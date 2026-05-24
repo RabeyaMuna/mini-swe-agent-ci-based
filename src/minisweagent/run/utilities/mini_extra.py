@@ -16,6 +16,7 @@ subcommands = [
     ("minisweagent.run.benchmarks.swebench", ["swebench"], "Evaluate on SWE-bench (batch mode)"),
     ("minisweagent.run.benchmarks.swebench_single", ["swebench-single"], "Evaluate on SWE-bench (single instance)"),
     ("minisweagent.run.benchmarks.programbench", ["programbench"], "Run on ProgramBench (batch mode)"),
+    ("minisweagent.run.benchmarks.cibench", ["cibench"], "Run on CI-failure repair benchmark (batch mode, with/without memory)"),
 ]
 
 
