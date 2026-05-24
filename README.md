@@ -186,6 +186,364 @@ Read more in our [documentation](https://mini-swe-agent.com/latest/):
 * [FAQ](https://mini-swe-agent.com/latest/faq/)
 * [Contribute!](https://mini-swe-agent.com/latest/contributing/)
 
+## CI Repair Setup And Run
+
+This repo includes a CI-repair benchmark runner at `src/minisweagent/run/benchmarks/cibench.py`.
+The benchmark command supports:
+
+- `baseline`: no memory retrieval
+- `L1`: file-level retrieval only
+- `L1+L2`: file-level + repo-level retrieval
+- `L1+L2+L3`: file-level + repo-level + cross-repo retrieval
+
+### Directory Structure
+
+All data, results, and memory files live under the project root:
+
+```
+mini-swe-agent-ci-based/
+│
+├── data/
+│   └── ci_dataset.jsonl          ← dataset fetched from HuggingFace (or your own JSONL)
+│
+├── results/
+│   ├── shared_memory/            ← L1 / L2 / L3 memory bank (shared across all runs)
+│   │   ├── failure_memory.json   ← L1: per-file failure records
+│   │   ├── repo_memory.json      ← L2: repo-level recurring patterns
+│   │   └── cross_memory.json     ← L3: cross-repo generalised principles
+│   │
+│   ├── baseline/                 ← output of the no-memory run
+│   │   ├── preds.json            ← predicted patch per instance {id, sha_fail, diff}
+│   │   ├── cibench.log           ← full run log
+│   │   └── <instance_id>/
+│   │       └── <instance_id>.traj.json   ← per-instance agent trajectory
+│   │
+│   ├── l1/                       ← output of L1-only retrieval run
+│   ├── l1_l2/                    ← output of L1+L2 retrieval run
+│   └── l1_l2_l3/                 ← output of L1+L2+L3 retrieval run
+│
+└── scripts/
+    ├── fetch_dataset.py                    ← downloads dataset from HuggingFace
+    └── run_cibench_minimax_openrouter.sh   ← convenience runner for MiniMax via OpenRouter
+```
+
+Create the directories once:
+
+```bash
+mkdir -p data results/shared_memory results/baseline results/l1 results/l1_l2 results/l1_l2_l3
+```
+
+### File Reference
+
+| File | What it contains |
+|------|-----------------|
+| `data/ci_dataset.jsonl` | One JSON object per line — each is a CI failure instance to repair |
+| `results/shared_memory/failure_memory.json` | **L1** — per-file records: file path, error type, failure pattern, fix direction, dependent files |
+| `results/shared_memory/repo_memory.json` | **L2** — repo-level patterns: aggregated per-file entries for each issue, overall failure reason, fix approach |
+| `results/shared_memory/cross_memory.json` | **L3** — cross-repo principles: abstract patterns merged across repos by (error_type, issue_type) |
+| `results/<run>/preds.json` | Final predictions: `{"<instance_id>": {"id": ..., "sha_fail": ..., "diff": ...}}` |
+| `results/<run>/<id>/<id>.traj.json` | Full agent trajectory for one instance (messages, tool calls, exit status) |
+| `results/<run>/cibench.log` | Timestamped log of the entire benchmark run |
+
+### Dataset Fields
+
+Each line in `ci_dataset.jsonl` must be a JSON object with these fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `instance_id` | `str` | ✅ | Unique identifier, e.g. `"owner-repo-abc123"` |
+| `sha_fail` | `str` | ✅ | Git commit SHA where CI failed |
+| `repo_owner` | `str` | ✅ | GitHub organisation or user name |
+| `repo_name` | `str` | ✅ | Repository name (without owner) |
+| `workflow_path` | `str` | ✅ | Path to the workflow file, e.g. `".github/workflows/test.yml"` |
+| `workflow_name` | `str` | ✅ | Human-readable workflow name, e.g. `"test"` |
+| `workflow` | `str` | ✅ | Full YAML text of the workflow file |
+| `logs` | `str` or `list` | ✅ | Raw CI logs — either a plain string or a list of `{"step_name": "...", "log": "..."}` |
+
+### Prerequisites
+
+- Python 3.10+
+- Git available in `PATH`
+- An LLM API key configured for the model you want to use through LiteLLM
+- `datasets` and `huggingface_hub` packages for fetching the dataset
+
+### Install
+
+Use a local virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+
+# Upgrade pip (fixes SSL issues on macOS + pyenv)
+pip install --upgrade pip \
+  --trusted-host pypi.org \
+  --trusted-host pypi.python.org \
+  --trusted-host files.pythonhosted.org
+
+pip install -e .
+```
+
+If you want local dense retrieval for memory, install at least one embedding backend:
+
+```bash
+pip install sentence-transformers   # recommended
+# or
+pip install fastembed               # lighter alternative
+```
+
+Install dataset utilities:
+
+```bash
+pip install datasets huggingface_hub
+```
+
+### Fetch the Dataset
+
+Download CI-REPAIR-BENCH from HuggingFace into `data/ci_dataset.jsonl`:
+
+```bash
+# Fetch the test split (default)
+python scripts/fetch_dataset.py
+
+# Fetch a specific split
+python scripts/fetch_dataset.py --split train
+
+# Fetch all splits into one file
+python scripts/fetch_dataset.py --split all
+
+# Custom output path
+python scripts/fetch_dataset.py --out data/my_subset.jsonl --split test
+```
+
+Or directly in Python:
+
+```python
+from datasets import load_dataset
+import json, pathlib
+
+ds = load_dataset("ci-benchmark-user/ci-repair-bench", split="test")
+
+out = pathlib.Path("data/ci_dataset.jsonl")
+out.parent.mkdir(exist_ok=True)
+with out.open("w") as fh:
+    for row in ds:
+        fh.write(json.dumps(dict(row)) + "\n")
+
+print(f"Saved {len(ds)} instances → {out}")
+```
+
+### Basic Run Command
+
+Both `mini` and `mini-swe-agent` point to the same CLI. The examples below use `mini-swe-agent`.
+
+```bash
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/run_01 \
+  -m openai/gpt-4.1 \
+  --context-model gpt-4o-mini
+```
+
+Useful flags:
+
+- `--filter "^repo_or_instance_regex"`: run only matching instances
+- `--slice 0:10`: run a subset
+- `--shuffle`: shuffle before slicing
+- `--redo-existing`: rerun instances already present in `preds.json`
+- `--memory-top-k 3`: top-k retrieval per memory level
+- `--save-memory` / `--no-save-memory`: control whether successful fixes are written back to memory
+
+### Running Different LLMs
+
+The CI repair runner already supports swapping the agent model per run with `-m/--model`.
+Examples:
+
+```bash
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/claude \
+  -m anthropic/claude-sonnet-4-5-20250929 \
+  --context-model gpt-4o-mini
+```
+
+```bash
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/gpt41 \
+  -m openai/gpt-4.1 \
+  --context-model gpt-4o-mini
+```
+
+### Multi-Model Agent Runs
+
+For the main repair agent, this project can already run multiple models through the meta-model classes:
+
+- `RouletteModel`: randomly chooses one configured model at each agent turn
+- `InterleavingModel`: alternates between configured models in a fixed sequence
+
+An example config is included at:
+
+- `src/minisweagent/config/benchmarks/cibench_multi_model_example.yaml`
+
+Run it like this:
+
+```bash
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/multi_model \
+  -c src/minisweagent/config/benchmarks/cibench.yaml \
+  -c src/minisweagent/config/benchmarks/cibench_multi_model_example.yaml \
+  --context-model gpt-4o-mini
+```
+
+Important note:
+
+- The main agent model can be multi-model through the config above.
+- `--context-model` is still a single model string for CI log analysis and workflow analysis in `cibench`.
+
+### MiniMax M2.5
+
+This repo now includes a ready OpenRouter-based MiniMax M2.5 setup, which matches the environment variables below.
+
+If your actual setup is through OpenRouter with these environment variables:
+
+```bash
+export MINIMAX_API_KEY='your_key_here'
+export MINIMAX_BASE_URL='https://openrouter.ai/api/v1'
+export MEMCI_LLM_MODEL='minimax/minimax-m2.5'
+```
+
+you can run directly with the wrapper script added to this repo:
+
+```bash
+scripts/run_cibench_minimax_openrouter.sh \
+  data/ci_dataset.jsonl \
+  results/minimax_openrouter
+```
+
+This script:
+
+- maps `MINIMAX_API_KEY` to `OPENROUTER_API_KEY`
+- uses `src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml`
+- passes `MEMCI_LLM_MODEL` into `--context-model`
+
+Direct CLI equivalent:
+
+```bash
+OPENROUTER_API_KEY="$MINIMAX_API_KEY" \
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/minimax_openrouter \
+  -c src/minisweagent/config/benchmarks/cibench.yaml \
+  -c src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml \
+  --context-model "${MEMCI_LLM_MODEL:-minimax/minimax-m2.5}"
+```
+
+MiniMax inside a multi-model pool:
+
+```bash
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/multi_model_minimax \
+  -c src/minisweagent/config/benchmarks/cibench.yaml \
+  -c src/minisweagent/config/benchmarks/cibench_multi_model_example.yaml \
+  --context-model gpt-4o-mini
+```
+
+Before using the example file, replace:
+
+- `YOUR_MINIMAX_API_KEY`
+
+### Baseline And Ablation Commands
+
+Set a shared memory directory if you want retrieval runs to reuse saved memory across experiments.
+
+#### 1. Baseline
+
+No retrieval, no memory injection:
+
+```bash
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/baseline \
+  -m openai/gpt-4.1 \
+  --context-model gpt-4o-mini \
+  --no-memory-enabled
+```
+
+#### 2. L1 Retrieval
+
+File-level memory only:
+
+```bash
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/l1 \
+  -m openai/gpt-4.1 \
+  --context-model gpt-4o-mini \
+  --memory-enabled \
+  --memory-root results/shared_memory \
+  --memory-ablation L1
+```
+
+#### 3. L1 + L2 Retrieval
+
+File-level plus repo-level memory:
+
+```bash
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/l1_l2 \
+  -m openai/gpt-4.1 \
+  --context-model gpt-4o-mini \
+  --memory-enabled \
+  --memory-root results/shared_memory \
+  --memory-ablation L1+L2
+```
+
+#### 4. L1 + L2 + L3 Retrieval
+
+Full hierarchical retrieval:
+
+```bash
+mini-swe-agent cibench \
+  --dataset data/ci_dataset.jsonl \
+  --output results/l1_l2_l3 \
+  -m openai/gpt-4.1 \
+  --context-model gpt-4o-mini \
+  --memory-enabled \
+  --memory-root results/shared_memory \
+  --memory-ablation L1+L2+L3
+```
+
+### Recommended Retrieval Workflow
+
+If you want meaningful retrieval results, use the runs in this order:
+
+1. Run `baseline` or an initial memory-enabled pass to generate trajectories and successful patches.
+2. Keep `--save-memory` enabled so successful repairs are written into `--memory-root`.
+3. Re-run with `--memory-enabled` and the ablation you want to test: `L1`, `L1+L2`, or `L1+L2+L3`.
+
+### Example Experiment Matrix
+
+```bash
+mini-swe-agent cibench --dataset data/ci_dataset.jsonl --output results/baseline --no-memory-enabled
+mini-swe-agent cibench --dataset data/ci_dataset.jsonl --output results/l1 --memory-enabled --memory-root results/shared_memory --memory-ablation L1
+mini-swe-agent cibench --dataset data/ci_dataset.jsonl --output results/l1_l2 --memory-enabled --memory-root results/shared_memory --memory-ablation L1+L2
+mini-swe-agent cibench --dataset data/ci_dataset.jsonl --output results/l1_l2_l3 --memory-enabled --memory-root results/shared_memory --memory-ablation L1+L2+L3
+```
+
+### Outputs
+
+Each run writes:
+
+- `preds.json`: predicted patch per instance
+- `cibench.log`: benchmark log
+- `<output>/<instance_id>/<instance_id>.traj.json`: per-instance trajectory
+
+When memory is enabled, the memory store under `--memory-root` contains persistent L1/L2/L3 JSON records used for retrieval in later runs.
+
 ## Attribution
 
 If you found this work helpful, please consider citing the [SWE-agent paper](https://arxiv.org/abs/2405.15793) in your work:

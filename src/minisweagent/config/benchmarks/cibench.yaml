@@ -1,0 +1,184 @@
+################################################################################
+#  cibench.yaml — mini-swe-agent config for CI-failure repair
+#
+#  Usage:
+#    mini-swe-agent cibench --dataset ci_instances.jsonl --output results/
+#    mini-swe-agent cibench -c cibench.yaml -c model.model_name=gpt-4o ...
+#
+#  Each instance in the dataset must contain:
+#    instance_id, sha_fail, repo_owner, repo_name,
+#    workflow, workflow_path, workflow_name, logs
+#
+#  The runner (cibench.py) will:
+#    1. Run CILogAnalyzer on logs          → structured failure context
+#    2. Run CIMemorySystem retrieval       → L1/L2/L3 similar failures
+#    3. Clone repo + checkout sha_fail     → local testbed at {{testbed_path}}
+#    4. Call agent.run(problem_statement)  → agent explores + fixes
+#    5. Capture git diff as the patch      → {id, sha_fail, diff}
+################################################################################
+
+# ── Agent ────────────────────────────────────────────────────────────────────
+agent:
+  system_template: |
+    You are an expert software engineer specializing in CI failure repair.
+    Your job is to analyze CI failures, understand why they occurred at a
+    specific commit, and produce a minimal patch to fix the issue so that
+    the CI pipeline passes.
+
+  instance_template: |
+    <ci_failure_task>
+    {{task}}
+    </ci_failure_task>
+
+    <instructions>
+    # CI Repair Task
+
+    ## Your Goal
+    The CI pipeline failed at the commit shown above.  Your task is to fix
+    the source code so the CI passes **without breaking other functionality**.
+
+    ## Repository State
+    You are already on the failing commit (sha_fail).
+    The repository is checked out at `{{testbed_path}}`.
+
+    ## Recommended Workflow
+
+    1. **Understand the failure** — read the CI Failure Report above carefully.
+       Pay close attention to:
+         - The "Why the CI Failed" section (error reasons)
+         - The "Failed Jobs / Commands" section (exact command that failed)
+         - The "Affected Files" section (which files are implicated)
+         - The "Memory Context" section (how similar failures were fixed before)
+
+    2. **Reproduce the failure** — run the validation command locally to see
+       the exact error:
+       ```bash
+       cd {{testbed_path}} && <validation_command_from_report>
+       ```
+
+    3. **Explore the codebase** — read the affected files and any files they
+       import to understand the root cause.
+
+    4. **Apply a minimal fix** — change only what is needed to fix the failure.
+       Do NOT modify tests, CI config files, or unrelated source files.
+
+    5. **Verify your fix** — re-run the validation command; ensure it passes.
+
+    6. **Test edge cases** — ensure you haven't broken adjacent functionality.
+
+    ## Important Constraints
+    - ONLY modify regular source code files under `{{testbed_path}}`
+    - Do NOT modify: tests, CI YAML, pyproject.toml, setup.cfg, setup.py
+    - Do NOT commit your changes
+    - Your fix must be minimal and targeted
+
+    ## Command Execution Rules
+    - You issue at least one command per response
+    - Directory / env variable changes are NOT persistent between commands
+    - Prefix with `cd {{testbed_path}} && ...` when needed
+    - Use non-interactive flags: `-y`, `-f`, `-n`, etc.
+    - Avoid interactive editors (vi, nano)
+
+    ## Submission
+    When your fix is complete and verified:
+
+    **Step 1** — Create the patch file (list ONLY modified source files):
+    ```bash
+    git -C {{testbed_path}} diff -- path/to/file1.py path/to/file2.py > {{testbed_path}}/patch.txt
+    ```
+
+    **Step 2** — Inspect the patch:
+    ```bash
+    cat {{testbed_path}}/patch.txt
+    ```
+
+    **Step 3** — Submit (EXACT command):
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat {{testbed_path}}/patch.txt
+    ```
+
+    <CRITICAL>
+    - Creating the patch and submitting MUST be separate commands (no &&).
+    - You CANNOT continue working after submitting.
+    - If the patch command returns exit code 0 but patch.txt is empty,
+      that means no changes were detected — re-check your edits.
+    </CRITICAL>
+    </instructions>
+
+  step_limit: 250
+  cost_limit: 4.0
+
+# ── Run ───────────────────────────────────────────────────────────────────────
+run:
+  # Executed inside the cloned repo after `git clone` completes.
+  # Sets git identity and checks out the exact failing commit.
+  # {{sha_fail}} is rendered from the instance dict.
+  startup_command: |
+    git config user.email "ci-repair@mini-swe-agent" && \
+    git config user.name "mini-swe-agent" && \
+    git checkout {{sha_fail}} --quiet 2>&1 || \
+    git checkout --detach {{sha_fail}} --quiet 2>&1
+
+# ── Environment ───────────────────────────────────────────────────────────────
+# Uses LocalEnvironment — no Docker or container runtime required.
+# `cwd` is set dynamically to the per-instance clone path ({{testbed_path}});
+# do not set it here.
+environment:
+  timeout: 120
+  interpreter: ["bash", "-c"]
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"
+    GIT_PAGER: cat
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  model_name: "anthropic/claude-sonnet-4-5-20250929"
+  model_kwargs:
+    drop_params: true
+    temperature: 0.0
+    parallel_tool_calls: true
+
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    Use head/tail/sed/grep to view relevant portions selectively.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+
+  format_error_template: |
+    Tool call error:
+
+    <error>
+    {{error}}
+    </error>
+
+    Use the bash tool with your command as the argument:
+    - Tool: bash
+    - Arguments: {"command": "your_command_here"}
+
+    If you have completed your fix, follow the submission instructions in the
+    first message to submit your patch.
