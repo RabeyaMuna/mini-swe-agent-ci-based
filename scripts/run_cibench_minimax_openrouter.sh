@@ -28,8 +28,10 @@
 # Environment variables (optional):
 #   MINIMAX_BASE_URL  — defaults to https://openrouter.ai/api/v1
 #   MEMCI_LLM_MODEL   — defaults to minimax/minimax-m2.5
+#   PYTHON_BIN        — python launcher to use (default: python)
 #   DATASET           — JSONL dataset (default: data/eval_dataset.jsonl — the shared TRS eval set)
 #   MEMORY_ROOT       — shared memory directory  (default: results/shared_memory)
+#   MSWEA_REPO_CACHE_ROOT — shared repo cache root (default: <project>/repo)
 # ===========================================================================
 
 set -euo pipefail
@@ -53,6 +55,7 @@ fi
 : "${MINIMAX_API_KEY:?Set MINIMAX_API_KEY first (your OpenRouter API key)}"
 : "${MINIMAX_BASE_URL:=https://openrouter.ai/api/v1}"
 : "${MEMCI_LLM_MODEL:=minimax/minimax-m2.5}"
+: "${PYTHON_BIN:=python}"
 : "${DATASET:=data/eval_dataset.jsonl}"
 : "${MEMORY_ROOT:=results/shared_memory}"
 
@@ -125,7 +128,7 @@ fi
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 RUN_CMD=(
-  python -m minisweagent.run.benchmarks.cibench
+  "${PYTHON_BIN}" -m minisweagent.run.benchmarks.cibench
   --dataset "${DATASET}"
   --output "${OUTPUT_DIR}"
   -c src/minisweagent/config/benchmarks/cibench.yaml

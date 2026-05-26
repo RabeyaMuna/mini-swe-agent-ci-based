@@ -494,6 +494,18 @@ def _extract_workflow_profile(
     Tries ErrorContextAgent Phase 3 first (3 LLM calls).
     Falls back to _parse_workflow_yaml_commands() for basic extraction.
     """
+    # Fallback 1: extract validation_cmd from pre-computed failed_jobs
+    # (the failing command IS the test/lint command the agent needs to re-run)
+    precomputed = _extract_validation_from_failed_jobs(instance)
+    if precomputed.get("validation_cmd"):
+        logger.info("[Phase B] Using pre-computed validation_cmd from failed_jobs")
+        yaml_profile = _parse_workflow_yaml_commands(str(instance.get("workflow") or ""))
+        return {
+            "installation_cmd": _coerce_str_list(yaml_profile.get("installation_cmd")),
+            "validation_cmd": _coerce_str_list(precomputed.get("validation_cmd")),
+            "critical_steps": _coerce_str_list(yaml_profile.get("critical_steps")),
+        }
+
     ErrorContextAgent = _try_import_error_context_agent()
 
     if ErrorContextAgent is not None:
@@ -507,13 +519,6 @@ def _extract_workflow_profile(
         # Only return if we got meaningful results
         if profile.get("installation_cmd") or profile.get("validation_cmd"):
             return profile
-
-    # Fallback 1: extract validation_cmd from pre-computed failed_jobs
-    # (the failing command IS the test/lint command the agent needs to re-run)
-    precomputed = _extract_validation_from_failed_jobs(instance)
-    if precomputed.get("validation_cmd"):
-        logger.debug("[Phase B] Extracted validation_cmd from failed_jobs")
-        return precomputed
 
     # Fallback 2: basic YAML parsing
     return _parse_workflow_yaml_commands(str(instance.get("workflow") or ""))
@@ -910,8 +915,8 @@ def build_problem_statement(
       2. Why the CI Failed  (Phase A: overall_failure_reasons)
       3. Failed Jobs / Commands  (Phase A: failed_jobs)
       4. Affected Files  (Phase A: effected_files)
-      5. Validation Commands  (Phase B: validation_cmd)
-      6. Installation Commands  (Phase B: installation_cmd)
+      5. Validation Hints  (Phase B: validation_cmd)
+      6. Installation Hints  (Phase B: installation_cmd)
       7. Memory Context  (Phase C: LLM-selected only)
     """
     profile    = context.get("workflow_profile") or {}
@@ -947,14 +952,19 @@ def build_problem_statement(
         "## Affected Files",
         _fmt_effected_files(context.get("effected_files") or []),
         "",
-        "## Validation Commands",
-        "Run these to reproduce the failure and verify your fix:",
+        "## Validation Hints",
+        "These are candidate commands the agent may run, adapt, or ignore depending on local feasibility.",
         _fmt_validation_cmds(profile),
     ]
 
     install_block = _fmt_install_cmds(profile)
     if install_block:
-        lines += ["", "## Installation / Setup Commands", install_block]
+        lines += [
+            "",
+            "## Installation Hints",
+            "These are candidate setup commands the agent may extend with extra local preparation if needed.",
+            install_block,
+        ]
 
     chunk_block = _fmt_chunk_summaries(context.get("_log_analysis") or {})
     if chunk_block and chunk_block != "  (none)":
