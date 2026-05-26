@@ -50,11 +50,10 @@ agent:
          - The "Affected Files" section (which files are implicated)
          - The "Memory Context" section (how similar failures were fixed before)
 
-    2. **Reproduce the failure** — run the validation command locally to see
-       the exact error:
-       ```bash
-       cd {{testbed_path}} && <validation_command_from_report>
-       ```
+    2. **Decide whether local execution is worthwhile** — use the installation
+       and validation hints from the report when they seem relevant. If the
+       local environment needs extra setup first, infer and run the additional
+       commands you need before attempting reproduction.
 
     3. **Explore the codebase** — read the affected files and any files they
        import to understand the root cause.
@@ -62,15 +61,24 @@ agent:
     4. **Apply a minimal fix** — change only what is needed to fix the failure.
        Do NOT modify tests, CI config files, or unrelated source files.
 
-    5. **Verify your fix** — re-run the validation command; ensure it passes.
+    5. **Reproduce or sanity-check when feasible** — if the project appears
+       runnable locally, you may execute validation commands from the report or
+       closely related commands you derive yourself. You may also run extra
+       setup commands first if they are needed.
 
-    6. **Test edge cases** — ensure you haven't broken adjacent functionality.
+    6. **Prefer static debugging when setup is incompatible** — use the CI log,
+       failed commands, affected files, imports, and surrounding code to infer
+       the root cause and produce the patch even when local validation is not
+       possible.
 
     ## Important Constraints
     - ONLY modify regular source code files under `{{testbed_path}}`
     - Do NOT modify: tests, CI YAML, pyproject.toml, setup.cfg, setup.py
     - Do NOT commit your changes
     - Your fix must be minimal and targeted
+    - Local validation is OPTIONAL, not required for submission
+    - Installation commands and validation commands in the report are hints,
+      not mandatory steps; they may be incomplete or incompatible with local execution
 
     ## Command Execution Rules
     - You issue at least one command per response
@@ -78,9 +86,13 @@ agent:
     - Prefix with `cd {{testbed_path}} && ...` when needed
     - Use non-interactive flags: `-y`, `-f`, `-n`, etc.
     - Avoid interactive editors (vi, nano)
+    - If local setup seems promising, you may install dependencies or run extra
+      preparation commands before validation
+    - If local setup seems unworkable, fall back to repository inspection,
+      targeted file reads, and minimal edits
 
     ## Submission
-    When your fix is complete and verified:
+    When your fix is complete:
 
     **Step 1** — Create the patch file (list ONLY modified source files):
     ```bash
@@ -110,14 +122,11 @@ agent:
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 run:
-  # Executed inside the cloned repo after `git clone` completes.
-  # Sets git identity and checks out the exact failing commit.
-  # {{sha_fail}} is rendered from the instance dict.
+  # Executed after the runner has already fetched and hard-reset the repo
+  # to the exact failing commit. Keep this limited to lightweight setup.
   startup_command: |
     git config user.email "ci-repair@mini-swe-agent" && \
-    git config user.name "mini-swe-agent" && \
-    git checkout {{sha_fail}} --quiet 2>&1 || \
-    git checkout --detach {{sha_fail}} --quiet 2>&1
+    git config user.name "mini-swe-agent"
 
 # ── Environment ───────────────────────────────────────────────────────────────
 # Uses LocalEnvironment — no Docker or container runtime required.

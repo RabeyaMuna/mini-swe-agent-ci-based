@@ -86,6 +86,8 @@ from minisweagent.utils.serialize import UNSET, recursive_merge
 DEFAULT_CONFIG_FILE = builtin_config_dir / "benchmarks" / "cibench.yaml"
 _OUTPUT_FILE_LOCK   = threading.Lock()
 app = typer.Typer(rich_markup_mode="rich", add_completion=False)
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+REPO_CACHE_ROOT = Path(os.getenv("MSWEA_REPO_CACHE_ROOT") or (PROJECT_ROOT / "repo")).resolve()
 
 _HELP_TEXT = """
 Run mini-SWE-agent on CI-failure repair instances.
@@ -236,30 +238,94 @@ def setup_local_environment(
     instance_dir: Path,
 ) -> Tuple[LocalEnvironment, Path]:
     """
-    Clone the repository from GitHub and return *(env, testbed_path)*.
+    Prepare a local repository checkout and return *(env, testbed_path)*.
 
-    • Clones ``https://github.com/<repo_owner>/<repo_name>`` to
-      ``<instance_dir>/testbed/``.
+    • Keeps a shared network clone cache at ``<project_root>/repo/``.
+    • Creates ``<instance_dir>/testbed/`` from that cache when needed.
     • Checks out the failing commit (``sha_fail``).
     • Wraps the directory in a ``LocalEnvironment`` using settings from the
       ``environment`` section of the config (timeout, interpreter, env vars).
 
     If the testbed directory already contains a ``.git`` folder (re-run),
-    the clone step is skipped so previous work is preserved.
+    the local working copy is reused so previous work is preserved.
     """
     repo_owner = instance.get("repo_owner", "")
     repo_name  = instance.get("repo_name", "")
     sha_fail   = str(instance.get("sha_fail") or "")
 
     testbed_path = instance_dir / "testbed"
+    cache_dir_name = f"{repo_owner}__{repo_name}"
+    repo_cache_path = REPO_CACHE_ROOT / cache_dir_name
+    clone_url = f"https://github.com/{repo_owner}/{repo_name}.git"
 
-    # ── Clone ─────────────────────────────────────────────────────────────────
-    if not (testbed_path / ".git").exists():
-        testbed_path.parent.mkdir(parents=True, exist_ok=True)
-        clone_url = f"https://github.com/{repo_owner}/{repo_name}.git"
-        logger.info("[CIBench] Cloning %s → %s", clone_url, testbed_path)
+    def _run_git(args: list[str], cwd: Path, timeout: int = 300) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    def _ensure_commit_available(repo_path: Path, commit: str, remote: str = "origin") -> None:
+        if not commit:
+            return
+        verify = _run_git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repo_path)
+        if verify.returncode == 0:
+            return
+        fetch = _run_git(["fetch", "--quiet", remote, commit], repo_path)
+        if fetch.returncode != 0:
+            raise RuntimeError(
+                f"git fetch failed for commit {commit} in {repo_path}:\n"
+                f"{fetch.stderr[:800]}"
+            )
+        verify = _run_git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repo_path)
+        if verify.returncode != 0:
+            raise RuntimeError(
+                f"commit {commit} still unavailable in {repo_path} after fetch:\n"
+                f"{verify.stderr[:800]}"
+            )
+
+    def _must_run_git(args: list[str], cwd: Path, error_label: str, timeout: int = 300) -> None:
+        result = _run_git(args, cwd, timeout=timeout)
+        if result.returncode != 0:
+            raise RuntimeError(f"{error_label} in {cwd}:\n{result.stderr[:800] or result.stdout[:800]}")
+
+    def _prepare_worktree(repo_path: Path, commit: str) -> None:
+        if not commit:
+            raise RuntimeError(f"Missing sha_fail for worktree preparation in {repo_path}")
+        _must_run_git(
+            ["config", "user.email", "ci-repair@mini-swe-agent"],
+            repo_path,
+            "git config user.email failed",
+        )
+        _must_run_git(
+            ["config", "user.name", "mini-swe-agent"],
+            repo_path,
+            "git config user.name failed",
+        )
+        _must_run_git(
+            ["checkout", "--detach", "--force", commit],
+            repo_path,
+            f"git checkout {commit} failed",
+        )
+        _must_run_git(
+            ["reset", "--hard", commit],
+            repo_path,
+            f"git reset --hard {commit} failed",
+        )
+        _must_run_git(
+            ["clean", "-fdx"],
+            repo_path,
+            "git clean -fdx failed",
+        )
+
+    # ── Shared repo cache ─────────────────────────────────────────────────────
+    REPO_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    if not (repo_cache_path / ".git").exists():
+        logger.info("[CIBench] Cloning %s → shared cache %s", clone_url, repo_cache_path)
         result = subprocess.run(
-            ["git", "clone", "--quiet", clone_url, str(testbed_path)],
+            ["git", "clone", "--quiet", clone_url, str(repo_cache_path)],
             capture_output=True,
             text=True,
             timeout=300,
@@ -270,7 +336,40 @@ def setup_local_environment(
                 f"{result.stderr[:800]}"
             )
     else:
-        logger.info("[CIBench] Reusing existing clone at %s", testbed_path)
+        logger.info("[CIBench] Reusing shared cache at %s", repo_cache_path)
+        fetch_result = subprocess.run(
+            ["git", "-C", str(repo_cache_path), "fetch", "--all", "--tags", "--prune", "--quiet"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if fetch_result.returncode != 0:
+            logger.warning(
+                "[CIBench] git fetch failed for shared cache %s:\n%s",
+                repo_cache_path,
+                fetch_result.stderr[:800],
+            )
+    _ensure_commit_available(repo_cache_path, sha_fail, remote="origin")
+
+    # ── Per-instance working copy ─────────────────────────────────────────────
+    if not (testbed_path / ".git").exists():
+        testbed_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("[CIBench] Creating local working copy %s → %s", repo_cache_path, testbed_path)
+        result = subprocess.run(
+            ["git", "clone", "--quiet", "--shared", str(repo_cache_path), str(testbed_path)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"local git clone failed for {repo_owner}/{repo_name} from cache:\n"
+                f"{result.stderr[:800]}"
+            )
+    else:
+        logger.info("[CIBench] Reusing existing working copy at %s", testbed_path)
+    _ensure_commit_available(testbed_path, sha_fail, remote="origin")
+    _prepare_worktree(testbed_path, sha_fail)
 
     # ── Build LocalEnvironment ────────────────────────────────────────────────
     # Strip environment_class from the env config dict (LocalEnvironment doesn't accept it).
@@ -293,10 +392,9 @@ def setup_local_environment(
             rendered = startup_tpl.replace("{{sha_fail}}", sha_fail)
         out = env.execute({"command": rendered})
         if out.get("returncode", 0) != 0:
-            logger.warning(
-                "[CIBench] Startup command returned non-zero for %s:\n%s",
-                instance.get("instance_id"),
-                out.get("output", "")[:500],
+            raise RuntimeError(
+                f"startup command failed for {instance.get('instance_id')}:\n"
+                f"{out.get('output', '')[:800]}"
             )
 
     return env, testbed_path
