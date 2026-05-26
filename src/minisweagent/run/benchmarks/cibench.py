@@ -79,6 +79,7 @@ from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressMan
 from minisweagent.run.benchmarks.utils.common import ProgressTrackingAgent
 from minisweagent.run.benchmarks.utils.ci_context import build_ci_context, save_memory_after_patch
 from minisweagent.utils.log import add_file_handler, logger
+from minisweagent.utils.project_env import load_project_env
 from minisweagent.utils.serialize import UNSET, recursive_merge
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -565,6 +566,9 @@ def main(
 ) -> None:
     # fmt: on
     """Run mini-SWE-agent on CI failure instances (batch mode, local environment)."""
+    project_env_path = load_project_env()
+    if project_env_path:
+        logger.info("[CIBench] Loaded project env from %s", project_env_path)
 
     # ── Output directory ──────────────────────────────────────────────────────
     if not output:

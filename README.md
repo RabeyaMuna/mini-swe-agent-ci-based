@@ -196,6 +196,99 @@ The benchmark command supports:
 - `L1+L2`: file-level + repo-level retrieval
 - `L1+L2+L3`: file-level + repo-level + cross-repo retrieval
 
+### Project Setup Commands
+
+If you want to run the benchmark from the Python scripts in this repo, use this setup flow.
+
+#### 1. Install the project
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -e .
+```
+
+#### 2. Create project `.env`
+
+The benchmark wrapper and Python scripts now read the repo-level `.env` automatically.
+
+```bash
+cat > .env <<'EOF'
+MINIMAX_API_KEY=<your_openrouter_key>
+OPENROUTER_API_KEY=<your_openrouter_key>
+MINIMAX_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+MEMCI_LLM_MODEL=minimax/minimax-m2.5
+EOF
+```
+
+Important:
+
+- Use `minimax/minimax-m2.5`, not `MiniMax-M2.5`
+- Shell environment variables still override `.env` if you set them explicitly
+
+#### 3. Prepare the benchmark data
+
+If you already have the TRS export from `CI-REPAIR-BENCH`, copy it in:
+
+```bash
+python scripts/copy_trs_data.py
+```
+
+If you want to regenerate the split yourself instead:
+
+```bash
+python scripts/prepare_shared_dataset.py \
+  --trs-dir ~/Documents/CI-REPAIR-BENCH/results/trs_split \
+  --parquet ~/Documents/CI-REPAIR-BENCH/dataset/lca_dataset.parquet
+```
+
+#### 4. Seed shared memory
+
+Fast heuristic seeding:
+
+```bash
+python scripts/seed_memory.py --no-llm-analysis
+```
+
+LLM-backed seeding with MiniMax:
+
+```bash
+python scripts/seed_memory.py
+```
+
+#### 5. Run the eval issues
+
+Wrapper script:
+
+```bash
+bash scripts/run_cibench_minimax_openrouter.sh --ablation baseline
+bash scripts/run_cibench_minimax_openrouter.sh --ablation L1
+bash scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2
+bash scripts/run_cibench_minimax_openrouter.sh
+```
+
+Direct Python entry point:
+
+```bash
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset data/eval_dataset.jsonl \
+  --output results/l1_l2_l3 \
+  -c src/minisweagent/config/benchmarks/cibench.yaml \
+  -c src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml \
+  --context-model "${MEMCI_LLM_MODEL:-minimax/minimax-m2.5}" \
+  --memory-enabled \
+  --memory-root results/shared_memory \
+  --memory-ablation L1+L2+L3
+```
+
+Quick smoke-test on a small slice:
+
+```bash
+bash scripts/run_cibench_minimax_openrouter.sh --ablation baseline --slice 0:10
+```
+
 ### Directory Structure
 
 All data, results, and memory files live under the project root:
@@ -204,10 +297,12 @@ All data, results, and memory files live under the project root:
 mini-swe-agent-ci-based/
 │
 ├── data/
-│   └── ci_dataset.jsonl          ← dataset fetched from HuggingFace (or your own JSONL)
+│   ├── eval_dataset.jsonl        ← 189 eval issues (from TRS split — shared benchmark)
+│   ├── memory_seed.jsonl         ← 103 memory issues with ground-truth diffs (for seeding)
+│   └── ci_dataset.jsonl          ← full HuggingFace dataset (optional alternative)
 │
 ├── results/
-│   ├── shared_memory/            ← L1 / L2 / L3 memory bank (shared across all runs)
+│   ├── shared_memory/            ← L1 / L2 / L3 memory bank (seeded once, used by all agents)
 │   │   ├── failure_memory.json   ← L1: per-file failure records
 │   │   ├── repo_memory.json      ← L2: repo-level recurring patterns
 │   │   └── cross_memory.json     ← L3: cross-repo generalised principles
@@ -223,7 +318,9 @@ mini-swe-agent-ci-based/
 │   └── l1_l2_l3/                 ← output of L1+L2+L3 retrieval run
 │
 └── scripts/
-    ├── fetch_dataset.py                    ← downloads dataset from HuggingFace
+    ├── prepare_shared_dataset.py           ← joins TRS split + parquet → eval + memory JSONL
+    ├── seed_memory.py                      ← seeds results/shared_memory/ from memory_seed.jsonl
+    ├── fetch_dataset.py                    ← downloads full dataset from HuggingFace
     └── run_cibench_minimax_openrouter.sh   ← convenience runner for MiniMax via OpenRouter
 ```
 
@@ -237,9 +334,11 @@ mkdir -p data results/shared_memory results/baseline results/l1 results/l1_l2 re
 
 | File | What it contains |
 |------|-----------------|
-| `data/ci_dataset.jsonl` | One JSON object per line — each is a CI failure instance to repair |
-| `results/shared_memory/failure_memory.json` | **L1** — per-file records: file path, error type, failure pattern, fix direction, dependent files |
-| `results/shared_memory/repo_memory.json` | **L2** — repo-level patterns: aggregated per-file entries for each issue, overall failure reason, fix approach |
+| `data/eval_dataset.jsonl` | **189 eval issues** — the shared TRS benchmark every agent runs on |
+| `data/memory_seed.jsonl` | **103 memory issues** with ground-truth diffs — fed into `seed_memory.py` |
+| `data/ci_dataset.jsonl` | Full HuggingFace dataset (all instances, alternative to TRS split) |
+| `results/shared_memory/failure_memory.json` | **L1** — per-file records: file path, error type, failure pattern, fix direction |
+| `results/shared_memory/repo_memory.json` | **L2** — repo-level patterns: aggregated per-file entries, overall failure reason, fix approach |
 | `results/shared_memory/cross_memory.json` | **L3** — cross-repo principles: abstract patterns merged across repos by (error_type, issue_type) |
 | `results/<run>/preds.json` | Final predictions: `{"<instance_id>": {"id": ..., "sha_fail": ..., "diff": ...}}` |
 | `results/<run>/<id>/<id>.traj.json` | Full agent trajectory for one instance (messages, tool calls, exit status) |
@@ -333,13 +432,88 @@ with out.open("w") as fh:
 print(f"Saved {len(ds)} instances → {out}")
 ```
 
+### Shared Benchmark Setup (run ONCE)
+
+For consistent, fair comparison across agents (mini-swe-agent, mem-ci-repair-agent, etc.)
+use the **TRS split** from CI-REPAIR-BENCH: 103 memory issues (30%) and 189 eval issues (70%),
+selected by recurrence + temporal ordering so every agent sees identical prior knowledge and
+identical problems.
+
+The pre-computed TRS data already lives in `CI-REPAIR-BENCH/baselines/results/trs/`.
+Copy it directly into this project with a single command — no recomputation needed.
+
+#### Step 1 — Copy TRS data (primary path)
+
+```bash
+# Auto-detects CI-REPAIR-BENCH as a sibling or ~/Documents/CI-REPAIR-BENCH
+python scripts/copy_trs_data.py
+
+# Explicit paths
+python scripts/copy_trs_data.py \
+    --trs-results ~/Documents/CI-REPAIR-BENCH/baselines/results/trs \
+    --parquet     ~/Documents/CI-REPAIR-BENCH/dataset/lca_dataset.parquet
+```
+
+This produces:
+
+| File | Contents |
+|------|----------|
+| `data/eval_dataset.jsonl` | **189 eval issues** — the benchmark every agent is evaluated on |
+| `results/shared_memory/failure_memory.json` | **L1** — 136 per-file failure records (copied directly) |
+| `results/shared_memory/repo_memory.json` | **L2** — 80 repo-level recurring patterns (copied directly) |
+| `results/shared_memory/cross_memory.json` | **L3** — 66 cross-repo generalised principles (copied directly) |
+
+The eval issues are enriched with all TRS pipeline artifacts — `overall_failure_reasons`,
+`effected_files`, `failed_jobs`, `top_memory_peers`, `rcss_score` — so the agent can
+**skip LLM-based log analysis** entirely (saves ~567 LLM calls across 189 issues).
+
+> **Alternative: regenerate from raw split + parquet**
+>
+> If you want to rebuild from scratch rather than reuse the pre-computed data:
+> ```bash
+> python scripts/prepare_shared_dataset.py \
+>     --trs-dir  ~/Documents/CI-REPAIR-BENCH/results/trs_split \
+>     --parquet  ~/Documents/CI-REPAIR-BENCH/dataset/lca_dataset.parquet
+> python scripts/seed_memory.py --no-llm-analysis   # fast heuristic seeding
+> # or with LLM (richer L1/L2/L3):
+> # export MINIMAX_API_KEY=<key>; python scripts/seed_memory.py
+> ```
+
+#### Step 2 — Set your API key
+
+```bash
+export MINIMAX_API_KEY=<your_openrouter_key>
+```
+
+#### Step 3 — Run all four ablations
+
+```bash
+# 1. Baseline — no memory
+scripts/run_cibench_minimax_openrouter.sh --ablation baseline
+
+# 2. L1 — file-level memory only
+scripts/run_cibench_minimax_openrouter.sh --ablation L1
+
+# 3. L1+L2 — file-level + repo-level memory
+scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2
+
+# 4. L1+L2+L3 — full hierarchical memory (default)
+scripts/run_cibench_minimax_openrouter.sh
+```
+
+> **Why this matters:** every agent that uses `copy_trs_data.py` from the same
+> CI-REPAIR-BENCH TRS export gets **identical eval issues** and **identical starting memory**
+> — so differences in results reflect only the agent's repair capability.
+
+---
+
 ### Basic Run Command
 
 Both `mini` and `mini-swe-agent` point to the same CLI. The examples below use `mini-swe-agent`.
 
 ```bash
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset data/eval_dataset.jsonl \
   --output results/run_01 \
   -m openai/gpt-4.1 \
   --context-model gpt-4o-mini
@@ -360,16 +534,16 @@ The CI repair runner already supports swapping the agent model per run with `-m/
 Examples:
 
 ```bash
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset data/eval_dataset.jsonl \
   --output results/claude \
   -m anthropic/claude-sonnet-4-5-20250929 \
   --context-model gpt-4o-mini
 ```
 
 ```bash
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset data/eval_dataset.jsonl \
   --output results/gpt41 \
   -m openai/gpt-4.1 \
   --context-model gpt-4o-mini
@@ -389,8 +563,8 @@ An example config is included at:
 Run it like this:
 
 ```bash
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset data/eval_dataset.jsonl \
   --output results/multi_model \
   -c src/minisweagent/config/benchmarks/cibench.yaml \
   -c src/minisweagent/config/benchmarks/cibench_multi_model_example.yaml \
@@ -417,13 +591,16 @@ export MEMCI_LLM_MODEL='minimax/minimax-m2.5'
 you can run directly with the wrapper script added to this repo:
 
 ```bash
-scripts/run_cibench_minimax_openrouter.sh \
-  data/ci_dataset.jsonl \
-  results/minimax_openrouter
+# Full run with memory (default — L1+L2+L3)
+scripts/run_cibench_minimax_openrouter.sh
+
+# Baseline (no memory)
+scripts/run_cibench_minimax_openrouter.sh --ablation baseline
 ```
 
 This script:
 
+- reads `data/eval_dataset.jsonl` and `results/shared_memory/` by default
 - maps `MINIMAX_API_KEY` to `OPENROUTER_API_KEY`
 - uses `src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml`
 - passes `MEMCI_LLM_MODEL` into `--context-model`
@@ -432,23 +609,26 @@ Direct CLI equivalent:
 
 ```bash
 OPENROUTER_API_KEY="$MINIMAX_API_KEY" \
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
-  --output results/minimax_openrouter \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset data/eval_dataset.jsonl \
+  --output results/l1_l2_l3 \
   -c src/minisweagent/config/benchmarks/cibench.yaml \
   -c src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml \
-  --context-model "${MEMCI_LLM_MODEL:-minimax/minimax-m2.5}"
+  --context-model "${MEMCI_LLM_MODEL:-minimax/minimax-m2.5}" \
+  --memory-enabled \
+  --memory-root results/shared_memory \
+  --memory-ablation L1+L2+L3
 ```
 
 MiniMax inside a multi-model pool:
 
 ```bash
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset data/eval_dataset.jsonl \
   --output results/multi_model_minimax \
   -c src/minisweagent/config/benchmarks/cibench.yaml \
   -c src/minisweagent/config/benchmarks/cibench_multi_model_example.yaml \
-  --context-model gpt-4o-mini
+  --context-model minimax/minimax-m2.5
 ```
 
 Before using the example file, replace:
@@ -457,92 +637,189 @@ Before using the example file, replace:
 
 ### Baseline And Ablation Commands
 
-Set a shared memory directory if you want retrieval runs to reuse saved memory across experiments.
+All four runs share the same 189-issue dataset (`data/eval_dataset.jsonl`) and the same
+pre-seeded memory bank (`results/shared_memory/`).
+Run them in order — baseline first, then L1, L1+L2, L1+L2+L3 — for a clean ablation.
 
-#### 1. Baseline
-
-No retrieval, no memory injection:
+#### Prerequisites
 
 ```bash
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
-  --output results/baseline \
-  -m openai/gpt-4.1 \
-  --context-model gpt-4o-mini \
-  --no-memory-enabled
+# 1. Copy TRS data (once)
+python scripts/copy_trs_data.py
+
+# 2. Set API key
+export MINIMAX_API_KEY=<your_openrouter_key>
 ```
 
-#### 2. L1 Retrieval
+---
 
-File-level memory only:
+#### Run 1 — Baseline (no memory)
 
+The agent receives the eval issue (logs, workflow, repo context) but **no retrieved memory**.
+Used as the zero-memory performance floor.
+
+**Convenience script:**
 ```bash
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
-  --output results/l1 \
-  -m openai/gpt-4.1 \
-  --context-model gpt-4o-mini \
+scripts/run_cibench_minimax_openrouter.sh --ablation baseline
+# output → results/baseline/
+```
+
+**Direct CLI equivalent:**
+```bash
+OPENROUTER_API_KEY="$MINIMAX_API_KEY" \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset    data/eval_dataset.jsonl \
+  --output     results/baseline \
+  -c src/minisweagent/config/benchmarks/cibench.yaml \
+  -c src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml \
+  --context-model "${MEMCI_LLM_MODEL:-minimax/minimax-m2.5}" \
+  --no-memory-enabled \
+  --save-memory \
+  --memory-root results/shared_memory
+```
+
+---
+
+#### Run 2 — L1 (file-level memory)
+
+Retrieves **per-file failure records** from `failure_memory.json`.
+The agent sees past fixes for the same files that are failing.
+
+**Convenience script:**
+```bash
+scripts/run_cibench_minimax_openrouter.sh --ablation L1
+# output → results/l1/
+```
+
+**Direct CLI equivalent:**
+```bash
+OPENROUTER_API_KEY="$MINIMAX_API_KEY" \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset    data/eval_dataset.jsonl \
+  --output     results/l1 \
+  -c src/minisweagent/config/benchmarks/cibench.yaml \
+  -c src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml \
+  --context-model "${MEMCI_LLM_MODEL:-minimax/minimax-m2.5}" \
   --memory-enabled \
   --memory-root results/shared_memory \
   --memory-ablation L1
 ```
 
-#### 3. L1 + L2 Retrieval
+---
 
-File-level plus repo-level memory:
+#### Run 3 — L1+L2 (file-level + repo-level memory)
 
+Adds **repo-level recurring patterns** from `repo_memory.json` on top of L1.
+The agent sees both file-specific history and overall patterns for the same repository.
+
+**Convenience script:**
 ```bash
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
-  --output results/l1_l2 \
-  -m openai/gpt-4.1 \
-  --context-model gpt-4o-mini \
+scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2
+# output → results/l1_l2/
+```
+
+**Direct CLI equivalent:**
+```bash
+OPENROUTER_API_KEY="$MINIMAX_API_KEY" \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset    data/eval_dataset.jsonl \
+  --output     results/l1_l2 \
+  -c src/minisweagent/config/benchmarks/cibench.yaml \
+  -c src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml \
+  --context-model "${MEMCI_LLM_MODEL:-minimax/minimax-m2.5}" \
   --memory-enabled \
   --memory-root results/shared_memory \
   --memory-ablation L1+L2
 ```
 
-#### 4. L1 + L2 + L3 Retrieval
+---
 
-Full hierarchical retrieval:
+#### Run 4 — L1+L2+L3 (full hierarchical memory — default)
 
+Adds **cross-repo generalised principles** from `cross_memory.json` on top of L1+L2.
+The agent also sees abstract fix patterns merged across all repositories.
+
+**Convenience script:**
 ```bash
-mini-swe-agent cibench \
-  --dataset data/ci_dataset.jsonl \
-  --output results/l1_l2_l3 \
-  -m openai/gpt-4.1 \
-  --context-model gpt-4o-mini \
+scripts/run_cibench_minimax_openrouter.sh          # --ablation L1+L2+L3 is the default
+# output → results/l1_l2_l3/
+```
+
+**Direct CLI equivalent:**
+```bash
+OPENROUTER_API_KEY="$MINIMAX_API_KEY" \
+python -m minisweagent.run.benchmarks.cibench \
+  --dataset    data/eval_dataset.jsonl \
+  --output     results/l1_l2_l3 \
+  -c src/minisweagent/config/benchmarks/cibench.yaml \
+  -c src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml \
+  --context-model "${MEMCI_LLM_MODEL:-minimax/minimax-m2.5}" \
   --memory-enabled \
   --memory-root results/shared_memory \
   --memory-ablation L1+L2+L3
 ```
 
-### Recommended Retrieval Workflow
+---
 
-If you want meaningful retrieval results, use the runs in this order:
-
-1. Run `baseline` or an initial memory-enabled pass to generate trajectories and successful patches.
-2. Keep `--save-memory` enabled so successful repairs are written into `--memory-root`.
-3. Re-run with `--memory-enabled` and the ablation you want to test: `L1`, `L1+L2`, or `L1+L2+L3`.
-
-### Example Experiment Matrix
+### Quick Reference: All Four Runs
 
 ```bash
-mini-swe-agent cibench --dataset data/ci_dataset.jsonl --output results/baseline --no-memory-enabled
-mini-swe-agent cibench --dataset data/ci_dataset.jsonl --output results/l1 --memory-enabled --memory-root results/shared_memory --memory-ablation L1
-mini-swe-agent cibench --dataset data/ci_dataset.jsonl --output results/l1_l2 --memory-enabled --memory-root results/shared_memory --memory-ablation L1+L2
-mini-swe-agent cibench --dataset data/ci_dataset.jsonl --output results/l1_l2_l3 --memory-enabled --memory-root results/shared_memory --memory-ablation L1+L2+L3
+export MINIMAX_API_KEY=<your_key>
+
+scripts/run_cibench_minimax_openrouter.sh --ablation baseline   # → results/baseline/
+scripts/run_cibench_minimax_openrouter.sh --ablation L1         # → results/l1/
+scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2      # → results/l1_l2/
+scripts/run_cibench_minimax_openrouter.sh                       # → results/l1_l2_l3/
 ```
+
+Useful extra flags (pass after `--ablation`):
+
+| Flag | Effect |
+|------|--------|
+| `--slice 0:10` | Run only first 10 instances (quick smoke-test) |
+| `--filter "^owner/repo"` | Run only instances matching the regex |
+| `--redo-existing` | Rerun instances already present in `preds.json` |
+| `--memory-top-k 5` | Change retrieval depth (default: 3) |
 
 ### Outputs
 
-Each run writes:
+Each run writes to its output directory:
 
-- `preds.json`: predicted patch per instance
-- `cibench.log`: benchmark log
-- `<output>/<instance_id>/<instance_id>.traj.json`: per-instance trajectory
+```
+results/<run>/
+├── preds.json                         ← predicted patch per instance {id, sha_fail, diff}
+├── cibench.log                        ← timestamped log of the full run
+└── <instance_id>/
+    └── <instance_id>.traj.json        ← full agent trajectory (messages, tool calls, exit status)
+```
 
-When memory is enabled, the memory store under `--memory-root` contains persistent L1/L2/L3 JSON records used for retrieval in later runs.
+Memory-enabled runs also update the shared bank in `results/shared_memory/` with any
+new successful repairs, so each successive run can build on prior knowledge.
+
+### Algorithm: How the Pipeline Uses TRS Artifacts
+
+The `eval_dataset.jsonl` produced by `copy_trs_data.py` carries pre-computed TRS fields.
+The pipeline uses them in two optimisation phases:
+
+**Phase A — Skip LLM log analysis (saves ~567 LLM calls)**
+
+When an instance already has `overall_failure_reasons`, `effected_files`, or `failed_jobs`
+from the TRS pipeline, the agent **does not call `CILogAnalyzer`** (which normally costs 3+
+LLM calls per issue for chunking + classification). Instead it maps:
+
+| TRS field | Used as |
+|-----------|---------|
+| `overall_failure_reasons` | `error_context` injected into the repair prompt |
+| `effected_files[*]` | `relevant_files` with `file`, `failed_cmd`, `issue_type` |
+| `overall_error_types` | `error_types` structured classification |
+| `failed_jobs` | `failed_job` list for workflow profile |
+
+**Phase B — Extract validation command from `failed_jobs`**
+
+Instead of regex-parsing the full YAML workflow to guess what command to run,
+the agent reads `failed_jobs[*].failed_command` directly — that is the exact
+command that broke CI and is therefore the correct validation command to re-run.
+This eliminates a class of wrong-command errors and speeds up Phase B.
 
 ## Attribution
 

@@ -3,6 +3,10 @@
 # ==================================
 # Run cibench with MiniMax M2.5 via OpenRouter.
 #
+# Shared benchmark setup (run ONCE before any agent):
+#   python scripts/prepare_shared_dataset.py   # → data/eval_dataset.jsonl + data/memory_seed.jsonl
+#   python scripts/seed_memory.py              # → results/shared_memory/ (L1/L2/L3 bank)
+#
 # Usage:
 #   scripts/run_cibench_minimax_openrouter.sh [--ablation LEVEL] [extra cibench args...]
 #
@@ -12,7 +16,7 @@
 #   # Full run with memory (default)
 #   scripts/run_cibench_minimax_openrouter.sh
 #
-#   # Baseline (no memory)
+#   # Baseline (no memory) — same eval issues, empty memory
 #   scripts/run_cibench_minimax_openrouter.sh --ablation baseline
 #
 #   # Only first 10 instances
@@ -24,7 +28,7 @@
 # Environment variables (optional):
 #   MINIMAX_BASE_URL  — defaults to https://openrouter.ai/api/v1
 #   MEMCI_LLM_MODEL   — defaults to minimax/minimax-m2.5
-#   DATASET           — path to JSONL dataset (default: data/ci_dataset.jsonl)
+#   DATASET           — JSONL dataset (default: data/eval_dataset.jsonl — the shared TRS eval set)
 #   MEMORY_ROOT       — shared memory directory  (default: results/shared_memory)
 # ===========================================================================
 
@@ -35,11 +39,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
+# ── Load project .env if present ─────────────────────────────────────────────
+if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+  while IFS='=' read -r key value; do
+    [[ -z "${key}" || "${key}" == \#* ]] && continue
+    if [[ -z "${!key+x}" ]]; then
+      export "${key}=${value}"
+    fi
+  done < "${PROJECT_ROOT}/.env"
+fi
+
 # ── Defaults ─────────────────────────────────────────────────────────────────
 : "${MINIMAX_API_KEY:?Set MINIMAX_API_KEY first (your OpenRouter API key)}"
 : "${MINIMAX_BASE_URL:=https://openrouter.ai/api/v1}"
 : "${MEMCI_LLM_MODEL:=minimax/minimax-m2.5}"
-: "${DATASET:=data/ci_dataset.jsonl}"
+: "${DATASET:=data/eval_dataset.jsonl}"
 : "${MEMORY_ROOT:=results/shared_memory}"
 
 # ── Parse --ablation flag ─────────────────────────────────────────────────────
@@ -81,6 +95,10 @@ mkdir -p "${OUTPUT_DIR}" "${MEMORY_ROOT}"
 
 # ── Map MINIMAX_API_KEY → OPENROUTER_API_KEY ─────────────────────────────────
 export OPENROUTER_API_KEY="${MINIMAX_API_KEY}"
+export OPENROUTER_BASE_URL="${MINIMAX_BASE_URL}"
+
+# ── Force PyTorch backend for sentence-transformers (avoids Keras 3 conflict) ─
+export TRANSFORMERS_NO_TF=1
 
 if [[ "${MINIMAX_BASE_URL}" != "https://openrouter.ai/api/v1" ]]; then
   echo "Warning: MINIMAX_BASE_URL=${MINIMAX_BASE_URL} (expected https://openrouter.ai/api/v1)" >&2
@@ -106,14 +124,19 @@ else
 fi
 
 # ── Run ───────────────────────────────────────────────────────────────────────
-mini-swe-agent cibench \
-  --dataset    "${DATASET}" \
-  --output     "${OUTPUT_DIR}" \
-  -c src/minisweagent/config/benchmarks/cibench.yaml \
-  -c src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml \
-  --context-model "${MEMCI_LLM_MODEL}" \
-  "${MEMORY_FLAGS[@]}" \
-  "${EXTRA_ARGS[@]}"
+RUN_CMD=(
+  python -m minisweagent.run.benchmarks.cibench
+  --dataset "${DATASET}"
+  --output "${OUTPUT_DIR}"
+  -c src/minisweagent/config/benchmarks/cibench.yaml
+  -c src/minisweagent/config/benchmarks/cibench_minimax_openrouter.yaml
+  --context-model "${MEMCI_LLM_MODEL}"
+)
+RUN_CMD+=("${MEMORY_FLAGS[@]}")
+if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+  RUN_CMD+=("${EXTRA_ARGS[@]}")
+fi
+"${RUN_CMD[@]}"
 
 echo ""
 echo "Done. Results saved to:"
