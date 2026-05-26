@@ -245,17 +245,133 @@ def _log_analysis_to_context(
 # Phase A — CILogAnalyzer (log summarisation)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _has_precomputed_analysis(instance: Dict[str, Any]) -> bool:
+    """
+    Return True when the instance already carries TRS-pipeline analysis fields
+    so Phase A (CILogAnalyzer) can be skipped entirely — saving 3+ LLM calls.
+
+    Required: at least one of the three primary analysis outputs must be present.
+    """
+    return bool(
+        instance.get("overall_failure_reasons")
+        or instance.get("effected_files")
+        or instance.get("failed_jobs")
+    )
+
+
+def _build_from_precomputed(instance: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build a log_analysis_result directly from TRS-pipeline pre-computed fields.
+
+    Field mapping (instance → CI-REPAIR-BENCH log_analysis schema):
+        overall_failure_reasons → error_context
+        effected_files          → relevant_files   (with key aliases)
+        error_types / overall_error_types → error_types  (wrapped into {category, ...})
+        failed_jobs             → failed_job
+    """
+    sha_fail = str(instance.get("sha_fail") or "")
+    task_id  = str(instance.get("instance_id") or instance.get("id") or sha_fail)
+
+    # ── error_context ─────────────────────────────────────────────────────────
+    error_context: List[str] = [
+        str(r).strip()
+        for r in (instance.get("overall_failure_reasons") or [])
+        if str(r).strip()
+    ]
+
+    # ── relevant_files — normalise key names ──────────────────────────────────
+    raw_files = instance.get("effected_files") or []
+    relevant_files: List[Dict[str, Any]] = []
+    for f in raw_files:
+        if not isinstance(f, dict):
+            continue
+        relevant_files.append({
+            "file":         str(f.get("file")         or "").strip(),
+            "line_number":  f.get("line_number"),
+            "reason":       str(f.get("reason")        or "").strip(),
+            "issue_type":   str(f.get("issue_type")    or f.get("error_type") or "").strip(),
+            "failed_cmd":   f.get("failed_cmd")   or f.get("failed_command"),
+            "failed_tool":  f.get("failed_tool"),
+            "failed_tools": f.get("failed_tools")  or [],
+            "failed_command": str(f.get("failed_cmd") or f.get("failed_command") or ""),
+            "error_type":   str(f.get("issue_type")    or f.get("error_type") or "").strip(),
+            "error_subtype": str(f.get("error_subtype") or "").strip(),
+        })
+
+    # ── error_types — wrap plain strings into {category, subcategory, evidence} ─
+    raw_et = instance.get("error_types") or instance.get("overall_error_types") or []
+    error_types: List[Dict[str, Any]] = []
+    for et in raw_et:
+        if isinstance(et, dict):
+            error_types.append(et)
+        elif str(et).strip():
+            error_types.append({
+                "category":    str(et).strip(),
+                "subcategory": "",
+                "evidence":    "",
+            })
+
+    # ── failed_job ─────────────────────────────────────────────────────────────
+    raw_jobs = instance.get("failed_jobs") or []
+    failed_job: List[Dict[str, Any]] = []
+    for j in raw_jobs:
+        if isinstance(j, dict):
+            failed_job.append({
+                "job":     str(j.get("job")              or ""),
+                "step":    str(j.get("step")             or ""),
+                "command": str(j.get("command")          or j.get("failed_command") or ""),
+                "failed_command": str(j.get("failed_command") or j.get("command") or ""),
+            })
+        elif str(j).strip():
+            failed_job.append({"step": str(j), "command": "", "failed_command": ""})
+
+    # ── overall_ci_summary ─────────────────────────────────────────────────────
+    overall_ci_summary = " | ".join(error_context[:3]) if error_context else ""
+
+    return {
+        "sha_fail":           sha_fail,
+        "id":                 task_id,
+        "error_context":      error_context,
+        "relevant_files":     relevant_files,
+        "error_types":        error_types,
+        "failed_job":         failed_job,
+        "overall_ci_summary": overall_ci_summary,
+        "chunk_summaries":    [],
+        "analysis_document":  overall_ci_summary,
+        "_precomputed":       True,   # flag: skipped CILogAnalyzer
+    }
+
+
 def _run_log_analysis(
     instance: Dict[str, Any],
     llm: Any,
     model: str,
 ) -> Dict[str, Any]:
     """
-    Phase A — run CILogAnalyzer on CI logs.
+    Phase A — build a structured log_analysis_result.
 
-    Returns a log_analysis_result dict (CI-REPAIR-BENCH schema).
-    Falls back to a minimal raw-text result on failure.
+    Fast path (no LLM cost):
+        If the instance already carries pre-computed TRS-pipeline fields
+        (overall_failure_reasons, effected_files, failed_jobs), use them
+        directly.  This avoids 3+ LLM calls per instance and typically
+        produces *better* results because the TRS pipeline ran the full
+        CILogAnalyzerLLM with access to complete logs.
+
+    Slow path (LLM required):
+        Run CILogAnalyzer on the raw logs.  Falls back to the minimal
+        heuristic analysis if the LLM is unavailable or the analyzer fails.
     """
+    if _has_precomputed_analysis(instance):
+        result = _build_from_precomputed(instance)
+        logger.info(
+            "[Phase A] Using pre-computed fields (skipped CILogAnalyzer) — "
+            "error_types=%d  files=%d  jobs=%d",
+            len(result["error_types"]),
+            len(result["relevant_files"]),
+            len(result["failed_job"]),
+        )
+        return result
+
     sha_fail      = str(instance.get("sha_fail") or "")
     task_id       = str(instance.get("instance_id") or instance.get("id") or sha_fail)
     workflow      = instance.get("workflow") or ""
@@ -392,7 +508,14 @@ def _extract_workflow_profile(
         if profile.get("installation_cmd") or profile.get("validation_cmd"):
             return profile
 
-    # Fallback: basic YAML parsing
+    # Fallback 1: extract validation_cmd from pre-computed failed_jobs
+    # (the failing command IS the test/lint command the agent needs to re-run)
+    precomputed = _extract_validation_from_failed_jobs(instance)
+    if precomputed.get("validation_cmd"):
+        logger.debug("[Phase B] Extracted validation_cmd from failed_jobs")
+        return precomputed
+
+    # Fallback 2: basic YAML parsing
     return _parse_workflow_yaml_commands(str(instance.get("workflow") or ""))
 
 
@@ -466,6 +589,48 @@ def _run_error_context_agent_phase_b(
         except Exception as exc:
             logger.warning("[Phase B] ErrorContextAgent phase B failed (%s); using YAML fallback.", exc)
             return {"installation_cmd": [], "validation_cmd": [], "critical_steps": []}
+
+
+def _extract_validation_from_failed_jobs(instance: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract validation_cmd directly from pre-computed failed_jobs field.
+
+    The command that failed in CI *is* the validation command the agent needs
+    to run to reproduce and then verify their fix.  This is more accurate
+    than YAML regex parsing because it comes from the actual CI execution.
+    """
+    failed_jobs = instance.get("failed_jobs") or []
+    validation_cmd: List[str] = []
+    seen: set = set()
+
+    for j in failed_jobs:
+        if not isinstance(j, dict):
+            continue
+        cmd = str(j.get("failed_command") or j.get("command") or "").strip()
+        if cmd and cmd not in seen:
+            validation_cmd.append(cmd)
+            seen.add(cmd)
+
+    # Also check effected_files for per-file failed commands
+    for ef in (instance.get("effected_files") or []):
+        if not isinstance(ef, dict):
+            continue
+        cmd = str(ef.get("failed_cmd") or ef.get("failed_command") or "").strip()
+        if cmd and cmd not in seen:
+            validation_cmd.append(cmd)
+            seen.add(cmd)
+
+    # Deduplicate: prefer pytest/mypy/ruff invocations, drop install commands
+    _install_pat = re.compile(
+        r"(pip install|poetry install|npm install|yarn install|apt-get)", re.I
+    )
+    validation_cmd = [c for c in validation_cmd if not _install_pat.search(c)]
+
+    return {
+        "validation_cmd":   validation_cmd[:6],
+        "installation_cmd": [],
+        "critical_steps":   [],
+    }
 
 
 def _parse_workflow_yaml_commands(workflow_yaml: str) -> Dict[str, Any]:

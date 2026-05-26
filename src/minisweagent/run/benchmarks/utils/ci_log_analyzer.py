@@ -1067,3 +1067,130 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
             if str(item).strip()
         ]
         return " | ".join(error_context)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CILogAnalyzer — public adapter used by ci_context.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _normalize_logs(logs: Any) -> List[Dict[str, Any]]:
+    """
+    Normalise raw CI logs to the ``[{step_name, log}]`` format that
+    ``CILogAnalyzerLLM`` expects.
+    """
+    if isinstance(logs, list):
+        out: List[Dict[str, Any]] = []
+        for i, item in enumerate(logs):
+            if isinstance(item, dict):
+                step_name = str(
+                    item.get("step_name") or item.get("name") or f"step_{i + 1}"
+                )
+                log_text = str(
+                    item.get("log") or item.get("text") or item.get("output") or ""
+                )
+            else:
+                step_name = f"step_{i + 1}"
+                log_text  = str(item)
+            out.append({"step_name": step_name, "log": log_text})
+        return out
+
+    # Plain string — treat as a single step
+    return [{"step_name": "ci_log", "log": str(logs or "")}]
+
+
+def _make_langchain_llm(llm: Any) -> Any:
+    """
+    Return a LangChain-compatible LLM object from *llm*.
+
+    Supports:
+      • Already LangChain (has ``invoke([HumanMessage(...)])``): returned as-is.
+      • Callable / litellm-style (``llm(prompt) -> str``): wrapped in a thin
+        shim so ``CILogAnalyzerLLM`` can call ``.invoke([HumanMessage(…)])``.
+    """
+    if llm is None:
+        raise ValueError("llm must not be None for CILogAnalyzerLLM")
+
+    # Test whether it already speaks LangChain
+    try:
+        from langchain_core.messages import HumanMessage as _HM  # type: ignore
+        if callable(getattr(llm, "invoke", None)):
+            return llm
+    except ImportError:
+        pass
+
+    # Wrap a plain callable
+    class _LLMShim:
+        def __init__(self, fn: Any) -> None:
+            self._fn = fn
+
+        def invoke(self, messages: Any) -> Any:
+            # Extract text from a list of messages or pass through a plain string
+            if isinstance(messages, list):
+                content = " ".join(
+                    getattr(m, "content", str(m)) for m in messages
+                )
+            else:
+                content = str(messages)
+            result = self._fn(content)
+            # Return an object with a .content attribute
+            class _Resp:
+                def __init__(self, c: str) -> None:
+                    self.content = c
+            return _Resp(str(result) if result is not None else "")
+
+    return _LLMShim(llm)
+
+
+class CILogAnalyzer:
+    """
+    Public adapter for ``CILogAnalyzerLLM``, used by ``ci_context.py``.
+
+    Accepts the interface that ``ci_context._run_log_analysis()`` uses:
+
+        analyzer = CILogAnalyzer(
+            logs=logs,           # str | list[{step_name, log}]
+            sha_fail=sha_fail,
+            workflow=workflow,
+            workflow_path=workflow_path,
+            llm=llm,             # LangChain ChatModel | callable | None
+            model_name=model,
+            task_id=task_id,
+        )
+        result = analyzer.run()  # → same schema as CILogAnalyzerLLM.run()
+
+    Raises ``RuntimeError`` when ``llm`` is ``None`` so that the caller's
+    fallback (``_minimal_log_analysis``) is triggered automatically.
+    """
+
+    def __init__(
+        self,
+        *,
+        logs: Any,
+        sha_fail: str,
+        workflow: Any,
+        workflow_path: str,
+        llm: Any,
+        model_name: str,
+        task_id: str,
+    ) -> None:
+        if llm is None:
+            raise RuntimeError(
+                "CILogAnalyzer requires an LLM; llm=None → using fallback analysis."
+            )
+
+        ci_log = _normalize_logs(logs)
+        lc_llm = _make_langchain_llm(llm)
+
+        self._inner = CILogAnalyzerLLM(
+            repo_path=".",
+            ci_log=ci_log,
+            sha_fail=sha_fail,
+            workflow=workflow,
+            workflow_path=workflow_path,
+            llm=lc_llm,
+            model_name=model_name,
+            task_id=task_id,
+        )
+
+    def run(self) -> Dict[str, Any]:
+        return self._inner.run()

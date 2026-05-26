@@ -170,6 +170,20 @@ def test_openrouter_model_config():
         assert model._api_key == "test-key"
 
 
+def test_openrouter_model_uses_configured_base_url():
+    """Test OpenRouter base URL override via env vars."""
+    with patch.dict(
+        os.environ,
+        {
+            "OPENROUTER_API_KEY": "test-key",
+            "OPENROUTER_BASE_URL": "https://example.com/custom/v1/",
+        },
+        clear=True,
+    ):
+        model = OpenRouterTextbasedModel(model_name="anthropic/claude-3.5-sonnet")
+        assert model._api_url == "https://example.com/custom/v1/chat/completions"
+
+
 def test_openrouter_model_get_template_vars():
     """Test get_template_vars method."""
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):

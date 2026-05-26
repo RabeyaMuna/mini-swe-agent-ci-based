@@ -1,0 +1,18 @@
+{
+  "model_key": "MiniMax-M2.5",
+  "seed_file": "baselines/results/trs/trs_memory_seed_issues.json",
+  "analysis_file": "baselines/results/trs/seed_log_details.json",
+  "total_issues": 103,
+  "processed": 100,
+  "skipped": 3,
+  "design": {
+    "L1": "per-file; dependent_files={file,reason,must_change}",
+    "L2": "two-step: identification + per-failure enrichment; changed_files={file,reason,failure_reason,fix_strategy}; dependent_issues={issue_type,direction,reason,what_arose,what_to_fix}",
+    "L3": "universal principle; root_cause_pattern+cascade_pattern; no repo-specific details"
+  },
+  "memory_counts": {
+    "L1_failure_memory": 240,
+    "L2_repo_memory": 126,
+    "L3_cross_memory": 103
+  }
+}
