@@ -330,7 +330,7 @@ Important files:
   - predicted patch per instance
 - `cibench.log`
   - runner log
-- `<instance_id>/<instance_id>.traj.json`
+- `<sha_fail>/<sha_fail>.traj.json`
   - full agent trajectory
 
 Examples:
@@ -344,7 +344,7 @@ Inspect one issue:
 
 ```bash
 ls results/baseline/<instance_id>/
-cat results/baseline/<instance_id>/<instance_id>.traj.json
+cat results/baseline/<sha_fail>/<sha_fail>.traj.json
 ```
 
 ## Notes About Validation
