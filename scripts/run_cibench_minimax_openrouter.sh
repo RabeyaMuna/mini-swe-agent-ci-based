@@ -145,7 +145,7 @@ fi
 echo ""
 echo "Done. Results saved to:"
 echo "  Predictions : ${OUTPUT_DIR}/preds.json"
-echo "  Trajectories: ${OUTPUT_DIR}/<instance_id>/<instance_id>.traj.json"
+echo "  Trajectories: ${OUTPUT_DIR}/<sha_fail>/<sha_fail>.traj.json"
 echo "  Log         : ${OUTPUT_DIR}/cibench.log"
 if [[ "${ABLATION}" != "baseline" ]]; then
   echo "  Memory L1   : ${MEMORY_ROOT}/failure_memory.json"

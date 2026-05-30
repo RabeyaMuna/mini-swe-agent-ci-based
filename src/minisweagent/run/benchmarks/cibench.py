@@ -32,7 +32,7 @@ Output predictions  (preds.json)
 }
 
 Each instance also gets a trajectory saved to:
-  <output_dir>/<instance_id>/<instance_id>.traj.json
+  <output_dir>/<sha_fail>/<sha_fail>.traj.json
 
 Usage examples
 --------------
@@ -425,11 +425,12 @@ def process_instance(
     """
     instance_id = str(instance.get("instance_id") or instance.get("id") or "unknown")
     sha_fail    = str(instance.get("sha_fail") or "")
-    instance_dir = output_dir / instance_id
+    dir_name    = sha_fail or instance_id   # prefer sha_fail as the directory key
+    instance_dir = output_dir / dir_name
     instance_dir.mkdir(parents=True, exist_ok=True)
 
     remove_from_preds_file(output_dir / "preds.json", instance_id)
-    (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
+    (instance_dir / f"{dir_name}.traj.json").unlink(missing_ok=True)
 
     progress_manager.on_instance_start(instance_id)
     progress_manager.update_instance_status(instance_id, "Pre-processing CI logs")
@@ -519,7 +520,7 @@ def process_instance(
 
     finally:
         if agent is not None:
-            traj_path = instance_dir / f"{instance_id}.traj.json"
+            traj_path = instance_dir / f"{dir_name}.traj.json"
             agent.save(
                 traj_path,
                 {
@@ -551,13 +552,23 @@ def _extract_diff(submission: str) -> str:
     The agent echoes ``COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`` then cats the
     patch file.  We take everything after that sentinel (or the full string
     if the sentinel is absent).
+
+    NOTE: We deliberately avoid str.strip() here because it removes trailing
+    blank context lines (" \\n") from the diff, causing git to report
+    "corrupt patch" (hunk header claims N lines but body only has N-1).
+    Instead we lstrip leading whitespace and remove only truly empty trailing
+    lines so that blank context lines like " " are preserved.
     """
     sentinel = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     if sentinel in submission:
-        return submission[submission.index(sentinel) + len(sentinel):].strip()
-    if submission.strip().startswith("diff --git") or submission.strip().startswith("---"):
-        return submission.strip()
-    return submission.strip()
+        diff = submission[submission.index(sentinel) + len(sentinel):].lstrip()
+    else:
+        diff = submission.lstrip()
+    # Strip only completely empty trailing lines, not blank context lines (" ")
+    parts = diff.split("\n")
+    while parts and parts[-1] == "":
+        parts.pop()
+    return ("\n".join(parts) + "\n") if parts else ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
