@@ -188,4 +188,20 @@ pyrightconfig.json
 
 .codex
 .claude
-repo
+repo/
+results/
+
+# Test memory directories
+test_memory/
+*_rebuilt/
+data/trs_OLD/
+
+# Temporary files
+*.bak
+*.swp
+*.tmp
+
+# Analysis documents (optional - comment out to track)
+# DEEP_ANALYSIS_*.md
+# CRITICAL_FINDINGS.md
+# SMOKING_GUN.md

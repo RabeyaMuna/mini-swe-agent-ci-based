@@ -3,9 +3,10 @@
 This workspace is a trimmed CI-repair benchmark setup built around `mini-swe-agent`.
 It is intended to run CI-failure repair experiments on the prepared eval split in:
 
-- `data/eval_dataset.jsonl`
-- `data/memory_seed.jsonl`
-- `results/shared_memory/`
+- `data/trs/eval_issues.json` — evaluation issues
+- `data/trs/failure_memory.json` — L1 seeded memories (per-file)
+- `data/trs/repo_memory.json` — L2 seeded memories (repo-level patterns)
+- `data/trs/cross_memory.json` — L3 seeded memories (universal principles)
 
 It supports four ablations:
 
@@ -20,8 +21,8 @@ It supports four ablations:
   - main run entrypoint
 - `src/minisweagent/run/benchmarks/cibench.py`
   - benchmark runner
-- `results/shared_memory/`
-  - seeded L1/L2/L3 memory bank
+- `data/trs/`
+  - seeded L1/L2/L3 memory bank (high-quality, built from CI-REPAIR-BENCH)
 - `repo/`
   - shared repo clone cache
 
@@ -159,17 +160,16 @@ and behave like no-memory runs.
 Confirm required files exist:
 
 ```bash
-ls -lh data/eval_dataset.jsonl data/memory_seed.jsonl
-ls -lh results/shared_memory/
+ls -lh data/trs/eval_issues.json
+ls -lh data/trs/
 ```
 
 Expected:
 
-- `data/eval_dataset.jsonl`
-- `data/memory_seed.jsonl`
-- `results/shared_memory/failure_memory.json`
-- `results/shared_memory/repo_memory.json`
-- `results/shared_memory/cross_memory.json`
+- `data/trs/eval_issues.json` — evaluation dataset
+- `data/trs/failure_memory.json` — L1 per-file memories (1.3MB)
+- `data/trs/repo_memory.json` — L2 repo-level patterns (900KB)
+- `data/trs/cross_memory.json` — L3 universal principles (468KB)
 
 ## Quick Sanity Checks
 

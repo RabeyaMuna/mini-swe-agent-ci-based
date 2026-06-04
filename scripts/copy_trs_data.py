@@ -5,8 +5,8 @@ copy_trs_data.py
 Copy the pre-computed TRS data from CI-REPAIR-BENCH into this project.
 
 Produces:
-    data/eval_dataset.jsonl          — 189 eval issues (with full logs from parquet)
-    results/shared_memory/           — L1/L2/L3 memory bank (direct copy)
+    data/trs/eval_issues.json          — 189 eval issues (with full logs from parquet)
+    data/trs/                        — L1/L2/L3 memory bank (high-quality seeded memories)
 
 Usage:
     python scripts/copy_trs_data.py
@@ -79,7 +79,7 @@ def run(trs_results: Path, parquet_path: Path, project_root: Path) -> None:
     import pandas as pd  # type: ignore
 
     # ── 1. Load enriched eval issues ───────────────────────────────────────────
-    eval_json = trs_results / "trs_eval_issues.json"
+    eval_json = trs_results / "eval_issues.json"
     issues: List[Dict] = json.loads(eval_json.read_text(encoding="utf-8"))
     print(f"[copy] Loaded {len(issues)} eval issues from {eval_json}")
 

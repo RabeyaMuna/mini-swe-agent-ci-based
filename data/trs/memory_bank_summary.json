@@ -1,18 +1,53 @@
 {
   "model_key": "MiniMax-M2.5",
-  "seed_file": "baselines/results/trs/trs_memory_seed_issues.json",
-  "analysis_file": "baselines/results/trs/seed_log_details.json",
-  "total_issues": 103,
-  "processed": 100,
-  "skipped": 3,
-  "design": {
-    "L1": "per-file; dependent_files={file,reason,must_change}",
-    "L2": "two-step: identification + per-failure enrichment; changed_files={file,reason,failure_reason,fix_strategy}; dependent_issues={issue_type,direction,reason,what_arose,what_to_fix}",
-    "L3": "universal principle; root_cause_pattern+cascade_pattern; no repo-specific details"
-  },
+  "seed_file": "baselines/results/trs/memory_seed_issues_ready_for_memory_build.json",
+  "analysis_file": "/Users/rabeyakhatunmuna/Documents/CI-REPAIR-BENCH/baselines/results/MiniMax-M2.5/log_details.json",
+  "output_dir": "baselines/results/trs/_memory_build_staging",
   "memory_counts": {
-    "L1_failure_memory": 240,
-    "L2_repo_memory": 126,
-    "L3_cross_memory": 103
+    "L1_failure_memory": 675,
+    "L2_repo_memory": 188,
+    "L3_cross_memory": 168
+  },
+  "schema": {
+    "L1": [
+      "file",
+      "error_type",
+      "issue_subtype",
+      "root_cause_category",
+      "failure_pattern",
+      "failure_reason",
+      "fix_strategy",
+      "fix_pattern",
+      "failed_tool",
+      "issue_type",
+      "dependent_files",
+      "repo"
+    ],
+    "L2": [
+      "error_type",
+      "issue_subtype",
+      "root_cause_category",
+      "failure_pattern",
+      "failure_reason",
+      "fix_strategy",
+      "dependent_issue_patterns",
+      "fix_pattern",
+      "modified_files[file,failure_pattern,failure_reason,modification_hint,depended_files]",
+      "failed_tool",
+      "repo"
+    ],
+    "L3": [
+      "error_type",
+      "issue_subtype",
+      "root_cause_category",
+      "failure_pattern",
+      "principle",
+      "fix_strategy",
+      "secondary_issue_patterns",
+      "failure_patterns",
+      "failure_reasons",
+      "failed_tool",
+      "repos"
+    ]
   }
 }

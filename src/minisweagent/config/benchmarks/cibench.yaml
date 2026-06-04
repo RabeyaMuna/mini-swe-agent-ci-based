@@ -35,7 +35,7 @@ agent:
 
     ## Your Goal
     The CI pipeline failed at the commit shown above.  Your task is to fix
-    the source code so the CI passes **without breaking other functionality**.
+    the project so the CI passes **without breaking other functionality**.
 
     ## Repository State
     You are already on the failing commit (sha_fail).
@@ -59,7 +59,11 @@ agent:
        import to understand the root cause.
 
     4. **Apply a minimal fix** — change only what is needed to fix the failure.
-       Do NOT modify tests, CI config files, or unrelated source files.
+       Project configuration files such as `pyproject.toml`, `setup.cfg`,
+       `setup.py`, lock files, and source files are valid repair targets when
+       the CI evidence points to them. Do NOT modify tests or unrelated files.
+       Do NOT modify files under `.github/` unless the workflow/action file
+       itself is proven to be the root cause.
 
     5. **Reproduce or sanity-check when feasible** — if the project appears
        runnable locally, you may execute validation commands from the report or
@@ -72,8 +76,13 @@ agent:
        possible.
 
     ## Important Constraints
-    - ONLY modify regular source code files under `{{testbed_path}}`
-    - Do NOT modify: tests, CI YAML, pyproject.toml, setup.cfg, setup.py
+    - ONLY modify files under `{{testbed_path}}`
+    - Do NOT modify tests unless the task explicitly requires a test-only fix
+    - Do NOT modify files under `.github/` unless the workflow/action file is
+      proven to be the root cause
+    - Project config and dependency files such as `pyproject.toml`, `setup.cfg`,
+      `setup.py`, lock files, and requirements files may be modified when they
+      are the root cause
     - Do NOT commit your changes
     - Your fix must be minimal and targeted
     - Local validation is OPTIONAL, not required for submission
@@ -94,7 +103,7 @@ agent:
     ## Submission
     When your fix is complete:
 
-    **Step 1** — Create the patch file (list ONLY modified source files):
+    **Step 1** — Create the patch file (list ONLY modified project files):
     ```bash
     git -C {{testbed_path}} diff -- path/to/file1.py path/to/file2.py > {{testbed_path}}/patch.txt
     ```

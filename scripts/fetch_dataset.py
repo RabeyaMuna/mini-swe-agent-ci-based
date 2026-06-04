@@ -76,7 +76,7 @@ def fetch(split: str, output_path: Path) -> None:
     print("Run the benchmark with:")
     print(f"  mini-swe-agent cibench --dataset {output_path} --output results/baseline --no-memory-enabled")
     print(f"  mini-swe-agent cibench --dataset {output_path} --output results/l1_l2_l3 \\")
-    print( "      --memory-enabled --memory-root results/shared_memory --memory-ablation L1+L2+L3")
+    print( "      --memory-enabled --memory-root data/trs --memory-ablation L1+L2+L3")
 
 
 def main() -> None:

@@ -1,12 +1,25 @@
 #!/usr/bin/env python3
 """
-seed_memory.py
-==============
+seed_memory.py - Runtime Memory Generation
+==========================================
 Pre-populate the shared L1/L2/L3 memory bank from data/memory_seed.jsonl.
 
-Run this ONCE before any agent evaluation.  Every agent that reads from
-``results/shared_memory/`` will then start with the same prior experience —
-guaranteeing a fair, consistent comparison across agents.
+⚠️  WARNING: For high-quality memory suitable for evaluation, use
+    build_memory_bank.py instead! This script generates memory at runtime
+    with simpler structure (strings instead of 4-field objects).
+
+USE THIS SCRIPT FOR:
+    ✅ Quick experiments and prototyping
+    ✅ Runtime memory generation during agent runs
+    ✅ Fast memory creation (no LLM chain-of-thought)
+
+USE build_memory_bank.py FOR:
+    ✅ Evaluation and paper results (proper L2 structure)
+    ✅ Two-stage L2 construction (identifies distinct CI failures)
+    ✅ 4-field changed_files: [{file, reason, failure_reason, fix_strategy}]
+    ✅ Chain-of-thought analysis with cross-failure dependencies
+
+See MEMORY_BUILDING_GUIDE.md for details.
 
 How it works
 ------------
@@ -14,19 +27,19 @@ For each issue in memory_seed.jsonl:
   1. Run CILogAnalyzer on the CI logs           → structured log_analysis_result
   2. Call CIMemorySystem.save(log_analysis_result, diff)
      → appends entries to:
-         results/shared_memory/failure_memory.json   (L1 per-file)
-         results/shared_memory/repo_memory.json      (L2 per-repo)
-         results/shared_memory/cross_memory.json     (L3 cross-repo)
+         <memory-root>/failure_memory.json   (L1 per-file)
+         <memory-root>/repo_memory.json      (L2 per-repo)
+         <memory-root>/cross_memory.json     (L3 cross-repo)
 
 Usage
 -----
     # Use default paths + model from env
     python scripts/seed_memory.py
 
-    # Explicit options
+    # Explicit options (generates runtime memory, not recommended for eval)
     python scripts/seed_memory.py \\
         --memory-seed  data/memory_seed.jsonl \\
-        --memory-root  results/shared_memory \\
+        --memory-root  results/runtime_memory \\
         --model        minimax/minimax-m2.5 \\
         --workers      4
 
@@ -392,8 +405,8 @@ def main() -> None:
     p.add_argument(
         "--memory-root",
         type=Path,
-        default=Path("results/shared_memory"),
-        help="Directory for the shared L1/L2/L3 memory bank (default: results/shared_memory)",
+        default=Path("results/runtime_memory"),
+        help="Directory for the shared L1/L2/L3 memory bank (default: results/runtime_memory)",
     )
     p.add_argument(
         "--model",

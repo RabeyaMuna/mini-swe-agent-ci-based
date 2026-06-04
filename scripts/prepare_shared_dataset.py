@@ -5,7 +5,7 @@ prepare_shared_dataset.py
 Joins the TRS split from CI-REPAIR-BENCH with lca_dataset.parquet and
 produces two JSONL files that give every agent the SAME benchmark:
 
-    data/eval_dataset.jsonl    — 189 eval issues (mini-swe-agent cibench input)
+    data/trs/eval_issues.json    — 189 eval issues (mini-swe-agent cibench input)
     data/memory_seed.jsonl     — 103 memory issues (fed to seed_memory.py)
 
 Using the same eval set + the same seeded memory bank across all agents
@@ -227,7 +227,7 @@ def run(
     print()
     print("  2. Run mini-swe-agent evaluation:")
     print("       scripts/run_cibench_minimax_openrouter.sh")
-    print("     (uses data/eval_dataset.jsonl and results/shared_memory/ by default)")
+    print("     (uses data/trs/eval_issues.json and data/trs/ memory bank by default)")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
