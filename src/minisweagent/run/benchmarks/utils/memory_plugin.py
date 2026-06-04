@@ -164,6 +164,40 @@ def _normalize_path(path: str) -> str:
     return (path or "").strip().lstrip("/").replace("\\", "/")
 
 
+def _repo_matches(query_repo: str, memory_repo: str) -> bool:
+    """
+    Fuzzy repo matching to handle format inconsistencies.
+
+    Query may be "owner/repo" (full) or "repo" (short).
+    Memory may be "owner/repo" (full) or "repo" (short).
+
+    Returns True if they refer to the same repository.
+
+    Examples:
+      _repo_matches("camel-ai/camel", "camel") → True
+      _repo_matches("camel", "camel-ai/camel") → True
+      _repo_matches("camel-ai/camel", "camel-ai/camel") → True
+      _repo_matches("camel", "camel") → True
+      _repo_matches("camel-ai/camel", "other/repo") → False
+    """
+    if not query_repo or not memory_repo:
+        return False
+
+    query_repo = query_repo.strip()
+    memory_repo = memory_repo.strip()
+
+    # Exact match
+    if query_repo == memory_repo:
+        return True
+
+    # Extract repo names (after last /)
+    query_short = query_repo.split("/")[-1]
+    memory_short = memory_repo.split("/")[-1]
+
+    # Match if repo names are the same (ignoring owner prefix)
+    return query_short == memory_short
+
+
 def _basename(path: str) -> str:
     return os.path.basename(_normalize_path(path))
 
@@ -435,9 +469,13 @@ class MemoryPlugin:
     """
     MemCI-style three-level memory for fault localization.
 
-    L1: failure_memory  — per-file failure records
-    L2: repo_memory     — repo-scoped recurring patterns
-    L3: cross_memory    — cross-repo generalized principles
+    L1: failure_memory  — per-file failure records (repo + workflow scoped)
+    L2: repo_memory     — repo-scoped recurring patterns (repo + workflow scoped)
+    L3: cross_memory    — cross-repo generalized principles (no filtering, generalized)
+
+    Search scope:
+      - L1 & L2: Search within the same repo AND workflow context
+      - L3: Search across all repos and workflows (generalized knowledge)
 
     When an LLM is provided, candidates that pass lexical thresholds are
     re-scored by the LLM (Exemplar-Guardian-style) before injection.
@@ -463,15 +501,20 @@ class MemoryPlugin:
         #      Multi-level conditions are always at least as permissive as L1-only.
         #   3. Injection rate increases monotonically: L1 ≤ L1+L2 ≤ L1+L2+L3.
         #
-        # Concretely (renormalized L1 weights: L1=1.000 / 0.667 / 0.600):
+        # Concretely (renormalized L1 weights: L1=1.000 / 0.556 / 0.500):
         #   L1 only    → T = 0.55 × 1.000 = 0.55  (40/60 on benchmark)
-        #   L1+L2      → T = 0.55 × 0.667 = 0.37  (42/60 — 2 extra via L2 corroboration)
-        #   L1+L2+L3   → T = 0.55 × 0.600 = 0.33  (43/60 — 1 further via L3)
+        #   L1+L2      → T = 0.55 × 0.556 = 0.31  (LOWERED - allows L2-only matches for config errors)
+        #   L1+L2+L3   → T = 0.55 × 0.500 = 0.28  (LOWERED - allows L2/L3 to carry weight)
+        #
+        # Updated thresholds to handle configuration errors without specific files:
+        # - L1+L2: 0.31 (down from 0.37) - allows perfect L2 matches to pass even when L1=0
+        # - L1+L2+L3: 0.28 (down from 0.33) - allows L2/L3 corroboration without L1
         #
         # memory_similarity_threshold in config.yaml is only used as a fallback
         # for unrecognized ablation strings (e.g. custom configs).
         _raw_levels = str(self._cfg("memory_ablation_levels", "L1+L2+L3"))
-        _ablation_thresholds = {"L1": 0.55, "L1+L2": 0.37, "L1+L2+L3": 0.33}
+        # Low thresholds (0.10) act as spam filter only - LLM1 filter does the real selection
+        _ablation_thresholds = {"L1": 0.10, "L1+L2": 0.10, "L1+L2+L3": 0.10}
         if _raw_levels in _ablation_thresholds:
             self.similarity_threshold = float(_ablation_thresholds[_raw_levels])
         else:
@@ -492,15 +535,21 @@ class MemoryPlugin:
         )
 
         self.failure_memory = _load_json_list(self.failure_memory_path)
-        self.repo_memory = _load_json_list(self.repo_memory_path)
-        self.cross_memory = _load_json_list(self.cross_memory_path)
+        self.repo_memory    = _load_json_list(self.repo_memory_path)
+        self.cross_memory   = _load_json_list(self.cross_memory_path)
+
+        # Pre-load stored embeddings into the _EmbeddingProvider cache so
+        # retrieval never has to re-embed the same record twice, even across restarts.
+        # Embeddings are stored in each record as "_embedding": [float, ...]
+        # and injected into the provider's cache keyed by the record's search_document.
+        self._load_stored_embeddings()
         # Per-level gate thresholds applied before top-k selection.
-        # L1=0.40: file match alone (max 0.35) is insufficient — needs corroborating
-        #          error type, failure pattern, or semantic text signal.
+        # L1=0.35: LOWERED from 0.40 to allow semantic-only matches for config errors without files
+        #          (semantic match ~0.7 × 0.5 weight = 0.35 score when no file match)
         # L2=0.40: same bar; repo-level needs semantic + error type corroboration.
         # L3=0.50: strictest — cross-repo evidence must be high quality to avoid
         #          injecting generic patterns that mislead fault localization.
-        self.level_thresholds = {"L1": 0.40, "L2": 0.40, "L3": 0.50}
+        self.level_thresholds = {"L1": 0.35, "L2": 0.40, "L3": 0.50}
 
         # Ablation: which memory levels are active (L1 / L1+L2 / L1+L2+L3)
         raw_levels = str(self._cfg("memory_ablation_levels", "L1+L2+L3"))
@@ -509,7 +558,15 @@ class MemoryPlugin:
         # Renormalize base weights so they always sum to 1.0 across active levels.
         # Without this, L1-only weighted_similarity = 0.60 × L1_best, which would
         # suppress memory far more than the full config at the same threshold.
-        _base = {"L1": 0.60, "L2": 0.30, "L3": 0.10}
+        #
+        # Updated weights to reduce L1's influence and increase L2's:
+        # - L1: 0.50 (down from 0.60) - reduces penalty when L1 can't match (config errors)
+        # - L2: 0.40 (up from 0.30) - gives repo-level patterns more influence
+        # - L3: 0.10 (unchanged) - generalized knowledge baseline
+        #
+        # In L1+L2 mode: L1=0.556, L2=0.444 (instead of L1=0.667, L2=0.333)
+        # This allows perfect L2 (1.0) to reach 0.444 weighted score even when L1=0
+        _base = {"L1": 0.50, "L2": 0.40, "L3": 0.10}
         _active_sum = sum(_base[lvl] for lvl in self.active_levels if lvl in _base)
         self.level_weights = {
             lvl: (_base[lvl] / _active_sum if lvl in self.active_levels and _active_sum > 0 else 0.0)
@@ -536,6 +593,82 @@ class MemoryPlugin:
         except Exception:
             value = getattr(self.config, key, default)
         return default if value is None else value
+
+    # ── Embedding persistence ──────────────────────────────────────────────────
+
+    def _load_stored_embeddings(self) -> None:
+        """
+        Pre-populate the embedding provider's in-memory cache from stored
+        '_embedding' fields on memory records.
+
+        When records are first embedded (at retrieval time), their vectors are
+        saved back to the JSON files via _persist_embeddings_for_level().
+        On the next startup this method loads those vectors directly into the
+        cache so no re-embedding is needed — first query is as fast as all
+        subsequent ones.
+        """
+        if not _NUMPY_AVAILABLE:
+            return
+        provider = _EmbeddingProvider.get()
+        loaded = 0
+        for level_records, level_name in (
+            (self.failure_memory, "L1"),
+            (self.repo_memory,    "L2"),
+            (self.cross_memory,   "L3"),
+        ):
+            for record in level_records:
+                doc = str(record.get("search_document") or "").strip()
+                vec = record.get("_embedding")
+                if doc and vec and doc not in provider._cache:
+                    try:
+                        provider._cache[doc] = np.array(vec, dtype=np.float32)
+                        loaded += 1
+                    except Exception:
+                        pass
+        if loaded:
+            print(f"[Memory] Loaded {loaded} pre-computed embeddings from memory bank (no re-embedding needed)")
+
+    def _persist_new_embeddings(self) -> None:
+        """
+        After retrieval, write back any newly computed embeddings into the
+        memory records and save to disk. Called once after the first query
+        so subsequent runs skip all re-embedding.
+        """
+        if not _NUMPY_AVAILABLE:
+            return
+        provider = _EmbeddingProvider.get()
+        changed = {"L1": False, "L2": False, "L3": False}
+
+        for level_records, level_key in (
+            (self.failure_memory, "L1"),
+            (self.repo_memory,    "L2"),
+            (self.cross_memory,   "L3"),
+        ):
+            for record in level_records:
+                if "_embedding" in record:
+                    continue   # already stored
+                doc = str(record.get("search_document") or "").strip()
+                if not doc:
+                    # Build and store the search_document if missing (seeded records)
+                    level_char = level_key
+                    doc = self._build_search_document(record, level=level_char)
+                    if doc:
+                        record["search_document"] = doc
+                        changed[level_key] = True
+                vec = provider._cache.get(doc)
+                if vec is not None:
+                    record["_embedding"] = vec.tolist()
+                    changed[level_key] = True
+
+        if changed["L1"]:
+            _write_json_list(self.failure_memory_path, self.failure_memory)
+        if changed["L2"]:
+            _write_json_list(self.repo_memory_path, self.repo_memory)
+        if changed["L3"]:
+            _write_json_list(self.cross_memory_path, self.cross_memory)
+
+        total = sum(1 for r in self.failure_memory + self.repo_memory + self.cross_memory if "_embedding" in r)
+        print(f"[Memory] Persisted embeddings: {total} records now have stored vectors")
 
     def is_enabled(self) -> bool:
         return self.enabled
@@ -626,6 +759,34 @@ class MemoryPlugin:
             )
             for item in example_files[:5] if isinstance(item, dict)
         )
+        # Resolve field aliases — seeded data uses different key names than runtime-saved data.
+        # Always check both names so the document is equally rich for both sources.
+        file_failure_reason = (
+            record.get("file_failure_reason")
+            or record.get("failure_reason")   # seeded alias
+            or record.get("reason")           # seeded alias
+            or ""
+        )
+        overall_failure_reason = (
+            record.get("overall_failure_reason")
+            or record.get("failure_reason")   # seeded alias
+            or record.get("reason")           # seeded alias
+            or ""
+        )
+        fix = (
+            record.get("fix_direction")
+            or record.get("fix_strategy")     # seeded alias
+            or ""
+        )
+        # fix_pattern is a list in seeded data — join into text
+        fix_pattern_items = _safe_list(record.get("fix_pattern") or [])
+        fix_pattern_text  = " | ".join(str(x) for x in fix_pattern_items[:4])
+        if fix_pattern_text and not fix:
+            fix = fix_pattern_text
+
+        # issue_subtype is seeded-data's finer-grained label — treat as extra failure_pattern signal
+        issue_subtype = str(record.get("issue_subtype") or record.get("root_cause_category") or "")
+
         parts = [
             f"level: {level}",
             f"repo: {record.get('repo','')}",
@@ -634,14 +795,15 @@ class MemoryPlugin:
             f"line: {record.get('line_number','')}",
             f"error_type: {record.get('error_type','')}",
             f"issue_type: {record.get('issue_type','')}",
+            f"issue_subtype: {issue_subtype}",
             f"failure_pattern: {record.get('failure_pattern','')}",
             f"failed_tool: {' '.join(str(x) for x in _safe_list(record.get('failed_tool', [])))}",
             f"failed_cmd: {' '.join(str(x) for x in _safe_list(record.get('failed_cmd', [])))}",
-            f"file_failure_reason: {record.get('file_failure_reason') or record.get('failure_reason') or ''}",
-            f"overall_failure_reason: {record.get('overall_failure_reason') or ''}",
+            f"file_failure_reason: {file_failure_reason}",
+            f"overall_failure_reason: {overall_failure_reason}",
             f"principle: {record.get('principle') or ''}",
-            f"fix_strategy: {record.get('fix_strategy') or ''}",
-            f"fix_direction: {record.get('fix_direction') or ''}",
+            f"fix_strategy: {fix}",
+            f"fix_direction: {fix}",
             f"failure_examples: {' | '.join(str(x) for x in _safe_list(record.get('failure_examples', []))[:4])}",
             f"files: {file_text}",
             f"example_files: {example_text}",
@@ -758,7 +920,10 @@ class MemoryPlugin:
 
     def _metadata_boost(self, query: Dict[str, Any], row: Dict[str, Any], level: str) -> float:
         boost = 0.0
-        if str(query.get("repo") or "") and str(query.get("repo") or "") == str(row.get("repo") or ""):
+        # Use fuzzy repo matching for metadata boost
+        query_repo = str(query.get("repo") or "")
+        row_repo = str(row.get("repo") or "")
+        if query_repo and row_repo and _repo_matches(query_repo, row_repo):
             boost += 0.05
         query_error = str(query.get("error_type") or "").lower()
         row_error = str(row.get("error_type") or "").lower()
@@ -979,6 +1144,8 @@ class MemoryPlugin:
             "matches": [*l1, *l2, *l3],
         }
         self._append_jsonl(self.retrieval_log_path, result)
+        # Persist any newly computed embeddings back to disk so next run skips re-embedding
+        self._persist_new_embeddings()
         return result
 
     def _empty_result(
@@ -1020,6 +1187,7 @@ class MemoryPlugin:
 
     def _retrieve_l1(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         repo = str(query.get("repo") or "")
+        workflow = str(query.get("workflow_path") or query.get("workflow_text") or "")
         error_type = str(query.get("error_type") or "").lower()
         failure_pattern = str(query.get("failure_pattern") or "").lower()
         query_files = query.get("relevant_files", []) + query.get("changed_files", [])
@@ -1057,8 +1225,16 @@ class MemoryPlugin:
         for row in self.failure_memory:
             if row.get("sha_fail") == query.get("sha_fail"):
                 continue
-            if repo and str(row.get("repo") or "") != repo:
-                continue
+            # L1: Filter by repo AND workflow to keep searches within the same repo+workflow context
+            # Use fuzzy repo matching to handle "owner/repo" vs "repo" format inconsistencies
+            if repo:
+                row_repo = str(row.get("repo") or "")
+                if not _repo_matches(repo, row_repo):
+                    continue
+            if workflow:
+                row_workflow = str(row.get("workflow_path") or row.get("workflow_name") or "")
+                if row_workflow and row_workflow != workflow:
+                    continue
 
             row_error = str(row.get("error_type") or "").lower()
             row_pattern = str(row.get("failure_pattern") or "").lower()
@@ -1070,10 +1246,10 @@ class MemoryPlugin:
             row_file_norm = _normalize_path(str(row.get("file") or ""))
             file_score = 1.0 if row_file_norm and row_file_norm in query_file_norms else 0.0
 
-            # L1 row document: structured per-file features only.
-            # Mirrors query_doc: file_path | error_type | failure_pattern | issue_type | tools | cmds
-            # fix_direction omitted — unknown at query time (asymmetric).
-            row_doc = " | ".join(x for x in [
+            # L1 row document: use stored search_document if present (richer, and
+            # ensures the cache key matches _persist_new_embeddings lookup).
+            # Fall back to compact inline doc for records that pre-date storage.
+            row_doc = str(row.get("search_document") or "").strip() or " | ".join(x for x in [
                 row_file_norm,
                 row_error,
                 row_pattern,
@@ -1139,6 +1315,7 @@ class MemoryPlugin:
 
     def _retrieve_l2(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         repo = str(query.get("repo") or "")
+        workflow = str(query.get("workflow_path") or query.get("workflow_text") or "")
         error_type = str(query.get("error_type") or "").lower()
         failure_pattern = str(query.get("failure_pattern") or "").lower()
         query_tools = [str(x).lower() for x in query.get("failed_tool", [])]
@@ -1179,8 +1356,16 @@ class MemoryPlugin:
 
         scored: List[Dict[str, Any]] = []
         for row in self.repo_memory:
-            if repo and str(row.get("repo") or "") != repo:
-                continue
+            # L2: Filter by repo AND workflow to keep searches within the same repo+workflow context
+            # Use fuzzy repo matching to handle "owner/repo" vs "repo" format inconsistencies
+            if repo:
+                row_repo = str(row.get("repo") or "")
+                if not _repo_matches(repo, row_repo):
+                    continue
+            if workflow:
+                row_workflow = str(row.get("workflow_path") or row.get("workflow_name") or "")
+                if row_workflow and row_workflow != workflow:
+                    continue
 
             row_error = str(row.get("error_type") or "").lower()
             row_pattern = str(row.get("failure_pattern") or row.get("pattern_name") or "").lower()
@@ -1202,12 +1387,8 @@ class MemoryPlugin:
                     row_per_file_parts.append(entry)
             row_per_file_block = " | ".join(row_per_file_parts)
 
-            # L2 row document:
-            #   PER FILE INFO (file_path | error | pattern | issue_type) per stored file
-            #   + overall_failure_reason (stored error_context)
-            #   + tools | cmds
-            # fix_approach/fix_strategy excluded — asymmetric, unknown at query time.
-            row_doc = " | ".join(x for x in [
+            # L2 row document: use stored search_document if present.
+            row_doc = str(row.get("search_document") or "").strip() or " | ".join(x for x in [
                 row_per_file_block,
                 row_error,
                 row_pattern,
@@ -1246,6 +1427,9 @@ class MemoryPlugin:
         return scored[: self.top_k]
 
     def _retrieve_l3(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # L3: Cross-repo generalized retrieval — NO repo or workflow filtering
+        # Searches across all cross_memory records to find generalized principles
+        # that apply across different repositories and workflows
         error_type = str(query.get("error_type") or "").lower()
         failure_pattern = str(query.get("failure_pattern") or "").lower()
         query_tools = [str(x).lower() for x in query.get("failed_tool", [])]
@@ -1283,6 +1467,7 @@ class MemoryPlugin:
         ] if x)
 
         scored: List[Dict[str, Any]] = []
+        # L3: No repo/workflow filtering — searches all cross-memory for generalized patterns
         for row in self.cross_memory:
             row_error = str(row.get("error_type") or "").lower()
             row_issue_type = str(row.get("issue_type") or "").lower()
@@ -1317,8 +1502,8 @@ class MemoryPlugin:
             #   + error_type | issue_type | all_failure_patterns
             #   + failure_reasons (overall + per-file, accumulated across issues)
             #   + tools | cmds
-            # fix_strategies excluded — asymmetric, unknown at search time.
-            row_doc = " | ".join(x for x in [
+            # L3 row document: use stored search_document if present.
+            row_doc = str(row.get("search_document") or "").strip() or " | ".join(x for x in [
                 row_per_file_block,
                 row_error,
                 row_issue_type,
@@ -1999,6 +2184,7 @@ Rules:
             diff_text=diff_text,
             error_context_summary=error_context_summary,
             log_file_details_map=log_file_details_map,
+            all_error_types=_normalize_error_type_rows(log_analysis_result.get("error_types", [])),
         )
         overall_failure_reason = _clip(
             " | ".join(
@@ -2019,6 +2205,8 @@ Rules:
                 self.failure_memory,
                 row,
                 keys=("sha_fail", "file", "error_type", "failure_pattern"),
+                # One record per (issue, file, error_type, pattern) — distinct failure types
+                # for the same file are stored separately, not overwritten.
             )
             if self.memory_backend == "chroma":
                 self._upsert_chroma_record("L1", row)
@@ -2077,48 +2265,32 @@ Rules:
         diff_text: str,
         error_context_summary: str,
         log_file_details_map: Optional[Dict[str, Dict[str, Any]]] = None,
+        all_error_types: Optional[List[Dict[str, str]]] = None,
     ) -> List[Dict[str, Any]]:
+        """
+        Build L1 records — one per (file, error_type) pair.
+
+        A single CI failure can involve multiple distinct failure types in the
+        same file (e.g. ImportError + TypeAnnotation + LintError). Storing one
+        record per type means retrieval for any one of those types will find
+        this memory, not just the primary type.
+        """
         log_file_details_map = log_file_details_map or {}
+        all_error_types = all_error_types or []
         rows: List[Dict[str, Any]] = []
+
         for entry in fl_data:
             file_path = _normalize_path(entry.get("file_path", ""))
             if not file_path:
                 continue
             faults = entry.get("faults", []) or []
 
-            # Aggregate fault-level fields from fault localization
-            reasons = [str(f.get("reason") or "").strip() for f in faults if str(f.get("reason") or "").strip()]
-            raw_issue_types = [str(f.get("issue_type") or "").strip() for f in faults if str(f.get("issue_type") or "").strip()]
-
-            # Per-file log analyzer detail (issue_type, failed_cmd, failed_tool per file).
-            # More precise than issue-level fields; used as fallback when fl_data is missing them.
             log_file_detail = log_file_details_map.get(file_path, {})
-
-            # failure_pattern: fault's specific keyword — prefer fl_data, fall back to
-            # log-analyzer issue_type (as keyword), then issue-level pattern
-            raw_pattern = (
-                raw_issue_types[0]
-                if raw_issue_types
-                else str(log_file_detail.get("issue_type") or "").strip() or issue_failure_pattern
-            )
-
-            # issue_type: human-readable descriptive phrase
-            issue_type_desc = _to_descriptive_issue_type(raw_pattern, error_type)
-
-            # failure_pattern stays as the keyword for exact/semantic matching
-            failure_pattern = raw_pattern
-
-            # file-specific failed_tool: prefer log analyzer per-file value, fall back to issue-level
             file_failed_tool = [str(x) for x in _safe_list(log_file_detail.get("failed_tool") or [])] or failed_tool
-            # file-specific failed_cmd: prefer log analyzer per-file value, fall back to issue-level
-            file_failed_cmd = [str(x) for x in _safe_list(log_file_detail.get("failed_cmd") or [])] or failed_cmd
+            file_failed_cmd  = [str(x) for x in _safe_list(log_file_detail.get("failed_cmd") or [])] or failed_cmd
 
-            # failure_reason: fault localization reasons → log analyzer per-file reason → issue summary
             file_log_reason = str(log_file_detail.get("reason") or "").strip()
-            failure_reason_parts = [r for r in [" | ".join(reasons), file_log_reason] if r]
-            failure_reason = _clip(" | ".join(failure_reason_parts) or error_context_summary, 500)
 
-            # fix_direction: lines added in this file's diff chunk (brief, readable)
             file_diff = _extract_file_diff(diff_text, file_path)
             added_lines = [
                 ln.lstrip("+").strip()
@@ -2127,39 +2299,81 @@ Rules:
             ]
             fix_direction = _clip("; ".join(added_lines[:5]), 500) if added_lines else ""
 
-            # dependent_files: structured [{file, reason}] — other files co-patched in the same fix
             dep_files: List[Dict[str, str]] = [
-                {
-                    "file": p,
-                    "reason": "Co-modified in the same fix — directly or indirectly dependent on this file",
-                }
-                for p in ground_truth_files
-                if p != file_path
+                {"file": p, "reason": "Co-modified in the same fix"}
+                for p in ground_truth_files if p != file_path
             ]
 
-            row = {
-                "sha_fail": sha_fail,
-                "issue_id": task_id,
-                "repo": repo_id,
-                "repo_name": repo_name,
-                "workflow_path": workflow_path,
-                "workflow_name": workflow_name,
-                "file": file_path,
-                "error_type": error_type,
-                # issue_type: descriptive phrase — "Dependency on environment"
-                "issue_type": issue_type_desc,
-                # failure_pattern: specific keyword — "dependency_or_env" / "import-error"
-                "failure_pattern": failure_pattern,
-                "failure_reason": failure_reason,
-                # fix_direction: the actual lines added/changed (brief readable summary)
-                "fix_direction": fix_direction,
-                # Per-file tool/cmd: file-specific from log analyzer, falling back to issue-level
-                "failed_tool": file_failed_tool,
-                "failed_cmd": file_failed_cmd,
-                # dependent_files: [{file, reason}] — files that depend on or are affected by this file
-                "dependent_files": dep_files,
-            }
-            rows.append(row)
+            # Collect all distinct (error_type, failure_pattern, reasons) for this file.
+            # Sources in priority order:
+            #   1. Per-fault issue_type from fault localization data (most specific)
+            #   2. Per-file issue_type from log analyzer
+            #   3. Issue-level error_types from log analysis (all types, not just primary)
+            #   4. Issue-level primary error_type as final fallback
+            type_pattern_pairs: List[Tuple[str, str, List[str]]] = []
+
+            # Source 1: per-fault (issue_type, reason) pairs — one entry per distinct type
+            fault_type_map: Dict[str, List[str]] = {}
+            for f in faults:
+                ft = str(f.get("issue_type") or "").strip()
+                fr = str(f.get("reason") or "").strip()
+                if ft:
+                    fault_type_map.setdefault(ft, [])
+                    if fr:
+                        fault_type_map[ft].append(fr)
+
+            for ft, ft_reasons in fault_type_map.items():
+                type_pattern_pairs.append((error_type, ft, ft_reasons))
+
+            # Source 2: per-file log analyzer issue_type (if not already covered)
+            log_issue = str(log_file_detail.get("issue_type") or "").strip()
+            if log_issue and not any(p == log_issue for _, p, _ in type_pattern_pairs):
+                type_pattern_pairs.append((error_type, log_issue, [file_log_reason] if file_log_reason else []))
+
+            # Source 3: issue-level error_types (use category as both error_type and pattern
+            # when no finer-grained per-file type was found)
+            if not type_pattern_pairs:
+                for et_row in all_error_types:
+                    cat = str(et_row.get("category") or "").strip()
+                    sub = str(et_row.get("subcategory") or "").strip()
+                    if cat:
+                        pat = sub or cat
+                        if not any(p == pat for _, p, _ in type_pattern_pairs):
+                            type_pattern_pairs.append((cat, pat, []))
+
+            # Source 4: primary error_type fallback
+            if not type_pattern_pairs:
+                type_pattern_pairs.append((
+                    error_type,
+                    issue_failure_pattern or error_type,
+                    [file_log_reason] if file_log_reason else [],
+                ))
+
+            # Emit one L1 record per distinct (error_type, failure_pattern) pair
+            for file_error_type, raw_pattern, type_reasons in type_pattern_pairs:
+                issue_type_desc = _to_descriptive_issue_type(raw_pattern, file_error_type)
+                all_reasons = list(dict.fromkeys(r for r in type_reasons + [file_log_reason] if r))
+                failure_reason = _clip(" | ".join(all_reasons) or error_context_summary, 500)
+
+                row = {
+                    "sha_fail": sha_fail,
+                    "issue_id": task_id,
+                    "repo": repo_id,
+                    "repo_name": repo_name,
+                    "workflow_path": workflow_path,
+                    "workflow_name": workflow_name,
+                    "file": file_path,
+                    "error_type": file_error_type,
+                    "issue_type": issue_type_desc,
+                    "failure_pattern": raw_pattern,
+                    "failure_reason": failure_reason,
+                    "fix_direction": fix_direction,
+                    "failed_tool": file_failed_tool,
+                    "failed_cmd": file_failed_cmd,
+                    "dependent_files": dep_files,
+                }
+                rows.append(row)
+
         return rows
 
     def _build_l2_row(

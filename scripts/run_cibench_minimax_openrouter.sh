@@ -4,8 +4,8 @@
 # Run cibench with MiniMax M2.5 via OpenRouter.
 #
 # Shared benchmark setup (run ONCE before any agent):
-#   python scripts/prepare_shared_dataset.py   # → data/eval_dataset.jsonl + data/memory_seed.jsonl
-#   python scripts/seed_memory.py              # → results/shared_memory/ (L1/L2/L3 bank)
+#   python scripts/prepare_shared_dataset.py   # → data/trs/eval_issues.json + data/memory_seed.jsonl
+#   Uses seeded memory from CI-REPAIR-BENCH: data/trs/ (L1/L2/L3 bank)
 #
 # Usage:
 #   scripts/run_cibench_minimax_openrouter.sh [--ablation LEVEL] [extra cibench args...]
@@ -29,8 +29,8 @@
 #   MINIMAX_BASE_URL  — defaults to https://openrouter.ai/api/v1
 #   MEMCI_LLM_MODEL   — defaults to minimax/minimax-m2.5
 #   PYTHON_BIN        — python launcher to use (default: python)
-#   DATASET           — JSONL dataset (default: data/eval_dataset.jsonl — the shared TRS eval set)
-#   MEMORY_ROOT       — shared memory directory  (default: results/shared_memory)
+#   DATASET           — JSONL dataset (default: data/trs/eval_issues.json — the shared TRS eval set)
+#   MEMORY_ROOT       — shared memory directory  (default: data/trs - uses seeded high-quality memories)
 #   MSWEA_REPO_CACHE_ROOT — shared repo cache root (default: <project>/repo)
 # ===========================================================================
 
@@ -57,8 +57,8 @@ fi
 : "${MINIMAX_BASE_URL:=https://openrouter.ai/api/v1}"
 : "${MEMCI_LLM_MODEL:=minimax/minimax-m2.5}"
 : "${PYTHON_BIN:=python}"
-: "${DATASET:=data/eval_dataset.jsonl}"
-: "${MEMORY_ROOT:=results/shared_memory}"
+: "${DATASET:=data/trs/eval_issues.json}"
+: "${MEMORY_ROOT:=data/trs}"
 
 # ── Parse --ablation flag ─────────────────────────────────────────────────────
 ABLATION="L1+L2+L3"

@@ -90,6 +90,55 @@ app = typer.Typer(rich_markup_mode="rich", add_completion=False)
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 REPO_CACHE_ROOT = Path(os.getenv("MSWEA_REPO_CACHE_ROOT") or (PROJECT_ROOT / "repo")).resolve()
 
+def _make_context_llm(config: Dict[str, Any]) -> Any:
+    """
+    Build a plain callable (prompt: str) -> str for Phase A and Phase C
+    using the SAME model already configured for the repair agent.
+
+    Reuses OpenRouterModel directly — no LiteLLM, no separate credentials.
+    The model reads OPENROUTER_API_KEY / OPENROUTER_BASE_URL from env,
+    exactly as the repair agent does.
+    """
+    try:
+        model = get_model(config=config.get("model", {}))
+
+        def _call(prompt: str) -> str:
+            try:
+                # query() expects a messages list; we pass a single user turn.
+                # We bypass the bash-tool parsing and just read raw content.
+                import json as _json
+                api_key  = os.getenv("OPENROUTER_API_KEY", "")
+                api_base = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+                model_name = config.get("model", {}).get("model_name", "minimax/minimax-m2.5")
+
+                import requests as _req
+                payload = {
+                    "model":    model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                }
+                resp = _req.post(
+                    f"{api_base}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type":  "application/json",
+                    },
+                    data=_json.dumps(payload),
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                return (resp.json()["choices"][0]["message"]["content"] or "").strip()
+            except Exception as exc:
+                logger.warning("[CIBench] context LLM call failed: %s", exc)
+                return ""
+
+        return _call
+
+    except Exception as exc:
+        logger.warning("[CIBench] Could not build context LLM: %s", exc)
+        return None
+
+
 _HELP_TEXT = """
 Run mini-SWE-agent on CI-failure repair instances.
 
@@ -108,53 +157,294 @@ Output: per-instance patch in preds.json, format {id, sha_fail, diff}.
 # Dataset loading
 # ─────────────────────────────────────────────────────────────────────────────
 
+_seed_log_index: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def _load_seed_log_index() -> Dict[str, Dict[str, Any]]:
+    """
+    Load data/trs/seed_log_details.json and index by sha_fail and id.
+    Contains pre-computed CILogAnalyzer output (error_context, error_types,
+    relevant_files, failed_job) nested under an 'analysis' key.
+    Cached after first load.
+    """
+    global _seed_log_index
+    if _seed_log_index is not None:
+        return _seed_log_index
+
+    seed_path = PROJECT_ROOT / "data" / "trs" / "seed_log_details.json"
+    if not seed_path.exists():
+        _seed_log_index = {}
+        return {}
+
+    try:
+        data = json.loads(seed_path.read_text(encoding="utf-8"))
+        records = data if isinstance(data, list) else list(data.values())
+        index: Dict[str, Dict[str, Any]] = {}
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            sha = str(rec.get("sha_fail") or "")
+            iid = str(rec.get("id") or rec.get("instance_id") or "")
+            if sha:
+                index[sha] = rec
+            if iid:
+                index[iid] = rec
+        _seed_log_index = index
+        logger.info("[CIBench] Loaded seed_log_details index: %d records", len(index))
+    except Exception as exc:
+        logger.warning("[CIBench] Could not load seed_log_details.json: %s", exc)
+        _seed_log_index = {}
+
+    return _seed_log_index
+
+
+def _inject_precomputed_analysis(inst: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Look up the instance in seed_log_details.json and inject the pre-computed
+    CILogAnalyzer output as top-level fields so Phase A is skipped entirely.
+
+    seed_log_details stores analysis under a nested 'analysis' key:
+      {
+        "sha_fail": "...",
+        "analysis": {
+          "error_context":  [str]   → overall_failure_reasons
+          "error_types":    [dict]  → overall_error_types (already set)
+          "relevant_files": [dict]  → effected_files
+          "failed_job":     [dict]  → failed_jobs
+        }
+      }
+
+    Mapping to top-level fields that _has_precomputed_analysis checks for:
+        analysis.error_context  → overall_failure_reasons
+        analysis.relevant_files → effected_files
+        analysis.failed_job     → failed_jobs
+        analysis.error_types    → error_types (for Phase A query building)
+    """
+    index = _load_seed_log_index()
+    if not index:
+        return inst
+
+    sha = str(inst.get("sha_fail") or "")
+    iid = str(inst.get("instance_id") or inst.get("id") or "")
+    seed_rec = index.get(sha) or index.get(iid)
+
+    if not seed_rec:
+        return inst
+
+    analysis = seed_rec.get("analysis") or {}
+    if not analysis:
+        return inst
+
+    inst = dict(inst)
+
+    # Map nested analysis fields to the top-level fields the pipeline expects
+    if not inst.get("overall_failure_reasons") and analysis.get("error_context"):
+        inst["overall_failure_reasons"] = [
+            str(x) for x in analysis["error_context"] if str(x).strip()
+        ]
+
+    if not inst.get("effected_files") and analysis.get("relevant_files"):
+        inst["effected_files"] = analysis["relevant_files"]
+
+    if not inst.get("failed_jobs") and analysis.get("failed_job"):
+        inst["failed_jobs"] = analysis["failed_job"]
+
+    if not inst.get("error_types") and analysis.get("error_types"):
+        inst["error_types"] = analysis["error_types"]
+
+    logger.debug(
+        "[CIBench] Injected pre-computed analysis for sha=%s: "
+        "reasons=%d  files=%d  jobs=%d",
+        sha[:12],
+        len(inst.get("overall_failure_reasons") or []),
+        len(inst.get("effected_files") or []),
+        len(inst.get("failed_jobs") or []),
+    )
+    return inst
+
+
+def _normalize_instance(inst: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize field names so both eval_dataset.jsonl and eval_issues.json
+    work without any changes to the rest of the pipeline.
+
+    Field aliases handled:
+        id               → instance_id        (eval_issues.json uses "id")
+        workflow_filename → workflow_path      (if workflow_path is missing)
+        error_type list  → overall_error_types (eval_issues has a list, not a string)
+    """
+    if not isinstance(inst, dict):
+        return inst
+    inst = dict(inst)
+
+    # id → instance_id
+    if "instance_id" not in inst and "id" in inst:
+        inst["instance_id"] = str(inst["id"])
+
+    # workflow_filename → workflow_path
+    if "workflow_path" not in inst and "workflow_filename" in inst:
+        wf = str(inst["workflow_filename"])
+        inst["workflow_path"] = f".github/workflows/{wf}" if not wf.startswith(".github") else wf
+
+    # error_type as list → overall_error_types
+    # eval_issues.json stores ["Dependency Issues", "Syntax Error", ...]
+    # The pipeline uses overall_error_types (list) and error_type (str)
+    et = inst.get("error_type")
+    if isinstance(et, list):
+        inst["overall_error_types"] = et
+        inst["error_type"] = et[0] if et else ""
+    elif isinstance(et, str) and et:
+        inst.setdefault("overall_error_types", [et])
+
+    return inst
+
+
+_HF_DATASET_NAME = "ci-benchmark-user/ci-repair-bench"
+_hf_index: Optional[Dict[str, Dict[str, Any]]] = None   # module-level cache
+
+
+def _load_hf_index() -> Dict[str, Dict[str, Any]]:
+    """
+    Load the full HuggingFace dataset once and index it by sha_fail and id.
+    Cached after first load so subsequent calls are instant.
+    """
+    global _hf_index
+    if _hf_index is not None:
+        return _hf_index
+
+    try:
+        from datasets import load_dataset  # type: ignore
+        logger.info("[CIBench] Loading HuggingFace dataset %s for instance enrichment...", _HF_DATASET_NAME)
+        # Suppress noisy HuggingFace "Repo card metadata block was not found" warnings
+        import logging as _logging
+        _hf_logger = _logging.getLogger("datasets")
+        _prev_level = _hf_logger.level
+        _hf_logger.setLevel(_logging.ERROR)
+
+        # Try common split names — dataset uses 'train' as the only split
+        try:
+            for split_name in ("test", "train", "validation", "all"):
+                try:
+                    ds = load_dataset(_HF_DATASET_NAME, split=split_name)
+                    break
+                except Exception:
+                    continue
+            else:
+                raise RuntimeError(f"No usable split found in {_HF_DATASET_NAME}")
+        finally:
+            _hf_logger.setLevel(_prev_level)
+        index: Dict[str, Dict[str, Any]] = {}
+        for row in ds:
+            row = dict(row)
+            sha = str(row.get("sha_fail") or "")
+            iid = str(row.get("instance_id") or row.get("id") or "")
+            if sha:
+                index[sha] = row       # match by sha_fail
+            if iid:
+                index[iid] = row       # match by id / instance_id
+            # Also index by numeric string of id (eval_issues stores id as string)
+            raw_id = row.get("id")
+            if raw_id is not None:
+                index[str(int(raw_id))] = row
+        _hf_index = index
+        logger.info("[CIBench] HuggingFace index built: %d records", len(index))
+        return index
+    except Exception as exc:
+        logger.warning("[CIBench] Could not load HuggingFace dataset (%s) — using local data only", exc)
+        _hf_index = {}
+        return {}
+
+
+def _enrich_from_hf(inst: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Look up the instance in the HuggingFace dataset by sha_fail or id.
+    If found, merge HF record (base) with local record (overlay) so that
+    any pre-computed analysis fields from HF are used, but local overrides
+    (like error_type list) are preserved.
+    Returns the enriched instance.
+    """
+    index = _load_hf_index()
+    if not index:
+        return inst
+
+    sha = str(inst.get("sha_fail") or "")
+    iid = str(inst.get("instance_id") or inst.get("id") or "")
+
+    hf_row = index.get(sha) or index.get(iid)
+    if not hf_row:
+        logger.debug("[CIBench] No HF match for sha=%s id=%s — using local data", sha[:12], iid)
+        return inst
+
+    # Merge: HF record is the base (has pre-computed fields like overall_failure_reasons),
+    # local inst overlays its own fields (logs, error_type list, etc.)
+    merged = {**hf_row, **inst}
+    return _normalize_instance(merged)
+
+
 def load_ci_instances(dataset_path: str, split: str = "test") -> List[Dict[str, Any]]:
     """
-    Load CI benchmark instances from a JSONL file or a HuggingFace dataset.
+    Load CI benchmark instances.
 
-    Each returned dict must have at minimum:
-        instance_id, sha_fail, repo_owner, repo_name,
-        workflow, workflow_path, workflow_name, logs
+    Supports three sources:
+        .json   — JSON array (eval_issues.json) — IDs are looked up in HuggingFace
+                  to enrich with pre-computed analysis fields
+        .jsonl  — one JSON object per line (eval_dataset.jsonl)
+        str     — HuggingFace dataset name (loaded directly)
+
+    For .json files: each instance is enriched by fetching the matching
+    full record from HuggingFace by sha_fail/id, so the pipeline always
+    gets complete data regardless of what the local file contains.
     """
     p = Path(dataset_path)
 
-    # Local JSONL file
-    if p.exists() and p.suffix in (".jsonl", ".json"):
-        instances: List[Dict[str, Any]] = []
-        with p.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+    if p.exists():
+        raw_text = p.read_text(encoding="utf-8").strip()
+
+        # JSON array — enrich each instance from HuggingFace
+        if raw_text.startswith("["):
+            try:
+                data = json.loads(raw_text)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Could not parse JSON array in {dataset_path}: {e}") from e
+            instances = []
+            for x in data:
+                if not isinstance(x, dict):
                     continue
-                try:
-                    obj = json.loads(line)
-                    if isinstance(obj, list):
-                        instances.extend(obj)
-                    else:
-                        instances.append(obj)
-                except json.JSONDecodeError as e:
-                    logger.warning("Skipping malformed line in %s: %s", dataset_path, e)
-        logger.info("Loaded %d instances from %s", len(instances), dataset_path)
-        return instances
+                normalized = _normalize_instance(x)
+                enriched   = _enrich_from_hf(normalized)
+                enriched   = _inject_precomputed_analysis(enriched)
+                instances.append(enriched)
+            logger.info("Loaded %d instances from %s (enriched from HuggingFace)", len(instances), dataset_path)
+            return instances
 
-    # Local JSON array file
-    if p.exists() and p.suffix == ".json":
-        data = json.loads(p.read_text(encoding="utf-8"))
-        instances = data if isinstance(data, list) else [data]
-        logger.info("Loaded %d instances from %s", len(instances), dataset_path)
-        return instances
+        # JSONL — one object per line, no HF enrichment needed (already full data)
+        instances_: List[Dict[str, Any]] = []
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, list):
+                    instances_.extend(_normalize_instance(x) for x in obj if isinstance(x, dict))
+                elif isinstance(obj, dict):
+                    instances_.append(_normalize_instance(obj))
+            except json.JSONDecodeError as e:
+                logger.warning("Skipping malformed line in %s: %s", dataset_path, e)
+        logger.info("Loaded %d instances from %s", len(instances_), dataset_path)
+        return instances_
 
-    # HuggingFace dataset
+    # HuggingFace dataset name passed directly
     try:
         from datasets import load_dataset  # type: ignore
         ds = load_dataset(dataset_path, split=split)
-        instances = list(ds)  # type: ignore
-        logger.info("Loaded %d instances from HuggingFace dataset %s", len(instances), dataset_path)
-        return instances
+        instances_ = [_normalize_instance(dict(x)) for x in ds]  # type: ignore
+        logger.info("Loaded %d instances from HuggingFace dataset %s", len(instances_), dataset_path)
+        return instances_
     except Exception as e:
         raise ValueError(
             f"Could not load dataset from '{dataset_path}'. "
-            f"Expected a .jsonl / .json file path or a HuggingFace dataset name. Error: {e}"
+            f"Expected a .json / .jsonl file path or a HuggingFace dataset name. Error: {e}"
         ) from e
 
 
@@ -435,14 +725,16 @@ def process_instance(
     progress_manager.on_instance_start(instance_id)
     progress_manager.update_instance_status(instance_id, "Pre-processing CI logs")
 
-    agent      = None
+    agent        = None
     exit_status: Optional[str] = None
-    diff       = ""
-    ci_ctx     = {}
+    diff         = ""
+    ci_ctx       = {}
+    ci_memory: Dict[str, Any] = {}   # full memory retrieval result — saved to trajectory
     extra_info: Dict[str, Any] = {}
 
     # ── Phase 1: build enriched CI problem statement ──────────────────────────
     try:
+        context_llm = _make_context_llm(config)
         ci_result = build_ci_context(
             instance,
             memory_root=memory_root,
@@ -451,14 +743,18 @@ def process_instance(
             memory_ablation_levels=memory_ablation_levels,
             memory_plugin_path=memory_plugin_path,
             model=context_model,
+            llm=context_llm,
         )
-        ci_ctx = ci_result["context"]
-        task   = ci_result["problem_statement"]
+        ci_ctx    = ci_result["context"]
+        task      = ci_result["problem_statement"]
+        ci_memory = ci_result["memory"]
         extra_info["memory_summary"] = {
             "enabled":             memory_enabled,
-            "weighted_similarity": ci_result["memory"].get("weighted_similarity", 0.0),
-            "levels_retrieved":    ci_result["memory"].get("selected_memory_levels", []),
+            "weighted_similarity": ci_memory.get("weighted_similarity", 0.0),
+            "levels_retrieved":    ci_memory.get("selected_memory_levels", []),
         }
+        # Write per-instance retrieval diagnostics for manual inspection
+        _save_retrieval_diagnostic(output_dir / "memory_retrieval_debug.jsonl", instance_id, ci_ctx, ci_memory)
     except Exception as exc:
         logger.error("[CIBench] CI pre-processing failed for %s: %s", instance_id, exc)
         raw_log = instance.get("logs") or instance.get("log") or ""
@@ -521,6 +817,7 @@ def process_instance(
     finally:
         if agent is not None:
             traj_path = instance_dir / f"{dir_name}.traj.json"
+            llm_sel   = ci_memory.get("llm_selection") or {}
             agent.save(
                 traj_path,
                 {
@@ -531,18 +828,234 @@ def process_instance(
                         **extra_info,
                     },
                     "instance_id": instance_id,
+
+                    # ── Phase A + B: Structured CI failure context ────────
                     "ci_context": {
                         "overall_failure_reasons": ci_ctx.get("overall_failure_reasons", []),
                         "overall_error_types":     ci_ctx.get("overall_error_types", []),
                         "effected_files":          ci_ctx.get("effected_files", []),
                         "failed_jobs":             ci_ctx.get("failed_jobs", []),
+                        "workflow_profile":        ci_ctx.get("workflow_profile", {}),
                     } if ci_ctx else {},
+
+                    # ── Phase C: Full memory retrieval + two-LLM analysis ─
+                    "memory_retrieval": _build_memory_traj(ci_memory, task),
                 },
             )
             logger.info("[CIBench] Saved trajectory to '%s'", traj_path)
 
         update_preds_file(output_dir / "preds.json", instance_id, sha_fail, diff)
         progress_manager.on_instance_end(instance_id, exit_status)
+
+
+def _build_memory_traj(ci_memory: Dict[str, Any], task: str) -> Dict[str, Any]:
+    """
+    Build the memory_retrieval block saved to every trajectory.
+
+    Captures the full two-LLM pipeline result so every run can be
+    analyzed without re-running:
+
+      cosine_search   — what L1/L2/L3 returned (scores, files, patterns)
+      llm1_filter     — which candidates LLM 1 selected as relevant + why
+      llm2_guidance   — the full repair document LLM 2 synthesized
+      injected        — exact text injected into the agent's problem statement
+    """
+    if not ci_memory:
+        return {}
+
+    llm_sel   = ci_memory.get("llm_selection") or {}
+    threshold = float((ci_memory.get("thresholds") or {}).get("similarity_threshold") or 0.0)
+    weighted  = float(ci_memory.get("weighted_similarity") or 0.0)
+
+    return {
+        # ── Retrieval metadata ────────────────────────────────────────────
+        "enabled":            bool(ci_memory.get("enabled", False)),
+        "weighted_similarity": round(weighted, 4),
+        "level_scores":       {
+            k: round(float(v), 4)
+            for k, v in (ci_memory.get("level_scores") or {}).items()
+        },
+        "threshold":          round(threshold, 4),
+        "above_threshold":    weighted >= threshold,
+        "counts": {
+            "L1": len(ci_memory.get("l1_matches") or []),
+            "L2": len(ci_memory.get("l2_matches") or []),
+            "L3": len(ci_memory.get("l3_matches") or []),
+        },
+
+        # ── Step 3-4: Raw cosine search results ───────────────────────────
+        # All matches stored in full — no truncation — for manual analysis
+        "cosine_search": {
+            "L1": _slim_matches(ci_memory.get("l1_matches") or []),
+            "L2": _slim_matches(ci_memory.get("l2_matches") or []),
+            "L3": _slim_matches(ci_memory.get("l3_matches") or []),
+        },
+
+        # ── Step 5a: LLM 1 — Relevance Filter output ─────────────────────
+        # Which candidates did LLM 1 select as relevant and why
+        "llm1_filter": {
+            "use_memory":          bool(llm_sel.get("use_memory", False)),
+            "n_relevant":          len(llm_sel.get("relevant_candidates") or []),
+            "relevant_candidates": llm_sel.get("relevant_candidates") or [],
+            # easy to check: did LLM 1 fire? how many candidates passed?
+        },
+
+        # ── Step 5b: LLM 2 — Experience Synthesizer output ───────────────
+        # The full repair guidance document produced from relevant candidates
+        "llm2_guidance": llm_sel.get("guidance_document") or {},
+
+        # ── What went into the agent's context ────────────────────────────
+        # The exact ## Memory Context section injected into problem_statement
+        "injected_memory_block": _extract_memory_block(task),
+
+        # ── Quick-read summary ────────────────────────────────────────────
+        "analysis_summary": str(llm_sel.get("analysis_summary") or ""),
+    }
+
+
+def _slim_matches(matches: List[Dict[str, Any]], n: int = 3) -> List[Dict[str, Any]]:
+    """Keep only the fields needed for analysis — avoids bloating the trajectory."""
+    out = []
+    for row in matches[:n]:
+        out.append({
+            "score":           round(float(row.get("similarity_score") or 0.0), 4),
+            "file":            row.get("file", ""),
+            "error_type":      row.get("error_type", ""),
+            "failure_pattern": row.get("failure_pattern") or row.get("issue_type", ""),
+            "failure_reason":  str(row.get("failure_reason") or row.get("overall_failure_reason") or "")[:300],
+            "fix_direction":   str(row.get("fix_direction") or row.get("fix_strategy") or "")[:300],
+            "matched_on":      row.get("matched_on") or {},
+            "repo":            row.get("repo", ""),
+            "sha_fail":        str(row.get("sha_fail") or "")[:12],
+        })
+    return out
+
+
+def _extract_memory_block(problem_statement: str) -> str:
+    """Extract just the ## Memory Context section from the assembled problem statement."""
+    if not problem_statement:
+        return ""
+    marker = "## Memory Context"
+    idx = problem_statement.find(marker)
+    if idx == -1:
+        return ""
+    return problem_statement[idx:].strip()
+
+
+def _save_retrieval_diagnostic(
+    log_path: Path,
+    instance_id: str,
+    context: Dict[str, Any],
+    memory: Dict[str, Any],
+) -> None:
+    """
+    Append one line to memory_retrieval_debug.jsonl with everything needed
+    to manually verify whether memory retrieval is working correctly.
+
+    Fields saved:
+      instance_id, repo, sha_fail, error_type, failure_pattern
+      memory_enabled, weighted_similarity, level_scores
+      counts per level (how many matches found)
+      above_threshold (was weighted_sim >= threshold?)
+      llm_used_memory, llm_analysis_summary
+      selected_items  (what the LLM gate kept — key_insight + fix_direction)
+      top_matches     (raw top-3 records per level for manual similarity check)
+    """
+    try:
+        llm_sel   = memory.get("llm_selection") or {}
+        query     = memory.get("query") or {}
+        scores    = memory.get("level_scores") or {"L1": 0.0, "L2": 0.0, "L3": 0.0}
+        threshold = (memory.get("thresholds") or {}).get("similarity_threshold", 0.0)
+        weighted  = float(memory.get("weighted_similarity") or 0.0)
+
+        # Counts per level
+        counts = {
+            "L1": len(memory.get("l1_matches") or []),
+            "L2": len(memory.get("l2_matches") or []),
+            "L3": len(memory.get("l3_matches") or []),
+        }
+
+        # Top-3 raw matches per level — enough to manually judge similarity
+        def _top_matches(level_key: str, n: int = 3) -> List[Dict[str, Any]]:
+            out = []
+            for row in (memory.get(level_key) or [])[:n]:
+                out.append({
+                    "level":           row.get("memory_level", level_key.split("_")[0].upper()),
+                    "score":           round(float(row.get("similarity_score") or 0.0), 4),
+                    "file":            row.get("file", ""),
+                    "error_type":      row.get("error_type", ""),
+                    "failure_pattern": row.get("failure_pattern") or row.get("issue_type", ""),
+                    "failure_reason":  str(row.get("failure_reason") or row.get("overall_failure_reason") or "")[:200],
+                    "fix_direction":   str(row.get("fix_direction") or row.get("fix_strategy") or "")[:200],
+                    "matched_on":      row.get("matched_on") or {},
+                })
+            return out
+
+        top_matches = (
+            _top_matches("l1_matches")
+            + _top_matches("l2_matches")
+            + _top_matches("l3_matches")
+        )
+
+        # LLM 1 — relevance filter result
+        relevant_candidates = llm_sel.get("relevant_candidates") or []
+
+        # LLM 2 — guidance document (summarised for the debug log)
+        guidance = llm_sel.get("guidance_document") or {}
+
+        record = {
+            # ── Instance identity ─────────────────────────────────────────
+            "instance_id":     instance_id,
+            "repo":            context.get("repo", ""),
+            "sha_fail":        str(context.get("sha_fail", ""))[:12],
+            # ── Current failure ───────────────────────────────────────────
+            "error_type":      (
+                query.get("error_type")
+                or (context.get("overall_error_types") or [""])[0]
+            ),
+            "failure_pattern": query.get("failure_pattern", ""),
+            "failure_reason":  str(query.get("overall_failure_reason") or ""),
+            # ── Cosine retrieval outcome ──────────────────────────────────
+            "memory_enabled":  bool(memory.get("enabled", False)),
+            "level_scores":    {k: round(float(v), 4) for k, v in scores.items()},
+            "weighted_sim":    round(weighted, 4),
+            "threshold":       round(float(threshold), 4),
+            "above_threshold": weighted >= threshold if threshold > 0 else False,
+            "counts":          counts,
+            "top_matches":     top_matches,           # raw candidates for manual check
+            # ── LLM 1: Relevance Filter ───────────────────────────────────
+            "llm1": {
+                "used_memory":         bool(llm_sel.get("use_memory", False)),
+                "n_relevant":          len(relevant_candidates),
+                "relevant_candidates": relevant_candidates,
+                # each item: {index, memory_level, similarity_score, relevance, why_relevant}
+            },
+            # ── LLM 2: Experience Synthesizer ─────────────────────────────
+            "llm2": {
+                "produced_guidance": bool(guidance),
+                "confidence":        guidance.get("confidence", ""),
+                "confidence_reason": guidance.get("confidence_reason", ""),
+                "diagnosis":         guidance.get("diagnosis", ""),
+                "full_scope":        guidance.get("full_scope", {}),
+                "linked_issues":     guidance.get("linked_issues", []),
+                "fix_approach":      guidance.get("fix_approach", []),
+                "post_fix_patterns": guidance.get("post_fix_patterns", []),
+                "verification":      guidance.get("verification", {}),
+                "summary":           guidance.get("summary", ""),
+                # full document also stored for completeness
+                "_full_guidance_document": guidance,
+            },
+            # ── What was injected into agent context ──────────────────────
+            "analysis_summary": str(llm_sel.get("analysis_summary") or ""),
+        }
+
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with _OUTPUT_FILE_LOCK:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    except Exception as exc:
+        logger.warning("[CIBench] Failed to write retrieval diagnostic for %s: %s", instance_id, exc)
 
 
 def _extract_diff(submission: str) -> str:
