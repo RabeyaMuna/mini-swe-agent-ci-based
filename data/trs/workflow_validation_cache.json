@@ -1,0 +1,1302 @@
+[
+  {
+    "id": "124",
+    "sha_fail": "da7ae359227a089cedf0b7aba53962766e7eb0b2",
+    "workflow_path": ".github/workflows/framework.yml",
+    "dependent_files": [
+      {
+        "path": ".github/actions/bootstrap/action.yml",
+        "reason": "workflow uses local composite action for environment setup"
+      },
+      {
+        "path": "framework/dev/check-protos.sh",
+        "reason": "explicitly referenced validation command to check if protos need recompilation"
+      },
+      {
+        "path": "framework/dev/test.sh",
+        "reason": "explicitly referenced validation command running isort/black/docformatter/mypy/pylint/flake8/pytest"
+      },
+      {
+        "path": "dev/test.sh",
+        "reason": "explicitly referenced validation command for checking benchmarks and examples"
+      }
+    ],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Bootstrap environment setup",
+        "installation_cmd": "python -m pip install -U pip==${{ inputs.pip-version }} && python -m pip install -U setuptools==${{ inputs.setuptools-version }}",
+        "validation_cmd": "",
+        "source": ".github/actions/bootstrap/action.yml",
+        "evidence": "Uses actions/setup-python@v6 and astral-sh/setup-uv@v7 to install Python, pip, setuptools, and uv"
+      },
+      {
+        "order": 2,
+        "validates": "Python dependencies installation",
+        "installation_cmd": "python -m poetry install --all-extras",
+        "validation_cmd": "",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "Step 'Install dependencies (mandatory only)' runs poetry install with all extras"
+      },
+      {
+        "order": 3,
+        "validates": "Proto files synchronization",
+        "installation_cmd": "",
+        "validation_cmd": "./framework/dev/check-protos.sh",
+        "source": "framework/dev/check-protos.sh",
+        "evidence": "Runs protoc recompilation and checks git diff to verify proto files are up to date"
+      },
+      {
+        "order": 4,
+        "validates": "Code formatting (clang-format)",
+        "installation_cmd": "",
+        "validation_cmd": "clang-format --Werror --dry-run proto/flwr/proto/*",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'clang-format: start' runs dry-run with Werror"
+      },
+      {
+        "order": 5,
+        "validates": "Import sorting (isort)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'isort: start' runs isort check-only on py and e2e directories"
+      },
+      {
+        "order": 6,
+        "validates": "Code formatting (black)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --check",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'black: start' runs black check on py and e2e directories"
+      },
+      {
+        "order": 7,
+        "validates": "Init py files check",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.init_py_check py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'init_py_check: start' runs init_py_check on py/flwr"
+      },
+      {
+        "order": 8,
+        "validates": "Docstring signature check",
+        "installation_cmd": "",
+        "validation_cmd": "docsig py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'docsig: start' runs docsig on py/flwr"
+      },
+      {
+        "order": 9,
+        "validates": "Code linting (ruff)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m ruff check py/flwr --no-respect-gitignore",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'ruff: start' runs ruff check on py/flwr"
+      },
+      {
+        "order": 10,
+        "validates": "Static type checking (mypy)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mypy py",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'mypy: start' runs mypy on py directory"
+      },
+      {
+        "order": 11,
+        "validates": "Code linting (pylint)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pylint --ignore=py/flwr/proto py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'pylint: start' runs pylint on py/flwr"
+      },
+      {
+        "order": 12,
+        "validates": "Unit tests (pytest)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pytest --cov=py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'pytest: start' runs pytest with coverage on py/flwr"
+      },
+      {
+        "order": 13,
+        "validates": "Markdown formatting (mdformat)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number docs/source",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'mdformat: start' runs mdformat check on docs/source (RUN_FULL_TEST)"
+      },
+      {
+        "order": 14,
+        "validates": "TOML formatting (taplo)",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'taplo: start' runs taplo fmt check"
+      },
+      {
+        "order": 15,
+        "validates": "rST formatting (docstrfmt)",
+        "installation_cmd": "",
+        "validation_cmd": "docstrfmt --check docs/source",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'docstrfmt: start' runs docstrfmt check (RUN_FULL_TEST)"
+      },
+      {
+        "order": 16,
+        "validates": "SQLAlchemy schema check (paracelsus)",
+        "installation_cmd": "",
+        "validation_cmd": "paracelsus inject py/flwr/supercore/state/schema/README.md dev.get_schema_base:Base --import-module flwr.supercore.state.schema.linkstate_tables:* --import-module flwr.supercore.state.schema.corestate_tables:* --import-module flwr.supercore.state.schema.objectstore_tables:* --layout elk --check",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'paracelsus' runs SQLAlchemy schema check on core schema"
+      },
+      {
+        "order": 17,
+        "validates": "Copyright check",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.check_copyright py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'copyright: start' runs copyright check (RUN_FULL_TEST)"
+      },
+      {
+        "order": 18,
+        "validates": "License check",
+        "installation_cmd": "",
+        "validation_cmd": "python -m licensecheck --fail-licenses gpl --zero",
+        "source": "framework/dev/test.sh",
+        "evidence": "Step 'licensecheck: start' runs licensecheck"
+      },
+      {
+        "order": 19,
+        "validates": "Import sorting for examples (isort)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only",
+        "source": "dev/test.sh",
+        "evidence": "Step 'isort: start' runs isort check on examples directories"
+      },
+      {
+        "order": 20,
+        "validates": "Code formatting for benchmarks/examples (black)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --check",
+        "source": "dev/test.sh",
+        "evidence": "Step 'black: start' runs black check on benchmarks and examples"
+      },
+      {
+        "order": 21,
+        "validates": "Markdown formatting for examples (mdformat)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number ../examples",
+        "source": "dev/test.sh",
+        "evidence": "Step 'mdformat: start' runs mdformat check on examples"
+      },
+      {
+        "order": 22,
+        "validates": "TOML formatting for benchmarks/examples (taplo)",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check",
+        "source": "dev/test.sh",
+        "evidence": "Step 'taplo: start' runs taplo fmt check on benchmarks and examples"
+      }
+    ]
+  },
+  {
+    "id": "121",
+    "sha_fail": "c3a3944a6d50067aa5937e22e97eac0a64631f47",
+    "workflow_path": ".github/workflows/framework.yml",
+    "dependent_files": [
+      {
+        "path": ".github/actions/bootstrap",
+        "reason": "workflow uses local composite action for bootstrap step"
+      },
+      {
+        "path": "framework/dev/test.sh",
+        "reason": "workflow runs this script for linting (isort/black/docformatter/mypy/pylint/flake8) and testing (pytest)"
+      },
+      {
+        "path": "dev/test.sh",
+        "reason": "workflow runs this script to check benchmarks and examples"
+      }
+    ],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Dependencies installation",
+        "installation_cmd": "python -m poetry install --all-extras",
+        "validation_cmd": "",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "run: cd framework && python -m poetry install --all-extras"
+      },
+      {
+        "order": 2,
+        "validates": "Proto files recompilation check",
+        "installation_cmd": "",
+        "validation_cmd": "./framework/dev/check-protos.sh",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "run: ./framework/dev/check-protos.sh"
+      },
+      {
+        "order": 3,
+        "validates": "C code formatting",
+        "installation_cmd": "",
+        "validation_cmd": "clang-format --Werror --dry-run proto/flwr/proto/*",
+        "source": "framework/dev/test.sh",
+        "evidence": "clang-format --Werror --dry-run proto/flwr/proto/*"
+      },
+      {
+        "order": 4,
+        "validates": "Import sorting",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only --skip py/flwr/proto --skip-glob \"**/.venv/**\" py e2e",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m isort --check-only --skip py/flwr/proto --skip-glob \"**/.venv/**\" py e2e"
+      },
+      {
+        "order": 5,
+        "validates": "Code formatting",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --extend-exclude \"py\\/flwr\\/proto|(^|\\/)\\.venv\\/\" --check py e2e",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m black --extend-exclude \"py\\/flwr\\/proto|(^|\\/)\\.venv\\/\" --check py e2e"
+      },
+      {
+        "order": 6,
+        "validates": "Init py files check",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.init_py_check py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m devtool.init_py_check py/flwr"
+      },
+      {
+        "order": 7,
+        "validates": "Docstring signatures",
+        "installation_cmd": "",
+        "validation_cmd": "docsig py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "docsig py/flwr"
+      },
+      {
+        "order": 8,
+        "validates": "Code linting (ruff)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m ruff check py/flwr --no-respect-gitignore",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m ruff check py/flwr --no-respect-gitignore"
+      },
+      {
+        "order": 9,
+        "validates": "Type checking (mypy)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mypy py",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m mypy py"
+      },
+      {
+        "order": 10,
+        "validates": "Code linting (pylint)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pylint --ignore=py/flwr/proto py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m pylint --ignore=py/flwr/proto py/flwr"
+      },
+      {
+        "order": 11,
+        "validates": "Unit tests",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pytest --cov=py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m pytest --cov=py/flwr"
+      },
+      {
+        "order": 12,
+        "validates": "Markdown formatting",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number docs/source",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m mdformat --check --number docs/source"
+      },
+      {
+        "order": 13,
+        "validates": "TOML formatting",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check",
+        "source": "framework/dev/test.sh",
+        "evidence": "taplo fmt --check"
+      },
+      {
+        "order": 14,
+        "validates": "Docstring formatting",
+        "installation_cmd": "",
+        "validation_cmd": "docstrfmt --check docs/source",
+        "source": "framework/dev/test.sh",
+        "evidence": "docstrfmt --check docs/source"
+      },
+      {
+        "order": 15,
+        "validates": "SQLAlchemy schema check",
+        "installation_cmd": "",
+        "validation_cmd": "paracelsus inject py/flwr/supercore/state/schema/README.md dev.get_schema_base:Base --import-module \"flwr.supercore.state.schema.linkstate_tables:*\" --import-module \"flwr.supercore.state.schema.corestate_tables:*\" --import-module \"flwr.supercore.state.schema.objectstore_tables:*\" --layout elk --check",
+        "source": "framework/dev/test.sh",
+        "evidence": "paracelsus inject ... --check"
+      },
+      {
+        "order": 16,
+        "validates": "Copyright check",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.check_copyright py/flwr",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m devtool.check_copyright py/flwr"
+      },
+      {
+        "order": 17,
+        "validates": "License check",
+        "installation_cmd": "",
+        "validation_cmd": "python -m licensecheck --fail-licenses gpl --zero",
+        "source": "framework/dev/test.sh",
+        "evidence": "python -m licensecheck --fail-licenses gpl --zero"
+      },
+      {
+        "order": 18,
+        "validates": "Import sorting (benchmarks/examples)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only ../benchmarks",
+        "source": "dev/test.sh",
+        "evidence": "python -m isort --check-only ../benchmarks"
+      },
+      {
+        "order": 19,
+        "validates": "Code formatting (benchmarks/examples)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --check ../benchmarks ../examples",
+        "source": "dev/test.sh",
+        "evidence": "python -m black --check ../benchmarks ../examples"
+      },
+      {
+        "order": 20,
+        "validates": "Markdown formatting (examples)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number ../examples",
+        "source": "dev/test.sh",
+        "evidence": "python -m mdformat --check --number ../examples"
+      },
+      {
+        "order": 21,
+        "validates": "TOML formatting (benchmarks/examples)",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check ../benchmarks ../examples",
+        "source": "dev/test.sh",
+        "evidence": "taplo fmt --check ../benchmarks ../examples"
+      }
+    ]
+  },
+  {
+    "id": "123",
+    "sha_fail": "d4593aedbc14dbd885f63009dcb0a4b962a04be6",
+    "workflow_path": ".github/workflows/framework.yml",
+    "dependent_files": [],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Python environment setup",
+        "installation_cmd": "uses: ./.github/actions/bootstrap",
+        "validation_cmd": "",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "Bootstrap step with python-version parameter"
+      },
+      {
+        "order": 2,
+        "validates": "Python version requirement patching",
+        "installation_cmd": "",
+        "validation_cmd": "python - <<'PY' (inline script)",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "Patch pyproject python requirement for CI step"
+      },
+      {
+        "order": 3,
+        "validates": "Dependencies installation",
+        "installation_cmd": "python -m poetry install --all-extras",
+        "validation_cmd": "",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "Install dependencies (mandatory only) step"
+      },
+      {
+        "order": 4,
+        "validates": "Proto files recompilation check",
+        "installation_cmd": "",
+        "validation_cmd": "./framework/dev/check-protos.sh",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "Check if protos need recompilation step"
+      },
+      {
+        "order": 5,
+        "validates": "Code style and linting (isort/black/docformatter/mypy/pylint/flake8) and tests (pytest)",
+        "installation_cmd": "",
+        "validation_cmd": "./framework/dev/test.sh",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "Lint + Test (isort/black/docformatter/mypy/pylint/flake8/pytest) step"
+      },
+      {
+        "order": 6,
+        "validates": "Benchmarks and examples validation",
+        "installation_cmd": "",
+        "validation_cmd": "./dev/test.sh",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "Check benchmarks and examples step"
+      }
+    ]
+  },
+  {
+    "id": "125",
+    "sha_fail": "df0344c9bd80f87fed394e512d67a3138a1d8176",
+    "workflow_path": ".github/workflows/framework.yml",
+    "dependent_files": [
+      {
+        "path": "./framework/dev/check-protos.sh",
+        "reason": "validation command referenced in workflow to check if protos need recompilation"
+      },
+      {
+        "path": "./framework/dev/test.sh",
+        "reason": "validation command referenced in workflow that runs isort/black/docformatter/mypy/pylint/flake8/pytest"
+      },
+      {
+        "path": "./dev/test.sh",
+        "reason": "validation command referenced in workflow to check benchmarks and examples"
+      },
+      {
+        "path": ".github/actions/bootstrap/action.yml",
+        "reason": "local composite action used by workflow for bootstrapping"
+      }
+    ],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Python environment setup",
+        "installation_cmd": "actions/setup-python@v6 + astral-sh/setup-uv@v7 + pip install build tools",
+        "validation_cmd": "",
+        "source": ".github/actions/bootstrap/action.yml",
+        "evidence": "Sets up Python, uv, pip, and setuptools"
+      },
+      {
+        "order": 2,
+        "validates": "Project dependencies installation",
+        "installation_cmd": "python -m poetry install --all-extras",
+        "validation_cmd": "",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "Install dependencies (mandatory only) step"
+      },
+      {
+        "order": 3,
+        "validates": "Proto files compilation status",
+        "installation_cmd": "",
+        "validation_cmd": "./framework/dev/check-protos.sh",
+        "source": ".github/workflows/framework.yml + ./framework/dev/check-protos.sh",
+        "evidence": "Runs protoc.sh and checks for uncommitted proto changes"
+      },
+      {
+        "order": 4,
+        "validates": "Code style (isort, black), formatting (clang-format), type checking (mypy), linting (ruff, pylint), tests (pytest), documentation (mdformat, docstrfmt), schema (paracelsus), licensing",
+        "installation_cmd": "",
+        "validation_cmd": "./framework/dev/test.sh",
+        "source": ".github/workflows/framework.yml + ./framework/dev/test.sh",
+        "evidence": "Runs isort, black, clang-format, docsig, ruff, mypy, pylint, pytest, mdformat, taplo, docstrfmt, paracelsus, copyright, licensecheck"
+      },
+      {
+        "order": 5,
+        "validates": "Benchmarks and examples code style (isort, black), formatting (mdformat), TOML (taplo)",
+        "installation_cmd": "",
+        "validation_cmd": "./dev/test.sh",
+        "source": ".github/workflows/framework.yml + ./dev/test.sh",
+        "evidence": "Runs isort, black, mdformat, taplo on benchmarks and examples"
+      }
+    ]
+  },
+  {
+    "id": "127",
+    "sha_fail": "f231d50356ccfb76ed54d27e9fd32dd40e824f28",
+    "workflow_path": ".github/workflows/framework.yml",
+    "dependent_files": [
+      {
+        "path": "./framework/dev/check-protos.sh",
+        "reason": "directly executed in workflow to check if protos need recompilation"
+      },
+      {
+        "path": "./framework/dev/test.sh",
+        "reason": "directly executed in workflow for lint + test validations (isort/black/docformatter/mypy/pylint/flake8/pytest)"
+      },
+      {
+        "path": "./dev/test.sh",
+        "reason": "directly executed in workflow to check benchmarks and examples"
+      }
+    ],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Proto definitions recompilation",
+        "installation_cmd": "",
+        "validation_cmd": "./framework/dev/check-protos.sh",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "Step 'Check if protos need recompilation' runs ./framework/dev/check-protos.sh which recompiles protos and fails if changes detected in py/flwr/proto"
+      },
+      {
+        "order": 2,
+        "validates": "Code formatting (clang-format)",
+        "installation_cmd": "",
+        "validation_cmd": "clang-format --Werror --dry-run proto/flwr/proto/*",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs clang-format check on proto files"
+      },
+      {
+        "order": 3,
+        "validates": "Import sorting (isort)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs isort check on py and e2e directories"
+      },
+      {
+        "order": 4,
+        "validates": "Code formatting (black)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --check",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs black check on py and e2e directories"
+      },
+      {
+        "order": 5,
+        "validates": "Init py files structure",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.init_py_check py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs init_py_check on py/flwr"
+      },
+      {
+        "order": 6,
+        "validates": "Docstring signatures",
+        "installation_cmd": "",
+        "validation_cmd": "docsig py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs docsig on py/flwr"
+      },
+      {
+        "order": 7,
+        "validates": "Code linting (ruff)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m ruff check py/flwr --no-respect-gitignore",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs ruff check on py/flwr"
+      },
+      {
+        "order": 8,
+        "validates": "Type checking (mypy)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mypy py",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs mypy on py directory"
+      },
+      {
+        "order": 9,
+        "validates": "Code linting (pylint)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pylint --ignore=py/flwr/proto py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs pylint on py/flwr"
+      },
+      {
+        "order": 10,
+        "validates": "Unit tests (pytest)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pytest --cov=py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs pytest with coverage on py/flwr"
+      },
+      {
+        "order": 11,
+        "validates": "Markdown formatting (mdformat)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number docs/source",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs mdformat check on docs/source when RUN_FULL_TEST is true"
+      },
+      {
+        "order": 12,
+        "validates": "TOML formatting (taplo)",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs taplo check on all TOML files"
+      },
+      {
+        "order": 13,
+        "validates": "reStructuredText formatting (docstrfmt)",
+        "installation_cmd": "",
+        "validation_cmd": "docstrfmt --check docs/source",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs docstrfmt check on docs/source when RUN_FULL_TEST is true"
+      },
+      {
+        "order": 14,
+        "validates": "SQLAlchemy schema consistency",
+        "installation_cmd": "",
+        "validation_cmd": "paracelsus inject py/flwr/supercore/state/schema/README.md dev.get_schema_base:Base --import-module \"flwr.supercore.state.schema.linkstate_tables:*\" --import-module \"flwr.supercore.state.schema.corestate_tables:*\" --import-module \"flwr.supercore.state.schema.objectstore_tables:*\" --layout elk --check",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs paracelsus to check SQLAlchemy schema consistency"
+      },
+      {
+        "order": 15,
+        "validates": "Copyright headers",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.check_copyright py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs copyright check when RUN_FULL_TEST is true"
+      },
+      {
+        "order": 16,
+        "validates": "License compliance",
+        "installation_cmd": "",
+        "validation_cmd": "python -m licensecheck --fail-licenses gpl --zero",
+        "source": "./framework/dev/test.sh",
+        "evidence": "test.sh runs licensecheck to verify licenses"
+      },
+      {
+        "order": 17,
+        "validates": "Import sorting for benchmarks and examples (isort)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only",
+        "source": "./dev/test.sh",
+        "evidence": "dev/test.sh runs isort check on examples and benchmarks directories"
+      },
+      {
+        "order": 18,
+        "validates": "Code formatting for benchmarks and examples (black)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --check ../benchmarks ../examples",
+        "source": "./dev/test.sh",
+        "evidence": "dev/test.sh runs black check on benchmarks and examples"
+      },
+      {
+        "order": 19,
+        "validates": "Markdown formatting for examples (mdformat)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number ../examples",
+        "source": "./dev/test.sh",
+        "evidence": "dev/test.sh runs mdformat check on examples"
+      },
+      {
+        "order": 20,
+        "validates": "TOML formatting for benchmarks and examples (taplo)",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check ../benchmarks ../examples",
+        "source": "./dev/test.sh",
+        "evidence": "dev/test.sh runs taplo check on benchmarks and examples"
+      }
+    ]
+  },
+  {
+    "id": "102",
+    "sha_fail": "07c55e7c8bee5b60d9d9647d647f89bec137ef4d",
+    "workflow_path": ".github/workflows/framework.yml",
+    "dependent_files": [
+      {
+        "path": ".github/actions/bootstrap/action.yml",
+        "reason": "workflow uses local composite action for bootstrap step"
+      },
+      {
+        "path": "./framework/dev/check-protos.sh",
+        "reason": "validation script explicitly called to check if protos need recompilation"
+      },
+      {
+        "path": "./framework/dev/test.sh",
+        "reason": "validation script explicitly called for linting and testing (isort/black/docformatter/mypy/pylint/flake8/pytest)"
+      },
+      {
+        "path": "./dev/test.sh",
+        "reason": "validation script explicitly called to check benchmarks and examples"
+      }
+    ],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Python environment setup",
+        "installation_cmd": "actions/setup-python@v6 with python-version input",
+        "validation_cmd": "",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 2,
+        "validates": "UV package manager installation",
+        "installation_cmd": "astral-sh/setup-uv@v7 with uv-version input",
+        "validation_cmd": "",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 3,
+        "validates": "Build tools installation (pip, setuptools)",
+        "installation_cmd": "python -m pip install -U pip==<pip-version> setuptools==<setuptools-version>",
+        "validation_cmd": "",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 4,
+        "validates": "Project dependencies installation",
+        "installation_cmd": "python -m poetry install --all-extras",
+        "validation_cmd": "",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 5,
+        "validates": "Proto files compilation status",
+        "installation_cmd": "",
+        "validation_cmd": "./framework/dev/check-protos.sh",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 6,
+        "validates": "Code formatting (clang-format)",
+        "installation_cmd": "",
+        "validation_cmd": "clang-format --Werror --dry-run proto/flwr/proto/*",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 7,
+        "validates": "Import sorting (isort)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 8,
+        "validates": "Code formatting (black)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --check",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 9,
+        "validates": "Init py files structure",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.init_py_check py/flwr",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 10,
+        "validates": "Docstring signature consistency",
+        "installation_cmd": "",
+        "validation_cmd": "docsig py/flwr",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 11,
+        "validates": "Code linting (ruff)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m ruff check py/flwr --no-respect-gitignore",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 12,
+        "validates": "Type checking (mypy)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mypy py",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 13,
+        "validates": "Code linting (pylint)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pylint --ignore=py/flwr/proto py/flwr",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 14,
+        "validates": "Unit tests and coverage",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pytest --cov=py/flwr",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 15,
+        "validates": "Markdown formatting",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number docs/source",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 16,
+        "validates": "TOML file formatting",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 17,
+        "validates": "reStructuredText formatting",
+        "installation_cmd": "",
+        "validation_cmd": "docstrfmt --check docs/source",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 18,
+        "validates": "SQLAlchemy schema consistency",
+        "installation_cmd": "",
+        "validation_cmd": "paracelsus inject py/flwr/supercore/state/schema/README.md dev.get_schema_base:Base --check",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 19,
+        "validates": "Copyright headers presence",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.check_copyright py/flwr",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 20,
+        "validates": "License compliance",
+        "installation_cmd": "",
+        "validation_cmd": "python -m licensecheck --fail-licenses gpl --zero",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 21,
+        "validates": "Benchmark and example import sorting",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 22,
+        "validates": "Benchmark and example code formatting",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --check ../benchmarks ../examples",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 23,
+        "validates": "Benchmark and example Markdown formatting",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number ../examples",
+        "source": "",
+        "evidence": ""
+      },
+      {
+        "order": 24,
+        "validates": "Benchmark and example TOML formatting",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check ../benchmarks ../examples",
+        "source": "",
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": "128",
+    "sha_fail": "f539ef9be2b510a9bef42e224e7c601f5965bcda",
+    "workflow_path": ".github/workflows/framework.yml",
+    "dependent_files": [
+      {
+        "path": "./framework/dev/check-protos.sh",
+        "reason": "workflow runs this script to check if protos need recompilation"
+      },
+      {
+        "path": "./framework/dev/test.sh",
+        "reason": "workflow runs this script for linting (isort/black/docformatter/mypy/pylint/flake8) and testing (pytest)"
+      },
+      {
+        "path": "./dev/test.sh",
+        "reason": "workflow runs this script to check benchmarks and examples"
+      }
+    ],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Bootstrap environment setup",
+        "installation_cmd": "uv install",
+        "validation_cmd": "",
+        "source": ".github/actions/bootstrap",
+        "evidence": "uses: ./.github/actions/bootstrap with python-version"
+      },
+      {
+        "order": 2,
+        "validates": "Python dependency installation",
+        "installation_cmd": "python -m poetry install --all-extras",
+        "validation_cmd": "",
+        "source": ".github/workflows/framework.yml",
+        "evidence": "run: cd framework; python -m poetry install --all-extras"
+      },
+      {
+        "order": 3,
+        "validates": "Proto files recompilation check",
+        "installation_cmd": "",
+        "validation_cmd": "./dev/protoc.sh && git diff --name-only HEAD py/flwr/proto",
+        "source": "./framework/dev/check-protos.sh",
+        "evidence": "Runs ./dev/protoc.sh then checks for changes in py/flwr/proto"
+      },
+      {
+        "order": 4,
+        "validates": "Code formatting (clang-format)",
+        "installation_cmd": "",
+        "validation_cmd": "clang-format --Werror --dry-run proto/flwr/proto/*",
+        "source": "./framework/dev/test.sh",
+        "evidence": "clang-format --Werror --dry-run proto/flwr/proto/*"
+      },
+      {
+        "order": 5,
+        "validates": "Import sorting (isort)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m isort --check-only --skip py/flwr/proto"
+      },
+      {
+        "order": 6,
+        "validates": "Code formatting (black)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --check",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m black --extend-exclude \"py\\/flwr\\/proto\" --check py"
+      },
+      {
+        "order": 7,
+        "validates": "Python init file consistency",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.init_py_check py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m devtool.init_py_check py/flwr"
+      },
+      {
+        "order": 8,
+        "validates": "Documentation signature consistency",
+        "installation_cmd": "",
+        "validation_cmd": "docsig py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "docsig py/flwr"
+      },
+      {
+        "order": 9,
+        "validates": "Code linting (ruff)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m ruff check py/flwr --no-respect-gitignore",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m ruff check py/flwr --no-respect-gitignore"
+      },
+      {
+        "order": 10,
+        "validates": "Type checking (mypy)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mypy py",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m mypy py"
+      },
+      {
+        "order": 11,
+        "validates": "Code linting (pylint)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pylint --ignore=py/flwr/proto py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m pylint --ignore=py/flwr/proto py/flwr"
+      },
+      {
+        "order": 12,
+        "validates": "Unit tests (pytest)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m pytest --cov=py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m pytest --cov=py/flwr"
+      },
+      {
+        "order": 13,
+        "validates": "Markdown formatting (mdformat)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number docs/source",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m mdformat --check --number docs/source"
+      },
+      {
+        "order": 14,
+        "validates": "TOML formatting (taplo)",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check",
+        "source": "./framework/dev/test.sh",
+        "evidence": "taplo fmt --check"
+      },
+      {
+        "order": 15,
+        "validates": "rST documentation formatting (docstrfmt)",
+        "installation_cmd": "",
+        "validation_cmd": "docstrfmt --check docs/source",
+        "source": "./framework/dev/test.sh",
+        "evidence": "docstrfmt --check docs/source"
+      },
+      {
+        "order": 16,
+        "validates": "SQLAlchemy schema consistency (paracelsus)",
+        "installation_cmd": "",
+        "validation_cmd": "paracelsus inject py/flwr/supercore/state/schema/README.md dev.get_schema_base:Base",
+        "source": "./framework/dev/test.sh",
+        "evidence": "paracelsus inject ... --check"
+      },
+      {
+        "order": 17,
+        "validates": "Copyright header check",
+        "installation_cmd": "",
+        "validation_cmd": "python -m devtool.check_copyright py/flwr",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m devtool.check_copyright py/flwr"
+      },
+      {
+        "order": 18,
+        "validates": "License compliance check",
+        "installation_cmd": "",
+        "validation_cmd": "python -m licensecheck --fail-licenses gpl --zero",
+        "source": "./framework/dev/test.sh",
+        "evidence": "python -m licensecheck --fail-licenses gpl --zero"
+      },
+      {
+        "order": 19,
+        "validates": "Import sorting for benchmarks and examples (isort)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m isort --check-only",
+        "source": "./dev/test.sh",
+        "evidence": "python -m isort --check-only on ../examples and ../benchmarks"
+      },
+      {
+        "order": 20,
+        "validates": "Code formatting for benchmarks and examples (black)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m black --check ../benchmarks ../examples",
+        "source": "./dev/test.sh",
+        "evidence": "python -m black --check ../benchmarks ../examples"
+      },
+      {
+        "order": 21,
+        "validates": "Markdown formatting for examples (mdformat)",
+        "installation_cmd": "",
+        "validation_cmd": "python -m mdformat --check --number ../examples",
+        "source": "./dev/test.sh",
+        "evidence": "python -m mdformat --check --number ../examples"
+      },
+      {
+        "order": 22,
+        "validates": "TOML formatting for benchmarks and examples (taplo)",
+        "installation_cmd": "",
+        "validation_cmd": "taplo fmt --check ../benchmarks ../examples",
+        "source": "./dev/test.sh",
+        "evidence": "taplo fmt --check ../benchmarks ../examples"
+      }
+    ]
+  },
+  {
+    "id": "411",
+    "sha_fail": "d31c3cbffdc728c53feae391e36e9e67248d0928",
+    "workflow_path": ".github/workflows/test_minimal_dependency.yml",
+    "dependent_files": [],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Virtual environment and project dependencies",
+        "installation_cmd": "python -m venv .venv && source .venv/bin/activate && pip install --upgrade pip && pip install -e .",
+        "validation_cmd": "",
+        "source": ".github/workflows/test_minimal_dependency.yml",
+        "evidence": "pip install -e ."
+      },
+      {
+        "order": 2,
+        "validates": "Integration tests execution",
+        "installation_cmd": "pip install pytest dotenv",
+        "validation_cmd": "pytest test/integration_test/test_minimal_dependency.py -m \"not model_backend\"",
+        "source": ".github/workflows/test_minimal_dependency.yml",
+        "evidence": "pytest test/integration_test/test_minimal_dependency.py"
+      }
+    ]
+  },
+  {
+    "id": "413",
+    "sha_fail": "dbe785e7397a3849c329fda9c181e9290ac95a2a",
+    "workflow_path": ".github/workflows/pre_commit.yml",
+    "dependent_files": [
+      {
+        "path": ".pre-commit-config.yaml",
+        "reason": "workflow runs pre-commit, hooks define the validations"
+      }
+    ],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Dependencies installation",
+        "installation_cmd": "uv install",
+        "validation_cmd": "",
+        "source": ".github/actions/camel_install",
+        "evidence": "action installs dependencies using uv"
+      },
+      {
+        "order": 2,
+        "validates": "Code style and imports (ruff)",
+        "installation_cmd": "",
+        "validation_cmd": "ruff check --fix --exit-non-zero-on-fix --show-fixes",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook id: ruff with args"
+      },
+      {
+        "order": 3,
+        "validates": "Code formatting (ruff-format)",
+        "installation_cmd": "",
+        "validation_cmd": "ruff-format",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook id: ruff-format"
+      },
+      {
+        "order": 4,
+        "validates": "Type checking (mypy)",
+        "installation_cmd": "",
+        "validation_cmd": "uv run mypy --namespace-packages -p camel -p test -p apps",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook id: mypy with entry command"
+      },
+      {
+        "order": 5,
+        "validates": "License header check",
+        "installation_cmd": "",
+        "validation_cmd": "python licenses/update_license.py . licenses/license_template.txt",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook id: check-license with entry command"
+      },
+      {
+        "order": 6,
+        "validates": "Spell checking (codespell)",
+        "installation_cmd": "",
+        "validation_cmd": "codespell",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook id: codespell"
+      },
+      {
+        "order": 7,
+        "validates": "Secrets scanning (gitleaks)",
+        "installation_cmd": "",
+        "validation_cmd": "gitleaks",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook id: gitleaks"
+      },
+      {
+        "order": 8,
+        "validates": "End of file fixer",
+        "installation_cmd": "",
+        "validation_cmd": "end-of-file-fixer",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook id: end-of-file-fixer"
+      },
+      {
+        "order": 9,
+        "validates": "Trailing whitespace removal",
+        "installation_cmd": "",
+        "validation_cmd": "trailing-whitespace",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook id: trailing-whitespace"
+      }
+    ]
+  },
+  {
+    "id": "421",
+    "sha_fail": "f4ed7a6f985ea8135f1cb2b2b01bd794a7f45520",
+    "workflow_path": ".github/workflows/pre_commit.yml",
+    "dependent_files": [
+      {
+        "path": ".pre-commit-config.yaml",
+        "reason": "workflow runs pre-commit, hooks define the validations"
+      }
+    ],
+    "validation_sequence": [
+      {
+        "order": 1,
+        "validates": "Python environment and dependencies installation",
+        "installation_cmd": "uses: ./.github/actions/camel_install with python-version: 3.10",
+        "validation_cmd": "",
+        "source": ".github/workflows/pre_commit.yml",
+        "evidence": "uses: ./.github/actions/camel_install with: python-version: \"3.10\""
+      },
+      {
+        "order": 2,
+        "validates": "Code style and imports (ruff)",
+        "installation_cmd": "",
+        "validation_cmd": "pre-commit run --all-files",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook: id: ruff, args: [--fix, --exit-non-zero-on-fix, --show-fixes]"
+      },
+      {
+        "order": 3,
+        "validates": "Code formatting (ruff-format)",
+        "installation_cmd": "",
+        "validation_cmd": "pre-commit run --all-files",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook: id: ruff-format"
+      },
+      {
+        "order": 4,
+        "validates": "Type checking (mypy)",
+        "installation_cmd": "",
+        "validation_cmd": "pre-commit run --all-files",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook: id: mypy, entry: uv run mypy --namespace-packages -p camel -p test -p apps"
+      },
+      {
+        "order": 5,
+        "validates": "License header check",
+        "installation_cmd": "",
+        "validation_cmd": "pre-commit run --all-files",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook: id: check-license, entry: python licenses/update_license.py . licenses/license_template.txt"
+      },
+      {
+        "order": 6,
+        "validates": "Spell checking (codespell)",
+        "installation_cmd": "",
+        "validation_cmd": "pre-commit run --all-files",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook: id: codespell, rev: v2.4.1"
+      },
+      {
+        "order": 7,
+        "validates": "Secrets detection (gitleaks)",
+        "installation_cmd": "",
+        "validation_cmd": "pre-commit run --all-files",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook: id: gitleaks, rev: v8.16.3"
+      },
+      {
+        "order": 8,
+        "validates": "End of file fixer",
+        "installation_cmd": "",
+        "validation_cmd": "pre-commit run --all-files",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook: id: end-of-file-fixer, rev: v4.4.0"
+      },
+      {
+        "order": 9,
+        "validates": "Trailing whitespace removal",
+        "installation_cmd": "",
+        "validation_cmd": "pre-commit run --all-files",
+        "source": ".pre-commit-config.yaml",
+        "evidence": "hook: id: trailing-whitespace, rev: v4.4.0"
+      }
+    ]
+  }
+]

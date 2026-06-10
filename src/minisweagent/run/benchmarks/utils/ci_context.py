@@ -110,6 +110,7 @@ import os
 import re
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -120,6 +121,13 @@ from minisweagent.run.benchmarks.utils.ci_memory_system import (
     CIMemorySystem,
     format_memory_context,
 )
+from minisweagent.run.benchmarks.utils.ci_workflow_aware_retrieval import (
+    analyze_workflow_from_benchmark,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[5]
+WORKFLOW_VALIDATION_CACHE = PROJECT_ROOT / "data" / "trs" / "workflow_validation_cache.json"
+LOG_ANALYSIS_CACHE = PROJECT_ROOT / "data" / "trs" / "log_details.json"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -342,6 +350,61 @@ def _build_from_precomputed(instance: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _load_log_analysis_cache(*, sha_fail: str, task_id: str) -> Dict[str, Any]:
+    if not LOG_ANALYSIS_CACHE.exists():
+        return {}
+    try:
+        payload = json.loads(LOG_ANALYSIS_CACHE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("[Phase A] Could not read log analysis cache: %s", exc)
+        return {}
+
+    rows = payload if isinstance(payload, list) else list(payload.values()) if isinstance(payload, dict) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if sha_fail and str(row.get("sha_fail") or "") == sha_fail:
+            return row
+        if task_id and str(row.get("id") or row.get("instance_id") or "") == task_id:
+            return row
+    return {}
+
+
+def _save_log_analysis_cache(result: Dict[str, Any]) -> None:
+    sha_fail = str(result.get("sha_fail") or "")
+    task_id = str(result.get("id") or result.get("instance_id") or "")
+    if not sha_fail and not task_id:
+        return
+    if result.get("error"):
+        return
+
+    try:
+        rows: List[Dict[str, Any]] = []
+        if LOG_ANALYSIS_CACHE.exists():
+            payload = json.loads(LOG_ANALYSIS_CACHE.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                rows = [row for row in payload if isinstance(row, dict)]
+            elif isinstance(payload, dict):
+                rows = [row for row in payload.values() if isinstance(row, dict)]
+
+        updated = False
+        for index, row in enumerate(rows):
+            if (sha_fail and str(row.get("sha_fail") or "") == sha_fail) or (
+                task_id and str(row.get("id") or row.get("instance_id") or "") == task_id
+            ):
+                rows[index] = result
+                updated = True
+                break
+        if not updated:
+            rows.append(result)
+
+        LOG_ANALYSIS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        LOG_ANALYSIS_CACHE.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info("[Phase A] Saved log analysis to %s", LOG_ANALYSIS_CACHE)
+    except Exception as exc:
+        logger.warning("[Phase A] Could not save log analysis cache: %s", exc)
+
+
 def _run_log_analysis(
     instance: Dict[str, Any],
     llm: Any,
@@ -361,6 +424,9 @@ def _run_log_analysis(
         Run CILogAnalyzer on the raw logs.  Falls back to the minimal
         heuristic analysis if the LLM is unavailable or the analyzer fails.
     """
+    sha_fail      = str(instance.get("sha_fail") or "")
+    task_id       = str(instance.get("instance_id") or instance.get("id") or sha_fail)
+
     if _has_precomputed_analysis(instance):
         result = _build_from_precomputed(instance)
         logger.info(
@@ -370,10 +436,20 @@ def _run_log_analysis(
             len(result["relevant_files"]),
             len(result["failed_job"]),
         )
+        _save_log_analysis_cache(result)
         return result
 
-    sha_fail      = str(instance.get("sha_fail") or "")
-    task_id       = str(instance.get("instance_id") or instance.get("id") or sha_fail)
+    cached = _load_log_analysis_cache(sha_fail=sha_fail, task_id=task_id)
+    if cached:
+        logger.info(
+            "[Phase A] Loaded cached log analysis for %s — error_types=%d  files=%d  jobs=%d",
+            (sha_fail or task_id)[:12],
+            len(cached.get("error_types") or []),
+            len(cached.get("relevant_files") or []),
+            len((cached.get("failed_job") or cached.get("failed_jobs")) or []),
+        )
+        return cached
+
     workflow      = instance.get("workflow") or ""
     workflow_path = str(instance.get("workflow_path") or "")
     logs          = instance.get("logs") or instance.get("log") or ""
@@ -391,6 +467,8 @@ def _run_log_analysis(
         result = analyzer.run()
         if result.get("error"):
             logger.warning("[Phase A] CILogAnalyzer returned error: %s", result["error"])
+            return _minimal_log_analysis(instance)
+        _save_log_analysis_cache(result)
         return result
     except Exception as exc:
         logger.warning("[Phase A] CILogAnalyzer failed (%s); using raw log fallback.", exc)
@@ -487,14 +565,21 @@ def _extract_workflow_profile(
     memory_root: str,
     memory_enabled: bool,
     model: str,
+    llm: Any = None,
 ) -> Dict[str, Any]:
     """
-    Phase B — extract installation_cmd and validation_cmd from the workflow YAML.
+    Phase B — extract the ordered validation sequence from benchmark workflow YAML.
 
-    Tries ErrorContextAgent Phase 3 first (3 LLM calls).
-    Falls back to _parse_workflow_yaml_commands() for basic extraction.
+    Priority:
+      1. data/trs/workflow_validation_cache.json by sha_fail/id.
+      2. ci_workflow_aware_retrieval.analyze_workflow_from_benchmark().
+      3. Legacy failed-job/YAML fallback for compatibility.
     """
-    # Fallback 1: extract validation_cmd from pre-computed failed_jobs
+    workflow_profile = _workflow_profile_from_cache_or_analyzer(instance, llm=llm)
+    if workflow_profile.get("validation_sequence"):
+        return workflow_profile
+
+    # Compatibility fallback 1: extract validation_cmd from pre-computed failed_jobs
     # (the failing command IS the test/lint command the agent needs to re-run)
     precomputed = _extract_validation_from_failed_jobs(instance)
     if precomputed.get("validation_cmd"):
@@ -504,6 +589,8 @@ def _extract_workflow_profile(
             "installation_cmd": _coerce_str_list(yaml_profile.get("installation_cmd")),
             "validation_cmd": _coerce_str_list(precomputed.get("validation_cmd")),
             "critical_steps": _coerce_str_list(yaml_profile.get("critical_steps")),
+            "validation_sequence": [],
+            "dependent_files": [],
         }
 
     ErrorContextAgent = _try_import_error_context_agent()
@@ -522,6 +609,136 @@ def _extract_workflow_profile(
 
     # Fallback 2: basic YAML parsing
     return _parse_workflow_yaml_commands(str(instance.get("workflow") or ""))
+
+
+def _workflow_profile_from_cache_or_analyzer(instance: Dict[str, Any], *, llm: Any = None) -> Dict[str, Any]:
+    sha_fail = str(instance.get("sha_fail") or "")
+    issue_id = str(instance.get("id") or instance.get("instance_id") or "")
+    workflow_path = str(instance.get("workflow_path") or instance.get("workflow_filename") or "")
+
+    cached = _load_workflow_validation_cache(sha_fail=sha_fail, issue_id=issue_id)
+    if cached:
+        logger.info("[Phase B] Loaded cached workflow validation sequence for %s", (sha_fail or issue_id)[:12])
+        return _workflow_validation_context_to_profile(cached)
+
+    workflow_content = str(instance.get("workflow") or "")
+    if not workflow_content.strip() or llm is None:
+        return {"installation_cmd": [], "validation_cmd": [], "critical_steps": [], "validation_sequence": [], "dependent_files": []}
+
+    try:
+        logger.info("[Phase B] Extracting workflow validation sequence with ci_workflow_aware_retrieval")
+        context = analyze_workflow_from_benchmark(
+            workflow_content=workflow_content,
+            workflow_path=workflow_path,
+            repo_path=str(instance.get("repo_path") or instance.get("checkout_path") or "") or None,
+            llm=llm,
+            issue_id=issue_id,
+            sha_fail=sha_fail,
+        )
+    except Exception as exc:
+        logger.warning("[Phase B] Workflow validation extraction failed (%s); using legacy fallback.", exc)
+        return {"installation_cmd": [], "validation_cmd": [], "critical_steps": [], "validation_sequence": [], "dependent_files": []}
+
+    if context.get("validation_sequence"):
+        _save_workflow_validation_cache(context)
+        return _workflow_validation_context_to_profile(context)
+
+    return {"installation_cmd": [], "validation_cmd": [], "critical_steps": [], "validation_sequence": [], "dependent_files": []}
+
+
+def _load_workflow_validation_cache(*, sha_fail: str, issue_id: str) -> Dict[str, Any]:
+    if not WORKFLOW_VALIDATION_CACHE.exists():
+        return {}
+    try:
+        payload = json.loads(WORKFLOW_VALIDATION_CACHE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("[Phase B] Could not read workflow validation cache: %s", exc)
+        return {}
+
+    rows = payload if isinstance(payload, list) else list(payload.values()) if isinstance(payload, dict) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if sha_fail and str(row.get("sha_fail") or "") == sha_fail:
+            return row
+        if issue_id and str(row.get("id") or row.get("instance_id") or "") == issue_id:
+            return row
+    return {}
+
+
+def _save_workflow_validation_cache(context: Dict[str, Any]) -> None:
+    sha_fail = str(context.get("sha_fail") or "")
+    issue_id = str(context.get("id") or context.get("instance_id") or "")
+    if not sha_fail and not issue_id:
+        return
+
+    try:
+        rows: List[Dict[str, Any]] = []
+        if WORKFLOW_VALIDATION_CACHE.exists():
+            payload = json.loads(WORKFLOW_VALIDATION_CACHE.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                rows = [row for row in payload if isinstance(row, dict)]
+            elif isinstance(payload, dict):
+                rows = [row for row in payload.values() if isinstance(row, dict)]
+
+        compact = {
+            "id": issue_id,
+            "sha_fail": sha_fail,
+            "workflow_path": str(context.get("workflow_path") or ""),
+            "dependent_files": context.get("dependent_files", []) or [],
+            "validation_sequence": context.get("validation_sequence", []) or [],
+        }
+
+        updated = False
+        for index, row in enumerate(rows):
+            if (sha_fail and str(row.get("sha_fail") or "") == sha_fail) or (
+                issue_id and str(row.get("id") or row.get("instance_id") or "") == issue_id
+            ):
+                rows[index] = compact
+                updated = True
+                break
+        if not updated:
+            rows.append(compact)
+
+        WORKFLOW_VALIDATION_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        WORKFLOW_VALIDATION_CACHE.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info("[Phase B] Saved workflow validation sequence to %s", WORKFLOW_VALIDATION_CACHE)
+    except Exception as exc:
+        logger.warning("[Phase B] Could not save workflow validation cache: %s", exc)
+
+
+def _workflow_validation_context_to_profile(context: Dict[str, Any]) -> Dict[str, Any]:
+    sequence = context.get("validation_sequence") or []
+    installation_cmd: List[str] = []
+    validation_cmd: List[str] = []
+    critical_steps: List[str] = []
+
+    for step in sequence if isinstance(sequence, list) else []:
+        if not isinstance(step, dict):
+            continue
+        install = str(step.get("installation_cmd") or "").strip()
+        validate = str(step.get("validation_cmd") or "").strip()
+        label = str(step.get("validates") or validate or install or "").strip()
+        if install and install not in installation_cmd:
+            installation_cmd.append(install)
+        if validate and validate not in validation_cmd:
+            validation_cmd.append(validate)
+        if label and label not in critical_steps:
+            critical_steps.append(label)
+
+    logger.info(
+        "[Phase B] Workflow validation sequence: steps=%d install_cmds=%d validation_cmds=%d",
+        len(sequence) if isinstance(sequence, list) else 0,
+        len(installation_cmd),
+        len(validation_cmd),
+    )
+    return {
+        "installation_cmd": installation_cmd,
+        "validation_cmd": validation_cmd,
+        "critical_steps": critical_steps,
+        "validation_sequence": sequence if isinstance(sequence, list) else [],
+        "dependent_files": context.get("dependent_files", []) or [],
+    }
 
 
 def _run_error_context_agent_phase_b(
@@ -973,6 +1190,51 @@ def build_problem_statement(
     if mem_block:
         lines += ["", mem_block]
 
+    # Add repair plan if available
+    repair_plan = memory.get("repair_plan")
+    if repair_plan and not repair_plan.get("error"):
+        plan_lines = [
+            "",
+            "## Suggested Repair Plan",
+            "",
+            f"**Problem Statement**: {repair_plan.get('problem_statement', '')}",
+            "",
+        ]
+
+        root_causes = repair_plan.get("root_causes", [])
+        if root_causes:
+            plan_lines += ["### Root Causes"]
+            for rc in root_causes:
+                plan_lines.append(f"- **Cause**: {rc.get('cause', '')}")
+                plan_lines.append(f"  - Evidence: {rc.get('evidence', '')}")
+                plan_lines.append(f"  - Validation Stage: {rc.get('validation_stage', '?')}")
+            plan_lines.append("")
+
+        repair_steps = repair_plan.get("repair_steps", [])
+        if repair_steps:
+            plan_lines += ["### Repair Steps (in order)"]
+            for step in repair_steps:
+                step_id = step.get("step_id", "?")
+                plan_lines.append(f"#### Step {step_id}")
+                plan_lines.append(f"- **What to Fix**: {step.get('what_to_fix', '')}")
+                plan_lines.append(f"- **Where to Fix**: {step.get('where_to_fix', '')}")
+                plan_lines.append(f"- **How to Fix**: {step.get('how_to_fix', '')}")
+                plan_lines.append(f"- **Why This Fixes It**: {step.get('why_this_fixes', '')}")
+                plan_lines.append(f"- **Verify By**: {step.get('verify_by', '')}")
+                if step.get("depends_on"):
+                    plan_lines.append(f"- **Depends On**: Steps {', '.join(map(str, step['depends_on']))}")
+                plan_lines.append("")
+
+        verification_order = repair_plan.get("verification_order", [])
+        if verification_order:
+            plan_lines.append(f"**Verification Order**: {' → '.join(map(str, verification_order))}")
+            plan_lines.append("")
+
+        complexity = repair_plan.get("estimated_complexity", "unknown")
+        plan_lines.append(f"**Estimated Complexity**: {complexity}")
+
+        lines += plan_lines
+
     if is_fallback:
         lines += [
             "",
@@ -1084,6 +1346,7 @@ def build_ci_context(
         memory_root=effective_memory_root,
         memory_enabled=memory_enabled,
         model=model,
+        llm=llm,
     )
     logger.info(
         "[Phase B] done — install_cmds=%d  validation_cmds=%d",
@@ -1115,9 +1378,39 @@ def build_ci_context(
         (memory.get("llm_selection") or {}).get("use_memory", False),
     )
 
+    # ── Phase C.5 — Repair Plan Generation (if memory enabled and LLM available) ──
+    repair_plan = None
+    if memory_enabled and llm and memory.get("enabled"):
+        try:
+            raw_retrieval = memory.get("raw_retrieval", {})
+            validation_sequence = workflow_profile.get("validation_sequence", [])
+
+            # Build issue dict for plan generation
+            issue_for_plan = {
+                "repo": repo,
+                "workflow_path": instance.get("workflow_path", ""),
+                "failed_cmd": log_analysis.get("failed_cmd", []),
+                "error_message": log_analysis.get("error_context", []),
+            }
+
+            # Generate structured repair plan from memories
+            repair_plan = memory_system.plugin.generate_repair_plan(
+                issue=issue_for_plan,
+                retrieved_memories=raw_retrieval,
+                validation_sequence=validation_sequence,
+            )
+
+            if repair_plan and not repair_plan.get("error"):
+                memory["repair_plan"] = repair_plan
+                logger.info(
+                    "[Phase C.5] Repair plan generated — %d steps",
+                    len(repair_plan.get("repair_steps", [])),
+                )
+        except Exception as e:
+            logger.warning("[Phase C.5] Plan generation failed: %s", e)
+
     # ── Phase D — Document Assembly ───────────────────────────────────────────
     problem_statement = build_problem_statement(context, memory)
-
     logger.info(
         "[CIContext] DONE  sha=%s  problem_statement=%d chars",
         str(context.get("sha_fail") or "")[:12],

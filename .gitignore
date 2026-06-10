@@ -195,6 +195,7 @@ results/
 test_memory/
 *_rebuilt/
 data/trs_OLD/
+test_script
 
 # Temporary files
 *.bak

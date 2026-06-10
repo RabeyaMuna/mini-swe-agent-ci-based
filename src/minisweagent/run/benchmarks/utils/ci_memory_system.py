@@ -8,16 +8,13 @@ Phase C (Steps 1–5):
   2. Embed query (sentence-transformers or fastembed)
   3. Cosine similarity search across L1 / L2 / L3 memory stores
   4. Rank candidates highest → lowest
-  5. Two-LLM gate:
-       LLM 1 — Relevance Filter: fast binary selection of useful candidates
-       LLM 2 — Experience Synthesizer: deep repair guidance document
-               (only called when LLM 1 finds relevant candidates)
+  5. One synthesis prompt turns retrieved memory into previous-experience
+     repair guidance for the agent problem statement.
 
 Design principles:
-  - No arbitrary truncation — LLM sees all candidate data
-  - Chunked processing when total context exceeds model limits
-  - LLM 1 filters noise so LLM 2 works only on signal
-  - LLM 2 produces a structured repair playbook, not just raw memories
+  - Keep retrieval deterministic and transparent
+  - Use one LLM synthesis step for reasoning over visible + hidden failures
+  - Fall back to deterministic guidance if the synthesis call fails
 """
 
 from __future__ import annotations
@@ -27,10 +24,6 @@ import logging
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
-
-_MAX_PROMPT_CHARS = 28_000   # ~7k tokens — safe for most models
-_CHUNK_SIZE       = 4        # candidates per chunk when prompt is too large
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Universal LLM caller
@@ -59,16 +52,62 @@ def _call_llm(llm: Any, prompt: str) -> str:
 
 
 def _parse_json(raw: str) -> Optional[Dict[str, Any]]:
+    """Parse LLM JSON with comprehensive cleaning for malformed output."""
+    import re
+
     raw = raw.strip()
-    if raw.startswith("```"):
-        lines = raw.splitlines()[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
+
+    # Remove markdown fences
+    raw = re.sub(r'```(?:json)?\s*\n?(.*?)\n?```', r'\1', raw, flags=re.DOTALL)
+
+    # Fix trailing commas
+    raw = re.sub(r',(\s*[}\]])', r'\1', raw)
+
+    # Fix missing commas between string values
+    raw = re.sub(r'"\s+"', '", "', raw)
+
+    # Fix double commas
+    raw = re.sub(r',\s*,', ',', raw)
+
+    # Fix missing commas between objects
+    raw = re.sub(r'}\s*{', '}, {', raw)
+    raw = re.sub(r'}\s*\[', '}, [', raw)
+    raw = re.sub(r']\s*{', '], {', raw)
+
+    # Extract JSON from surrounding text
+    raw = raw.strip()
+    start_brace = raw.find('{')
+    start_bracket = raw.find('[')
+
+    if start_brace == -1 and start_bracket == -1:
+        return None
+
+    # Find first { or [
+    if start_brace == -1:
+        start = start_bracket
+        end_char = ']'
+    elif start_bracket == -1:
+        start = start_brace
+        end_char = '}'
+    else:
+        start = min(start_brace, start_bracket)
+        end_char = '}' if start == start_brace else ']'
+
+    # Find matching closing
+    end = raw.rfind(end_char)
+    if end > start:
+        raw = raw[start:end+1]
+
+    # Try parsing
     try:
         parsed = json.loads(raw)
         return parsed if isinstance(parsed, dict) else None
-    except Exception:
+    except json.JSONDecodeError:
+        # Log the error for debugging
+        logger.debug(f"[_parse_json] Failed to parse cleaned JSON. First 200 chars: {raw[:200]}")
+        return None
+    except Exception as e:
+        logger.debug(f"[_parse_json] Unexpected error: {e}")
         return None
 
 
@@ -126,6 +165,11 @@ class CIMemorySystem:
         plugin = MemoryPlugin(config, memory_root, llm=llm)
         return cls(plugin, memory_enabled=True)
 
+    @property
+    def plugin(self):
+        """Expose the underlying MemoryPlugin for direct access."""
+        return self._plugin
+
     def is_enabled(self) -> bool:
         return (
             self._enabled
@@ -175,7 +219,6 @@ class CIMemorySystem:
         except Exception as exc:
             logger.error("[CIMemorySystem] retrieve failed: %s", exc)
             return _empty
-
         effective_llm = llm or self._plugin.llm
         llm_selection = _run_two_llm_gate(raw, effective_llm)
 
@@ -221,333 +264,356 @@ class CIMemorySystem:
 def _empty_selection() -> Dict[str, Any]:
     return {
         "use_memory":            False,
-        "relevant_candidates":   [],   # LLM 1 output
-        "guidance_document":     {},   # LLM 2 output
+        "relevant_candidates":   [],
+        "selected_items":        [],
+        "guidance_document":     {},
         "analysis_summary":      "",
     }
 
 
-def _format_candidate(i: int, row: Dict[str, Any]) -> str:
-    """Render one memory record for the LLM — all fields, no truncation."""
-    level   = row.get("memory_level", "")
-    score   = float(row.get("similarity_score") or 0.0)
-    error   = row.get("error_type", "")
-    pattern = row.get("failure_pattern") or row.get("issue_type", "")
-    reason  = (
-        row.get("overall_failure_reason")
-        or row.get("failure_reason")
-        or row.get("principle")
-        or ""
-    )
-    fix = (
-        row.get("fix_strategy")
-        or row.get("fix_approach")
-        or row.get("fix_direction")
-        or ""
-    )
-
-    dep_files = row.get("dependent_files") or []
-    dep_parts = []
-    for d in dep_files:
-        if isinstance(d, dict):
-            f = d.get("file", "")
-            r = d.get("reason", "")
-            dep_parts.append(f"{f} ({r})" if r else f)
-        elif d:
-            dep_parts.append(str(d))
-    dep_text = f"\n    dependent_files: {' | '.join(dep_parts)}" if dep_parts else ""
-
-    changed = row.get("changed_files") or row.get("modified_files") or []
-    changed_text = (
-        f"\n    co_changed_files: {' | '.join(str(x) for x in changed)}"
-        if changed else ""
-    )
-
-    files_list = row.get("files") or []
-    files_parts = []
-    for f in files_list:
-        if isinstance(f, dict):
-            name         = f.get("file", "")
-            file_pattern = f.get("failure_pattern", "")
-            file_fix     = f.get("fix_direction") or f.get("fix_strategy", "")
-            files_parts.append(
-                f"{name} [{file_pattern}] fix={file_fix}"
-                if (file_pattern or file_fix) else name
-            )
-        elif f:
-            files_parts.append(str(f))
-    files_text = (
-        f"\n    all_files_in_issue: {' | '.join(files_parts)}"
-        if files_parts else ""
-    )
-
-    return (
-        f"[{i}] {level} score={score:.3f} error_type={error} pattern={pattern}\n"
-        f"    reason: {reason}\n"
-        f"    fix: {fix}"
-        f"{dep_text}"
-        f"{changed_text}"
-        f"{files_text}"
-    )
-
-
-def _current_failure_block(q: Dict[str, Any]) -> str:
-    error   = q.get("error_type", "")
-    pattern = q.get("failure_pattern", "")
-    reason  = str(q.get("overall_failure_reason") or q.get("failure_reason") or "")
-    files   = " | ".join(str(f) for f in (q.get("relevant_files") or [])) or "(none identified)"
-    return (
-        f"error_type      : {error}\n"
-        f"failure_pattern : {pattern}\n"
-        f"failure_reason  : {reason}\n"
-        f"files_in_log    : {files}"
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM 1 — Relevance Filter
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _build_filter_prompt(failure_block: str, candidate_lines: List[str]) -> str:
-    return f"""You are a CI repair memory relevance filter.
-
-CURRENT CI FAILURE
-{failure_block}
-
-RETRIEVED MEMORY CANDIDATES (ranked highest → lowest similarity)
-{chr(10).join(candidate_lines)}
-
-TASK
-For each candidate decide: is it genuinely relevant to the current failure?
-A candidate is relevant if it:
-  - Matches the error type or failure pattern
-  - Shows a fix, root cause analysis, or solution approach (even if the error matches the log)
-  - Reveals additional files, dependencies, or context not visible in the current log
-  - Shows a transferable fix that could directly apply
-
-IMPORTANT:
-  - A memory with the SAME error but a known FIX is highly relevant - select it!
-  - Do NOT select based on similarity score alone - check if it adds value
-  - Do NOT select if it ONLY describes the error without any fix, root cause, or actionable guidance
-
-Return STRICT JSON only (no markdown):
-{{
-  "relevant_candidates": [
-    {{
-      "index": 0,
-      "memory_level": "L1|L2|L3",
-      "similarity_score": 0.0,
-      "relevance": "high|medium|low",
-      "why_relevant": "<one sentence: what this candidate adds beyond the log>"
-    }}
-  ]
-}}
-
-If nothing is relevant return: {{"relevant_candidates": []}}"""
-
-
-def _run_llm1_filter(
-    all_matches: List[Dict[str, Any]],
-    failure_block: str,
-    llm: Any,
-) -> List[Dict[str, Any]]:
-    """
-    LLM 1 — fast relevance filter.
-    Returns list of selected candidate dicts with their original index.
-    Chunks if prompt is too large.
-    """
-    if not all_matches or llm is None:
+def _safe_list(value: Any) -> List[Any]:
+    if value is None:
         return []
-
-    candidate_lines = [_format_candidate(i, row) for i, row in enumerate(all_matches)]
-
-    def _call_chunk(lines: List[str]) -> List[Dict[str, Any]]:
-        prompt = _build_filter_prompt(failure_block, lines)
-        raw    = _call_llm(llm, prompt)
-        parsed = _parse_json(raw)
-        if not parsed:
-            return []
-        return parsed.get("relevant_candidates") or []
-
-    full_prompt = _build_filter_prompt(failure_block, candidate_lines)
-    if len(full_prompt) <= _MAX_PROMPT_CHARS:
-        return _call_chunk(candidate_lines)
-
-    # Chunked
-    logger.info("[CIMemorySystem] LLM1 filter: chunking %d candidates", len(candidate_lines))
-    results: List[Dict[str, Any]] = []
-    for start in range(0, len(candidate_lines), _CHUNK_SIZE):
-        chunk = candidate_lines[start : start + _CHUNK_SIZE]
-        results.extend(_call_chunk(chunk))
-    return results
+    return value if isinstance(value, list) else [value]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM 2 — Experience Synthesizer
-# ─────────────────────────────────────────────────────────────────────────────
+def _normalize_path(path: Any) -> str:
+    return str(path or "").strip().lstrip("/").replace("\\", "/")
 
-def _build_synthesis_prompt(
-    failure_block: str,
-    relevant_candidate_lines: List[str],
-    relevance_notes: List[str],
-) -> str:
-    candidates_text = "\n\n".join(relevant_candidate_lines)
-    notes_text      = "\n".join(relevance_notes)
 
-    return f"""You are a CI repair experience synthesizer. You have been given:
-  1. A current CI failure (partial — the log is incomplete)
-  2. Past repair experiences that were judged relevant to this failure
-  3. Notes on WHY each past experience is relevant
+def _add_file(files: List[Dict[str, str]], seen: set[str], file_path: Any, reason: str = "", fix: str = "") -> None:
+    path = _normalize_path(file_path)
+    if not path or path in seen:
+        return
+    seen.add(path)
+    row = {"file": path, "reason": reason}
+    if fix:
+        row["fix"] = fix
+    files.append(row)
 
-Your job is to synthesize these into a complete repair guidance document
-that fills in what the CI log does NOT show and tells the agent exactly
-what to do, how to verify, and what to watch out for.
 
-═══════════════════════════════════════════════════════
-CURRENT CI FAILURE  (log is partial)
-═══════════════════════════════════════════════════════
-{failure_block}
+def _build_deterministic_guidance(memory_result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build a production-safe previous-experience document directly from ranked
+    L1/L2/L3 memories.
 
-═══════════════════════════════════════════════════════
-RELEVANT PAST EXPERIENCES
-═══════════════════════════════════════════════════════
-{candidates_text}
+    This is intentionally simple: no extra LLM calls, no hidden filtering, and
+    no separate trajectory prompt. The repair agent receives the current CI
+    context plus the most relevant prior repair evidence and can reason from it.
+    """
+    q = memory_result.get("query") or {}
+    matches: List[Dict[str, Any]] = memory_result.get("matches") or []
+    if not matches:
+        return {}
 
-═══════════════════════════════════════════════════════
-RELEVANCE NOTES (from the filter step)
-═══════════════════════════════════════════════════════
-{notes_text}
+    files_in_log = [_normalize_path(f) for f in _safe_list(q.get("relevant_files")) if _normalize_path(f)]
+    changed_files = [_normalize_path(f) for f in _safe_list(q.get("changed_files")) if _normalize_path(f)]
+    primary_seen: set[str] = set()
+    additional_seen: set[str] = set(files_in_log)
+    primary_files: List[Dict[str, str]] = []
+    additional_files: List[Dict[str, str]] = []
+    linked_issues: List[Dict[str, Any]] = []
+    fix_steps: List[str] = []
+    post_fix_patterns: List[Dict[str, str]] = []
+    verification_commands: List[str] = []
+    relevant_candidates: List[Dict[str, Any]] = []
 
-═══════════════════════════════════════════════════════
-SYNTHESIZE A REPAIR GUIDANCE DOCUMENT
-═══════════════════════════════════════════════════════
+    for index, row in enumerate(matches):
+        level = row.get("memory_level", "")
+        score = float(row.get("similarity_score") or 0.0)
+        reason = str(
+            row.get("overall_failure_reason")
+            or row.get("failure_reason")
+            or row.get("reason")
+            or row.get("principle")
+            or ""
+        ).strip()
+        fix = str(
+            row.get("fix_strategy")
+            or row.get("fix_approach")
+            or row.get("fix_direction")
+            or row.get("principle")
+            or ""
+        ).strip()
+        pattern = str(row.get("failure_pattern") or row.get("issue_type") or row.get("pattern_name") or "").strip()
 
-Produce a structured document covering:
+        relevant_candidates.append({
+            "index": index,
+            "memory_level": level,
+            "similarity_score": round(score, 4),
+            "relevance": "high" if score >= 0.65 else "medium" if score >= 0.35 else "low",
+            "why_relevant": reason or fix or pattern,
+        })
 
-1. DIAGNOSIS — What is really happening beyond what the log shows?
-   The log shows symptoms. What is the actual root cause based on past experience?
+        row_file = _normalize_path(row.get("file"))
+        if row_file:
+            target = primary_files if row_file in files_in_log or level == "L1" else additional_files
+            seen = primary_seen if target is primary_files else additional_seen
+            _add_file(target, seen, row_file, reason or f"Relevant {level} memory match", fix)
 
-2. FULL SCOPE — What files need to change?
-   The log may only mention one file. Based on past fixes, what other files
-   are affected by the same root cause? Include files from dependent_files
-   and co_changed_files in the past experiences.
+        for file_row in _safe_list(row.get("files") or row.get("modified_files") or row.get("example_files")):
+            if isinstance(file_row, dict):
+                file_reason = str(file_row.get("reason") or file_row.get("failure_reason") or reason or "").strip()
+                file_fix = str(file_row.get("fix_direction") or file_row.get("fix_strategy") or fix or "").strip()
+                _add_file(additional_files, additional_seen, file_row.get("file"), file_reason, file_fix)
+            else:
+                _add_file(additional_files, additional_seen, file_row, reason, fix)
 
-3. LINKED ISSUES — Are there related failure patterns that come from the
-   same root cause? If fixing file A typically also requires fixing file B,
-   or if this error type tends to cascade into secondary failures, say so.
+        for dep in _safe_list(row.get("dependent_files")):
+            if isinstance(dep, dict):
+                _add_file(additional_files, additional_seen, dep.get("file"), dep.get("reason", "Dependent file from prior repair"), fix)
+            else:
+                _add_file(additional_files, additional_seen, dep, "Dependent file from prior repair", fix)
 
-4. FIX APPROACH — How to fix it, step by step.
-   Be specific: exact imports, function names, patterns. Use what the past
-   fixes show, not general advice.
+        if fix and fix not in fix_steps:
+            fix_steps.append(fix)
+        for command in _safe_list(row.get("verification") or row.get("verification_after_fix") or row.get("ci_command")):
+            text = str(command).strip()
+            if text and text not in verification_commands:
+                verification_commands.append(text)
 
-5. POST-FIX PATTERNS — What commonly breaks AFTER this fix?
-   Based on past experience, what secondary failures or follow-up CI errors
-   should the agent check for after applying the fix?
+        atomic = row.get("atomic_problems") or row.get("all_problems") or []
+        repair_trajectory = row.get("repair_trajectory") or []
+        if atomic or repair_trajectory:
+            linked_issues.append({
+                "root_cause": reason or pattern,
+                "affected_files": [
+                    item["file"] for item in additional_files if item.get("file")
+                ],
+                "fix_pattern": fix,
+                "missing_from_log": "Prior repair includes linked atomic problems or trajectory steps that may appear after the first CI failure is fixed.",
+                "atomic_problems": atomic,
+                "repair_trajectory": repair_trajectory,
+            })
+            post_fix_patterns.append({
+                "pattern": "Downstream CI stages may reveal hidden failures after the visible failure is fixed.",
+                "likelihood": "medium",
+                "how_to_fix": "Follow the linked repair trajectory and run the workflow validations in order.",
+            })
 
-6. VERIFICATION — How to verify the fix worked before submitting.
-   What command to run, what output to expect, what file to check.
+    for file_path in files_in_log:
+        _add_file(primary_files, primary_seen, file_path, "Mentioned by current CI failure/log analysis", "")
+    for file_path in changed_files:
+        _add_file(additional_files, additional_seen, file_path, "Changed file from current issue context", "")
 
-7. CONFIDENCE — How confident are you based on the evidence?
-   (high = multiple past fixes agree / low = only one partial match)
+    best_score = max((float(row.get("similarity_score") or 0.0) for row in matches), default=0.0)
+    confidence = "high" if best_score >= 0.65 else "medium" if best_score >= 0.35 else "low"
+    diagnosis_parts = [
+        str(q.get("overall_failure_reason") or "").strip(),
+        next((str(row.get("overall_failure_reason") or row.get("failure_reason") or row.get("principle") or "").strip() for row in matches if row), ""),
+    ]
+    diagnosis = " ".join(part for part in diagnosis_parts if part).strip()
 
-Return STRICT JSON only (no markdown fences):
+    command = verification_commands[0] if verification_commands else ""
+    return {
+        "diagnosis": diagnosis,
+        "primary_files": primary_files,
+        "full_scope": {
+            "files_in_log": files_in_log,
+            "primary_files": primary_files,
+            "additional_files": additional_files,
+            "l1_followup_queries": [
+                {
+                    "file": item["file"],
+                    "reason": "Fetch file-level L1 memory/details because this file is linked by prior repair evidence.",
+                }
+                for item in additional_files
+            ],
+        },
+        "linked_issues": linked_issues,
+        "fix_approach": fix_steps or ["Inspect the primary files, then apply the matching prior repair pattern to linked files."],
+        "post_fix_patterns": post_fix_patterns,
+        "verification": {
+            "command": command,
+            "expected_output": "The workflow stage that failed should pass; then run downstream validation stages from the CI workflow.",
+            "files_to_check": [item["file"] for item in primary_files + additional_files if item.get("file")],
+        },
+        "confidence": confidence,
+        "confidence_reason": f"Best memory similarity score is {best_score:.2f}; {len(matches)} memory candidates were retrieved.",
+        "summary": (
+            "Use the current CI failure and workflow context as the primary signal. "
+            "The memory bank provides prior repair evidence for similar failures, including files to inspect, likely linked changes, "
+            "and validation steps to run after the visible failure is fixed."
+        ),
+        "relevant_candidates": relevant_candidates,
+    }
+
+
+def _compact_candidate(row: Dict[str, Any], index: int) -> Dict[str, Any]:
+    files: List[str] = []
+    for value in _safe_list(row.get("file")):
+        path = _normalize_path(value)
+        if path and path not in files:
+            files.append(path)
+    for field in ("files", "modified_files", "example_files", "dependent_files", "changed_files", "affected_files"):
+        for item in _safe_list(row.get(field)):
+            if isinstance(item, dict):
+                path = _normalize_path(item.get("file") or item.get("path"))
+            else:
+                path = _normalize_path(item)
+            if path and path not in files:
+                files.append(path)
+
+    return {
+        "index": index,
+        "memory_level": row.get("memory_level", ""),
+        "similarity_score": row.get("similarity_score", 0.0),
+        "repo": row.get("repo") or row.get("repo_name") or "",
+        "issue_id": row.get("issue_id") or row.get("sha_fail") or "",
+        "error_type": row.get("error_type", ""),
+        "failure_pattern": row.get("failure_pattern") or row.get("issue_type") or row.get("pattern_name") or "",
+        "symptom_or_reason": row.get("symptom") or row.get("overall_failure_reason") or row.get("failure_reason") or row.get("reason") or row.get("principle") or "",
+        "root_cause": row.get("root_cause") or row.get("why_occurred") or "",
+        "fix": row.get("how_fixed") or row.get("fix_strategy") or row.get("fix_approach") or row.get("fix_direction") or row.get("principle") or "",
+        "files": files,
+        "atomic_problems": row.get("atomic_problems") or row.get("all_problems") or [],
+        "repair_trajectory": row.get("repair_trajectory") or [],
+        "repair_trajectory_summary": row.get("repair_trajectory_summary") or "",  # ← ADDED: Pass trajectory reasoning
+        "verification_sequence": row.get("verification_sequence") or [],  # ← ADDED: Pass verification steps
+        "verification": row.get("verification_after_fix") or row.get("verification") or row.get("ci_command") or "",
+    }
+
+
+def _build_single_synthesis_prompt(memory_result: Dict[str, Any], deterministic_doc: Dict[str, Any]) -> str:
+    q = memory_result.get("query") or {}
+    compact_candidates = [
+        _compact_candidate(row, index)
+        for index, row in enumerate(memory_result.get("matches") or [])
+    ]
+    current_context = {
+        "task_id": q.get("task_id"),
+        "sha_fail": q.get("sha_fail"),
+        "repo": q.get("repo"),
+        "workflow_path": q.get("workflow_path"),
+        "error_type": q.get("error_type"),
+        "failure_pattern": q.get("failure_pattern"),
+        "overall_failure_reason": q.get("overall_failure_reason"),
+        "relevant_files_from_log": q.get("relevant_files") or [],
+        "changed_files": q.get("changed_files") or [],
+        "failed_cmd": q.get("failed_cmd") or [],
+        "failed_tool": q.get("failed_tool") or [],
+        "level_scores": memory_result.get("level_scores") or {},
+        "weighted_similarity": memory_result.get("weighted_similarity"),
+    }
+
+    return f"""You are synthesizing CI repair memory into a previous-experience note for a repair agent.
+
+Use the current CI context plus retrieved L1/L2/L3 memories. The CI log may show only the first failure. Your job is to reason from prior repairs and identify:
+- primary files to inspect first
+- hidden/downstream CI problems likely to appear after the visible failure is fixed
+- extra file-level L1 information that should be consulted
+- concrete fixes and validation commands
+- a concise previous-experience summary that can be merged into the problem statement
+
+CRITICAL GUIDANCE FOR MULTI-PROBLEM CI FAILURES:
+1. Check "repair_trajectory_summary" in L2 memories - this explains:
+   - Which problems to fix FIRST (dependency roots)
+   - Which problems are HIDDEN (will fail after visible ones are fixed)
+   - WHY that order (based on CI validation sequence)
+   - Step-by-step verification commands
+
+2. Check "verification_sequence" in L2 memories - this shows:
+   - The CI validation order (install → lint → type → test)
+   - Hidden validations that haven't run yet
+   - What will fail NEXT after current fix
+
+3. For multi-file failures, look for:
+   - File dependencies (file A blocks file B)
+   - Validation cascades (mypy must pass before pytest runs)
+   - Pattern-based problems (same fix across many files)
+
+4. In "additional_files", include ALL files that:
+   - Share the same root cause (even if not in current CI log)
+   - Will fail in later CI validations (based on repair_trajectory_summary)
+   - Are mentioned in "atomic_problems" but not visible yet
+
+Do not invent facts. Use only the current context and retrieved memories. If evidence is weak, mark confidence low.
+
+CURRENT CI CONTEXT
+{json.dumps(current_context, indent=2, ensure_ascii=False)}
+
+RETRIEVED MEMORY CANDIDATES
+{json.dumps(compact_candidates, indent=2, ensure_ascii=False)}
+
+DETERMINISTIC FALLBACK SUMMARY
+{json.dumps(deterministic_doc, indent=2, ensure_ascii=False)}
+
+Return STRICT JSON only:
 {{
-  "diagnosis": "<what is really happening — root cause beyond the log>",
+  "diagnosis": "reasoned root cause and hidden CI picture",
+  "primary_files": [
+    {{"file": "path", "reason": "why primary", "fix": "specific fix pattern if known"}}
+  ],
   "full_scope": {{
-    "files_in_log":     ["<files the log mentions>"],
+    "files_in_log": ["paths from current log"],
+    "primary_files": [
+      {{"file": "path", "reason": "why primary", "fix": "specific fix pattern if known"}}
+    ],
     "additional_files": [
-      {{
-        "file":   "<path>",
-        "reason": "<why this file needs changing>",
-        "fix":    "<what specifically to change>"
-      }}
+      {{"file": "path", "reason": "why likely needed", "fix": "specific prior fix pattern"}}
+    ],
+    "l1_followup_queries": [
+      {{"file": "path", "reason": "what file-level detail should be fetched/checked"}}
     ]
   }},
   "linked_issues": [
     {{
-      "root_cause":    "<shared root cause>",
-      "affected_files": ["<file1>", "<file2>"],
-      "fix_pattern":   "<common fix across all these files>",
-      "missing_from_log": "<what the log hides about this linked change>"
+      "root_cause": "shared cause",
+      "affected_files": ["path"],
+      "fix_pattern": "common fix",
+      "missing_from_log": "hidden/downstream failure inferred from prior repair",
+      "workflow_stage": "install/lint/test/build/etc"
     }}
   ],
   "fix_approach": [
-    "<step 1>",
-    "<step 2>",
-    "<step 3>"
+    "actionable step"
   ],
   "post_fix_patterns": [
-    {{
-      "pattern":     "<what might break next>",
-      "likelihood":  "high|medium|low",
-      "how_to_fix":  "<how to address it if it appears>"
-    }}
+    {{"pattern": "what may fail next", "likelihood": "high|medium|low", "how_to_fix": "what to do"}}
   ],
   "verification": {{
-    "command":         "<command to run to verify the fix>",
-    "expected_output": "<what success looks like>",
-    "files_to_check":  ["<file to inspect after fixing>"]
+    "command": "best command from workflow or memory",
+    "expected_output": "what passing looks like",
+    "files_to_check": ["path"]
   }},
-  "confidence":       "high|medium|low",
-  "confidence_reason": "<why — number of agreeing past fixes, quality of match>",
-  "summary": "<3-4 sentences: complete picture of the failure and the fix approach>"
+  "confidence": "high|medium|low",
+  "confidence_reason": "why",
+  "summary": "short previous-experience note for the repair agent",
+  "relevant_candidates": [
+    {{"index": 0, "memory_level": "L1|L2|L3", "similarity_score": 0.0, "relevance": "high|medium|low", "why_relevant": "why selected"}}
+  ]
 }}"""
 
 
-def _run_llm2_synthesis(
-    all_matches: List[Dict[str, Any]],
-    relevant_candidates: List[Dict[str, Any]],
-    failure_block: str,
-    llm: Any,
-) -> Dict[str, Any]:
-    """
-    LLM 2 — deep synthesis.
-    Only called with the relevant candidates (LLM 1 output).
-    Produces a structured repair guidance document.
-    """
-    if not relevant_candidates or llm is None:
-        return {}
+def _run_single_llm_synthesis(memory_result: Dict[str, Any], llm: Any) -> Dict[str, Any]:
+    deterministic_doc = _build_deterministic_guidance(memory_result)
+    if llm is None:
+        return deterministic_doc
 
-    # Build candidate lines for only the relevant ones
-    selected_lines  = []
-    relevance_notes = []
-
-    for item in relevant_candidates:
-        idx = item.get("index")
-        if idx is None or idx >= len(all_matches):
-            continue
-        row = all_matches[idx]
-        selected_lines.append(_format_candidate(idx, row))
-        note = item.get("why_relevant", "")
-        if note:
-            relevance_notes.append(f"  [candidate {idx}]: {note}")
-
-    if not selected_lines:
-        return {}
-
-    prompt = _build_synthesis_prompt(failure_block, selected_lines, relevance_notes)
-    raw    = _call_llm(llm, prompt)
+    prompt = _build_single_synthesis_prompt(memory_result, deterministic_doc)
+    raw = _call_llm(llm, prompt)
     parsed = _parse_json(raw)
-
     if not parsed:
-        logger.debug("[CIMemorySystem] LLM2 synthesis returned a response that could not be parsed")
-        return {}
+        logger.warning("[CIMemorySystem] Memory synthesis LLM failed or returned invalid JSON; using deterministic guidance")
+        logger.debug(f"[CIMemorySystem] Raw LLM output (first 500 chars): {raw[:500] if raw else 'None'}")
+        return deterministic_doc
 
-    # Ensure all expected keys exist
-    parsed.setdefault("diagnosis",           "")
-    parsed.setdefault("full_scope",          {"files_in_log": [], "additional_files": []})
-    parsed.setdefault("linked_issues",       [])
-    parsed.setdefault("fix_approach",        [])
-    parsed.setdefault("post_fix_patterns",   [])
-    parsed.setdefault("verification",        {})
-    parsed.setdefault("confidence",          "low")
-    parsed.setdefault("confidence_reason",   "")
-    parsed.setdefault("summary",             "")
+    parsed.setdefault("diagnosis", deterministic_doc.get("diagnosis", ""))
+    parsed.setdefault("primary_files", deterministic_doc.get("primary_files", []))
+    parsed.setdefault("full_scope", deterministic_doc.get("full_scope", {}))
+    parsed.setdefault("linked_issues", deterministic_doc.get("linked_issues", []))
+    parsed.setdefault("fix_approach", deterministic_doc.get("fix_approach", []))
+    parsed.setdefault("post_fix_patterns", deterministic_doc.get("post_fix_patterns", []))
+    parsed.setdefault("verification", deterministic_doc.get("verification", {}))
+    parsed.setdefault("confidence", deterministic_doc.get("confidence", "low"))
+    parsed.setdefault("confidence_reason", deterministic_doc.get("confidence_reason", ""))
+    parsed.setdefault("summary", deterministic_doc.get("summary", ""))
+    parsed.setdefault("relevant_candidates", deterministic_doc.get("relevant_candidates", []))
     return parsed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Two-LLM gate entry point
+# Single synthesis entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_two_llm_gate(
@@ -555,36 +621,24 @@ def _run_two_llm_gate(
     llm: Any,
 ) -> Dict[str, Any]:
     """
-    Two-stage LLM gate:
-      LLM 1 — fast relevance filter (all candidates → relevant subset)
-      LLM 2 — deep synthesis (relevant subset → repair guidance document)
+    Build the memory guidance used by the repair agent.
+
+    Kept under the old function name for compatibility with existing callers.
+    The production path uses one synthesis prompt over ranked L1/L2/L3 memory
+    candidates, with deterministic guidance as a fallback.
     """
     result = _empty_selection()
 
     all_matches: List[Dict[str, Any]] = memory_result.get("matches") or []
-    if not all_matches or llm is None:
+    if not all_matches:
         return result
 
-    q             = memory_result.get("query") or {}
-    failure_block = _current_failure_block(q)
-
-    # ── LLM 1: Relevance Filter ───────────────────────────────────────────────
-    relevant_candidates = _run_llm1_filter(all_matches, failure_block, llm)
-    logger.info(
-        "[CIMemorySystem] LLM1 filter: %d/%d candidates selected as relevant",
-        len(relevant_candidates), len(all_matches),
-    )
-
-    if not relevant_candidates:
-        return result   # nothing relevant — skip LLM 2, return empty
-
-    # ── LLM 2: Experience Synthesizer ────────────────────────────────────────
-    guidance_document = _run_llm2_synthesis(
-        all_matches, relevant_candidates, failure_block, llm
-    )
+    guidance_document = _run_single_llm_synthesis(memory_result, llm)
+    relevant_candidates = guidance_document.get("relevant_candidates", [])
 
     result["use_memory"]          = True
     result["relevant_candidates"] = relevant_candidates
+    result["selected_items"]      = relevant_candidates
     result["guidance_document"]   = guidance_document
     result["analysis_summary"]    = guidance_document.get("summary", "")
     return result
@@ -633,6 +687,24 @@ def format_memory_context(memory: Dict[str, Any]) -> str:
 
     # ── 2. Full scope ─────────────────────────────────────────────────────────
     scope = doc.get("full_scope") or {}
+    primary = scope.get("primary_files") or doc.get("primary_files") or []
+    if primary:
+        out.append("### Primary files to inspect first")
+        for pf in primary:
+            if isinstance(pf, dict):
+                fname = pf.get("file", "")
+                why = pf.get("reason", "")
+                fix = pf.get("fix", "")
+            else:
+                fname, why, fix = str(pf), "", ""
+            line = f"  - `{fname}`"
+            if why:
+                line += f"  — {why}"
+            if fix:
+                line += f"\n    → **prior fix pattern:** {fix}"
+            out.append(line)
+        out.append("")
+
     additional = scope.get("additional_files") or []
     if additional:
         out.append("### Files to fix — including those NOT in the log")
@@ -646,6 +718,16 @@ def format_memory_context(memory: Dict[str, Any]) -> str:
             if fix:
                 line += f"\n    → **fix:** {fix}"
             out.append(line)
+        out.append("")
+
+    followups = scope.get("l1_followup_queries") or []
+    if followups:
+        out.append("### Extra file-level memory to consult")
+        for item in followups:
+            if isinstance(item, dict):
+                out.append(f"  - `{item.get('file', '')}` — {item.get('reason', '')}")
+            else:
+                out.append(f"  - `{item}`")
         out.append("")
 
     # ── 3. Linked issues ──────────────────────────────────────────────────────

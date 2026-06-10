@@ -45,6 +45,59 @@ except ImportError:
         def __init__(self, content: str):
             self.content = content
 
+
+# ── JSON Cleaning Utility ──────────────────────────────────────────────────────
+def _clean_malformed_json(content: str) -> str:
+    """
+    Clean common LLM JSON errors:
+    - Markdown fences
+    - Trailing commas
+    - Missing commas
+    - Extra text before/after JSON
+    """
+    # Remove markdown fences
+    content = re.sub(r'```(?:json)?\s*\n?(.*?)\n?```', r'\1', content, flags=re.DOTALL)
+
+    # Fix trailing commas before } or ]
+    content = re.sub(r',(\s*[}\]])', r'\1', content)
+
+    # Fix missing commas between string values
+    content = re.sub(r'"\s+"', '", "', content)
+
+    # Fix double commas
+    content = re.sub(r',\s*,', ',', content)
+
+    # Fix missing commas between } and {
+    content = re.sub(r'}\s*{', '}, {', content)
+    content = re.sub(r'}\s*\[', '}, [', content)
+    content = re.sub(r']\s*{', '], {', content)
+
+    # Extract JSON from surrounding text (find first { or [ to last } or ])
+    content = content.strip()
+    start_brace = content.find('{')
+    start_bracket = content.find('[')
+
+    # Determine which comes first
+    if start_brace == -1 and start_bracket == -1:
+        return content
+    elif start_brace == -1:
+        start = start_bracket
+        end_char = ']'
+    elif start_bracket == -1:
+        start = start_brace
+        end_char = '}'
+    else:
+        start = min(start_brace, start_bracket)
+        end_char = '}' if start == start_brace else ']'
+
+    # Find matching closing brace/bracket
+    end = content.rfind(end_char)
+    if end > start:
+        content = content[start:end+1]
+
+    return content.strip()
+
+
 # ── Fallbacks for missing 'utilities.*' modules ────────────────────────────────
 
 # utilities.constant.ERROR_KEYWORDS
@@ -442,13 +495,20 @@ of the CI failure for this step using the following STRICT JSON schema
                 try:
                     summary = json.loads(content)
                 except json.JSONDecodeError:
-                    if demjson3 is not None:
-                        try:
-                            summary = demjson3.decode(content)
-                        except Exception as dec_err:
-                            raise ValueError(f"JSON parse failed: {dec_err} | raw: {content[:200]}")
-                    else:
-                        raise ValueError(f"JSON parse failed (demjson3 not installed) | raw: {content[:200]}")
+                    # Try cleaning malformed JSON first
+                    try:
+                        cleaned = _clean_malformed_json(content)
+                        summary = json.loads(cleaned)
+                    except json.JSONDecodeError:
+                        # Fall back to demjson3
+                        if demjson3 is not None:
+                            try:
+                                cleaned = _clean_malformed_json(content)
+                                summary = demjson3.decode(cleaned)
+                            except Exception as dec_err:
+                                raise ValueError(f"JSON parse failed: {dec_err} | raw: {content[:200]}")
+                        else:
+                            raise ValueError(f"JSON parse failed (demjson3 not installed) | raw: {content[:200]}")
 
                 log_details.append(summary)
             except Exception as e:
@@ -606,13 +666,20 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
             try:
                 summary = json.loads(content)
             except json.JSONDecodeError:
-                if demjson3 is not None:
-                    try:
-                        summary = demjson3.decode(content)
-                    except Exception as dec_err:
-                        raise ValueError(f"JSON parse failed: {dec_err} | raw: {content[:200]}")
-                else:
-                    raise ValueError(f"JSON parse failed (demjson3 not installed) | raw: {content[:200]}")
+                # Try cleaning malformed JSON first
+                try:
+                    cleaned = _clean_malformed_json(content)
+                    summary = json.loads(cleaned)
+                except json.JSONDecodeError:
+                    # Fall back to demjson3
+                    if demjson3 is not None:
+                        try:
+                            cleaned = _clean_malformed_json(content)
+                            summary = demjson3.decode(cleaned)
+                        except Exception as dec_err:
+                            raise ValueError(f"JSON parse failed: {dec_err} | raw: {content[:200]}")
+                    else:
+                        raise ValueError(f"JSON parse failed (demjson3 not installed) | raw: {content[:200]}")
             print(" Completed: _generate_summary")
             
             summary["sha_fail"] = self.sha_fail

@@ -83,8 +83,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Download CI-REPAIR-BENCH from HuggingFace.")
     parser.add_argument(
         "--split",
-        default="test",
-        help="Dataset split to download (default: test). Use 'train', 'validation', or 'all'.",
+        default="train",
+        help="Dataset split to download (default: train). Use 'train' or 'all'.",
     )
     parser.add_argument(
         "--out",

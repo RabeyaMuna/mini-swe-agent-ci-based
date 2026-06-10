@@ -17,8 +17,6 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from minisweagent.run.benchmarks.utils.memory_plugin import CIMemoryPlugin
-from minisweagent.run.benchmarks.utils.ci_memory_system import CIMemorySystem
 import numpy as np
 
 
@@ -30,7 +28,7 @@ def load_issue(eval_issues_path: Path, issue_id: int = None, repo: str = None, i
     if issue_id is not None:
         # Find by ID
         for issue in issues:
-            if issue.get('id') == issue_id:
+            if str(issue.get('id')) == str(issue_id):
                 return issue
         raise ValueError(f"Issue {issue_id} not found")
 
@@ -380,7 +378,9 @@ def trace_retrieval(
 
     print(f"\nRetrieval Pipeline:")
     print(f"  1. Load memory:        {len(l1_repo)} L1, {len(l2_repo)} L2, {len(l3_records)} L3")
-    print(f"  2. Compute similarity: Top L1={l1_with_sim[0]['similarity']:.4f if l1_with_sim else 0:.4f}, Top L2={l2_with_sim[0]['similarity']:.4f if l2_with_sim else 0:.4f}")
+    top_l1_score = l1_with_sim[0]["similarity"] if l1_with_sim else 0.0
+    top_l2_score = l2_with_sim[0]["similarity"] if l2_with_sim else 0.0
+    print(f"  2. Compute similarity: Top L1={top_l1_score:.4f}, Top L2={top_l2_score:.4f}")
     print(f"  3. Threshold filter:   {len(l1_filtered)} L1, {len(l2_filtered)} L2 passed (threshold={threshold})")
     print(f"  4. LLM1 filter:        Would select most relevant")
     print(f"  5. LLM2 synthesis:     Would generate guidance")

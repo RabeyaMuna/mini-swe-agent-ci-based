@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
@@ -206,10 +205,6 @@ def _tokenize(text: str) -> List[str]:
     return re.findall(r"[a-z0-9_./-]+", (text or "").lower())
 
 
-def _token_set(text: str) -> set[str]:
-    return set(_tokenize(text))
-
-
 def _jaccard(left: Iterable[str], right: Iterable[str]) -> float:
     lset = {x for x in left if x}
     rset = {x for x in right if x}
@@ -240,10 +235,6 @@ def _structured_file_refs(value: Any) -> List[Dict[str, str]]:
             if path:
                 refs.append({"file": path, "reason": ""})
     return refs
-
-
-def _token_counter(text: str) -> Counter[str]:
-    return Counter(_tokenize(text))
 
 
 def _normalize_error_type_rows(error_types: Any) -> List[Dict[str, str]]:
@@ -425,35 +416,6 @@ def _json_dumps_compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _call_llm(llm: Any, prompt: str) -> str:
-    """
-    Universal LLM caller — works with LangChain ChatModels and plain callables.
-    Returns the text response, or "" on any failure.
-    """
-    if llm is None:
-        return ""
-    # LangChain ChatModel  (.invoke([HumanMessage]) → result.content)
-    try:
-        try:
-            from langchain_core.messages import HumanMessage  # type: ignore
-            result = llm.invoke([HumanMessage(content=prompt)])
-            return (getattr(result, "content", None) or "").strip()
-        except (ImportError, AttributeError):
-            pass
-        # LangChain string-invoke or any object with .invoke()
-        result = llm.invoke(prompt)
-        if hasattr(result, "content"):
-            return (result.content or "").strip()
-        return str(result).strip()
-    except Exception:
-        pass
-    # Plain callable  (llm(prompt) → str)
-    try:
-        return str(llm(prompt)).strip()
-    except Exception:
-        return ""
-
-
 def _json_loads_safe(value: Any, default: Any) -> Any:
     if value in (None, ""):
         return default
@@ -477,8 +439,9 @@ class MemoryPlugin:
       - L1 & L2: Search within the same repo AND workflow context
       - L3: Search across all repos and workflows (generalized knowledge)
 
-    When an LLM is provided, candidates that pass lexical thresholds are
-    re-scored by the LLM (Exemplar-Guardian-style) before injection.
+    This plugin does deterministic retrieval only. Higher-level LLM filtering
+    and synthesis happens in ci_memory_system.py after ranked candidates are
+    returned.
     """
 
     def __init__(self, config, result_dir: str, llm=None):
@@ -489,31 +452,10 @@ class MemoryPlugin:
         self.top_k = int(self._cfg("memory_top_k", 3))
         self.memory_backend = str(self._cfg("memory_backend", "json")).strip().lower() or "json"
 
-        # Per-ablation thresholds — always take precedence for known ablation configs.
-        #
-        # Design principle (Equal L1-floor / Corroboration-bonus):
-        #   T_cond = T_L1 × W_L1(renormalized)
-        #   where T_L1 = 0.55 is the base evidence bar for a direct file match.
-        #
-        # This guarantees:
-        #   1. L1 alone at strength ≥ 0.55 always passes in every ablation condition.
-        #   2. L2 and L3 can only LOWER the bar for a weaker L1 (corroboration bonus).
-        #      Multi-level conditions are always at least as permissive as L1-only.
-        #   3. Injection rate increases monotonically: L1 ≤ L1+L2 ≤ L1+L2+L3.
-        #
-        # Concretely (renormalized L1 weights: L1=1.000 / 0.556 / 0.500):
-        #   L1 only    → T = 0.55 × 1.000 = 0.55  (40/60 on benchmark)
-        #   L1+L2      → T = 0.55 × 0.556 = 0.31  (LOWERED - allows L2-only matches for config errors)
-        #   L1+L2+L3   → T = 0.55 × 0.500 = 0.28  (LOWERED - allows L2/L3 to carry weight)
-        #
-        # Updated thresholds to handle configuration errors without specific files:
-        # - L1+L2: 0.31 (down from 0.37) - allows perfect L2 matches to pass even when L1=0
-        # - L1+L2+L3: 0.28 (down from 0.33) - allows L2/L3 corroboration without L1
-        #
-        # memory_similarity_threshold in config.yaml is only used as a fallback
-        # for unrecognized ablation strings (e.g. custom configs).
+        # Thresholds are reported for observability. Retrieval itself keeps all
+        # positive-similarity candidates and lets the downstream memory gate
+        # decide what to use.
         _raw_levels = str(self._cfg("memory_ablation_levels", "L1+L2+L3"))
-        # Low thresholds (0.10) act as spam filter only - LLM1 filter does the real selection
         _ablation_thresholds = {"L1": 0.10, "L1+L2": 0.10, "L1+L2+L3": 0.10}
         if _raw_levels in _ablation_thresholds:
             self.similarity_threshold = float(_ablation_thresholds[_raw_levels])
@@ -543,29 +485,13 @@ class MemoryPlugin:
         # Embeddings are stored in each record as "_embedding": [float, ...]
         # and injected into the provider's cache keyed by the record's search_document.
         self._load_stored_embeddings()
-        # Per-level gate thresholds applied before top-k selection.
-        # L1=0.35: LOWERED from 0.40 to allow semantic-only matches for config errors without files
-        #          (semantic match ~0.7 × 0.5 weight = 0.35 score when no file match)
-        # L2=0.40: same bar; repo-level needs semantic + error type corroboration.
-        # L3=0.50: strictest — cross-repo evidence must be high quality to avoid
-        #          injecting generic patterns that mislead fault localization.
         self.level_thresholds = {"L1": 0.35, "L2": 0.40, "L3": 0.50}
 
         # Ablation: which memory levels are active (L1 / L1+L2 / L1+L2+L3)
         raw_levels = str(self._cfg("memory_ablation_levels", "L1+L2+L3"))
         self.active_levels = {lvl.strip() for lvl in raw_levels.split("+") if lvl.strip()} or {"L1", "L2", "L3"}
 
-        # Renormalize base weights so they always sum to 1.0 across active levels.
-        # Without this, L1-only weighted_similarity = 0.60 × L1_best, which would
-        # suppress memory far more than the full config at the same threshold.
-        #
-        # Updated weights to reduce L1's influence and increase L2's:
-        # - L1: 0.50 (down from 0.60) - reduces penalty when L1 can't match (config errors)
-        # - L2: 0.40 (up from 0.30) - gives repo-level patterns more influence
-        # - L3: 0.10 (unchanged) - generalized knowledge baseline
-        #
-        # In L1+L2 mode: L1=0.556, L2=0.444 (instead of L1=0.667, L2=0.333)
-        # This allows perfect L2 (1.0) to reach 0.444 weighted score even when L1=0
+        # Renormalize weights so weighted_similarity is comparable across ablations.
         _base = {"L1": 0.50, "L2": 0.40, "L3": 0.10}
         _active_sum = sum(_base[lvl] for lvl in self.active_levels if lvl in _base)
         self.level_weights = {
@@ -726,15 +652,60 @@ class MemoryPlugin:
         )
 
     def _build_search_document(self, record: Dict[str, Any], *, level: str) -> str:
+        def _json_text(value: Any) -> str:
+            try:
+                return json.dumps(value, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                return str(value)
+
+        def _atomic_problem_text(value: Any) -> str:
+            rows = []
+            for problem in _safe_list(value):
+                if not isinstance(problem, dict):
+                    text = str(problem).strip()
+                    if text:
+                        rows.append(text)
+                    continue
+                file_changes = _safe_list(problem.get("file_changes", []))
+                file_text = " ".join(
+                    " ".join(
+                        str(x).strip()
+                        for x in [
+                            item.get("file", ""),
+                            item.get("fix", "") or item.get("fix_strategy", ""),
+                            item.get("what_wrong", "") or item.get("what_is_wrong", ""),
+                        ]
+                        if str(x or "").strip()
+                    )
+                    for item in file_changes if isinstance(item, dict)
+                )
+                rows.append(
+                    " ".join(
+                        str(x).strip()
+                        for x in [
+                            problem.get("problem_id"),
+                            problem.get("visibility"),
+                            problem.get("issue_type") or problem.get("problem_type"),
+                            problem.get("failed_cmd") or problem.get("ci_command"),
+                            problem.get("problem") or problem.get("symptom"),
+                            problem.get("root_cause"),
+                            problem.get("fix_strategy") or problem.get("how_fixed"),
+                            file_text,
+                        ]
+                        if str(x or "").strip()
+                    )
+                )
+            return " | ".join(row for row in rows if row)
+
         dependent_files = _structured_file_refs(record.get("dependent_files", []))
         dep_text = " | ".join(
             " ".join(
                 x for x in [
-                    ref.get("file", ""),
+                    ref.get("file", "") or ref.get("path", ""),
                     ref.get("reason", ""),
                 ] if x
             )
-            for ref in dependent_files[:5]
+            for ref in dependent_files
         )
         file_entries = _safe_list(record.get("files", []))
         file_text = " | ".join(
@@ -746,7 +717,7 @@ class MemoryPlugin:
                     str(item.get("fix_strategy", "") or item.get("fix_direction", "")).strip(),
                 ] if x
             )
-            for item in file_entries[:5] if isinstance(item, dict)
+            for item in file_entries if isinstance(item, dict)
         )
         example_files = _safe_list(record.get("example_files", []))
         example_text = " | ".join(
@@ -757,7 +728,7 @@ class MemoryPlugin:
                     str(item.get("failure_pattern", "")).strip(),
                 ] if x
             )
-            for item in example_files[:5] if isinstance(item, dict)
+            for item in example_files if isinstance(item, dict)
         )
         # Resolve field aliases — seeded data uses different key names than runtime-saved data.
         # Always check both names so the document is equally rich for both sources.
@@ -780,17 +751,26 @@ class MemoryPlugin:
         )
         # fix_pattern is a list in seeded data — join into text
         fix_pattern_items = _safe_list(record.get("fix_pattern") or [])
-        fix_pattern_text  = " | ".join(str(x) for x in fix_pattern_items[:4])
+        fix_pattern_text  = " | ".join(str(x) for x in fix_pattern_items)
         if fix_pattern_text and not fix:
             fix = fix_pattern_text
 
         # issue_subtype is seeded-data's finer-grained label — treat as extra failure_pattern signal
         issue_subtype = str(record.get("issue_subtype") or record.get("root_cause_category") or "")
+        repair_trajectory = (
+            record.get("repair_trajectory")
+            or record.get("repair_trajectory_summary")
+            or record.get("trajectory_summary")
+            or ""
+        )
+        atomic_problems = record.get("atomic_problems") or record.get("problems") or []
 
         parts = [
             f"level: {level}",
             f"repo: {record.get('repo','')}",
             f"workflow: {record.get('workflow_name') or record.get('workflow_path') or ''}",
+            f"sha_fail: {record.get('sha_fail','')}",
+            f"issue_id: {record.get('issue_id') or record.get('id') or ''}",
             f"file: {record.get('file','')}",
             f"line: {record.get('line_number','')}",
             f"error_type: {record.get('error_type','')}",
@@ -804,7 +784,11 @@ class MemoryPlugin:
             f"principle: {record.get('principle') or ''}",
             f"fix_strategy: {fix}",
             f"fix_direction: {fix}",
-            f"failure_examples: {' | '.join(str(x) for x in _safe_list(record.get('failure_examples', []))[:4])}",
+            f"repair_trajectory: {repair_trajectory if isinstance(repair_trajectory, str) else _json_text(repair_trajectory)}",
+            f"repair_trajectory_summary: {record.get('repair_trajectory_summary') or ''}",
+            f"atomic_problems: {_atomic_problem_text(atomic_problems)}",
+            f"workflow_ordered_problem_flow: {_json_text(record.get('workflow_ordered_problem_flow', []))}",
+            f"failure_examples: {' | '.join(str(x) for x in _safe_list(record.get('failure_examples', [])))}",
             f"files: {file_text}",
             f"example_files: {example_text}",
             f"dependent_files: {dep_text}",
@@ -860,7 +844,7 @@ class MemoryPlugin:
         record["line_number"] = record.get("line_number")
         record["overall_failure_reason"] = str(
             record.get("overall_failure_reason")
-            or " | ".join(str(x) for x in _safe_list(record.get("failure_reasons", []))[:3])
+            or " | ".join(str(x) for x in _safe_list(record.get("failure_reasons", [])))
         ).strip()
         record["file_failure_reason"] = str(record.get("file_failure_reason") or "").strip()
         record["failure_examples"] = _safe_list(record.get("failure_examples", [])) or _safe_list(record.get("failure_reasons", []))
@@ -870,7 +854,7 @@ class MemoryPlugin:
 
     def _build_query_document(self, query: Dict[str, Any]) -> str:
         file_rows = []
-        for item in (query.get("relevant_files_details") or [])[:5]:
+        for item in (query.get("relevant_files_details") or []):
             if not isinstance(item, dict):
                 continue
             file_rows.append(
@@ -886,7 +870,7 @@ class MemoryPlugin:
                 )
             )
         chunk_rows = []
-        for item in (query.get("chunk_summaries") or [])[:8]:
+        for item in (query.get("chunk_summaries") or []):
             if not isinstance(item, dict):
                 continue
             chunk_rows.append(
@@ -949,6 +933,17 @@ class MemoryPlugin:
                 boost += 0.05
         return min(boost, 0.15)
 
+    def _similar_matches(self, scored: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Keep every candidate that has measurable similarity.
+
+        The memory bank is already split by level and repo/workflow scope where
+        appropriate, so retrieval should not silently drop useful files because
+        of a fixed slice. Ranking is preserved for downstream prompt formatting.
+        """
+        scored.sort(key=lambda item: float(item.get("similarity_score", 0.0)), reverse=True)
+        return [row for row in scored if float(row.get("similarity_score", 0.0)) > 0.0]
+
     def _query_collection(self, level: str, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         collection = self._collection_for_level(level)
         if collection is None:
@@ -958,9 +953,13 @@ class MemoryPlugin:
         if query_embedding is None:
             return []
         try:
+            try:
+                n_results = max(int(collection.count()), 1)
+            except Exception:
+                n_results = self.top_k
             result = collection.query(
                 query_embeddings=[query_embedding.tolist()],
-                n_results=self.top_k,
+                n_results=n_results,
                 include=["metadatas", "documents", "distances"],
             )
         except Exception as exc:
@@ -981,8 +980,7 @@ class MemoryPlugin:
                 "semantic_score": round(semantic_score, 4),
             }
             rows.append(row)
-        rows.sort(key=lambda item: float(item.get("similarity_score", 0.0)), reverse=True)
-        return rows[: self.top_k]
+        return self._similar_matches(rows)
 
     def _upsert_chroma_record(self, level: str, record: Dict[str, Any]) -> None:
         collection = self._collection_for_level(level)
@@ -1066,17 +1064,115 @@ class MemoryPlugin:
             "chunk_summaries": log_analysis_result.get("chunk_summaries", []) or [],
         }
 
+    def _llm_rerank(self, query: Dict[str, Any], candidates: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+        """
+        LLM re-ranks candidates by semantic relevance.
+
+        Stage 2 of hybrid retrieval: after fast embedding search,
+        use LLM to score semantic relevance and return top_k best matches.
+        """
+        if not self.llm or not candidates:
+            return candidates[:top_k]
+
+        if len(candidates) <= top_k:
+            return candidates  # No re-ranking needed
+
+        # Prepare compact summary for LLM
+        candidates_summary = []
+        for i, c in enumerate(candidates):
+            candidates_summary.append({
+                "index": i,
+                "memory_level": c.get("memory_level", ""),
+                "similarity_score": round(float(c.get("similarity_score", 0.0)), 3),
+                "issue_type": c.get("issue_type", ""),
+                "error_type": c.get("error_type", ""),
+                "problem": _clip(str(c.get("problem", "") or c.get("overall_failure_reason", "") or c.get("failure_reason", "")), 200),
+                "fix": _clip(str(c.get("universal_fix_strategy", "") or c.get("fix_strategy", "")), 150),
+            })
+
+        prompt = f"""Score how relevant each past CI failure memory is for this NEW failure.
+
+NEW CI FAILURE:
+- Repo: {query.get("repo", "")}
+- Error Type: {query.get("error_type", "")}
+- Failed Command: {" ".join(_safe_list(query.get("failed_cmd", [])))}
+- Error Message: {_clip(str(query.get("failure_reason", "")), 200)}
+
+CANDIDATE MEMORIES (from embedding search):
+{json.dumps(candidates_summary, indent=2)[:2500]}
+
+Your task: Score each candidate 0-100 on relevance to the NEW failure.
+Consider:
+- Does it address the same root cause?
+- Would its fix strategy help here?
+- Are the conditions/constraints similar?
+
+Return STRICT JSON (no markdown):
+{{
+  "scores": [95, 80, 70, 65, 60, ...]
+}}
+
+IMPORTANT: Return exactly {len(candidates)} scores in the same order as candidates.
+"""
+
+        try:
+            result = self.llm.invoke(prompt)
+            response = getattr(result, "content", str(result)).strip()
+
+            # Extract JSON
+            first_brace = response.find("{")
+            last_brace = response.rfind("}")
+            if first_brace != -1 and last_brace != -1:
+                response = response[first_brace:last_brace + 1]
+
+            scores_data = json.loads(response)
+            scores = scores_data.get("scores", [])
+
+            # Combine scores with candidates and sort
+            scored_candidates = []
+            for i, candidate in enumerate(candidates):
+                score = scores[i] if i < len(scores) else 0
+                scored_candidates.append((score, candidate))
+
+            # Sort by LLM score (descending) and return top_k
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            return [c for _, c in scored_candidates[:top_k]]
+
+        except Exception as e:
+            logger.warning(f"[Memory] LLM re-ranking failed: {e}, falling back to embedding scores")
+            return candidates[:top_k]
+
     def retrieve(self, query: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Hybrid retrieval: Fast embedding search (top 20) + LLM re-ranking (top 5).
+
+        Stage 1: Embedding-based similarity (fast, broad)
+        Stage 2: LLM semantic re-ranking (precise, focused)
+        """
         if not self.enabled:
             return self._empty_result(query, "memory_disabled")
+
+        # Stage 1: Fast embedding search - get top 20 candidates per level
         if self.memory_backend == "chroma":
-            l1 = self._query_collection("L1", query) if "L1" in self.active_levels else []
-            l2 = self._query_collection("L2", query) if "L2" in self.active_levels else []
-            l3 = self._query_collection("L3", query) if "L3" in self.active_levels else []
+            l1_candidates = self._query_collection("L1", query) if "L1" in self.active_levels else []
+            l2_candidates = self._query_collection("L2", query) if "L2" in self.active_levels else []
+            l3_candidates = self._query_collection("L3", query) if "L3" in self.active_levels else []
         else:
-            l1 = self._retrieve_l1(query) if "L1" in self.active_levels else []
-            l2 = self._retrieve_l2(query) if "L2" in self.active_levels else []
-            l3 = self._retrieve_l3(query) if "L3" in self.active_levels else []
+            # Get all candidates from embedding search (already sorted by similarity)
+            l1_candidates = self._retrieve_l1(query) if "L1" in self.active_levels else []
+            l2_candidates = self._retrieve_l2(query) if "L2" in self.active_levels else []
+            l3_candidates = self._retrieve_l3(query) if "L3" in self.active_levels else []
+
+        # Stage 2: LLM re-rank top 20 to top 5 (only if LLM is available)
+        if self.llm:
+            l1 = self._llm_rerank(query, l1_candidates[:20], top_k=5)
+            l2 = self._llm_rerank(query, l2_candidates[:20], top_k=3)
+            l3 = self._llm_rerank(query, l3_candidates[:20], top_k=2)
+        else:
+            # Fallback: just take top results from embedding search
+            l1 = l1_candidates[:5]
+            l2 = l2_candidates[:3]
+            l3 = l3_candidates[:2]
 
         best_scores = {
             "L1": round(max((float(row.get("similarity_score", 0.0)) for row in l1), default=0.0), 4),
@@ -1088,9 +1184,6 @@ class MemoryPlugin:
             4,
         )
 
-        # No threshold gate — all retrieved entries are ranked and passed to the LLM.
-        # The LLM uses similarity scores to decide what is relevant for this issue.
-
         # Candidate files: prefer LLM's suspected_files, fall back to L1/L2 paths
         candidate_files: List[str] = []
         for row in l1:
@@ -1098,7 +1191,7 @@ class MemoryPlugin:
             if path and path not in candidate_files:
                 candidate_files.append(path)
         for row in l2:
-            for file_row in (row.get("files", []) or row.get("modified_files", []))[:5]:
+            for file_row in (row.get("files", []) or row.get("modified_files", [])):
                 path = _normalize_path(file_row.get("file", ""))
                 if path and path not in candidate_files:
                     candidate_files.append(path)
@@ -1121,9 +1214,14 @@ class MemoryPlugin:
                 "task_id": query.get("task_id"),
                 "sha_fail": query.get("sha_fail"),
                 "repo": query.get("repo"),
+                "workflow_path": query.get("workflow_path"),
                 "error_type": query.get("error_type"),
                 "failure_pattern": query.get("failure_pattern"),
                 "overall_failure_reason": query.get("failure_reason") or query.get("error_context_summary") or "",
+                "relevant_files": query.get("relevant_files", []) or [],
+                "changed_files": query.get("changed_files", []) or [],
+                "failed_cmd": query.get("failed_cmd", []) or [],
+                "failed_tool": query.get("failed_tool", []) or [],
             },
             "query_file_details": query.get("relevant_files_details", []) or [],
             "thresholds": {
@@ -1136,17 +1234,171 @@ class MemoryPlugin:
             "selected_memory_levels": [
                 lvl for lvl, rows in (("L1", l1), ("L2", l2), ("L3", l3)) if rows
             ],
-            "candidate_files": candidate_files[:10],
-            "high_level_hints": high_level_hints[:6],
+            "candidate_files": candidate_files,
+            "high_level_hints": high_level_hints,
             "l1_matches": l1,
             "l2_matches": l2,
             "l3_matches": l3,
             "matches": [*l1, *l2, *l3],
+            "retrieval_method": "hybrid" if self.llm else "embedding_only",
         }
         self._append_jsonl(self.retrieval_log_path, result)
         # Persist any newly computed embeddings back to disk so next run skips re-embedding
         self._persist_new_embeddings()
         return result
+
+    def generate_repair_plan(
+        self,
+        issue: Dict[str, Any],
+        retrieved_memories: Dict[str, Any],
+        validation_sequence: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Generate structured CI repair plan from retrieved memories.
+
+        Input:
+        - issue: Current CI failure details
+        - retrieved_memories: Result from retrieve() with L1/L2/L3 matches
+        - validation_sequence: CI workflow validation steps
+
+        Output: Structured plan with:
+        - problem_statement: For CI document
+        - root_causes: Identified causes with evidence
+        - repair_steps: Step-by-step fixes (WHAT, WHERE, HOW, WHY, VERIFY)
+        - verification_order: Sequence to follow
+        """
+        if not self.llm:
+            return {"error": "LLM not available for plan generation"}
+
+        query = retrieved_memories.get("query", {})
+        l1_matches = retrieved_memories.get("l1_matches", [])[:3]
+        l2_matches = retrieved_memories.get("l2_matches", [])[:2]
+        l3_matches = retrieved_memories.get("l3_matches", [])[:2]
+
+        # Compact memory summary for LLM
+        l1_summary = [
+            {
+                "file": m.get("file", ""),
+                "problem": _clip(str(m.get("problem", "")), 150),
+                "fix": _clip(str(m.get("fix_strategy", "")), 150),
+            }
+            for m in l1_matches
+        ]
+
+        l2_summary = [
+            {
+                "issue_type": m.get("issue_type", ""),
+                "atomic_problems": [
+                    {
+                        "type": p.get("issue_type", ""),
+                        "symptom": _clip(str(p.get("symptom", "")), 100),
+                        "ci_stage": p.get("ci_stage", ""),
+                    }
+                    for p in (m.get("atomic_problems", []) or [])[:3]
+                ],
+            }
+            for m in l2_matches
+        ]
+
+        l3_summary = [
+            {
+                "issue_type": m.get("issue_type", ""),
+                "problem": _clip(str(m.get("problem", "")), 200),
+                "fix_strategy": _clip(str(m.get("universal_fix_strategy", "")), 200),
+            }
+            for m in l3_matches
+        ]
+
+        prompt = f"""You are a CI repair expert. Generate a structured repair plan for this CI failure.
+
+CI FAILURE:
+- Repo: {query.get("repo", "")}
+- Workflow: {query.get("workflow_path", "")}
+- Failed Command: {" ".join(_safe_list(query.get("failed_cmd", [])))}
+- Error: {_clip(str(query.get("overall_failure_reason", "")), 300)}
+
+VALIDATION SEQUENCE (CI workflow order):
+{json.dumps(validation_sequence, indent=2)[:1000]}
+
+RETRIEVED MEMORIES FROM SIMILAR PAST FAILURES:
+
+L1 (File-level fixes):
+{json.dumps(l1_summary, indent=2)[:1500]}
+
+L2 (Issue-level patterns):
+{json.dumps(l2_summary, indent=2)[:1500]}
+
+L3 (Universal patterns):
+{json.dumps(l3_summary, indent=2)[:1500]}
+
+YOUR TASK:
+Generate a structured repair plan that:
+1. Identifies WHAT needs to be fixed (root causes)
+2. Specifies WHERE to fix (files, lines, sections)
+3. Explains HOW to fix (specific changes)
+4. Lists WHAT TO VERIFY after each fix
+5. RESPECTS validation sequence order (fix P1 before P2 appears)
+
+Return STRICT JSON (no markdown, no extra text):
+{{
+  "problem_statement": "Complete problem description for CI document. Be comprehensive.",
+  "root_causes": [
+    {{
+      "cause": "Root cause description",
+      "evidence": "Evidence from logs/errors",
+      "validation_stage": 1
+    }}
+  ],
+  "repair_steps": [
+    {{
+      "step_id": 1,
+      "what_to_fix": "Specific problem description",
+      "where_to_fix": "File path and location (e.g., pyproject.toml line 189)",
+      "how_to_fix": "Exact change to make",
+      "why_this_fixes": "Explanation of why this resolves the issue",
+      "verify_by": "Command to verify (e.g., 'uv install' should succeed)",
+      "validation_stage": 1,
+      "depends_on": []
+    }},
+    {{
+      "step_id": 2,
+      "what_to_fix": "Next problem",
+      "where_to_fix": "File location",
+      "how_to_fix": "Change details",
+      "why_this_fixes": "Reason",
+      "verify_by": "Verification command",
+      "validation_stage": 2,
+      "depends_on": [1]
+    }}
+  ],
+  "verification_order": [1, 2, 3],
+  "estimated_complexity": "low|medium|high"
+}}
+"""
+
+        try:
+            result = self.llm.invoke(prompt)
+            response = getattr(result, "content", str(result)).strip()
+
+            # Extract JSON
+            first_brace = response.find("{")
+            last_brace = response.rfind("}")
+            if first_brace != -1 and last_brace != -1:
+                response = response[first_brace:last_brace + 1]
+
+            plan = json.loads(response)
+            return plan
+
+        except Exception as e:
+            logger.warning(f"[Memory] Plan generation failed: {e}")
+            return {
+                "problem_statement": str(query.get("overall_failure_reason", "CI failure")),
+                "root_causes": [],
+                "repair_steps": [],
+                "verification_order": [],
+                "estimated_complexity": "unknown",
+                "error": str(e),
+            }
 
     def _empty_result(
         self,
@@ -1310,8 +1562,7 @@ class MemoryPlugin:
                 }
             )
 
-        scored.sort(key=lambda item: item.get("similarity_score", 0.0), reverse=True)
-        return scored[: self.top_k]
+        return self._similar_matches(scored)
 
     def _retrieve_l2(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         repo = str(query.get("repo") or "")
@@ -1423,8 +1674,7 @@ class MemoryPlugin:
                 }
             )
 
-        scored.sort(key=lambda item: item.get("similarity_score", 0.0), reverse=True)
-        return scored[: self.top_k]
+        return self._similar_matches(scored)
 
     def _retrieve_l3(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         # L3: Cross-repo generalized retrieval — NO repo or workflow filtering
@@ -1539,8 +1789,7 @@ class MemoryPlugin:
                 }
             )
 
-        scored.sort(key=lambda item: item.get("similarity_score", 0.0), reverse=True)
-        return scored[: self.top_k]
+        return self._similar_matches(scored)
 
     def retrieve_for_file(
         self,
@@ -1640,7 +1889,7 @@ class MemoryPlugin:
             if path and path not in candidate_files:
                 candidate_files.append(path)
         for row in l2:
-            for file_row in (row.get("modified_files", []) or row.get("files", []))[:5]:
+            for file_row in (row.get("modified_files", []) or row.get("files", [])):
                 path = _normalize_path(file_row.get("file", ""))
                 if path and path not in candidate_files:
                     candidate_files.append(path)
@@ -1678,8 +1927,8 @@ class MemoryPlugin:
             "selected_memory_levels": [
                 lvl for lvl, rows in (("L1", l1), ("L2", l2), ("L3", l3)) if rows
             ],
-            "candidate_files": candidate_files[:10],
-            "high_level_hints": high_level_hints[:6],
+            "candidate_files": candidate_files,
+            "high_level_hints": high_level_hints,
             "l1_matches": l1,
             "l2_matches": l2,
             "l3_matches": l3,
@@ -1761,9 +2010,9 @@ class MemoryPlugin:
             if any(_normalize_path(item.get("file", "")) == normalized or _basename(item.get("file", "")) == base for item in files):
                 l2_rows.append(row)
         if not l2_rows:
-            l2_rows = (retrieval_result.get("l2_matches", []) or [])[:2]
-        l3_rows = (retrieval_result.get("l3_matches", []) or [])[:2]
-        return {"l1": l1_rows[:3], "l2": l2_rows[:2], "l3": l3_rows[:2]}
+            l2_rows = retrieval_result.get("l2_matches", []) or []
+        l3_rows = retrieval_result.get("l3_matches", []) or []
+        return {"l1": l1_rows, "l2": l2_rows, "l3": l3_rows}
 
     def _build_file_level_analysis_prompt(
         self,
@@ -1792,10 +2041,12 @@ class MemoryPlugin:
         def _summarize_row(level: str, idx: int, row: Dict[str, Any]) -> str:
             row_file = row.get("file", "")
             files = row.get("modified_files", []) or row.get("files", []) or []
-            files_text = ", ".join(str(item.get("file", "")) for item in files[:4] if isinstance(item, dict))
+            files_text = ", ".join(str(item.get("file", "")) for item in files if isinstance(item, dict))
             reason = row.get("failure_reason") or row.get("reason") or row.get("principle") or ""
             fix = row.get("fix_pattern") or row.get("fix_strategies") or row.get("fix_strategy") or ""
-            return (
+
+            # Base summary
+            base = (
                 f"  [{level}-{idx}] score={row.get('similarity_score', 0.0):.2f} "
                 f"record_id={row.get('record_id', '')} "
                 f"error_type={row.get('error_type', '')} "
@@ -1806,6 +2057,34 @@ class MemoryPlugin:
                 f"      fix={_clip(str(fix), 220)}"
             )
 
+            # FOR L2: Add full repair trajectory
+            if level == "L2":
+                traj = row.get("repair_trajectory", [])
+                sequence = traj.get("sequence", []) if isinstance(traj, dict) else (traj if isinstance(traj, list) else [])
+
+                if sequence:
+                    traj_lines = [f"\n      TRAJECTORY ({len(sequence)} steps):"]
+                    for s in sequence:
+                        step_num = s.get("step", "?")
+                        action = _clip(str(s.get("action", s.get("fix", ""))), 70)
+                        result = _clip(str(s.get("result", s.get("expected_outcome", ""))), 50)
+                        ci_stage = s.get("ci_stage", "")
+                        traj_lines.append(f"        {step_num}[{ci_stage}]: {action} → {result}")
+                    base += "\n".join(traj_lines)
+
+                # Add atomic problems
+                problems = row.get("atomic_problems", []) or row.get("all_problems", [])
+                if problems:
+                    prob_lines = [f"\n      PROBLEMS ({len(problems)}):"]
+                    for p in problems:
+                        p_num = p.get("problem_number", "?")
+                        vis = "vis" if p.get("is_first_failure") else "hid"
+                        symptom = _clip(str(p.get("problem_identification", {}).get("symptom", p.get("symptom", ""))), 50)
+                        prob_lines.append(f"        P{p_num}[{vis}]: {symptom}")
+                    base += "\n".join(prob_lines)
+
+            return base
+
         candidate_lines: List[str] = []
         for level_key, rows in (("L1", candidates["l1"]), ("L2", candidates["l2"]), ("L3", candidates["l3"])):
             if rows:
@@ -1815,14 +2094,25 @@ class MemoryPlugin:
                 candidate_lines.append(f"  [{level_key}] none")
 
         candidate_block = "\n".join(candidate_lines)
-        return f"""You are a file-level memory relevance analyst for CI fault localization.
+        return f"""You are a TRAJECTORY-AWARE memory relevance analyst for CI fault localization.
 
 Your task:
-- The memory candidates below were already retrieved and ranked by similarity score (highest → lowest).
-- Analyze them against the CURRENT FILE and the CURRENT FILE RELEVANT DETAILS.
-- Use the similarity score as a signal, but make your own relevance judgement.
-- Select only memory that is relevant to the current file and current failure details.
-- A high score does not guarantee relevance; a low score does not disqualify a candidate.
+- Memory candidates below were retrieved by similarity (highest → lowest).
+- Analyze them against CURRENT FAILURE and predict FUTURE FAILURES.
+- Use similarity as a signal, but make your own relevance judgement.
+
+CRITICAL FOR L2 MEMORY WITH TRAJECTORIES:
+- L2 contains REPAIR TRAJECTORIES showing sequential failures (Problem 1 → Problem 2 → Problem 3)
+- The CURRENT failure may match Problem 1, but you MUST analyze the ENTIRE trajectory
+- Understand what will fail NEXT after fixing the current problem
+- Identify ALL files that need checking across ALL trajectory steps
+- Provide validation sequence (not just first fix)
+
+WHY THIS MATTERS:
+- CI stops at first error, so current failure shows only Problem 1
+- But the trajectory reveals Problem 2 (hidden, will appear after fixing P1)
+- And Problem 3 (hidden, will appear after fixing P2)
+- Agent needs to know about ALL problems to fix efficiently
 
 CURRENT FAILURE
 - repo: {query.get("repo", "")}
@@ -1844,6 +2134,41 @@ Selection criteria — select a candidate if it provides:
 2. A directly applicable fault-localization guidance, fix strategy, or fix direction
 3. Dependent files that likely need coordinated changes for this failure
 4. Additional repo-level or cross-repo files worth inspecting when indirectly relevant
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TRAJECTORY-AWARE SELECTION FOR L2 MEMORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+L2 contains REPAIR TRAJECTORIES showing sequential failures:
+  Problem 1 → fix → Problem 2 appears → fix → Problem 3 appears
+
+Your task is NOT just matching the current problem, but PREDICTING what comes next.
+
+REQUIRED ANALYSIS FOR L2:
+1. Match current failure to WHICH STEP in the trajectory
+2. Identify ALL SUBSEQUENT problems that will appear after fixing current problem
+3. List ALL FILES needed across ENTIRE trajectory (not just current step)
+4. Provide VALIDATION SEQUENCE (what to check after each fix)
+5. Warn about HIDDEN PROBLEMS that only appear after fixing visible problem
+
+Example:
+  Current failure: "uv install error in pyproject.toml"
+
+  Trajectory shows:
+    Step 1 [install]: Fix pyproject.toml → install succeeds
+    Step 2 [lint]: Will fail on unused imports in src/*.py
+    Step 3 [test]: Will fail on missing dependency
+
+  YOU MUST INCLUDE:
+    ✓ Current fix: pyproject.toml
+    ✓ Next failure: lint will fail on src/main.py, src/utils.py
+    ✓ After that: test will fail, need to update dependencies
+    ✓ All files to check NOW: pyproject.toml, src/main.py, src/utils.py
+    ✓ Validation sequence: uv install → ruff check → pytest
+
+DO NOT just say "fix pyproject.toml" — that's single-problem matching.
+DO include the ENTIRE trajectory so the agent knows what's coming.
+
 Reject candidates that do not match the current file details, current failure signals, or do not provide actionable guidance.
 
 Return STRICT JSON only:
@@ -1859,7 +2184,10 @@ Return STRICT JSON only:
       "matched_memory_file": "<memory source file if available, else empty string>",
       "failure_pattern": "<compatible pattern>",
       "fl_guidance": "<file-specific fault-localization guidance for the current file>",
-      "fix_strategy": "<transferable fix strategy>"
+      "fix_strategy": "<transferable fix strategy>",
+      "next_failures_expected": "<REQUIRED for L2: what will fail AFTER fixing current problem>",
+      "validation_sequence": ["<step 1: check this>", "<step 2: then check this>"],
+      "all_affected_files_in_trajectory": ["<file1 from step 1>", "<file2 from step 2>"]
     }}
   ],
   "dependent_files": [
@@ -1889,6 +2217,28 @@ Return STRICT JSON only:
       "justification": "<why this candidate is relevant for this file>",
       "failure_pattern": "<compatible pattern>",
       "failure_reason": "<relevant reason>",
+
+      "trajectory_analysis": {{
+        "current_failure_matches_step": 1,
+        "total_trajectory_steps": 3,
+        "next_failures": [
+          {{"step": 2, "stage": "lint", "what_will_fail": "Unused imports", "files": ["src/main.py"]}},
+          {{"step": 3, "stage": "test", "what_will_fail": "Missing dependency", "files": ["pyproject.toml"]}}
+        ],
+        "all_problems_in_trajectory": [
+          {{"problem": 1, "visible": true, "symptom": "Install error"}},
+          {{"problem": 2, "visible": false, "symptom": "Lint error"}},
+          {{"problem": 3, "visible": false, "symptom": "Test error"}}
+        ],
+        "validation_sequence": [
+          "Fix current problem → verify with 'uv install'",
+          "EXPECT lint failure → check src/main.py for unused imports",
+          "EXPECT test failure → check pyproject.toml for missing deps"
+        ],
+        "all_files_to_check_now": ["current_file", "file_from_step2", "file_from_step3"],
+        "recommended_approach": "Fix all 3 problems at once OR fix sequentially expecting 2 more CI runs"
+      }},
+
       "dependent_files": [
           {{"file": "file_a", "reason": "<why this file is relevant for the current file>"}},
           {{"file": "file_b", "reason": "<why this file is relevant for the current file>"}}
@@ -1909,6 +2259,343 @@ Rules:
 - Prefer L1 over L2 over L3 when multiple candidates are compatible.
 - No markdown fences. No extra keys."""
 
+    def _build_step1_trajectory_analysis_prompt(
+        self,
+        *,
+        file_path: str,
+        retrieval_result: Dict[str, Any],
+        candidates: Dict[str, List[Dict[str, Any]]],
+    ) -> str:
+        """
+        STEP 1: Analyze L2 trajectory to identify all files and next failures.
+        """
+        query = retrieval_result.get("query", {}) or {}
+
+        # Summarize L2 candidates with trajectories
+        l2_summaries = []
+        for idx, row in enumerate(candidates.get("l2", [])):
+            traj = row.get("repair_trajectory", {})
+            sequence = traj.get("sequence", []) if isinstance(traj, dict) else (traj if isinstance(traj, list) else [])
+            problems = row.get("atomic_problems", []) or row.get("all_problems", [])
+
+            summary = f"""[L2-{idx}] score={row.get('similarity_score', 0.0):.2f}
+  issue_id={row.get('issue_id', '')} repo={row.get('repo', '')}
+  overall_failure={_clip(str(row.get('overall_failure', '')), 150)}
+
+  TRAJECTORY ({len(sequence)} steps):"""
+
+            for s in sequence:
+                step_num = s.get("step", "?")
+                action = _clip(str(s.get("action", s.get("fix", ""))), 80)
+                files = s.get("files_modified", s.get("affected_files", []))
+                ci_stage = s.get("ci_stage", "")
+                result = _clip(str(s.get("result", s.get("expected_outcome", ""))), 60)
+
+                summary += f"\n    Step {step_num} [{ci_stage}]: {action}"
+                summary += f"\n      Files: {files}"
+                summary += f"\n      Result: {result}"
+
+            summary += f"\n  \n  PROBLEMS ({len(problems)}):"
+            for p in problems:
+                p_num = p.get("problem_number", "?")
+                vis = "visible" if p.get("is_first_failure") else "hidden"
+                symptom = _clip(str(p.get("problem_identification", {}).get("symptom", p.get("symptom", ""))), 60)
+                ci_stage = p.get("problem_identification", {}).get("ci_stage", p.get("ci_stage", ""))
+                affected = p.get("affected_files", [])
+
+                summary += f"\n    P{p_num} [{vis}, {ci_stage}]: {symptom}"
+                summary += f"\n      Files: {affected}"
+
+            l2_summaries.append(summary)
+
+        l2_block = "\n\n".join(l2_summaries) if l2_summaries else "[No L2 trajectories]"
+
+        return f"""STEP 1: TRAJECTORY ANALYSIS
+
+You are analyzing CI repair trajectories to identify all affected files and predict next failures.
+
+CURRENT FAILURE:
+- repo: {query.get("repo", "")}
+- file: {file_path}
+- error_type: {query.get("error_type", "")}
+- failure_pattern: {query.get("failure_pattern", "")}
+
+L2 REPAIR TRAJECTORIES:
+{l2_block}
+
+YOUR TASK:
+1. Find the L2 trajectory that best matches the current failure
+2. Identify which STEP in the trajectory matches the current problem
+3. Extract ALL files that will be affected across ALL steps
+4. Predict NEXT failures that will appear after fixing current problem
+5. Identify CI stages that will fail
+
+Return STRICT JSON:
+{{
+  "best_match_l2_index": 0,
+  "current_failure_matches_step": 1,
+  "total_trajectory_steps": 3,
+
+  "all_files_in_trajectory": [
+    {{"file": "pyproject.toml", "step": 1, "stage": "install"}},
+    {{"file": "src/main.py", "step": 2, "stage": "lint"}},
+    {{"file": "src/utils.py", "step": 2, "stage": "lint"}}
+  ],
+
+  "next_failures": [
+    {{"step": 2, "stage": "lint", "what_will_fail": "Unused imports", "files": ["src/main.py", "src/utils.py"]}},
+    {{"step": 3, "stage": "test", "what_will_fail": "Missing dependency", "files": ["pyproject.toml"]}}
+  ],
+
+  "ci_stages_sequence": ["install", "lint", "test"],
+
+  "validation_sequence": [
+    "Fix step 1 → verify with 'uv install'",
+    "EXPECT step 2 failure → check src/*.py for unused imports",
+    "EXPECT step 3 failure → check dependencies"
+  ]
+}}
+
+No markdown, just JSON."""
+
+    def _fetch_l1_details_for_files(
+        self,
+        *,
+        file_list: List[str],
+        retrieval_result: Dict[str, Any],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        STEP 2a: Fetch detailed L1 entries for specific files identified in trajectory.
+        """
+        l1_matches = retrieval_result.get("l1_matches", []) or []
+
+        l1_by_file = {}
+        for target_file in file_list:
+            normalized_target = _normalize_path(target_file)
+            base_target = _basename(normalized_target)
+
+            # Find L1 entries for this file
+            matching_l1 = [
+                row for row in l1_matches
+                if _normalize_path(row.get("file", "")) == normalized_target
+                or _basename(row.get("file", "")) == base_target
+            ]
+
+            l1_by_file[target_file] = matching_l1
+
+        return l1_by_file
+
+    def _build_step2_deep_analysis_prompt(
+        self,
+        *,
+        file_path: str,
+        file_context: str,
+        retrieval_result: Dict[str, Any],
+        candidates: Dict[str, List[Dict[str, Any]]],
+        step1_result: Dict[str, Any],
+        l1_details: Dict[str, List[Dict[str, Any]]],
+    ) -> str:
+        """
+        STEP 2b: Deep analysis with L1 file-level details to understand file connections.
+        """
+        query = retrieval_result.get("query", {}) or {}
+        query_file_details = [
+            item for item in (retrieval_result.get("query_file_details") or [])
+            if isinstance(item, dict) and _normalize_path(str(item.get("file", ""))) == _normalize_path(file_path)
+        ]
+        current_file_detail = query_file_details[0] if query_file_details else {}
+        current_file_payload = {
+            "file": file_path,
+            "issue_type": current_file_detail.get("issue_type", ""),
+            "line_number": current_file_detail.get("line_number"),
+            "failed_tool": _safe_list(current_file_detail.get("failed_tool", [])),
+            "failed_cmd": _safe_list(current_file_detail.get("failed_cmd", [])),
+            "file_failure_reason": current_file_detail.get("reason", ""),
+            "overall_failure_reason": query.get("overall_failure_reason", "") or query.get("failure_reason", "") or "",
+        }
+
+        # Get best L2 trajectory
+        best_l2_idx = step1_result.get("best_match_l2_index", 0)
+        l2_trajectory = candidates["l2"][best_l2_idx] if candidates.get("l2") and best_l2_idx < len(candidates["l2"]) else {}
+
+        # Format L1 details for each file
+        l1_details_text = []
+        for target_file, l1_entries in l1_details.items():
+            if l1_entries:
+                l1_details_text.append(f"\n  FILE: {target_file}")
+                for idx, l1 in enumerate(l1_entries):
+                    problem = _clip(str(l1.get("problem", l1.get("failure_reason", ""))), 100)
+                    fix = _clip(str(l1.get("fix_strategy", l1.get("fix", ""))), 150)
+                    l1_details_text.append(f"    [L1-{idx}] score={l1.get('similarity_score', 0.0):.2f}")
+                    l1_details_text.append(f"      problem: {problem}")
+                    l1_details_text.append(f"      fix_strategy: {fix}")
+
+        l1_block = "\n".join(l1_details_text) if l1_details_text else "[No L1 details]"
+
+        # L3 principles
+        l3_summaries = []
+        for idx, l3 in enumerate(candidates.get("l3", [])):
+            principle = _clip(str(l3.get("universal_principle", l3.get("principle", ""))), 100)
+            l3_summaries.append(f"  [L3-{idx}] {principle}")
+        l3_block = "\n".join(l3_summaries) if l3_summaries else "[No L3 principles]"
+
+        return f"""STEP 2: DEEP FILE ANALYSIS WITH L1 DETAILS
+
+You are doing deep analysis to understand file connections and create a complete repair plan.
+
+CURRENT FAILURE:
+- repo: {query.get("repo", "")}
+- file: {file_path}
+- error_type: {query.get("error_type", "")}
+- failure_pattern: {query.get("failure_pattern", "")}
+
+CURRENT FILE DETAILS:
+{json.dumps(current_file_payload, indent=2, ensure_ascii=False)}
+
+STEP 1 TRAJECTORY ANALYSIS RESULTS:
+{json.dumps(step1_result, indent=2, ensure_ascii=False)}
+
+L2 TRAJECTORY (best match):
+  issue_id: {l2_trajectory.get('issue_id', '')}
+  repo: {l2_trajectory.get('repo', '')}
+  overall_failure: {l2_trajectory.get('overall_failure', '')}
+
+  repair_trajectory: {json.dumps(l2_trajectory.get('repair_trajectory', {}), indent=4)}
+
+  atomic_problems: {json.dumps(l2_trajectory.get('atomic_problems', []), indent=4)}
+
+DETAILED L1 FILE-LEVEL INFORMATION:
+{l1_block}
+
+L3 UNIVERSAL PRINCIPLES:
+{l3_block}
+
+YOUR TASK:
+Analyze ALL information to understand:
+1. How files are CONNECTED (why fixing A affects B)
+2. Complete VALIDATION sequence (check A, then B, then C)
+3. What to check in EACH file NOW (before any fixes)
+4. Root cause analysis linking all problems
+
+Return STRICT JSON:
+{{
+  "use_memory": true,
+  "similarity_score": 0.85,
+  "similarity_reason": "Matches install error with multi-step trajectory",
+  "selected_memory_levels": ["L1", "L2"],
+
+  "file_connection_analysis": {{
+    "how_files_connected": "Fixing pyproject.toml updates dependencies → triggers lint checks → reveals unused imports",
+    "why_fixing_current_affects_others": "Dependency update changes available imports, making some imports unused",
+    "dependency_chain": ["pyproject.toml", "src/main.py", "src/utils.py"]
+  }},
+
+  "complete_validation_sequence": [
+    {{
+      "step": 1,
+      "action": "Fix pyproject.toml line 379-382: remove default-groups",
+      "verify_with": "uv install",
+      "expected_result": "Install succeeds",
+      "what_checks_now_enabled": "Linter can now run"
+    }},
+    {{
+      "step": 2,
+      "action": "Fix src/main.py line 5: remove unused import",
+      "verify_with": "ruff check src/main.py",
+      "expected_result": "Linter passes for main.py",
+      "what_fails_if_skipped": "Linter fails on unused ChatAgent import"
+    }}
+  ],
+
+  "all_files_to_check_now": [
+    {{
+      "file": "pyproject.toml",
+      "why": "Current failure - invalid default-groups",
+      "where": "Line 379-382, [tool.uv] section",
+      "what_to_look_for": "default-groups config (deprecated)",
+      "priority": "immediate"
+    }},
+    {{
+      "file": "src/main.py",
+      "why": "Will fail after fixing pyproject.toml",
+      "where": "Line 5, imports",
+      "what_to_look_for": "Unused ChatAgent import",
+      "priority": "after_step1"
+    }}
+  ],
+
+  "selected_context": [
+    {{
+      "score": 0.85,
+      "file": "{file_path}",
+      "matched_memory_file": "pyproject.toml",
+      "failure_pattern": "uv install configuration error",
+      "fl_guidance": "Check [tool.uv] section line 379-382 for deprecated default-groups",
+      "fix_strategy": "Remove default-groups section (deprecated in uv 0.5+)",
+      "next_failures_expected": "After fixing: lint will fail on unused imports in src/*.py files",
+      "validation_sequence": ["uv install", "ruff check", "pytest"],
+      "all_affected_files_in_trajectory": ["pyproject.toml", "src/main.py", "src/utils.py"]
+    }}
+  ],
+
+  "dependent_files": [
+    {{"file": "src/main.py", "reason": "Will have unused import after dependency update"}},
+    {{"file": "src/utils.py", "reason": "Will have unused import after dependency update"}}
+  ],
+
+  "additional_files_to_inspect": [],
+
+  "selected_items": [
+    {{
+      "memory_level": "L2",
+      "candidate_key": "L2-0",
+      "similarity_score": 0.85,
+      "relevance": "high",
+      "justification": "Complete trajectory matching install → lint → test sequence",
+      "failure_pattern": "uv config + lint + test cascade",
+      "failure_reason": "Dependency update cascades to multiple CI stages",
+
+      "trajectory_analysis": {{
+        "current_failure_matches_step": 1,
+        "total_trajectory_steps": 3,
+        "next_failures": [
+          {{"step": 2, "stage": "lint", "what_will_fail": "Unused imports", "files": ["src/main.py", "src/utils.py"]}},
+          {{"step": 3, "stage": "test", "what_will_fail": "Missing dev dependency", "files": ["pyproject.toml"]}}
+        ],
+        "all_problems_in_trajectory": [
+          {{"problem": 1, "visible": true, "symptom": "Install error"}},
+          {{"problem": 2, "visible": false, "symptom": "Lint error"}},
+          {{"problem": 3, "visible": false, "symptom": "Test error"}}
+        ],
+        "validation_sequence": [
+          "Fix pyproject.toml → verify with 'uv install'",
+          "EXPECT lint failure → check src/main.py for unused imports",
+          "EXPECT test failure → check pyproject.toml for missing deps"
+        ],
+        "all_files_to_check_now": ["pyproject.toml", "src/main.py", "src/utils.py"],
+        "recommended_approach": "Fix all 3 problems at once to avoid 2 additional CI runs"
+      }},
+
+      "dependent_files": [
+        {{"file": "src/main.py", "reason": "Unused import after dependency update"}},
+        {{"file": "src/utils.py", "reason": "Unused import after dependency update"}}
+      ],
+
+      "localization_hint": "Start at [tool.uv] section, then check src/*.py imports",
+      "fix_direction": "1. Remove deprecated config 2. Clean up imports 3. Update dependencies"
+    }}
+  ],
+
+  "diagnostic_summary": "This is a multi-stage CI failure. Current install error will cascade to lint and test failures. Fix all 3 problems together for efficiency."
+}}
+
+Rules:
+- Use ALL information: L2 trajectory + L1 file details + L3 principles
+- Explain file CONNECTIONS (not just list files)
+- Provide COMPLETE validation sequence
+- Be specific about WHERE to look in each file
+- No markdown, just JSON."""
+
     def analyze_relevance_for_file(
         self,
         *,
@@ -1920,7 +2607,8 @@ Rules:
         if cache_key in self._per_file_analysis_cache:
             return self._per_file_analysis_cache[cache_key]
 
-        empty = {
+        normalized_file = _normalize_path(file_path)
+        empty: Dict[str, Any] = {
             "use_memory": False,
             "similarity_score": 0.0,
             "similarity_reason": "",
@@ -1931,47 +2619,92 @@ Rules:
             "selected_items": [],
             "diagnostic_summary": "",
         }
-        if not self.llm:
-            self._per_file_analysis_cache[cache_key] = empty
-            return empty
 
         candidates = self._filter_candidates_for_file(file_path, retrieval_result)
-        candidate_map: Dict[str, Dict[str, Any]] = {}
-        for level_name, rows in (("L1", candidates["l1"]), ("L2", candidates["l2"]), ("L3", candidates["l3"])):
-            for idx, row in enumerate(rows):
-                candidate_map[f"{level_name}-{idx}"] = row
         if not (candidates["l1"] or candidates["l2"] or candidates["l3"]):
             self._per_file_analysis_cache[cache_key] = empty
             return empty
 
-        prompt = self._build_file_level_analysis_prompt(
-            file_path=file_path,
-            file_context=file_context,
-            retrieval_result=retrieval_result,
-            candidates=candidates,
-        )
-        try:
-            raw = _call_llm(self.llm, prompt)
-            if raw.startswith("```"):
-                lines = raw.splitlines()
-                lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                raw = "\n".join(lines).strip()
-            parsed = json.loads(raw)
-            if not isinstance(parsed, dict):
-                parsed = empty
-        except Exception as exc:
-            print(f"[Memory] File-level LLM relevance analysis failed for {file_path}: {exc}")
-            parsed = empty
+        selected_items: List[Dict[str, Any]] = []
+        selected_context: List[Dict[str, Any]] = []
+        dependent_files: List[Dict[str, str]] = []
+        additional_files: List[Dict[str, str]] = []
+        seen_files: set[str] = {normalized_file}
 
-        if isinstance(parsed, dict):
-            parsed.setdefault("selected_context", [])
-            parsed.setdefault("dependent_files", [])
-            parsed.setdefault("additional_files_to_inspect", [])
-            parsed.setdefault("selected_items", [])
-            parsed["_candidate_map"] = candidate_map
+        def add_file(path: str, reason: str, target: List[Dict[str, str]]) -> None:
+            normalized = _normalize_path(path)
+            if not normalized or normalized in seen_files:
+                return
+            seen_files.add(normalized)
+            target.append({"file": normalized, "reason": reason})
 
+        for level_name, rows in (("L1", candidates["l1"]), ("L2", candidates["l2"]), ("L3", candidates["l3"])):
+            for idx, row in enumerate(rows):
+                score = float(row.get("similarity_score", 0.0))
+                reason = str(
+                    row.get("failure_reason")
+                    or row.get("overall_failure_reason")
+                    or row.get("reason")
+                    or row.get("principle")
+                    or ""
+                )
+                fix = str(
+                    row.get("fix_strategy")
+                    or row.get("fix_direction")
+                    or row.get("fix_approach")
+                    or row.get("principle")
+                    or ""
+                )
+                key = f"{level_name}-{idx}"
+                selected_items.append({
+                    "memory_level": level_name,
+                    "candidate_key": key,
+                    "similarity_score": round(score, 4),
+                    "relevance": "high" if score >= 0.65 else "medium" if score >= 0.35 else "low",
+                    "justification": _clip(reason or fix, 260),
+                    "failure_pattern": row.get("failure_pattern") or row.get("issue_type") or row.get("pattern_name", ""),
+                    "failure_reason": reason,
+                    "localization_hint": _clip(reason, 220),
+                    "fix_direction": _clip(fix, 220),
+                    "dependent_files": row.get("dependent_files", []),
+                    "additional_localization_files": [],
+                })
+                selected_context.append({
+                    "memory_level": level_name,
+                    "score": round(score, 4),
+                    "file": normalized_file,
+                    "matched_memory_file": _normalize_path(str(row.get("file") or "")),
+                    "failure_pattern": row.get("failure_pattern") or row.get("issue_type") or row.get("pattern_name", ""),
+                    "fl_guidance": _clip(reason, 220),
+                    "fix_strategy": _clip(fix, 220),
+                })
+
+                for ref in _structured_file_refs(row.get("dependent_files", [])):
+                    add_file(ref["file"], ref.get("reason", "related memory file"), dependent_files)
+                for file_row in _safe_list(row.get("files") or row.get("modified_files") or row.get("example_files") or []):
+                    if isinstance(file_row, dict):
+                        add_file(
+                            str(file_row.get("file") or ""),
+                            str(file_row.get("reason") or file_row.get("failure_reason") or "related memory file"),
+                            additional_files,
+                        )
+
+        best_score = max((float(item.get("similarity_score", 0.0)) for item in selected_items), default=0.0)
+        levels = [level for level in ("L1", "L2", "L3") if candidates[level.lower()]]
+        parsed = {
+            "use_memory": bool(selected_items),
+            "similarity_score": round(best_score, 4),
+            "similarity_reason": "Ranked memory candidates matched this file or its issue context.",
+            "selected_memory_levels": levels,
+            "selected_context": selected_context,
+            "dependent_files": dependent_files,
+            "additional_files_to_inspect": additional_files,
+            "selected_items": selected_items,
+            "diagnostic_summary": (
+                f"Retrieved {len(selected_items)} memory candidates for {normalized_file}; "
+                f"best score={best_score:.2f}."
+            ),
+        }
         self._per_file_analysis_cache[cache_key] = parsed
         return parsed
 
@@ -2019,7 +2752,6 @@ Rules:
         )
         selected_items = per_file.get("selected_items", []) or []
         selected_context = per_file.get("selected_context", []) or []
-        by_key: Dict[str, Dict[str, Any]] = per_file.get("_candidate_map", {}) or {}
 
         lines = ["HIERARCHICAL MEMORY SYNTHESIS (L1/L2/L3):"]
         lines.append(f"  Levels used: {', '.join(per_file.get('selected_memory_levels', [])) or 'None'}")
@@ -2034,7 +2766,7 @@ Rules:
         lines.append(f"  File-level relevance: {_clip(str(per_file.get('similarity_reason', '')), 220)}")
         diagnostic_summary = per_file.get("diagnostic_summary", "")
         if diagnostic_summary:
-            lines.append(f"  LLM diagnostic summary: {_clip(diagnostic_summary, 400)}")
+            lines.append(f"  Memory summary: {_clip(diagnostic_summary, 400)}")
         if not selected_items and not selected_context:
             lines.append("  No file-specific memory evidence selected.")
             return "\n".join(lines)
@@ -2058,16 +2790,12 @@ Rules:
         for item in selected_items:
             level = str(item.get("memory_level", ""))
             candidate_key = str(item.get("candidate_key", ""))
-            row = by_key.get(candidate_key, {})
             lines.append(
                 f"  {level} selected: candidate={candidate_key} score={float(item.get('similarity_score', 0.0)):.2f} "
                 f"relevance={item.get('relevance', '')}"
             )
-            if row:
-                lines.append(
-                    f"    error_type={row.get('error_type', '')} "
-                    f"failure_pattern={row.get('failure_pattern') or row.get('issue_type') or row.get('pattern_name', '')}"
-                )
+            if item.get("failure_pattern"):
+                lines.append(f"    failure_pattern={_clip(str(item.get('failure_pattern', '')), 220)}")
             if item.get("justification"):
                 lines.append(f"    justification={_clip(str(item.get('justification', '')), 220)}")
             if item.get("failure_reason"):
@@ -2119,12 +2847,14 @@ Rules:
     def format_for_prompt(self, retrieval_result: Dict[str, Any]) -> str:
         lines = ["Retrieved hierarchical memory:"]
         for level_key in ("l1_matches", "l2_matches", "l3_matches"):
-            for row in (retrieval_result.get(level_key, []) or [])[:2]:
+            for row in (retrieval_result.get(level_key, []) or []):
                 score_str = f"score={row.get('similarity_score', 0.0):.2f}"
                 lines.append(
                     f"  {row.get('memory_level','')} scores=({score_str}) "
                     f"error_type={row.get('error_type','')}"
                 )
+                
+        
         return "\n".join(lines)
 
     def save_memory_entry(
@@ -2297,7 +3027,7 @@ Rules:
                 for ln in file_diff.splitlines()
                 if ln.startswith("+") and not ln.startswith("+++") and ln.lstrip("+").strip()
             ]
-            fix_direction = _clip("; ".join(added_lines[:5]), 500) if added_lines else ""
+            fix_direction = _clip("; ".join(added_lines), 500) if added_lines else ""
 
             dep_files: List[Dict[str, str]] = [
                 {"file": p, "reason": "Co-modified in the same fix"}
@@ -2413,13 +3143,13 @@ Rules:
         all_reasons = list(dict.fromkeys(
             r for row in l1_rows for r in [row.get("failure_reason", "")] if r
         ))
-        overall_failure_reason = _clip(" | ".join(all_reasons[:3]) or error_context_summary, 600)
+        overall_failure_reason = _clip(" | ".join(all_reasons) or error_context_summary, 600)
 
         # Fix approach: combine unique fix directions across files
         fix_directions = list(dict.fromkeys(
             row.get("fix_direction", "") for row in l1_rows if row.get("fix_direction")
         ))
-        fix_approach = _clip("; ".join(fix_directions[:3]), 500)
+        fix_approach = _clip("; ".join(fix_directions), 500)
 
         return {
             # Identity — keyed by sha_fail so each issue is its own L2 record
@@ -2482,12 +3212,12 @@ Rules:
             for f in (repo_row.get("files") or [])
             if f.get("failure_reason")
         ))
-        failure_reasons = ([overall_reason] + file_failure_reasons)[:4] if overall_reason else file_failure_reasons[:4]
+        failure_reasons = ([overall_reason] + file_failure_reasons) if overall_reason else file_failure_reasons
 
         # Example files: top files from L2 for concrete retrieval context
         example_files = [
             {"file": f.get("file", ""), "issue_type": f.get("issue_type", ""), "failure_pattern": f.get("failure_pattern", "")}
-            for f in (repo_row.get("files") or [])[:3]
+            for f in (repo_row.get("files") or [])
             if f.get("file")
         ]
 

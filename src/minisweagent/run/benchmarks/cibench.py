@@ -263,6 +263,23 @@ def _inject_precomputed_analysis(inst: Dict[str, Any]) -> Dict[str, Any]:
     return inst
 
 
+def _has_local_precomputed_analysis(inst: Dict[str, Any]) -> bool:
+    return bool(
+        inst.get("overall_failure_reasons")
+        and inst.get("effected_files")
+        and inst.get("failed_jobs")
+    )
+
+
+def _prepare_local_instance(inst: Dict[str, Any], *, allow_hf_enrichment: bool) -> Dict[str, Any]:
+    normalized = _normalize_instance(inst)
+    injected = _inject_precomputed_analysis(normalized)
+    if _has_local_precomputed_analysis(injected) or not allow_hf_enrichment:
+        return injected
+    enriched = _enrich_from_hf(injected)
+    return _inject_precomputed_analysis(enriched)
+
+
 def _normalize_instance(inst: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize field names so both eval_dataset.jsonl and eval_issues.json
@@ -277,9 +294,15 @@ def _normalize_instance(inst: Dict[str, Any]) -> Dict[str, Any]:
         return inst
     inst = dict(inst)
 
-    # id → instance_id
-    if "instance_id" not in inst and "id" in inst:
+    # Prefer "id" over "instance_id" for benchmark consistency
+    # (Benchmarks use numeric/string IDs like "102", "121", not repo@sha format)
+    if "id" in inst:
         inst["instance_id"] = str(inst["id"])
+    elif "instance_id" not in inst:
+        # Fallback: generate from repo@sha if neither exists
+        repo = f"{inst.get('repo_owner', '')}/{inst.get('repo_name', '')}".strip('/')
+        sha = str(inst.get('sha_fail', ''))[:12]
+        inst["instance_id"] = f"{repo}@{sha}" if repo and sha else "unknown"
 
     # workflow_filename → workflow_path
     if "workflow_path" not in inst and "workflow_filename" in inst:
@@ -410,14 +433,13 @@ def load_ci_instances(dataset_path: str, split: str = "test") -> List[Dict[str, 
             for x in data:
                 if not isinstance(x, dict):
                     continue
-                normalized = _normalize_instance(x)
-                enriched   = _enrich_from_hf(normalized)
-                enriched   = _inject_precomputed_analysis(enriched)
-                instances.append(enriched)
+                instances.append(_prepare_local_instance(x, allow_hf_enrichment=True))
             logger.info("Loaded %d instances from %s (enriched from HuggingFace)", len(instances), dataset_path)
             return instances
 
-        # JSONL — one object per line, no HF enrichment needed (already full data)
+        # JSONL — one object per line.  Filtered eval files may contain only
+        # the compact local issue rows, so normalize, enrich, and inject the
+        # same precomputed analysis used for JSON arrays.
         instances_: List[Dict[str, Any]] = []
         for line in raw_text.splitlines():
             line = line.strip()
@@ -426,12 +448,15 @@ def load_ci_instances(dataset_path: str, split: str = "test") -> List[Dict[str, 
             try:
                 obj = json.loads(line)
                 if isinstance(obj, list):
-                    instances_.extend(_normalize_instance(x) for x in obj if isinstance(x, dict))
+                    for x in obj:
+                        if not isinstance(x, dict):
+                            continue
+                        instances_.append(_prepare_local_instance(x, allow_hf_enrichment=True))
                 elif isinstance(obj, dict):
-                    instances_.append(_normalize_instance(obj))
+                    instances_.append(_prepare_local_instance(obj, allow_hf_enrichment=True))
             except json.JSONDecodeError as e:
                 logger.warning("Skipping malformed line in %s: %s", dataset_path, e)
-        logger.info("Loaded %d instances from %s", len(instances_), dataset_path)
+        logger.info("Loaded %d instances from %s (enriched from HuggingFace/local cache)", len(instances_), dataset_path)
         return instances_
 
     # HuggingFace dataset name passed directly

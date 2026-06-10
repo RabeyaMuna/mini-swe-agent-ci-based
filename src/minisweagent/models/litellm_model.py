@@ -92,6 +92,43 @@ class LitellmModel:
         }
         return message
 
+    def invoke(self, messages):
+        """
+        LangChain-compatible invoke method for CI log analyzer.
+
+        Accepts either:
+        - A list of message dicts or LangChain message objects
+        - A plain string prompt
+
+        Returns an object with a .content attribute.
+        """
+        # Convert to message format
+        if isinstance(messages, str):
+            msg_list = [{"role": "user", "content": messages}]
+        elif isinstance(messages, list):
+            msg_list = []
+            for m in messages:
+                # Handle LangChain messages
+                if hasattr(m, 'content'):
+                    role = "assistant" if hasattr(m, '__class__') and 'AI' in m.__class__.__name__ else "user"
+                    msg_list.append({"role": role, "content": m.content})
+                elif isinstance(m, dict):
+                    msg_list.append(m)
+                else:
+                    msg_list.append({"role": "user", "content": str(m)})
+        else:
+            msg_list = [{"role": "user", "content": str(messages)}]
+
+        # Call query method
+        response = self.query(msg_list)
+
+        # Return object with .content attribute
+        class Response:
+            def __init__(self, content):
+                self.content = content
+
+        return Response(response.get("content", ""))
+
     def _calculate_cost(self, response) -> dict[str, float]:
         try:
             cost = litellm.cost_calculator.completion_cost(response, model=self.config.model_name)
