@@ -205,4 +205,4 @@ test_script
 # Analysis documents (optional - comment out to track)
 # DEEP_ANALYSIS_*.md
 # CRITICAL_FINDINGS.md
-# SMOKING_GUN.md
+# SMOKING_GUN.mddata/ci_dataset.jsonl
