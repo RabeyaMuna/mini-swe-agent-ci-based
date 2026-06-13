@@ -206,3 +206,4 @@ test_script
 # DEEP_ANALYSIS_*.md
 # CRITICAL_FINDINGS.md
 # SMOKING_GUN.mddata/ci_dataset.jsonl
+data/
