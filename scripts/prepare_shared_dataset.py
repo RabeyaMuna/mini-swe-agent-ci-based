@@ -163,7 +163,7 @@ def run(
     eval_split   = _load_split(trs_dir / "eval_issues.json")
     all_shas = {str(r["sha_fail"]) for r in memory_split + eval_split}
 
-    print(f"[prepare] TRS split  → memory: {len(memory_split)}  eval: {len(eval_split)}")
+    print(f"[prepare] TRS split  -> memory: {len(memory_split)}  eval: {len(eval_split)}")
 
     # ── Load parquet ───────────────────────────────────────────────────────────
     print(f"[prepare] Loading parquet: {parquet_path}")

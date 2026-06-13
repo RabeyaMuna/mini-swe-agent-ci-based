@@ -207,18 +207,18 @@ agent.run("Write a sudoku game")</code></pre>
   </a>
 </div>
 
-## 📣 News
+##  News
 
 * [Run mini-swe-agent on our new & extremely challenging benchmark, ProgramBench](usage/programbench.md)
 * [New tutorial on building minimal AI agents](https://minimal-agent.com/)
 * Nov 19: [Gemini 3 Pro reaches 74% on SWE-bench verified with mini-swe-agent!](https://x.com/KLieret/status/1991164693839270372)
 * Aug 19: [New blogpost: Randomly switching between GPT-5 and Sonnet 4 boosts performance](https://www.swebench.com/post-250820-mini-roulette.html)
 
-## 📣 New features
+##  New features
 
 Please check the [github release notes](https://github.com/SWE-agent/mini-swe-agent/releases) for the latest updates.
 
-## 📣 Documentation updates
+##  Documentation updates
 
 * Jul 27: More notes on [local models](models/local_models.md)
 

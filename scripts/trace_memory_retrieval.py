@@ -118,7 +118,7 @@ def trace_retrieval(
     print(f"L3 with embeddings: {has_l3_embed}/{len(l3_records)}")
 
     if has_l1_embed == 0 and has_l2_embed == 0:
-        print("\n⚠️  WARNING: No embeddings found! Run precompute_embeddings.py first")
+        print("\nWARNING:  WARNING: No embeddings found! Run precompute_embeddings.py first")
         print("   Without embeddings, cosine similarity cannot be calculated")
         return
 
@@ -134,7 +134,7 @@ def trace_retrieval(
         print(f"Query embedding shape: {query_embedding.shape}")
         print(f"Query embedding norm: {np.linalg.norm(query_embedding):.4f}")
     except Exception as e:
-        print(f"❌ Failed to compute query embedding: {e}")
+        print(f"ERROR Failed to compute query embedding: {e}")
         return
 
     # Compute similarities
@@ -259,7 +259,7 @@ def trace_retrieval(
     print(f"{'='*80}")
 
     if not l1_filtered and not l2_filtered:
-        print("⚠️  No candidates passed threshold, LLM1 will not be called")
+        print("WARNING:  No candidates passed threshold, LLM1 will not be called")
         print("   System will proceed WITHOUT memory")
         return
 
@@ -319,12 +319,12 @@ def trace_retrieval(
             is_object_list = isinstance(changed_files[0], dict) and 'file' in changed_files[0]
 
             print(f"\nTop L2 Memory Quality:")
-            print(f"  ✅ Has overall_failure_reason: {has_failure_reason}")
-            print(f"  ✅ Has fix_strategy: {has_fix_strategy}")
-            print(f"  ✅ Has changed_files: {has_changed_files}")
+            print(f"  OK Has overall_failure_reason: {has_failure_reason}")
+            print(f"  OK Has fix_strategy: {has_fix_strategy}")
+            print(f"  OK Has changed_files: {has_changed_files}")
 
             if is_string_list:
-                print(f"  ❌ changed_files is STRING LIST: {changed_files}")
+                print(f"  ERROR changed_files is STRING LIST: {changed_files}")
                 print(f"     Problem: No per-file details (reason, failure_reason, fix_strategy)")
                 print(f"     Impact: LLM2 can't generate specific guidance")
             elif is_object_list:
@@ -333,17 +333,17 @@ def trace_retrieval(
                 has_failure_reason = 'failure_reason' in cf
                 has_fix_strategy_cf = 'fix_strategy' in cf
 
-                print(f"  ✅ changed_files is OBJECT LIST")
+                print(f"  OK changed_files is OBJECT LIST")
                 print(f"     - Has 'reason': {has_reason}")
                 print(f"     - Has 'failure_reason': {has_failure_reason}")
                 print(f"     - Has 'fix_strategy': {has_fix_strategy_cf}")
 
                 if has_reason and has_failure_reason and has_fix_strategy_cf:
-                    print(f"  ✅ STRUCTURE IS CORRECT!")
+                    print(f"  OK STRUCTURE IS CORRECT!")
                 else:
-                    print(f"  ⚠️  Missing some fields in changed_files objects")
+                    print(f"  WARNING:  Missing some fields in changed_files objects")
         else:
-            print(f"\n  ❌ changed_files is EMPTY!")
+            print(f"\n  ERROR changed_files is EMPTY!")
             print(f"     Impact: No file-level guidance, agent doesn't know what to modify")
 
     # Final output
@@ -352,10 +352,10 @@ def trace_retrieval(
     print(f"{'='*80}")
 
     if not l1_filtered and not l2_filtered:
-        print("❌ NO MEMORY USED")
+        print("ERROR NO MEMORY USED")
         print("   Agent will receive problem statement WITHOUT memory guidance")
     else:
-        print("✅ MEMORY WILL BE USED")
+        print("OK MEMORY WILL BE USED")
         print(f"   Agent will receive:")
         print(f"   - CI error description")
         print(f"   - Diagnosis from LLM2")
@@ -366,10 +366,10 @@ def trace_retrieval(
         if l2_filtered and l2_filtered[0]['record'].get('changed_files'):
             cf = l2_filtered[0]['record']['changed_files']
             if isinstance(cf[0], str):
-                print(f"\n   ⚠️  Quality: POOR (generic guidance)")
+                print(f"\n   WARNING:  Quality: POOR (generic guidance)")
                 print(f"       Agent knows 'something' needs fixing but not WHAT")
             else:
-                print(f"\n   ✅ Quality: GOOD (specific guidance)")
+                print(f"\n   OK Quality: GOOD (specific guidance)")
                 print(f"       Agent knows EXACTLY what to fix and HOW")
 
     print(f"\n{'='*80}")
@@ -387,16 +387,16 @@ def trace_retrieval(
     print(f"  6. Format context:     Pass to agent")
 
     use_memory = len(l1_filtered) > 0 or len(l2_filtered) > 0
-    print(f"\nMemory used: {'✅ YES' if use_memory else '❌ NO'}")
+    print(f"\nMemory used: {'OK YES' if use_memory else 'ERROR NO'}")
 
     if use_memory and l2_filtered:
         cf = l2_filtered[0]['record'].get('changed_files', [])
         if cf and isinstance(cf[0], str):
-            print(f"Memory quality: ⚠️  POOR (needs rebuild)")
+            print(f"Memory quality: WARNING:  POOR (needs rebuild)")
         elif cf and isinstance(cf[0], dict) and 'fix_strategy' in cf[0]:
-            print(f"Memory quality: ✅ GOOD")
+            print(f"Memory quality: OK GOOD")
         else:
-            print(f"Memory quality: ⚠️  INCOMPLETE")
+            print(f"Memory quality: WARNING:  INCOMPLETE")
 
 
 def main():
@@ -425,14 +425,14 @@ def main():
     try:
         issue = load_issue(eval_issues_path, args.issue_id, args.repo, args.index)
     except Exception as e:
-        print(f"❌ Error loading issue: {e}")
+        print(f"ERROR Error loading issue: {e}")
         return 1
 
     # Trace retrieval
     try:
         trace_retrieval(issue, memory_root, args.ablation)
     except Exception as e:
-        print(f"\n❌ Error during tracing: {e}")
+        print(f"\nERROR Error during tracing: {e}")
         import traceback
         traceback.print_exc()
         return 1

@@ -35,17 +35,17 @@ for i, line in enumerate(lines):
 '''
         lines.insert(i+1, debug_code)
         found = True
-        print(f"✅ Added debug code after line {i+1}")
+        print(f"OK Added debug code after line {i+1}")
         break
 
 if not found:
-    print("❌ Could not find the target line")
+    print("ERROR Could not find the target line")
     sys.exit(1)
 
 # Write back
 with open(file_path, 'w') as f:
     f.writelines(lines)
 
-print(f"✅ Debug code added to {file_path}")
+print(f"OK Debug code added to {file_path}")
 print("\nNow run your test and check stderr for debug output:")
 print("  python -m minisweagent.run.benchmarks.cibench ... 2>&1 | grep -A20 'LLM SYNTHESIS'")

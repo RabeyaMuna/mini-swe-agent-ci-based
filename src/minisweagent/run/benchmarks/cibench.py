@@ -207,18 +207,18 @@ def _inject_precomputed_analysis(inst: Dict[str, Any]) -> Dict[str, Any]:
       {
         "sha_fail": "...",
         "analysis": {
-          "error_context":  [str]   → overall_failure_reasons
-          "error_types":    [dict]  → overall_error_types (already set)
-          "relevant_files": [dict]  → effected_files
-          "failed_job":     [dict]  → failed_jobs
+          "error_context":  [str]   -> overall_failure_reasons
+          "error_types":    [dict]  -> overall_error_types (already set)
+          "relevant_files": [dict]  -> effected_files
+          "failed_job":     [dict]  -> failed_jobs
         }
       }
 
     Mapping to top-level fields that _has_precomputed_analysis checks for:
-        analysis.error_context  → overall_failure_reasons
-        analysis.relevant_files → effected_files
-        analysis.failed_job     → failed_jobs
-        analysis.error_types    → error_types (for Phase A query building)
+        analysis.error_context  -> overall_failure_reasons
+        analysis.relevant_files -> effected_files
+        analysis.failed_job     -> failed_jobs
+        analysis.error_types    -> error_types (for Phase A query building)
     """
     index = _load_seed_log_index()
     if not index:
@@ -286,9 +286,9 @@ def _normalize_instance(inst: Dict[str, Any]) -> Dict[str, Any]:
     work without any changes to the rest of the pipeline.
 
     Field aliases handled:
-        id               → instance_id        (eval_issues.json uses "id")
-        workflow_filename → workflow_path      (if workflow_path is missing)
-        error_type list  → overall_error_types (eval_issues has a list, not a string)
+        id               -> instance_id        (eval_issues.json uses "id")
+        workflow_filename -> workflow_path      (if workflow_path is missing)
+        error_type list  -> overall_error_types (eval_issues has a list, not a string)
     """
     if not isinstance(inst, dict):
         return inst
@@ -304,12 +304,12 @@ def _normalize_instance(inst: Dict[str, Any]) -> Dict[str, Any]:
         sha = str(inst.get('sha_fail', ''))[:12]
         inst["instance_id"] = f"{repo}@{sha}" if repo and sha else "unknown"
 
-    # workflow_filename → workflow_path
+    # workflow_filename -> workflow_path
     if "workflow_path" not in inst and "workflow_filename" in inst:
         wf = str(inst["workflow_filename"])
         inst["workflow_path"] = f".github/workflows/{wf}" if not wf.startswith(".github") else wf
 
-    # error_type as list → overall_error_types
+    # error_type as list -> overall_error_types
     # eval_issues.json stores ["Dependency Issues", "Syntax Error", ...]
     # The pipeline uses overall_error_types (list) and error_type (str)
     et = inst.get("error_type")
@@ -493,13 +493,13 @@ def filter_instances(
             inst for inst in instances
             if re.match(filter_spec, str(inst.get("instance_id", "")))
         ]
-        logger.info("Filter '%s': %d → %d instances", filter_spec, before, len(instances))
+        logger.info("Filter '%s': %d -> %d instances", filter_spec, before, len(instances))
 
     if slice_spec:
         before = len(instances)
         parts  = [int(x) if x else None for x in slice_spec.split(":")]
         instances = instances[slice(*parts)]
-        logger.info("Slice '%s': %d → %d instances", slice_spec, before, len(instances))
+        logger.info("Slice '%s': %d -> %d instances", slice_spec, before, len(instances))
 
     return instances
 
@@ -545,7 +545,7 @@ def remove_from_preds_file(output_path: Path, instance_id: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Local environment setup  (clone → checkout → LocalEnvironment)
+# Local environment setup  (clone -> checkout -> LocalEnvironment)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def setup_local_environment(
@@ -639,7 +639,7 @@ def setup_local_environment(
     # ── Shared repo cache ─────────────────────────────────────────────────────
     REPO_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     if not (repo_cache_path / ".git").exists():
-        logger.info("[CIBench] Cloning %s → shared cache %s", clone_url, repo_cache_path)
+        logger.info("[CIBench] Cloning %s -> shared cache %s", clone_url, repo_cache_path)
         result = subprocess.run(
             ["git", "clone", "--quiet", clone_url, str(repo_cache_path)],
             capture_output=True,
@@ -670,7 +670,7 @@ def setup_local_environment(
     # ── Per-instance working copy ─────────────────────────────────────────────
     if not (testbed_path / ".git").exists():
         testbed_path.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("[CIBench] Creating local working copy %s → %s", repo_cache_path, testbed_path)
+        logger.info("[CIBench] Creating local working copy %s -> %s", repo_cache_path, testbed_path)
         result = subprocess.run(
             ["git", "clone", "--quiet", "--shared", str(repo_cache_path), str(testbed_path)],
             capture_output=True,
@@ -736,7 +736,7 @@ def process_instance(
 ) -> None:
     """
     Full pipeline for one CI instance:
-      pre-process logs → clone repo → checkout sha_fail → run agent → save diff
+      pre-process logs -> clone repo -> checkout sha_fail -> run agent -> save diff
     """
     instance_id = str(instance.get("instance_id") or instance.get("id") or "unknown")
     sha_fail    = str(instance.get("sha_fail") or "")

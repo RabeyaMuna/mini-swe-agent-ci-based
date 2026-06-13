@@ -4377,12 +4377,12 @@
     "failed_job": [
       {
         "job": "Run ${{ matrix.check }}",
-        "step": "Run pyupgrade/5_🏃 Run the check (pyupgrade).txt",
+        "step": "Run pyupgrade/5_ Run the check (pyupgrade).txt",
         "command": "pre-commit run --hook-stage manual pyupgrade --all-files --config .github/pre-commit-config.yaml"
       },
       {
         "job": "Run ${{ matrix.check }}",
-        "step": "Run black/5_🏃 Run the check (black).txt",
+        "step": "Run black/5_ Run the check (black).txt",
         "command": "pre-commit run --hook-stage manual black --all-files --config .github/pre-commit-config.yaml"
       }
     ],
@@ -8223,7 +8223,7 @@
       },
       {
         "category": "Dependency Error",
-        "subcategory": "Dependency Error – missing or renamed import (ScrapeOptions → V1ScrapeOptions)",
+        "subcategory": "Dependency Error – missing or renamed import (ScrapeOptions -> V1ScrapeOptions)",
         "evidence": "the installed firecrawl-py package (version 4.22.1) uses 'V1ScrapeOptions' instead, causing test collection to fail"
       }
     ],

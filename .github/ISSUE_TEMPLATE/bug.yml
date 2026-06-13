@@ -11,7 +11,7 @@ body:
       Please copy as much as possible from the output, in particular any error message.
       Any hint about how to reproduce your issue will help us help you!
       Please also include your operating system where relevant.
-      Markdown formatting is appreciated 😉
+      Markdown formatting is appreciated 
 
       Hint: The full history of your last `mini` run is saved to your global config directory.
       Including it helps us understand the issue.
@@ -20,4 +20,4 @@ body:
 - type: markdown
   attributes:
     value: >
-      Thanks for contributing 🎉!
+      Thanks for contributing !

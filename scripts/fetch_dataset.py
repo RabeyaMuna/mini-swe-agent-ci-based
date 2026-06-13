@@ -71,7 +71,7 @@ def fetch(split: str, output_path: Path) -> None:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             written += 1
 
-    print(f"[fetch_dataset] Saved {written} instances → {output_path}")
+    print(f"[fetch_dataset] Saved {written} instances -> {output_path}")
     print()
     print("Run the benchmark with:")
     print(f"  mini-swe-agent cibench --dataset {output_path} --output results/baseline --no-memory-enabled")
@@ -108,7 +108,7 @@ def main() -> None:
                     fh.write(json.dumps(dict(row), ensure_ascii=False) + "\n")
                     written += 1
                 print(f"[fetch_dataset]   {split}: {len(ds)} instances")
-        print(f"[fetch_dataset] Total saved: {written} → {out_path}")
+        print(f"[fetch_dataset] Total saved: {written} -> {out_path}")
     else:
         fetch(args.split, out_path)
 

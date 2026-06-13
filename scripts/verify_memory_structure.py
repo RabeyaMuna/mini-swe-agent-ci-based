@@ -25,12 +25,12 @@ def verify_l1(l1_records: List[Dict]) -> Dict[str, Any]:
     print(f"{'='*60}")
 
     if not l1_records:
-        print("❌ CRITICAL: L1 is EMPTY! (0 records)")
+        print("ERROR CRITICAL: L1 is EMPTY! (0 records)")
         print("   Expected: 50-100 records (one per changed file)")
         print("   Impact: Cannot match at file level, loses 45% of matching signal")
         return {"status": "FAIL", "issues": ["L1 completely missing"]}
 
-    print(f"✅ L1 exists: {len(l1_records)} records")
+    print(f"OK L1 exists: {len(l1_records)} records")
 
     # Check required fields
     required_fields = [
@@ -70,12 +70,12 @@ def verify_l1(l1_records: List[Dict]) -> Dict[str, Any]:
     print(f"  fix_strategy:    {len(l1_records) - empty_fix_strategy}/{len(l1_records)} populated")
 
     if issues:
-        print(f"\n❌ Issues found: {len(issues)}")
+        print(f"\nERROR Issues found: {len(issues)}")
         for issue in issues:
             print(f"   - {issue}")
         return {"status": "FAIL", "issues": issues}
     else:
-        print(f"\n✅ L1 structure is CORRECT")
+        print(f"\nOK L1 structure is CORRECT")
         return {"status": "PASS", "issues": []}
 
 
@@ -89,10 +89,10 @@ def verify_l2(l2_records: List[Dict]) -> Dict[str, Any]:
     print(f"{'='*60}")
 
     if not l2_records:
-        print("❌ CRITICAL: L2 is EMPTY!")
+        print("ERROR CRITICAL: L2 is EMPTY!")
         return {"status": "FAIL", "issues": ["L2 completely missing"]}
 
-    print(f"✅ L2 exists: {len(l2_records)} records")
+    print(f"OK L2 exists: {len(l2_records)} records")
 
     # Check for stringified types
     stringified_types = 0
@@ -152,8 +152,8 @@ def verify_l2(l2_records: List[Dict]) -> Dict[str, Any]:
             missing_fields['fix_strategy'] += 1
 
     if broken_changed_files > 0:
-        issues.append(f"❌ CRITICAL: {broken_changed_files}/{len(l2_records)} records have broken changed_files structure!")
-        print(f"\n❌ CRITICAL: changed_files is list of strings, not objects!")
+        issues.append(f"ERROR CRITICAL: {broken_changed_files}/{len(l2_records)} records have broken changed_files structure!")
+        print(f"\nERROR CRITICAL: changed_files is list of strings, not objects!")
         print(f"   Current:  [\"file1.py\", \"file2.py\"]")
         print(f"   Needed:   [{{\"file\": \"file1.py\", \"reason\": \"...\", \"failure_reason\": \"...\", \"fix_strategy\": \"...\"}}]")
         print(f"   Impact:   Agent doesn't know WHY files changed or HOW they were fixed")
@@ -179,12 +179,12 @@ def verify_l2(l2_records: List[Dict]) -> Dict[str, Any]:
     print(f"  changed_files structure: {len(l2_records) - broken_changed_files}/{len(l2_records)} correct")
 
     if issues:
-        print(f"\n❌ Issues found: {len(issues)}")
+        print(f"\nERROR Issues found: {len(issues)}")
         for issue in issues:
             print(f"   - {issue}")
         return {"status": "FAIL", "issues": issues}
     else:
-        print(f"\n✅ L2 structure is CORRECT")
+        print(f"\nOK L2 structure is CORRECT")
         return {"status": "PASS", "issues": []}
 
 
@@ -197,10 +197,10 @@ def verify_l3(l3_records: List[Dict]) -> Dict[str, Any]:
     print(f"{'='*60}")
 
     if not l3_records:
-        print("⚠️  L3 is EMPTY (not critical)")
+        print("WARNING:  L3 is EMPTY (not critical)")
         return {"status": "WARN", "issues": ["L3 empty"]}
 
-    print(f"✅ L3 exists: {len(l3_records)} records")
+    print(f"OK L3 exists: {len(l3_records)} records")
 
     # Check for repo-specific details (should NOT exist!)
     repo_specific = 0
@@ -237,12 +237,12 @@ def verify_l3(l3_records: List[Dict]) -> Dict[str, Any]:
     print(f"  fix_strategy:  {has_fix_strategy}/{len(l3_records)} populated")
 
     if issues:
-        print(f"\n⚠️  Issues found: {len(issues)}")
+        print(f"\nWARNING:  Issues found: {len(issues)}")
         for issue in issues:
             print(f"   - {issue}")
         return {"status": "WARN", "issues": issues}
     else:
-        print(f"\n✅ L3 structure is CORRECT")
+        print(f"\nOK L3 structure is CORRECT")
         return {"status": "PASS", "issues": []}
 
 
@@ -283,25 +283,25 @@ def main():
     warned = [level for level, result in results.items() if result["status"] == "WARN"]
     passed = [level for level, result in results.items() if result["status"] == "PASS"]
 
-    print(f"✅ Passed: {', '.join(passed) if passed else 'None'}")
+    print(f"OK Passed: {', '.join(passed) if passed else 'None'}")
     if warned:
-        print(f"⚠️  Warnings: {', '.join(warned)}")
+        print(f"WARNING:  Warnings: {', '.join(warned)}")
     if failed:
-        print(f"❌ Failed: {', '.join(failed)}")
+        print(f"ERROR Failed: {', '.join(failed)}")
 
     total_issues = sum(len(r["issues"]) for r in results.values())
     print(f"\nTotal issues: {total_issues}")
 
     if failed:
-        print(f"\n❌ MEMORY STRUCTURE IS BROKEN!")
+        print(f"\nERROR MEMORY STRUCTURE IS BROKEN!")
         print(f"   Run: cd /Users/rabeyakhatunmuna/Documents/CI-REPAIR-BENCH/baselines")
         print(f"        python scripts/build_memory_bank.py --help")
         return 1
     elif warned:
-        print(f"\n⚠️  Memory structure has warnings but may work")
+        print(f"\nWARNING:  Memory structure has warnings but may work")
         return 0
     else:
-        print(f"\n✅ MEMORY STRUCTURE IS CORRECT!")
+        print(f"\nOK MEMORY STRUCTURE IS CORRECT!")
         return 0
 
 

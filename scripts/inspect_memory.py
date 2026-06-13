@@ -51,7 +51,7 @@ def inspect_l1(records):
     if multi_type_files:
         print("\n  Multi-type files (sample):")
         for f, types in list(multi_type_files.items())[:5]:
-            print(f"    {f}  →  {sorted(types)}")
+            print(f"    {f}  ->  {sorted(types)}")
 
     # error_type distribution
     et_counter = Counter(r.get("error_type", "(none)") for r in records)

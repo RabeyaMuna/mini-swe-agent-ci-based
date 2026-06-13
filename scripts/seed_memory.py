@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-⚠️  DEPRECATED: This script is disabled
+WARNING:  DEPRECATED: This script is disabled
 ==========================================
 
 This script created a DIFFERENT memory format than build_memory_from_decomposed.py

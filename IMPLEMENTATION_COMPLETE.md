@@ -1,253 +1,397 @@
-# Implementation Complete ✅
+# Implementation Complete: Sequential Multi-Problem CI Repair
 
-## What Was Implemented
+## ✅ **All Changes Implemented**
 
-I've enhanced the prompts in both scripts to generate **concrete, actionable content** while keeping the **exact same structure**. No changes to JSON schema - only to the quality of content generated.
-
----
-
-## Files Modified
-
-### 1. `scripts/decompose_ci_failure.py`
-
-**Enhanced chunk analysis prompt (around line 811):**
-- ✅ Requests line numbers from diff hunks
-- ✅ Requests before/after code snippets
-- ✅ Requests specific error messages
-- ✅ Requests technical reasoning (why fix works)
-- ✅ Detects patterns (5+ files with same change)
-
-**Enhanced output schema (around line 849):**
-- Added `line_range` field in affected_files
-- Added `what_was_wrong`, `before_snippet`, `after_snippet` fields
-- Added `why_wrong`, `how_fixed`, `why_fix_works` fields
-- Added `pattern_detected` object
-
-### 2. `scripts/build_memory_from_decomposed.py`
-
-**Enhanced L1 builder prompt (around line 209):**
-- ✅ Requests DETAILED narrative for `problem` field
-- ✅ Requests STEP-BY-STEP narrative for `fix_strategy` field
-- ✅ Includes templates and examples (good vs bad)
-- ✅ Handles patterns (10+ files with same fix)
-
-**Enhanced L2 builder prompt (around line 463):**
-- ✅ Requests detailed `problem` field with all symptoms
-- ✅ Requests detailed `fix` field in file_changes with steps
-- ✅ Includes templates and examples
-- ✅ Handles pattern-based changes
+### **Summary:**
+Successfully implemented **validation-sequence-aware sequential repair planning** that organizes problems by CI validation stages and predicts consecutive failures.
 
 ---
 
-## Structure Unchanged ✅
+## 🔧 **Changes Made:**
 
-**L1 Structure (same as before):**
-```json
-{
-  "memory_level": "L1",
-  "file": "path/to/file.py",
-  "repo": "flower",
-  "workflow_path": ".github/workflows/test.yml",
-  "issue_type": "type_error",
-  "failed_cmd": "mypy src/",
-  "problem": "< NOW DETAILED & ACTIONABLE >",
-  "fix_strategy": "< NOW DETAILED & ACTIONABLE >",
-  "diff_evidence": "brief diff",
-  "dependent_files": [...]
-}
+### **1. Added Helper Functions (10 new functions)**
+
+All added after line 276 in `ci_memory_system.py`:
+
+#### **Validation Sequence Helpers:**
+- ✅ `_get_current_failure_stage()` - Get full stage info for current failure
+- ✅ `_get_consecutive_stages()` - Get stages that run AFTER current failure
+- ✅ `_get_validation_cmd()` - Get validation command for a stage name
+
+#### **Memory Organization Helpers:**
+- ✅ `_map_memory_to_validation_stage()` - Map memory's `failed_cmd` → validation stage
+- ✅ `_extract_files_from_memory()` - Extract file info in standardized format
+- ✅ `_extract_identification_criteria()` - Extract/generate grep patterns
+- ✅ `_organize_memories_by_validation_stage()` - Group memories by stage, ordered
+
+#### **Problem Extraction & Prediction:**
+- ✅ `_extract_current_failure_as_problem_1()` - Extract current CI failure as Problem #1
+- ✅ `_analyze_interdependency()` - Analyze how problems relate
+- ✅ `_predict_consecutive_problems()` - Predict Problem #2+ from consecutive stages
+
+---
+
+### **2. Updated Prompt 1 (Organization)**
+
+**Before:**
+```python
+def _build_organization_prompt(memory_result, validation_sequence):
+    # Sends raw memories to LLM
+    # No pre-organization
+    # LLM has to guess validation stages
 ```
 
-**L2 Structure (same as before):**
-```json
-{
-  "atomic_problems": [
-    {
-      "problem_id": 1,
-      "issue_type": "type_error",
-      "failed_cmd": "mypy src/",
-      "problem": "< NOW DETAILED & ACTIONABLE >",
-      "file_changes": [
-        {
-          "file": "path/to/file.py",
-          "fix": "< NOW DETAILED & ACTIONABLE >"
-        }
-      ]
+**After:**
+```python
+def _build_organization_prompt(organized, validation_sequence):
+    # Pre-organized memories by validation stage
+    # LLM only refines (adds criteria, combines duplicates)
+    # Returns None if no memories (skips Prompt 1)
+```
+
+**Key Changes:**
+- Takes pre-organized memories as input
+- Optional refinement (not required)
+- Skips if no memories
+
+---
+
+### **3. Updated Prompt 2 (Reasoning)**
+
+**Before:**
+```python
+def _build_reasoning_prompt(current_context, organized_problems):
+    # Vague "current_context" dict
+    # No specific Problem #1 details
+    # No consecutive stages list
+```
+
+**After:**
+```python
+def _build_reasoning_prompt(problem_1, organized_problems, validation_sequence):
+    # Fully-formed Problem #1 with all details
+    # Explicit consecutive_stages list
+    # Clear interdependency examples
+```
+
+**Key Changes:**
+- Problem #1 is pre-extracted and fully formed
+- Shows consecutive stages explicitly
+- Better reasoning guidance
+
+---
+
+### **4. Completely Rewrote `_run_single_llm_synthesis()`**
+
+**Before:**
+```python
+def _run_single_llm_synthesis(...):
+    if llm is None:
+        return _build_simple_fallback()  # JSON dump
+    
+    # Build vague current_context
+    # Prompt 1: organize (raw memories)
+    # If Prompt 1 fails → fallback (gives up)
+    # Prompt 2: reason (with vague context)
+    # If Prompt 2 fails → fallback (gives up)
+```
+
+**After:**
+```python
+def _run_single_llm_synthesis(...):
+    if llm is None:
+        return _build_simple_fallback()  # Now uses helpers!
+    
+    # Extract Problem #1 first
+    problem_1 = _extract_current_failure_as_problem_1(...)
+    
+    if not matches:
+        # No memories: still predict from validation sequence
+        # Uses problem_1 + consecutive_stages
+    
+    # Step 1: Pre-organize deterministically
+    organized = _organize_memories_by_validation_stage(...)
+    # Optional: LLM refinement
+    # If LLM fails: use pre-organized (no fallback!)
+    
+    # Step 2: Build repair plan
+    reason_prompt = _build_reasoning_prompt(problem_1, organized, ...)
+    # If LLM fails: use deterministic prediction
+    consecutive_problems = _predict_consecutive_problems(...)
+```
+
+**Key Changes:**
+- ✅ **Works with 0 memories** (still predicts from validation sequence)
+- ✅ **Pre-organizes deterministically** (LLM refinement optional)
+- ✅ **Always has fallback** (deterministic prediction)
+- ✅ **Problem #1 always extracted** (not vague context)
+
+---
+
+### **5. Updated `_run_two_llm_gate()`**
+
+**Before:**
+```python
+def _run_two_llm_gate(...):
+    all_matches = memory_result.get("matches") or []
+    if not all_matches:
+        return result  # ← Early exit! No synthesis!
+
+**After:**
+```python
+def _run_two_llm_gate(...):
+    # ALWAYS synthesize (even if matches=0)
+    
+    if llm is None:
+        guidance_document = _build_simple_fallback(...)  # Now structured!
+    else:
+        guidance_document = _run_single_llm_synthesis(...)  # Works with 0 matches
+    
+    result["use_memory"] = True  # Always usable
+    # ... (no debug breakpoints)
+```
+
+**Key Changes:**
+- ✅ **No early exit** - always synthesizes
+- ✅ **Removed debug breakpoints**
+- ✅ **Works with 0 memories**
+
+---
+
+### **6. Improved `_build_simple_fallback()`**
+
+**Before:**
+```python
+def _build_simple_fallback(...):
+    # Just dumps JSON
+    fallback_statement = f"""# CI Repair Task
+    
+    ## Current Failure
+    {json.dumps(q)}
+    
+    ## Memories
+    {json.dumps(cleaned_matches)}
+    """
+    
+    return {"agent_problem_statement": fallback_statement, "total_problems": 1}
+```
+
+**After:**
+```python
+def _build_simple_fallback(...):
+    # Extract Problem #1
+    problem_1 = _extract_current_failure_as_problem_1(...)
+    problems = [problem_1]
+    
+    if matches:
+        # Organize memories
+        organized = _organize_memories_by_validation_stage(...)
+        # Predict consecutive problems
+        consecutive = _predict_consecutive_problems(problem_1, organized, ...)
+        problems.extend(consecutive[:3])
+    
+    # Build structured markdown
+    agent_statement = _format_problems_as_markdown(problems, len(problems))
+    
+    return {
+        "total_problems": len(problems),
+        "problems": problems,
+        "agent_problem_statement": agent_statement
     }
-  ],
-  "repair_trajectory_summary": "..."
-}
+```
+
+**Key Changes:**
+- ✅ **Structured output** (not JSON dump)
+- ✅ **Uses helper functions** (same logic as LLM path)
+- ✅ **Predicts consecutive problems** (even without LLM)
+
+---
+
+### **7. Removed Debug Breakpoints**
+
+Removed from:
+- `_run_two_llm_gate()` (2 breakpoints)
+- `format_memory_context()` (1 breakpoint)
+
+---
+
+## 📊 **Before vs After:**
+
+### **Scenario 1: Retrieval Returns 0 Memories**
+
+#### Before:
+```
+retrieve() → 0 matches
+  ↓
+_run_two_llm_gate() → if not matches: return {} ← STOPS
+  ↓
+Agent gets NOTHING
+```
+
+#### After:
+```
+retrieve() → 0 matches
+  ↓
+_run_two_llm_gate() → ALWAYS synthesize
+  ↓
+_run_single_llm_synthesis()
+  ↓
+Extract Problem #1 from current CI
+  ↓
+Predict Problem #2+ from validation sequence order
+  ↓
+Agent gets structured plan with N problems
 ```
 
 ---
 
-## Content Quality Improvement
+### **Scenario 2: Retrieval Returns 30 Memories**
 
-### Before (Vague)
-```json
-{
-  "problem": "Type error",
-  "fix_strategy": "Fixed types"
-}
+#### Before:
+```
+retrieve() → 30 matches
+  ↓
+Prompt 1: Organize (LLM guesses validation stages - empty field!)
+  ↓
+If fails → JSON dump fallback
+  ↓
+Prompt 2: Reason (vague current_context)
+  ↓
+If fails → JSON dump fallback
+  ↓
+Agent might get plan OR JSON dump
 ```
 
-### After (Concrete & Actionable)
-```json
-{
-  "problem": "Type error at line 45 in framework/py/flwr/common/typing.py. Symptom: mypy failed with 'Argument 1 has incompatible type List[int]; expected Sequence[int]'. Specific issue: Function call process(data) passes List[int] but function signature expects more general Sequence[int] after API update. Root cause: Dependency upgrade changed API to use covariant type parameters requiring Sequence instead of List per PEP-484. Detection: CI log shows mypy error at this line.",
-  
-  "fix_strategy": "Update type annotation at line 45 from List to Sequence. Step 1: Change 'data: List[int]' to 'data: Sequence[int]'. Step 2: Import Sequence from typing if not already imported. Before: 'def process(data: List[int])'. After: 'def process(data: Sequence[int])'. Implementation: Use more general type Sequence which is covariant allowing subtype substitution. This works because Sequence accepts List, tuple, and other sequences per PEP-484 type system. Verification: Run 'mypy src/' to confirm no type errors."
-}
+#### After:
 ```
-
----
-
-## What the Enhanced Prompts Request
-
-### For `problem` Field:
-1. ✅ **Issue type** with file path and **line location**
-2. ✅ **Concrete symptom**: exact error message from CI
-3. ✅ **Specific issue**: what's wrong with code examples
-4. ✅ **Root cause**: technical explanation with context
-5. ✅ **Detection**: how it appeared in CI log
-6. ✅ **Pattern note**: if 10+ files, describe pattern with example
-
-### For `fix_strategy` Field:
-1. ✅ **What changed** with line locations
-2. ✅ **Step-by-step** instructions (Step 1, Step 2, Step 3)
-3. ✅ **Before/after** code snippets for key changes
-4. ✅ **Implementation** details with technical context
-5. ✅ **Why it works**: technical reasoning
-6. ✅ **Verification**: command to run and expected result
-
-### For Patterns (10+ Files):
-- Pattern description with count
-- One concrete example file with full details
-- List of affected file paths
-- Generic fix instructions that apply to all
-
----
-
-## Example Templates
-
-The prompts now include these templates:
-
-**`problem` field template:**
-```
-{issue_type} at line X in {file}. 
-Symptom: 'exact error message'. 
-Specific issue: what's wrong with code example. 
-Root cause: technical explanation with context. 
-Detection: CI log evidence.
-```
-
-**`fix_strategy` field template:**
-```
-Changed {what} at lines X-Y. 
-Step 1: {action}. 
-Step 2: {action}. 
-Before: '{snippet}'. 
-After: '{snippet}'. 
-Implementation: {how-to with context}. 
-This works because {technical reasoning}. 
-Verification: {command} should {expected result}.
+retrieve() → 30 matches
+  ↓
+Pre-organize by validation stage (deterministic - maps failed_cmd → stage)
+  ↓
+Extract Problem #1 (current failure)
+  ↓
+Prompt 1: Refine organization (optional)
+  ↓
+If fails → use pre-organized (still works!)
+  ↓
+Prompt 2: Build plan (Problem #1 + consecutive stages + organized problems)
+  ↓
+If fails → deterministic prediction
+  ↓
+Agent ALWAYS gets structured plan with N problems
 ```
 
 ---
 
-## Testing
+### **Scenario 3: No LLM Available**
 
-To test the enhanced content generation:
+#### Before:
+```
+llm = None
+  ↓
+_build_simple_fallback()
+  ↓
+Returns JSON dump of raw data
+  ↓
+Agent has to parse JSON manually
+```
+
+#### After:
+```
+llm = None
+  ↓
+_build_simple_fallback() (improved!)
+  ↓
+Extract Problem #1
+  ↓
+Organize memories by validation stage
+  ↓
+Predict consecutive problems
+  ↓
+Build structured markdown
+  ↓
+Agent gets proper sequential plan
+```
+
+---
+
+## 🎯 **What This Achieves:**
+
+### **Your Requirements (All Met!):**
+
+1. ✅ **Use validation_sequence to understand order**
+   - `_get_current_failure_stage()`
+   - `_get_consecutive_stages()`
+
+2. ✅ **Organize memories by validation_cmd**
+   - `_map_memory_to_validation_stage()` - maps `failed_cmd` → stage
+   - `_organize_memories_by_validation_stage()` - groups by stage
+
+3. ✅ **Build repair plan with consecutive problems**
+   - `_extract_current_failure_as_problem_1()` - current failure
+   - `_predict_consecutive_problems()` - what fails AFTER
+   - `_analyze_interdependency()` - how they relate
+
+### **Additional Improvements:**
+
+4. ✅ **Works with 0 memories** (still predicts from validation order)
+5. ✅ **Deterministic fallbacks** (never gives up)
+6. ✅ **Problem #1 always current failure** (enforced in code)
+7. ✅ **No early exits** (always synthesizes)
+8. ✅ **Clean code** (no debug breakpoints)
+
+---
+
+## 🧪 **Testing:**
+
+To test the implementation:
 
 ```bash
-# Clear Python cache
-find . -type d -name "__pycache__" -exec rm -r {} + 2>/dev/null
-find . -name "*.pyc" -delete 2>/dev/null
+cd /Users/rabeyakhatunmuna/Documents/mini-swe-agent-ci-based
 
-# Run decomposition with enhanced prompts
-python scripts/decompose_ci_failure.py --batch --limit 3
+# Run on instance 102 (the test case from your debug session)
+python -m minisweagent.run.benchmarks.cibench \
+  --config config.yml \
+  --split test \
+  --instance_id 102
 
-# Build memory with enhanced prompts
-python scripts/build_memory_from_decomposed.py \
-  --decomposed data/trs/decomposed_issues.json \
-  --output-dir data/trs
+# Check results
+cat results/*/preds.json | python -m json.tool
 ```
 
----
-
-## What to Expect
-
-### Decomposition Output (`decomposed_issues.json`)
-
-Each problem's affected files will now have:
-- `line_range`: "lines 45-52"
-- `what_was_wrong`: Detailed description
-- `before_snippet`: Code before change
-- `after_snippet`: Code after change
-- `why_wrong`: Root cause
-- `how_fixed`: What changed
-- `why_fix_works`: Technical reasoning
-
-### L1 Memory Output (`failure_memory.json`)
-
-Each L1 entry will have:
-- **Rich `problem` field**: Line numbers, symptoms, root cause, detection
-- **Rich `fix_strategy` field**: Steps, snippets, reasoning, verification
-- Same structure as before, just better content
-
-### L2 Memory Output (`repo_memory.json`)
-
-Each atomic_problem will have:
-- **Rich `problem` field**: All symptoms, patterns, root causes
-- **Rich `fix` field** in file_changes: Steps, examples, reasoning
+**Expected Output:**
+- ✅ Memories organized by validation stage
+- ✅ Problem #1 = F632 lint error (confirmed)
+- ✅ Problem #2+ = predicted from consecutive validation stages
+- ✅ Interdependency reasoning included
+- ✅ Agent receives structured markdown with N problems
 
 ---
 
-## Key Features
+## 📝 **Files Modified:**
 
-1. ✅ **Line-level precision**: Line numbers and ranges
-2. ✅ **Concrete examples**: Before/after code snippets
-3. ✅ **Step-by-step**: Actionable instructions
-4. ✅ **Technical reasoning**: Why it failed, why fix works
-5. ✅ **Pattern recognition**: Groups 10+ similar files
-6. ✅ **Verification**: How to confirm fix worked
+1. **`src/minisweagent/run/benchmarks/utils/ci_memory_system.py`**
+   - Added 10 helper functions
+   - Updated `_build_organization_prompt()`
+   - Updated `_build_reasoning_prompt()`
+   - Completely rewrote `_run_single_llm_synthesis()`
+   - Updated `_run_two_llm_gate()`
+   - Improved `_build_simple_fallback()`
+   - Removed debug breakpoints
 
----
-
-## Success Criteria
-
-Someone reading the memory should be able to:
-- ✅ **Recognize** when they have the same problem
-- ✅ **Understand** exactly what was wrong and where
-- ✅ **Apply** the same fix to their code
-- ✅ **Verify** the fix worked
+**Total Changes:**
+- Lines added: ~300
+- Functions added: 10
+- Functions modified: 5
+- Debug breakpoints removed: 3
 
 ---
 
-## Next Steps
+## 🚀 **Next Steps:**
 
-1. **Test the enhanced prompts:**
-   ```bash
-   python test_script/02_build_memory.py
-   ```
+1. **Test the implementation** (run cibench on instance 102)
+2. **Verify output** (check if problems are organized by validation stage)
+3. **Monitor logs** (check if consecutive problems are predicted)
+4. **Review agent behavior** (does it fix all problems sequentially?)
 
-2. **Review output quality:**
-   - Check `data/trs/decomposed_issues.json`
-   - Check `data/trs/failure_memory.json`
-   - Check `data/trs/repo_memory.json`
-
-3. **Iterate if needed:**
-   - If content still too vague: add more examples to prompts
-   - If too verbose: adjust prompt to be more concise
-   - If missing details: add specific requests to prompts
-
----
-
-## Summary
-
-✅ **Enhanced decomposition prompts** - requests concrete details
-✅ **Enhanced L1 builder prompts** - generates detailed narratives  
-✅ **Enhanced L2 builder prompts** - includes patterns and examples
-✅ **Structure unchanged** - same JSON schema
-✅ **Content improved** - from vague to concrete and actionable
-
-The prompts now explicitly request line numbers, error messages, code snippets, step-by-step instructions, and technical reasoning - all packaged into the existing `problem` and `fix_strategy` fields.
+The implementation is **complete and ready to test**! 🎉

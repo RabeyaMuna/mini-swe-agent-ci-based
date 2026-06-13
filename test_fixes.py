@@ -17,21 +17,21 @@ def test_json_cleaning():
     malformed = '```json\n{"key": "value"}\n```'
     cleaned = _clean_malformed_json(malformed)
     assert '```' not in cleaned
-    print("✅ Test 1: Markdown fence removal")
+    print("OK Test 1: Markdown fence removal")
 
     # Test 2: Trailing commas
     malformed = '{"key": "value",}'
     cleaned = _clean_malformed_json(malformed)
     assert cleaned == '{"key": "value"}'
-    print("✅ Test 2: Trailing comma removal")
+    print("OK Test 2: Trailing comma removal")
 
     # Test 3: Extra text before/after JSON
     malformed = 'Here is the JSON: {"key": "value"} done'
     cleaned = _clean_malformed_json(malformed)
     assert cleaned == '{"key": "value"}'
-    print("✅ Test 3: Extra text removal")
+    print("OK Test 3: Extra text removal")
 
-    print("\n✅ All JSON cleaning tests passed!")
+    print("\nOK All JSON cleaning tests passed!")
 
 
 def test_plugin_property():
@@ -47,18 +47,18 @@ def test_plugin_property():
 
     # Test property exists
     assert hasattr(memory_system, 'plugin'), "Missing 'plugin' property"
-    print("✅ CIMemorySystem.plugin property exists")
+    print("OK CIMemorySystem.plugin property exists")
 
     # Test property is accessible
     plugin = memory_system.plugin
     assert plugin is not None, "plugin is None"
-    print("✅ CIMemorySystem.plugin is accessible")
+    print("OK CIMemorySystem.plugin is accessible")
 
     # Test generate_repair_plan method exists
     assert hasattr(plugin, 'generate_repair_plan'), "Missing generate_repair_plan method"
-    print("✅ MemoryPlugin.generate_repair_plan method exists")
+    print("OK MemoryPlugin.generate_repair_plan method exists")
 
-    print("\n✅ All plugin property tests passed!")
+    print("\nOK All plugin property tests passed!")
 
 
 def test_problem_statement_sections():
@@ -123,38 +123,38 @@ def test_problem_statement_sections():
 
     # Check essential sections
     assert "# CI Failure Report" in statement, "Missing header"
-    print("✅ Has header")
+    print("OK Has header")
 
     assert "## Why the CI Failed" in statement, "Missing failure reasons"
-    print("✅ Has failure reasons")
+    print("OK Has failure reasons")
 
     assert "## Memory Context" in statement, "Missing memory context"
-    print("✅ Has memory context")
+    print("OK Has memory context")
 
     assert "### Primary files to inspect first" in statement, "Missing primary files"
-    print("✅ Has primary files")
+    print("OK Has primary files")
 
     assert "### Files to fix — including those NOT in the log" in statement, "Missing additional files"
-    print("✅ Has additional/hidden files")
+    print("OK Has additional/hidden files")
 
     assert "## Suggested Repair Plan" in statement, "Missing repair plan"
-    print("✅ Has repair plan")
+    print("OK Has repair plan")
 
     assert "### Root Causes" in statement, "Missing root causes"
-    print("✅ Has root causes")
+    print("OK Has root causes")
 
     assert "### Repair Steps (in order)" in statement, "Missing repair steps"
-    print("✅ Has repair steps")
+    print("OK Has repair steps")
 
     # Check critical content
     assert "other.py" in statement, "Missing hidden file from additional_files"
-    print("✅ Hidden files included in statement")
+    print("OK Hidden files included in statement")
 
     assert "Type annotation" in statement, "Missing repair step detail"
-    print("✅ Repair step details included")
+    print("OK Repair step details included")
 
-    print("\n✅ All problem statement tests passed!")
-    print(f"\n📄 Problem statement length: {len(statement)} chars")
+    print("\nOK All problem statement tests passed!")
+    print(f"\n Problem statement length: {len(statement)} chars")
 
     # Show excerpt
     print("\n--- EXCERPT ---")
@@ -181,14 +181,14 @@ if __name__ == "__main__":
         test_problem_statement_sections()
 
         print("\n" + "=" * 80)
-        print("✅ ALL TESTS PASSED! System is ready.")
+        print("OK ALL TESTS PASSED! System is ready.")
         print("=" * 80)
 
     except AssertionError as e:
-        print(f"\n❌ TEST FAILED: {e}")
+        print(f"\nERROR TEST FAILED: {e}")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ ERROR: {e}")
+        print(f"\nERROR ERROR: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

@@ -99,11 +99,11 @@ def check_pair_similarity(
     mem2 = next((r for r in l2_records if r.get("sha_fail", "").startswith(sha2[:12])), None)
 
     if not mem1:
-        print(f"❌ No L2 memory found for issue {id1} ({sha1[:12]})")
+        print(f"ERROR No L2 memory found for issue {id1} ({sha1[:12]})")
         return {}
 
     if not mem2:
-        print(f"❌ No L2 memory found for issue {id2} ({sha2[:12]})")
+        print(f"ERROR No L2 memory found for issue {id2} ({sha2[:12]})")
         return {}
 
     # Get embeddings
@@ -111,7 +111,7 @@ def check_pair_similarity(
     emb2 = l2_embeddings.get(sha2)
 
     if emb1 is None or emb2 is None:
-        print(f"❌ No embeddings found, computing on the fly...")
+        print(f"ERROR No embeddings found, computing on the fly...")
 
         # Build query for issue 2
         query_emb = build_query_embedding(issue2, model)
@@ -150,11 +150,11 @@ def check_pair_similarity(
     print(f"Cosine Similarity: {similarity:.4f}")
 
     if similarity >= 0.70:
-        print(f"✅ STRONG MATCH (should retrieve)")
+        print(f"OK STRONG MATCH (should retrieve)")
     elif similarity >= 0.40:
-        print(f"⚠️  MEDIUM MATCH (might retrieve)")
+        print(f"WARNING:  MEDIUM MATCH (might retrieve)")
     else:
-        print(f"❌ WEAK MATCH (likely won't retrieve)")
+        print(f"ERROR WEAK MATCH (likely won't retrieve)")
 
     return {
         "issue1_id": id1,
@@ -252,7 +252,7 @@ def batch_eval_similarities(
     print(f"Eval issues: {len(eval_issues)}")
     print(f"Similarity threshold: {threshold}")
 
-    # Build SHA → issue lookup
+    # Build SHA -> issue lookup
     issue_by_sha = {}
     for issue in eval_issues:
         sha = issue.get("sha_fail", "")
@@ -315,7 +315,7 @@ def main():
     # Load eval issues
     eval_path = Path(args.eval_issues)
     if not eval_path.exists():
-        print(f"❌ Eval issues not found: {eval_path}")
+        print(f"ERROR Eval issues not found: {eval_path}")
         return 1
 
     with open(eval_path) as f:
@@ -326,11 +326,11 @@ def main():
     l2_records, l2_embeddings = load_embeddings(memory_root / "repo_memory.json")
 
     if not l2_records:
-        print(f"❌ No L2 memory found in {memory_root}")
+        print(f"ERROR No L2 memory found in {memory_root}")
         return 1
 
     if not l2_embeddings:
-        print(f"⚠️  No embeddings found, will compute on the fly")
+        print(f"WARNING:  No embeddings found, will compute on the fly")
         print(f"   Run: python scripts/precompute_embeddings.py --memory-root {memory_root}")
 
     # Initialize embedding model
@@ -338,7 +338,7 @@ def main():
         from sentence_transformers import SentenceTransformer
         model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
     except ImportError:
-        print(f"❌ sentence-transformers not installed")
+        print(f"ERROR sentence-transformers not installed")
         print(f"   Run: pip install sentence-transformers")
         return 1
 
@@ -348,10 +348,10 @@ def main():
         issue2 = next((i for i in eval_issues if str(i.get("id")) == args.issue_2), None)
 
         if not issue1:
-            print(f"❌ Issue {args.issue_1} not found")
+            print(f"ERROR Issue {args.issue_1} not found")
             return 1
         if not issue2:
-            print(f"❌ Issue {args.issue_2} not found")
+            print(f"ERROR Issue {args.issue_2} not found")
             return 1
 
         check_pair_similarity(issue1, issue2, l2_records, l2_embeddings, model)
@@ -361,7 +361,7 @@ def main():
         query_issue = next((i for i in eval_issues if str(i.get("id")) == args.query_issue), None)
 
         if not query_issue:
-            print(f"❌ Issue {args.query_issue} not found")
+            print(f"ERROR Issue {args.query_issue} not found")
             return 1
 
         check_query_retrieval(query_issue, eval_issues, l2_records, l2_embeddings, model, args.top_k)

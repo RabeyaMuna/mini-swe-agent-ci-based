@@ -23,9 +23,9 @@ What it does:
 After this runs, retrieval will be MUCH faster (no re-embedding on every query).
 
 Compatible with:
-    ✅ Memory from seed_memory.py (runtime generation)
-    ✅ Memory from build_memory_bank.py (CI-REPAIR-BENCH style)
-    ✅ Both old and new field structures
+    OK Memory from seed_memory.py (runtime generation)
+    OK Memory from build_memory_bank.py (CI-REPAIR-BENCH style)
+    OK Both old and new field structures
 """
 
 import argparse
@@ -116,7 +116,7 @@ def main():
 
         if changed:
             _write_json_list(path, records)
-            print(f"[{level}] Saved {len(records)} records with embeddings → {path}")
+            print(f"[{level}] Saved {len(records)} records with embeddings -> {path}")
         else:
             print(f"[{level}] No changes needed.")
 

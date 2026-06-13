@@ -355,7 +355,7 @@ def build_benchmark_ci_context(issue: Dict, llm: Any) -> Dict[str, Any]:
             if cached_analysis:
                 print(f"  [1/2] Loading cached CI log analysis for {sha_fail[:12]}...")
         except Exception as e:
-            print(f"  ⚠️  Cache load failed: {e}, will re-analyze")
+            print(f"  WARNING:  Cache load failed: {e}, will re-analyze")
 
     if cached_analysis:
         log_analysis = cached_analysis
@@ -377,7 +377,7 @@ def build_benchmark_ci_context(issue: Dict, llm: Any) -> Dict[str, Any]:
             if cached_validation:
                 print(f"  [2/2] Loading cached workflow validation sequence for {sha_fail[:12]}...")
         except Exception as e:
-            print(f"  ⚠️  Validation cache load failed: {e}, will re-analyze")
+            print(f"  WARNING:  Validation cache load failed: {e}, will re-analyze")
 
     if cached_validation:
         validation_sequence = cached_validation.get("validation_sequence", [])
@@ -469,9 +469,9 @@ def validate_required_ci_inputs(benchmark_context: Dict[str, Any]) -> bool:
     has_ci_context = _has_structured_ci_context(benchmark_context)
     has_validation_sequence = bool(benchmark_context.get("validation_sequence"))
     if not has_ci_context:
-        print("  ✗ Missing structured CI context from CILogAnalyzer; skipping decomposition")
+        print("  ERROR Missing structured CI context from CILogAnalyzer; skipping decomposition")
     if not has_validation_sequence:
-        print("  ✗ Missing CI workflow validation sequence; skipping decomposition")
+        print("  ERROR Missing CI workflow validation sequence; skipping decomposition")
     return has_ci_context and has_validation_sequence
 
 
@@ -1062,19 +1062,19 @@ Identify:
 
 **Example reasoning:**
 Structured CI context: "ERROR: No matching distribution for fish-audio-sdk>=2024.12.5"
-→ Problem 1 (VISIBLE): Dependency constraint
-→ Files: pyproject.toml
-→ CI stage: pip install
+-> Problem 1 (VISIBLE): Dependency constraint
+-> Files: pyproject.toml
+-> CI stage: pip install
 
 Diff ALSO changes: src/audio/*.py (11 files, type hints changed)
-→ Problem 2 (HIDDEN): Type errors after SDK upgrade
-→ Would fail at: mypy src/
-→ Depends on: Problem 1 (can't check types until SDK installable)
+-> Problem 2 (HIDDEN): Type errors after SDK upgrade
+-> Would fail at: mypy src/
+-> Depends on: Problem 1 (can't check types until SDK installable)
 
 	Diff ALSO changes: tests/test_audio.py
-	→ Problem 3 (HIDDEN): Test expectations outdated
-	→ Would fail at: pytest tests/
-	→ Depends on: Problem 2
+	-> Problem 3 (HIDDEN): Test expectations outdated
+	-> Would fail at: pytest tests/
+	-> Depends on: Problem 2
 	
 	════════════════════════════════════════════════════════════════════════════════
 	REQUIRED REASONING STEPS
@@ -1498,7 +1498,7 @@ def decompose_issue(issue: Dict, llm) -> Dict:
         print(f"  Calling LLM to reverse engineer atomic problems...")
         result = reverse_engineer_atomic_problems(issue, benchmark_context, diff_context, llm)
         if not result:
-            print("  ✗ Atomic problem JSON parsing failed; returning empty result")
+            print("  ERROR Atomic problem JSON parsing failed; returning empty result")
             return {}
 
         print(f"  Calling LLM to build repair trajectory...")
@@ -1514,7 +1514,7 @@ def decompose_issue(issue: Dict, llm) -> Dict:
     except Exception as e:
         import traceback
         error_trace = traceback.format_exc()
-        print(f"  ✗ Failed to decompose: {e}")
+        print(f"  ERROR Failed to decompose: {e}")
         print(f"\n--- FULL ERROR TRACE ---")
         print(error_trace)
         print(f"--- END TRACE ---\n")
@@ -1547,7 +1547,7 @@ def main():
     # Load eval issues
     eval_path = Path(args.eval_issues)
     if not eval_path.exists():
-        print(f"✗ Eval issues not found: {eval_path}")
+        print(f"ERROR Eval issues not found: {eval_path}")
         return 1
 
     with open(eval_path) as f:
@@ -1559,7 +1559,7 @@ def main():
     if args.issue_id:
         issues = [i for i in issues if str(i.get("id")) == args.issue_id]
         if not issues:
-            print(f"✗ Issue {args.issue_id} not found")
+            print(f"ERROR Issue {args.issue_id} not found")
             return 1
 
     # Limit if requested
@@ -1634,7 +1634,7 @@ def main():
     print(f"\nOutput saved to: {output_path}")
 
     if errors:
-        print(f"\n⚠️  {len(errors)} issues had errors")
+        print(f"\nWARNING:  {len(errors)} issues had errors")
         print(f"Issue IDs with errors: {[e.get('original_issue_id') for e in errors[:5]]}")
 
     return 0

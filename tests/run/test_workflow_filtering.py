@@ -271,19 +271,19 @@ if __name__ == "__main__":
 
         print("Testing L1 workflow filtering...")
         test_l1_filters_by_workflow(tmp_path_obj)
-        print("✅ L1 workflow filtering works correctly")
+        print("OK L1 workflow filtering works correctly")
 
         print("\nTesting L2 workflow filtering...")
         test_l2_filters_by_workflow(tmp_path_obj)
-        print("✅ L2 workflow filtering works correctly")
+        print("OK L2 workflow filtering works correctly")
 
         print("\nTesting L3 no filtering...")
         test_l3_no_workflow_filtering(tmp_path_obj)
-        print("✅ L3 generalized search works correctly")
+        print("OK L3 generalized search works correctly")
 
         print("\nTesting backward compatibility...")
         test_workflow_filtering_with_missing_workflow_field(tmp_path_obj)
-        print("✅ Backward compatibility maintained")
+        print("OK Backward compatibility maintained")
 
         print("\n" + "="*50)
-        print("✅ All workflow filtering tests passed!")
+        print("OK All workflow filtering tests passed!")

@@ -1155,7 +1155,7 @@ def test_confirm_exit_config_field_can_be_set(model_factory):
 
 
 def test_submission_help_then_human_mode(model_factory):
-    """Test: agent submits → /h shows help and reprompts → /u switches to human → echo 'test' → see 'test'."""
+    """Test: agent submits -> /h shows help and reprompts -> /u switches to human -> echo 'test' -> see 'test'."""
     factory, config = model_factory
     with mock_prompts(
         [
@@ -1186,7 +1186,7 @@ def test_submission_help_then_human_mode(model_factory):
 
 
 def test_submission_enter_quits(model_factory):
-    """Test: agent submits → Enter → quit for real."""
+    """Test: agent submits -> Enter -> quit for real."""
     factory, config = model_factory
     with mock_prompts([""]):  # At submission prompt: Enter to quit
         agent = InteractiveAgent(

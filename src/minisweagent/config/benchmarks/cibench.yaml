@@ -10,11 +10,11 @@
 #    workflow, workflow_path, workflow_name, logs
 #
 #  The runner (cibench.py) will:
-#    1. Run CILogAnalyzer on logs          → structured failure context
-#    2. Run CIMemorySystem retrieval       → L1/L2/L3 similar failures
-#    3. Clone repo + checkout sha_fail     → local testbed at {{testbed_path}}
-#    4. Call agent.run(problem_statement)  → agent explores + fixes
-#    5. Capture git diff as the patch      → {id, sha_fail, diff}
+#    1. Run CILogAnalyzer on logs          -> structured failure context
+#    2. Run CIMemorySystem retrieval       -> L1/L2/L3 similar failures
+#    3. Clone repo + checkout sha_fail     -> local testbed at {{testbed_path}}
+#    4. Call agent.run(problem_statement)  -> agent explores + fixes
+#    5. Capture git diff as the patch      -> {id, sha_fail, diff}
 ################################################################################
 
 # ── Agent ────────────────────────────────────────────────────────────────────

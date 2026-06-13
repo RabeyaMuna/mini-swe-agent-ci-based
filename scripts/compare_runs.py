@@ -299,17 +299,17 @@ def main():
     # Q1: In HELPED cases — did memory actually fire?
     helped_mem_used = [r for r in helped if r.get("llm_used_memory")]
     print(f"\n  HELPED cases where memory actually fired: {len(helped_mem_used)}/{len(helped)}")
-    print(f"  → If low: memory helped by chance (log analysis / workflow context did the work)")
+    print(f"  -> If low: memory helped by chance (log analysis / workflow context did the work)")
 
     # Q2: In HURT cases — did memory inject wrong context?
     hurt_mem_used = [r for r in hurt if r.get("llm_used_memory")]
     print(f"\n  HURT cases where memory fired: {len(hurt_mem_used)}/{len(hurt)}")
-    print(f"  → If high: memory is actively misleading the agent")
+    print(f"  -> If high: memory is actively misleading the agent")
 
     # Q3: In BOTH_FAILED cases — did memory fire and still fail?
     both_failed_mem = [r for r in categories["BOTH_FAILED"] if r.get("llm_used_memory")]
     print(f"\n  BOTH_FAILED cases where memory fired but still failed: {len(both_failed_mem)}/{len(categories['BOTH_FAILED'])}")
-    print(f"  → Shows memory injection quality — high here means retrieval is not useful enough")
+    print(f"  -> Shows memory injection quality — high here means retrieval is not useful enough")
 
     # Q4: Cases where memory did NOT fire (above_threshold=False) — what error types?
     from collections import Counter

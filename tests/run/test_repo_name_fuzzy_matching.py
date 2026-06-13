@@ -252,29 +252,29 @@ if __name__ == "__main__":
 
     print("\n1. Testing _repo_matches function...")
     test_repo_matches_function()
-    print("✅ _repo_matches works correctly")
+    print("OK _repo_matches works correctly")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         from pathlib import Path
         tmp_path = Path(tmpdir)
 
-        print("\n2. Testing L1 fuzzy matching (full → short)...")
+        print("\n2. Testing L1 fuzzy matching (full -> short)...")
         test_l1_fuzzy_repo_matching(tmp_path)
-        print("✅ L1 matches 'camel-ai/camel' query with 'camel' memory")
+        print("OK L1 matches 'camel-ai/camel' query with 'camel' memory")
 
-        print("\n3. Testing L1 reverse fuzzy matching (short → full)...")
+        print("\n3. Testing L1 reverse fuzzy matching (short -> full)...")
         test_l1_reverse_fuzzy_matching(tmp_path)
-        print("✅ L1 matches 'camel' query with 'camel-ai/camel' memory")
+        print("OK L1 matches 'camel' query with 'camel-ai/camel' memory")
 
         print("\n4. Testing L2 fuzzy matching...")
         test_l2_fuzzy_repo_matching(tmp_path)
-        print("✅ L2 uses fuzzy repo matching")
+        print("OK L2 uses fuzzy repo matching")
 
         print("\n5. Testing exclusion of different repos...")
         test_fuzzy_matching_excludes_different_repos(tmp_path)
-        print("✅ Fuzzy matching correctly excludes different repos")
+        print("OK Fuzzy matching correctly excludes different repos")
 
     print("\n" + "=" * 50)
-    print("✅ All fuzzy repo matching tests passed!")
+    print("OK All fuzzy repo matching tests passed!")
     print("\nThis fix addresses the issue where L1/L2 returned 0 results")
     print("due to 'camel-ai/camel' (query) != 'camel' (memory) mismatch.")

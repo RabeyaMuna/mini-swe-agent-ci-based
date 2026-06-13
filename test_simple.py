@@ -32,9 +32,9 @@ def test_clean_json():
         cleaned = clean_malformed_json(malformed)
         try:
             json.loads(cleaned)  # Verify it's valid JSON
-            print(f"✅ Cleaned: {malformed[:30]}... → valid JSON")
+            print(f"OK Cleaned: {malformed[:30]}... -> valid JSON")
         except json.JSONDecodeError as e:
-            print(f"❌ Failed: {malformed[:30]}... → {e}")
+            print(f"ERROR Failed: {malformed[:30]}... -> {e}")
             return False
 
     return True
@@ -46,10 +46,10 @@ def test_property_exists():
         content = f.read()
 
     if '@property' in content and 'def plugin(self):' in content:
-        print("✅ @property plugin added to CIMemorySystem")
+        print("OK @property plugin added to CIMemorySystem")
         return True
     else:
-        print("❌ @property plugin NOT found in CIMemorySystem")
+        print("ERROR @property plugin NOT found in CIMemorySystem")
         return False
 
 
@@ -59,16 +59,16 @@ def test_json_cleaning_in_analyzer():
         content = f.read()
 
     if 'def _clean_malformed_json' in content:
-        print("✅ _clean_malformed_json function added")
+        print("OK _clean_malformed_json function added")
     else:
-        print("❌ _clean_malformed_json function NOT found")
+        print("ERROR _clean_malformed_json function NOT found")
         return False
 
     if '_clean_malformed_json(content)' in content:
-        print("✅ _clean_malformed_json is being used")
+        print("OK _clean_malformed_json is being used")
         return True
     else:
-        print("❌ _clean_malformed_json NOT being called")
+        print("ERROR _clean_malformed_json NOT being called")
         return False
 
 
@@ -78,16 +78,16 @@ def test_problem_statement_has_repair_plan():
         content = f.read()
 
     if 'repair_plan = memory.get("repair_plan")' in content:
-        print("✅ Problem statement retrieves repair_plan")
+        print("OK Problem statement retrieves repair_plan")
     else:
-        print("❌ repair_plan not retrieved")
+        print("ERROR repair_plan not retrieved")
         return False
 
     if '## Suggested Repair Plan' in content:
-        print("✅ Problem statement includes repair plan section")
+        print("OK Problem statement includes repair plan section")
         return True
     else:
-        print("❌ Repair plan section missing")
+        print("ERROR Repair plan section missing")
         return False
 
 
@@ -109,21 +109,21 @@ if __name__ == "__main__":
         try:
             if not test_func():
                 all_passed = False
-                print(f"❌ {name} FAILED")
+                print(f"ERROR {name} FAILED")
         except Exception as e:
-            print(f"❌ {name} ERROR: {e}")
+            print(f"ERROR {name} ERROR: {e}")
             all_passed = False
 
     print("\n" + "=" * 80)
     if all_passed:
-        print("✅ ALL TESTS PASSED!")
-        print("\n📋 SUMMARY OF FIXES:")
-        print("  1. ✅ CI log JSON parser now handles malformed JSON")
-        print("  2. ✅ CIMemorySystem.plugin property added")
-        print("  3. ✅ Problem statement includes repair plans")
-        print("  4. ✅ Problem statement includes hidden files from memory")
-        print("\n🚀 Ready to test with actual benchmark!")
+        print("OK ALL TESTS PASSED!")
+        print("\n SUMMARY OF FIXES:")
+        print("  1. OK CI log JSON parser now handles malformed JSON")
+        print("  2. OK CIMemorySystem.plugin property added")
+        print("  3. OK Problem statement includes repair plans")
+        print("  4. OK Problem statement includes hidden files from memory")
+        print("\n Ready to test with actual benchmark!")
     else:
-        print("❌ SOME TESTS FAILED")
+        print("ERROR SOME TESTS FAILED")
         exit(1)
     print("=" * 80)

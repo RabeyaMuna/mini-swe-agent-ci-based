@@ -808,7 +808,7 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
             
 
         print(
-            f"Filtered from {n_chunks} ➝ {len(filtered_chunks)} chunks "
+            f"Filtered from {n_chunks} -> {len(filtered_chunks)} chunks "
             f"(checked first {cutoff}, always kept last 4)"
         )
 
@@ -855,13 +855,13 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
         raw_tokens = line.split()
         tokens = [tok.strip("[]():,") for tok in raw_tokens]
 
-        # 1) Phrase keywords → use substring
+        # 1) Phrase keywords -> use substring
         for kw in keywords:
             if " " in kw:
                 if kw in line:  # exact phrase, case-sensitive
                     hits.append(kw)
 
-        # 2) Single-word keywords → must match full token
+        # 2) Single-word keywords -> must match full token
         # We also apply the "no error" rule here.
         for idx, tok in enumerate(tokens):
             for kw in keywords:
@@ -873,7 +873,7 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
                     if kw in ("error", "errors") and idx > 0:
                         prev_tok = tokens[idx - 1]
                         if prev_tok.lower() == "no":
-                            # e.g. "no error", "No errors" → not a real error
+                            # e.g. "no error", "No errors" -> not a real error
                             continue
 
                     hits.append(kw)
@@ -1223,7 +1223,7 @@ class CILogAnalyzer:
             model_name=model,
             task_id=task_id,
         )
-        result = analyzer.run()  # → same schema as CILogAnalyzerLLM.run()
+        result = analyzer.run()  # -> same schema as CILogAnalyzerLLM.run()
 
     Raises ``RuntimeError`` when ``llm`` is ``None`` so that the caller's
     fallback (``_minimal_log_analysis``) is triggered automatically.
@@ -1242,7 +1242,7 @@ class CILogAnalyzer:
     ) -> None:
         if llm is None:
             raise RuntimeError(
-                "CILogAnalyzer requires an LLM; llm=None → using fallback analysis."
+                "CILogAnalyzer requires an LLM; llm=None -> using fallback analysis."
             )
 
         ci_log = _normalize_logs(logs)

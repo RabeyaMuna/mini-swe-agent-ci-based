@@ -688,7 +688,7 @@ CRITICAL ANALYSIS REQUIREMENTS:
 
 4. **UNIVERSAL VALIDATION COMMAND**:
    - What command can ANY Python project run to verify this?
-   - Generalize from examples (e.g., "uv install" → "pip install" or "poetry install")
+   - Generalize from examples (e.g., "uv install" -> "pip install" or "poetry install")
    - Command should work across different tools/environments
 
 5. **ACTIONABLE FIX STRATEGY**:
@@ -730,7 +730,7 @@ REMEMBER: This pattern will be used by OTHER projects you've never seen. Make it
         return _load_llm_json(response)
 
     except Exception as e:
-        print(f"⚠️  LLM L3 analysis failed for {issue_type}: {e}")
+        print(f"WARNING:  LLM L3 analysis failed for {issue_type}: {e}")
         print(f"   Response preview: {response[:500] if 'response' in locals() else 'N/A'}")
 
         # Fallback structure with flat strings
@@ -815,7 +815,7 @@ Return STRICT JSON (no markdown):
         return clusters if clusters else [problems]
 
     except Exception as e:
-        print(f"⚠️  LLM clustering failed: {e}, falling back to individual L3s")
+        print(f"WARNING:  LLM clustering failed: {e}, falling back to individual L3s")
         return [[p] for p in problems]  # Each problem in its own cluster
 
 
@@ -899,7 +899,7 @@ OUTPUT STRICT JSON (no markdown):
         return pattern
 
     except Exception as e:
-        print(f"⚠️  LLM cluster analysis failed: {e}")
+        print(f"WARNING:  LLM cluster analysis failed: {e}")
         # Fallback - use first problem in cluster
         return _build_l3_with_llm(cluster[0], llm)
 
@@ -990,7 +990,7 @@ def build_l3_memory(l2_memories: List[Dict], llm) -> List[Dict]:
         else:
             # Multiple problems - LLM cluster first
             clusters = _llm_cluster_atomic_problems(problems, llm)
-            print(f"    → Clustered into {len(clusters)} pattern(s)")
+            print(f"    -> Clustered into {len(clusters)} pattern(s)")
 
             for cluster in clusters:
                 pattern = _build_l3_from_cluster(cluster, llm)
@@ -1047,7 +1047,7 @@ def main():
     # Load decomposed issues
     decomposed_path = Path(args.decomposed)
     if not decomposed_path.exists():
-        print(f"✗ Decomposed issues not found: {decomposed_path}")
+        print(f"ERROR Decomposed issues not found: {decomposed_path}")
         print(f"Run decompose_ci_failure.py first!")
         return 1
 
@@ -1101,19 +1101,19 @@ def main():
     l1_path = output_dir / "failure_memory.json"
     with open(l1_path, "w") as f:
         json.dump(l1_memories, f, indent=2)
-    print(f"\n✓ Saved L1 memory: {l1_path}")
+    print(f"\nOK Saved L1 memory: {l1_path}")
 
     # Save L2 (repo_memory.json for compatibility)
     l2_path = output_dir / "repo_memory.json"
     with open(l2_path, "w") as f:
         json.dump(l2_memories, f, indent=2)
-    print(f"✓ Saved L2 memory: {l2_path}")
+    print(f"OK Saved L2 memory: {l2_path}")
 
     # Save L3 (cross_memory.json for compatibility)
     l3_path = output_dir / "cross_memory.json"
     with open(l3_path, "w") as f:
         json.dump(l3_principles, f, indent=2)
-    print(f"✓ Saved L3 memory: {l3_path}")
+    print(f"OK Saved L3 memory: {l3_path}")
 
     # Summary
     print(f"\n{'='*80}")

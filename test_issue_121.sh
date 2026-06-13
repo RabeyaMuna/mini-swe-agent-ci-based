@@ -13,7 +13,7 @@ echo ""
 echo "1. Clearing Python cache..."
 find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 find . -name "*.pyc" -delete 2>/dev/null || true
-echo "✅ Cache cleared"
+echo "OK Cache cleared"
 
 # Step 2: Create test set with issue 121
 echo ""
@@ -29,23 +29,23 @@ try:
     issue_121 = [i for i in all_issues if str(i.get('id')) == '121']
 
     if not issue_121:
-        print('❌ Issue 121 not found in eval_issues.json')
+        print('ERROR Issue 121 not found in eval_issues.json')
         print('Available IDs:', [i.get('id') for i in all_issues[:10]])
         sys.exit(1)
 
     with open('data/trs/eval_issues_121.jsonl', 'w') as f:
         f.write(json.dumps(issue_121[0]) + '\n')
 
-    print(f'✅ Created eval_issues_121.jsonl')
+    print(f'OK Created eval_issues_121.jsonl')
     print(f'   ID: {issue_121[0].get(\"id\")}')
     print(f'   SHA: {issue_121[0].get(\"sha_fail\")}')
     print(f'   Repo: {issue_121[0].get(\"repo_owner\")}/{issue_121[0].get(\"repo_name\")}')
 
 except FileNotFoundError:
-    print('❌ eval_issues.json not found at data/trs/')
+    print('ERROR eval_issues.json not found at data/trs/')
     sys.exit(1)
 except Exception as e:
-    print(f'❌ Error: {e}')
+    print(f'ERROR Error: {e}')
     sys.exit(1)
 "
 
@@ -58,24 +58,24 @@ fi
 echo ""
 echo "3. Checking memory files..."
 if [ ! -f "data/trs/repo_memory.json" ]; then
-    echo "❌ Memory not found. Run: python scripts/build_memory_from_decomposed.py --decomposed data/trs/decomposed_issues.json --output-dir data/trs"
+    echo "ERROR Memory not found. Run: python scripts/build_memory_from_decomposed.py --decomposed data/trs/decomposed_issues.json --output-dir data/trs"
     exit 1
 fi
 
 python -c "
 import json
 l2 = json.load(open('data/trs/repo_memory.json'))
-print(f'✅ L2 memory loaded: {len(l2)} entries')
+print(f'OK L2 memory loaded: {len(l2)} entries')
 
 # Check if issue 121 is in memory
 issue_121_mem = [e for e in l2 if e.get('id') == 'flower_121']
 if issue_121_mem:
-    print(f'✅ Issue 121 found in memory')
+    print(f'OK Issue 121 found in memory')
     entry = issue_121_mem[0]
     print(f'   Problems: {len(entry.get(\"atomic_problems\", []))}')
     print(f'   Has trajectory: {\"repair_trajectory_summary\" in entry}')
 else:
-    print(f'❌ Issue 121 NOT in memory')
+    print(f'ERROR Issue 121 NOT in memory')
     print(f'   Available IDs: {[e.get(\"id\") for e in l2[:5]]}')
 "
 
@@ -112,7 +112,7 @@ for key, value in preds.items():
     if diff:
         # Count files changed
         files = [line for line in diff.split('\n') if line.startswith('diff --git')]
-        print(f'\n📝 Files changed: {len(files)}')
+        print(f'\n Files changed: {len(files)}')
         for f in files[:10]:
             print(f'   {f}')
         if len(files) > 10:
@@ -123,22 +123,22 @@ for key, value in preds.items():
         has_rst = '.rst' in diff
         has_toml = 'pyproject.toml' in diff
 
-        print(f'\n✅ Expected changes:')
-        print(f'   numpy type fix: {\"✅\" if has_numpy else \"❌\"}')
-        print(f'   RST formatting: {\"✅\" if has_rst else \"❌\"}')
-        print(f'   taplo enable:   {\"✅\" if has_toml else \"❌\"}')
+        print(f'\nOK Expected changes:')
+        print(f'   numpy type fix: {\"OK\" if has_numpy else \"ERROR\"}')
+        print(f'   RST formatting: {\"OK\" if has_rst else \"ERROR\"}')
+        print(f'   taplo enable:   {\"OK\" if has_toml else \"ERROR\"}')
 
         if has_numpy and has_rst and has_toml:
-            print(f'\n🎉 SUCCESS: All 3 problems fixed!')
+            print(f'\n SUCCESS: All 3 problems fixed!')
         elif has_numpy or has_rst or has_toml:
-            print(f'\n⚠️  PARTIAL: Some problems fixed')
+            print(f'\nWARNING:  PARTIAL: Some problems fixed')
         else:
-            print(f'\n❌ FAILURE: No expected changes found')
+            print(f'\nERROR FAILURE: No expected changes found')
     else:
-        print('❌ No diff generated')
+        print('ERROR No diff generated')
 "
 else
-    echo "❌ No predictions generated"
+    echo "ERROR No predictions generated"
     echo "Check results/test_issue_121_fixed/ for logs"
 fi
 

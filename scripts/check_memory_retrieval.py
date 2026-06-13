@@ -93,8 +93,8 @@ def show_instance(r, show_matches=False):
     ws    = r.get("weighted_sim", 0.0)
     thr   = r.get("threshold", 0.0)
     used  = r.get("llm_used_memory", False)
-    print(f"  Q1  Was memory retrieved?     {'YES ✓' if above else 'NO ✗'}  (weighted={ws:.3f}  threshold={thr:.3f})")
-    print(f"      LLM gate used memory?     {'YES ✓' if used else 'NO ✗'}")
+    print(f"  Q1  Was memory retrieved?     {'YES OK' if above else 'NO ERROR'}  (weighted={ws:.3f}  threshold={thr:.3f})")
+    print(f"      LLM gate used memory?     {'YES OK' if used else 'NO ERROR'}")
 
     # Q2: Match counts
     counts = r.get("counts", {})

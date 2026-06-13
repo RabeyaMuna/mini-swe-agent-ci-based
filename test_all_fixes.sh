@@ -9,14 +9,14 @@ echo "=========================================="
 echo "1. Clearing Python cache..."
 find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 find . -name "*.pyc" -delete 2>/dev/null || true
-echo "✅ Done"
+echo "OK Done"
 
 # Test fixes are present
 echo ""
 echo "2. Verifying fixes in code..."
 python test_simple.py
 if [ $? -ne 0 ]; then
-    echo "❌ Fixes not present in code"
+    echo "ERROR Fixes not present in code"
     exit 1
 fi
 
@@ -43,12 +43,12 @@ echo "=========================================="
 echo ""
 echo "Checking for critical errors..."
 if grep -q "Memory synthesis LLM failed" results/test_all_fixes/cibench.log; then
-    echo "⚠️  LLM synthesis still failing - check logs:"
+    echo "WARNING:  LLM synthesis still failing - check logs:"
     grep "Memory synthesis" results/test_all_fixes/cibench.log
     echo ""
     echo "Debug: Check with --log-level DEBUG to see raw LLM output"
 else
-    echo "✅ No LLM synthesis failures"
+    echo "OK No LLM synthesis failures"
 fi
 
 # Check instance ID
@@ -60,11 +60,11 @@ preds = json.load(open('results/test_all_fixes/preds.json'))
 for key in preds.keys():
     print(f'Prediction key: {key}')
     if key.startswith('adap/flower@'):
-        print('❌ Still using repo@sha format instead of benchmark ID')
+        print('ERROR Still using repo@sha format instead of benchmark ID')
     elif key == '102':
-        print('✅ Using correct benchmark ID format')
+        print('OK Using correct benchmark ID format')
     else:
-        print(f'⚠️  Using unexpected ID format: {key}')
+        print(f'WARNING:  Using unexpected ID format: {key}')
 "
 
 # Check problem statement
@@ -85,13 +85,13 @@ try:
 
         # Check if synthesis worked
         if 'using deterministic guidance' in ps.lower() or 'Relevant L1 memory match' in ps:
-            print('⚠️  Deterministic fallback was used (LLM synthesis failed)')
+            print('WARNING:  Deterministic fallback was used (LLM synthesis failed)')
         else:
-            print('✅ LLM synthesis likely succeeded')
+            print('OK LLM synthesis likely succeeded')
 except FileNotFoundError:
-    print('❌ Trajectory file not found')
+    print('ERROR Trajectory file not found')
 except Exception as e:
-    print(f'❌ Error: {e}')
+    print(f'ERROR Error: {e}')
 "
 
 echo ""

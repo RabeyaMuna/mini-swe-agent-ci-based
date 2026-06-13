@@ -6407,7 +6407,7 @@
     "workflow_path": ".github/workflows/test_minimal_dependency.yml",
     "issue_type": "circular_import_dependency",
     "failed_cmd": "pytest test/integration_test/test_minimal_dependency.py -m \"not model_backend\"",
-    "problem": "Unused import of ChatAgent from camel.agents creates circular dependency chain: test → camel.agents → chat_agent.py → _utils.py → camel.toolkits → async_browser_toolkit → back to camel.agents, causing ImportError at module initialization",
+    "problem": "Unused import of ChatAgent from camel.agents creates circular dependency chain: test -> camel.agents -> chat_agent.py -> _utils.py -> camel.toolkits -> async_browser_toolkit -> back to camel.agents, causing ImportError at module initialization",
     "fix_strategy": "Remove the unused 'from camel.agents import ChatAgent' import line from async_browser_toolkit.py. Verify fix by running: pytest test/integration_test/test_minimal_dependency.py -m \"not model_backend\"",
     "dependent_files": [
       {
@@ -6424,7 +6424,7 @@
     "workflow_path": ".github/workflows/test_minimal_dependency.yml",
     "issue_type": "circular_import_dependency",
     "failed_cmd": "pytest test/integration_test/test_minimal_dependency.py -m \"not model_backend\"",
-    "problem": "Unused import of ChatAgent from camel.agents creates circular dependency chain: test → camel.agents → chat_agent.py → _utils.py → camel.toolkits → browser_toolkit → back to camel.agents, causing ImportError at module initialization",
+    "problem": "Unused import of ChatAgent from camel.agents creates circular dependency chain: test -> camel.agents -> chat_agent.py -> _utils.py -> camel.toolkits -> browser_toolkit -> back to camel.agents, causing ImportError at module initialization",
     "fix_strategy": "Remove the unused 'from camel.agents import ChatAgent' import line from browser_toolkit.py. Verify fix by running: pytest test/integration_test/test_minimal_dependency.py -m \"not model_backend\"",
     "dependent_files": [
       {

@@ -18,7 +18,7 @@ print("=" * 80)
 
 for level, path in files.items():
     if not path.exists():
-        print(f"\n{level}: ❌ File not found: {path}")
+        print(f"\n{level}: ERROR File not found: {path}")
         continue
 
     data = json.loads(path.read_text())
@@ -48,7 +48,7 @@ for level, path in files.items():
         if sample:
             search_doc = sample.get("search_document", "")
             has_trajectory = "repair_trajectory:" in search_doc
-            print(f"  ✅ Has repair_trajectory in search_document: {has_trajectory}")
+            print(f"  OK Has repair_trajectory in search_document: {has_trajectory}")
 
 print("\n" + "=" * 80)
 print("SUMMARY")
@@ -60,8 +60,8 @@ all_embedded = all(
 )
 
 if all_embedded:
-    print("✅ SUCCESS: All memory entries have embeddings!")
-    print("\n🚀 Ready for retrieval testing")
+    print("OK SUCCESS: All memory entries have embeddings!")
+    print("\n Ready for retrieval testing")
 else:
-    print("⚠️  Some entries missing embeddings")
+    print("WARNING:  Some entries missing embeddings")
     print("   Run: python scripts/precompute_embeddings.py --memory-root data/trs")
