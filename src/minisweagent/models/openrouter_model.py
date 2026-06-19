@@ -26,7 +26,9 @@ class OpenRouterModelConfig(BaseModel):
     model_kwargs: dict[str, Any] = {}
     set_cache_control: Literal["default_end"] | None = None
     """Set explicit cache control markers, for example for Anthropic models"""
-    cost_tracking: Literal["default", "ignore_errors"] = os.getenv("MSWEA_COST_TRACKING", "default")
+    cost_tracking: Literal["default", "ignore_errors"] = os.getenv(
+        "MSWEA_COST_TRACKING", "default"
+    )
     """Cost tracking mode for this model. Can be "default" or "ignore_errors" (ignore errors/missing cost info)"""
     format_error_template: str = "{{ error }}"
     """Template used when the LM's output is not in the expected format."""
@@ -52,7 +54,10 @@ class OpenRouterRateLimitError(Exception):
 
 
 class OpenRouterModel:
-    abort_exceptions: list[type[Exception]] = [OpenRouterAuthenticationError, KeyboardInterrupt]
+    abort_exceptions: list[type[Exception]] = [
+        OpenRouterAuthenticationError,
+        KeyboardInterrupt,
+    ]
 
     def __init__(self, **kwargs):
         self.config = OpenRouterModelConfig(**kwargs)
@@ -79,9 +84,11 @@ class OpenRouterModel:
         }
 
         try:
-            response = requests.post(self._api_url, headers=headers, data=json.dumps(payload), timeout=60)
+            response = requests.post(
+                self._api_url, headers=headers, data=json.dumps(payload), timeout=60
+            )
             response.raise_for_status()
-            return response.json()
+            return self._parse_json_response(response)
         except requests.exceptions.HTTPError as e:
             if response.status_code == 401:
                 error_msg = "Authentication failed. You can permanently set your API key with `mini-extra config set OPENROUTER_API_KEY YOUR_KEY`."
@@ -89,9 +96,22 @@ class OpenRouterModel:
             elif response.status_code == 429:
                 raise OpenRouterRateLimitError("Rate limit exceeded") from e
             else:
-                raise OpenRouterAPIError(f"HTTP {response.status_code}: {response.text}") from e
+                raise OpenRouterAPIError(
+                    f"HTTP {response.status_code}: {response.text}"
+                ) from e
         except requests.exceptions.RequestException as e:
             raise OpenRouterAPIError(f"Request failed: {e}") from e
+
+    def _parse_json_response(self, response: requests.Response) -> dict:
+        try:
+            return response.json()
+        except requests.exceptions.JSONDecodeError as e:
+            content_type = response.headers.get("content-type", "<missing>")
+            body = response.text[:1000] if response.text else "<empty>"
+            raise OpenRouterAPIError(
+                "Invalid JSON response from OpenRouter: "
+                f"status={response.status_code}, content-type={content_type!r}, body={body!r}"
+            ) from e
 
     def _prepare_messages_for_api(self, messages: list[dict]) -> list[dict]:
         prepared = [{k: v for k, v in msg.items() if k != "extra"} for msg in messages]
@@ -101,7 +121,9 @@ class OpenRouterModel:
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
             with attempt:
-                response = self._query(self._prepare_messages_for_api(messages), **kwargs)
+                response = self._query(
+                    self._prepare_messages_for_api(messages), **kwargs
+                )
         cost_output = self._calculate_cost(response)
         GLOBAL_MODEL_STATS.add(cost_output["cost"])
         message = dict(response["choices"][0]["message"])
@@ -130,7 +152,9 @@ class OpenRouterModel:
         """Parse tool calls from the response. Raises FormatError if unknown tool."""
         tool_calls = response["choices"][0]["message"].get("tool_calls") or []
         tool_calls = [_DictToObj(tc) for tc in tool_calls]
-        return parse_toolcall_actions(tool_calls, format_error_template=self.config.format_error_template)
+        return parse_toolcall_actions(
+            tool_calls, format_error_template=self.config.format_error_template
+        )
 
     def format_message(self, **kwargs) -> dict:
         return expand_multimodal_content(kwargs, pattern=self.config.multimodal_regex)

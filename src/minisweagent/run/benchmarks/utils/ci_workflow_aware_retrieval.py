@@ -292,6 +292,12 @@ def analyze_workflow_from_benchmark(
         llm,
         build_validation_sequence_prompt(workflow_path, workflow_content, dependent_file_contents),
     )
+
+    # Log raw LLM response for debugging
+    print(f"[DEBUG] Workflow validation LLM raw response (first 1000 chars):")
+    print(f"{str(sequence_raw)[:1000]}")
+    print(f"[DEBUG] Response length: {len(str(sequence_raw))} chars")
+
     validation_sequence = _normalize_validation_sequence(_load_json(sequence_raw, []))
 
     if not validation_sequence:

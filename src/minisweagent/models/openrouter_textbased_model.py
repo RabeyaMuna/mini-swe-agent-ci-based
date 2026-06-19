@@ -10,7 +10,10 @@ from minisweagent.models.openrouter_model import (
     OpenRouterModelConfig,
     OpenRouterRateLimitError,
 )
-from minisweagent.models.utils.actions_text import format_observation_messages, parse_regex_actions
+from minisweagent.models.utils.actions_text import (
+    format_observation_messages,
+    parse_regex_actions,
+)
 
 logger = logging.getLogger("openrouter_textbased_model")
 
@@ -43,9 +46,11 @@ class OpenRouterTextbasedModel(OpenRouterModel):
         }
 
         try:
-            response = requests.post(self._api_url, headers=headers, data=json.dumps(payload), timeout=60)
+            response = requests.post(
+                self._api_url, headers=headers, data=json.dumps(payload), timeout=60
+            )
             response.raise_for_status()
-            return response.json()
+            return self._parse_json_response(response)
         except requests.exceptions.HTTPError as e:
             if response.status_code == 401:
                 error_msg = "Authentication failed. You can permanently set your API key with `mini-extra config set OPENROUTER_API_KEY YOUR_KEY`."
@@ -53,7 +58,9 @@ class OpenRouterTextbasedModel(OpenRouterModel):
             elif response.status_code == 429:
                 raise OpenRouterRateLimitError("Rate limit exceeded") from e
             else:
-                raise OpenRouterAPIError(f"HTTP {response.status_code}: {response.text}") from e
+                raise OpenRouterAPIError(
+                    f"HTTP {response.status_code}: {response.text}"
+                ) from e
         except requests.exceptions.RequestException as e:
             raise OpenRouterAPIError(f"Request failed: {e}") from e
 
@@ -61,7 +68,9 @@ class OpenRouterTextbasedModel(OpenRouterModel):
         """Parse actions from the model response. Raises FormatError if not exactly one action."""
         content = response["choices"][0]["message"]["content"] or ""
         return parse_regex_actions(
-            content, action_regex=self.config.action_regex, format_error_template=self.config.format_error_template
+            content,
+            action_regex=self.config.action_regex,
+            format_error_template=self.config.format_error_template,
         )
 
     def format_observation_messages(

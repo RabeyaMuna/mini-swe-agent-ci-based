@@ -57,9 +57,11 @@ class OpenRouterResponseModel(OpenRouterModel):
             **(self.config.model_kwargs | kwargs),
         }
         try:
-            response = requests.post(self._api_url, headers=headers, data=json.dumps(payload), timeout=60)
+            response = requests.post(
+                self._api_url, headers=headers, data=json.dumps(payload), timeout=60
+            )
             response.raise_for_status()
-            return response.json()
+            return self._parse_json_response(response)
         except requests.exceptions.HTTPError as e:
             if response.status_code == 401:
                 error_msg = "Authentication failed. You can permanently set your API key with `mini-extra config set OPENROUTER_API_KEY YOUR_KEY`."
@@ -67,7 +69,9 @@ class OpenRouterResponseModel(OpenRouterModel):
             elif response.status_code == 429:
                 raise OpenRouterRateLimitError("Rate limit exceeded") from e
             else:
-                raise OpenRouterAPIError(f"HTTP {response.status_code}: {response.text}") from e
+                raise OpenRouterAPIError(
+                    f"HTTP {response.status_code}: {response.text}"
+                ) from e
         except requests.exceptions.RequestException as e:
             raise OpenRouterAPIError(f"Request failed: {e}") from e
 
@@ -89,7 +93,9 @@ class OpenRouterResponseModel(OpenRouterModel):
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
             with attempt:
-                response = self._query(self._prepare_messages_for_api(messages), **kwargs)
+                response = self._query(
+                    self._prepare_messages_for_api(messages), **kwargs
+                )
         cost_output = self._calculate_cost(response)
         GLOBAL_MODEL_STATS.add(cost_output["cost"])
         message = dict(response)
@@ -102,14 +108,19 @@ class OpenRouterResponseModel(OpenRouterModel):
 
     def _parse_actions(self, response: dict) -> list[dict]:
         return parse_toolcall_actions_response(
-            response.get("output", []), format_error_template=self.config.format_error_template
+            response.get("output", []),
+            format_error_template=self.config.format_error_template,
         )
 
     def format_message(self, **kwargs) -> dict:
         role = kwargs.get("role", "user")
         content = kwargs.get("content", "")
         extra = kwargs.get("extra")
-        content_items = [{"type": "input_text", "text": content}] if isinstance(content, str) else content
+        content_items = (
+            [{"type": "input_text", "text": content}]
+            if isinstance(content, str)
+            else content
+        )
         msg = {"type": "message", "role": role, "content": content_items}
         if extra:
             msg["extra"] = extra

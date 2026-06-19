@@ -29,6 +29,11 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
+from deterministic_diff_parser import (
+    parse_diff_to_structured,
+    chunk_structured_diff,
+    format_structured_for_llm
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -48,7 +53,7 @@ try:
 except Exception:
     demjson3 = None  # type: ignore
 
-DIFF_CHUNK_CHAR_LIMIT = 60000
+DIFF_CHUNK_CHAR_LIMIT = int(os.getenv("DIFF_CHUNK_CHAR_LIMIT", "30000"))
 CHUNK_FINDINGS_INLINE_CHAR_LIMIT = 22000
 CHUNK_FINDINGS_BATCH_CHAR_LIMIT = 14000
 LOGGER = logging.getLogger(__name__)
@@ -179,41 +184,149 @@ def _extract_json_from_text(content: str) -> str:
     return content
 
 
+def _clean_malformed_json(content: str) -> str:
+    """Clean common LLM JSON formatting mistakes before parsing."""
+    content = str(content or "").strip()
+    content = re.sub(r'```(?:json)?\s*\n?(.*?)\n?```', r'\1', content, flags=re.DOTALL)
+    content = re.sub(r',(\s*[}\]])', r'\1', content)
+    content = re.sub(r',\s*,', ',', content)
+    content = re.sub(r'}\s*{', '}, {', content)
+    content = re.sub(r'}\s*\[', '}, [', content)
+    content = re.sub(r']\s*{', '], {', content)
+    return content.strip()
+
+
 def _load_llm_json(content: str) -> Any:
     """Parse raw LLM JSON. Handles markdown fences and explanatory text."""
     content = str(content or "").strip()
 
-    # First, try to extract JSON from potential markdown or text wrapper
-    extracted = _extract_json_from_text(content)
+    if not content:
+        return []
 
-    try:
-        return json.loads(extracted)
-    except json.JSONDecodeError as json_err:
-        demjson3_err: Any = "demjson3 is not installed"
+    candidates = [
+        content,
+        _extract_json_from_text(content),
+        _clean_malformed_json(content),
+        _clean_malformed_json(_extract_json_from_text(content)),
+    ]
+
+    last_json_err: Any = None
+    last_demjson3_err: Any = "demjson3 is not installed"
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_json_err = exc
+
+        # Some models emit several JSON objects back-to-back instead of an array.
+        try:
+            decoder = json.JSONDecoder()
+            objects = []
+            idx = 0
+            while idx < len(candidate):
+                tail = candidate[idx:].lstrip()
+                if not tail:
+                    break
+                obj, end = decoder.raw_decode(tail)
+                objects.append(obj)
+                idx += len(candidate[idx:]) - len(tail) + end
+            if len(objects) > 1:
+                return objects
+            if len(objects) == 1:
+                return objects[0]
+        except Exception:
+            pass
+
         try:
             if demjson3 is not None:
-                return demjson3.decode(extracted)
+                return demjson3.decode(candidate)
         except Exception as exc:
-            demjson3_err = exc
+            last_demjson3_err = exc
 
-        # Log the problematic content for debugging
-        preview = extracted[:500] if len(extracted) > 500 else extracted
-        parse_error = ValueError(
-            f"JSON parse failed: json={json_err}; demjson3={demjson3_err}\n"
-            f"Content preview (first 500 chars):\n{preview}"
-        )
-        LOGGER.warning("%s", parse_error)
-        return []
+    preview = content[:500] if len(content) > 500 else content
+    parse_error = ValueError(
+        f"JSON parse failed: json={last_json_err}; demjson3={last_demjson3_err}\n"
+        f"Content preview (first 500 chars):\n{preview}"
+    )
+    LOGGER.warning("%s", parse_error)
+    return []
 
 
 def _invoke_json(llm: Any, prompt: str) -> Any:
-    response = llm.invoke(prompt)
-    content = str(getattr(response, "content", response) or "").strip()
-    return _load_llm_json(content)
+    try:
+        response = llm.invoke(prompt)
+        content = str(getattr(response, "content", response) or "").strip()
+    except Exception as exc:
+        LOGGER.error(f"LLM API call failed: {type(exc).__name__}: {exc}")
+        raise  # Re-raise so caller can handle it
+
+    if not content:
+        LOGGER.warning("LLM returned empty content")
+        return []
+
+    parsed = _load_llm_json(content)
+    if parsed not in (None, [], {}):
+        return parsed
+
+    # One repair pass helps when the model produced almost-valid JSON or was
+    # wrapped/truncated. Keep this prompt small.
+    LOGGER.warning(f"Initial JSON parse failed, attempting repair. Content preview: {content[:200]}")
+    repair_prompt = f"""{STRICT_JSON_RULES}
+
+Repair the following model output into valid JSON only.
+Preserve all recoverable keys and values.
+If the output is truncated, close the current JSON structure conservatively and omit incomplete trailing items.
+
+--- MODEL OUTPUT TO REPAIR ---
+{content[:24000]}
+"""
+    try:
+        repaired_response = llm.invoke(repair_prompt)
+        repaired_content = str(getattr(repaired_response, "content", repaired_response) or "").strip()
+        repaired = _load_llm_json(repaired_content)
+        if repaired not in (None, [], {}):
+            LOGGER.info("Recovered malformed JSON with repair prompt")
+            return repaired
+    except Exception as exc:
+        LOGGER.warning("JSON repair prompt failed: %s", exc)
+
+    LOGGER.warning(f"All JSON parsing attempts failed. Returning empty. Original content length: {len(content)}")
+    return parsed
 
 
 def _json_text(value: Any) -> str:
     return json.dumps(value, indent=2)
+
+
+def _compact_diff_for_retry(diff: str, max_chars: int = 12000) -> str:
+    """Compact a diff for JSON-retry prompts while preserving file/hunk signals."""
+    kept: List[str] = []
+    total = 0
+    per_file_body_lines = 0
+    for line in str(diff or "").splitlines():
+        keep = False
+        if line.startswith("diff --git "):
+            per_file_body_lines = 0
+            keep = True
+        elif line.startswith(("+++ ", "--- ", "@@ ")):
+            keep = True
+        elif line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
+            if per_file_body_lines < 8:
+                keep = True
+                per_file_body_lines += 1
+        if not keep:
+            continue
+        clipped = line[:240]
+        kept.append(clipped)
+        total += len(clipped) + 1
+        if total >= max_chars:
+            kept.append("...diff compacted...")
+            break
+    return "\n".join(kept)
+
 
 
 def _extract_diff_file_sections(diff: str) -> List[Dict[str, Any]]:
@@ -391,16 +504,28 @@ def build_benchmark_ci_context(issue: Dict, llm: Any) -> Dict[str, Any]:
         print(f"       Found {len(validation_sequence)} validation steps (cached)")
     else:
         print("  [2/2] Analyzing workflow to extract validation sequence...")
-        workflow_validation_context = analyze_workflow_from_benchmark(
-            workflow_content=raw_workflow,
-            workflow_path=workflow_path,
-            repo_path=repo_path,
-            llm=llm,
-            issue_id=issue_id,
-            sha_fail=str(sha_fail or ""),
-        )
-        validation_sequence = workflow_validation_context.get("validation_sequence", [])
-        print(f"       Found {len(validation_sequence)} validation steps")
+        try:
+            workflow_validation_context = analyze_workflow_from_benchmark(
+                workflow_content=raw_workflow,
+                workflow_path=workflow_path,
+                repo_path=repo_path,
+                llm=llm,
+                issue_id=issue_id,
+                sha_fail=str(sha_fail or ""),
+            )
+
+            validation_sequence = workflow_validation_context.get("validation_sequence", [])
+
+            print(f"       Found {len(validation_sequence)} validation steps")
+        except Exception as e:
+            print(f"       WARNING: Workflow extraction failed: {e}")
+            print(f"       Using fallback: empty validation sequence")
+            workflow_validation_context = {
+                "workflow_path": str(workflow_path),
+                "dependent_files": [],
+                "validation_sequence": [],
+            }
+            validation_sequence = []
 
         # Save to global cache
         if sha_fail and validation_sequence:
@@ -428,11 +553,10 @@ def build_benchmark_ci_context(issue: Dict, llm: Any) -> Dict[str, Any]:
                 print(f"Saved workflow validation to cache")
             except Exception as e:
                 print(f" Failed to save validation cache: {e}")
+
+    # Allow empty validation_sequence as fallback (decomposition will work in simpler mode)
     if not validation_sequence:
-        raise ValueError(
-            f"Issue {issue.get('id')} has no CI workflow validation sequence; "
-            "decomposition requires workflow analyzer output first"
-        )
+        print(f"       WARNING: No validation sequence available, using fallback decomposition mode")
 
     return {
         "context": context,
@@ -536,6 +660,387 @@ def _compact_chunk_findings_for_consolidation(
     return compact
 
 
+# ============================================================================
+# CI-DIFF CORRELATION: Layered Analysis
+# ============================================================================
+
+def _is_dependency_file(file_path: str) -> bool:
+    """Check if file is a dependency configuration file."""
+    dep_files = ['pyproject.toml', 'package.json', 'requirements.txt',
+                 'Cargo.toml', 'pom.xml', 'build.gradle', 'setup.py']
+    return any(file_path.endswith(f) for f in dep_files)
+
+
+def _extract_packages_from_error(error_message: str) -> List[str]:
+    """Extract package names mentioned in error message."""
+    if not error_message:
+        return []
+
+    packages = []
+    # Common patterns in import errors
+    patterns = [
+        r"import ['\"]?(\w+)['\"]?",
+        r"from ['\"]?(\w+)['\"]?",
+        r"package ['\"]?(\w+)['\"]?",
+        r"module ['\"]?(\w+)['\"]?",
+        r"'(\w+)' not found",
+    ]
+
+    for pattern in patterns:
+        matches = re.findall(pattern, error_message.lower())
+        packages.extend(matches)
+
+    return list(set(packages))
+
+
+def _extract_package_changes(changes: List[Dict]) -> List[str]:
+    """Extract package names from dependency file changes."""
+    packages = []
+    for change in changes:
+        before = change.get('before', '')
+        after = change.get('after', '')
+
+        # Look for package names in toml/json format
+        for line in [before, after]:
+            # Match: package = "version" or "package": "version"
+            matches = re.findall(r'["\']?(\w+(?:-\w+)*)["\']?\s*[=:]\s*["\']', line)
+            packages.extend(matches)
+
+    return list(set(packages))
+
+
+def extract_primary_ci_failures(ci_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    LAYER 1: Extract PRIMARY CI failures that actually happened.
+
+    These are the failures that broke CI run.
+    Other problems are hidden until these are fixed.
+    """
+    primary_failures = []
+    failure_id = 1
+
+    # From overall_error_types (structured CI analysis)
+    for error_type in ci_context.get('overall_error_types', []):
+        primary_failures.append({
+            "failure_id": failure_id,
+            "validation_order": None,  # Will be inferred from validation sequence
+            "error_type": error_type,
+            "error_category": error_type,
+            "error_message": "",
+            "severity": "primary",
+        })
+        failure_id += 1
+
+    # From overall_failure_reasons (detailed descriptions)
+    for reason in ci_context.get('overall_failure_reasons', []):
+        # Try to extract validation info from reason
+        validation_info = {
+            "failure_id": failure_id,
+            "validation_order": None,
+            "error_type": "Unknown",
+            "error_message": reason[:500],  # First 500 chars
+            "severity": "primary",
+        }
+
+        # Try to infer error type from message
+        if 'import' in reason.lower() or 'module' in reason.lower():
+            validation_info['error_type'] = 'Import Error'
+        elif 'type' in reason.lower() and 'check' in reason.lower():
+            validation_info['error_type'] = 'Type Checking'
+        elif 'format' in reason.lower():
+            validation_info['error_type'] = 'Formatting'
+        elif 'test' in reason.lower():
+            validation_info['error_type'] = 'Test Failure'
+
+        primary_failures.append(validation_info)
+        failure_id += 1
+
+    print(f"    Extracted {len(primary_failures)} primary CI failures")
+    print(f"      From overall_error_types: {len(ci_context.get('overall_error_types', []))}")
+    print(f"      From overall_failure_reasons: {len(ci_context.get('overall_failure_reasons', []))}")
+
+    return primary_failures
+
+
+def match_failures_with_diff_fixes(
+    primary_failures: List[Dict[str, Any]],
+    validation_groups: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    LAYER 2: For EACH validation group with changes, determine fix type.
+
+    Simpler approach: Analyze each validation group independently.
+
+    Categories:
+    - DIRECT_FIX: Code changes only (normal fix)
+    - ENABLEMENT_FIX: Dependency changes only (enables validation)
+    - BOTH: Has both dependency and code changes (enablement + secondary)
+    """
+    matched = []
+    groups_data = validation_groups.get('validation_groups', {})
+
+    print(f"    Analyzing {len(groups_data)} validation groups with changes...")
+
+    # For EACH validation group, classify the fix type
+    for val_order_str, val_group in groups_data.items():
+        all_changes = val_group.get('all_changes', [])
+
+        if not all_changes:
+            continue
+
+        # Classify changes
+        dep_changes = [c for c in all_changes if _is_dependency_file(c.get('file', ''))]
+        code_changes = [c for c in all_changes if not _is_dependency_file(c.get('file', ''))]
+
+        # Determine fix type based on what's present
+        if dep_changes and code_changes:
+            # Has BOTH - this is an enablement that reveals secondary
+            fix_type = "ENABLEMENT_FIX"  # Mark as enablement, cascade detection will handle secondary
+        elif dep_changes and not code_changes:
+            # ONLY dependency changes - pure enablement
+            fix_type = "ENABLEMENT_FIX"
+        elif code_changes and not dep_changes:
+            # ONLY code changes - direct fix
+            fix_type = "DIRECT_FIX"
+        else:
+            # No changes (shouldn't happen)
+            continue
+
+        matched.append({
+            "failure_id": len(matched) + 1,
+            "fix_type": fix_type,
+            "validation_order": int(val_order_str),
+            "validation_cmd": val_group.get('validation_cmd', ''),
+            "diff_changes": all_changes,
+            "dependency_changes": dep_changes,
+            "code_changes": code_changes,
+            "error_type": val_group.get('failure_type', 'Unknown'),
+            "error_message": f"Validation {val_order_str}: {val_group.get('validation_cmd', '')}"
+        })
+
+    return matched
+
+
+def detect_enablement_cascades(
+    matched_failures: List[Dict[str, Any]],
+    validation_groups: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    LAYER 3: Detect which fixes ENABLE validations and REVEAL secondary failures.
+
+    Logic: If validation has ENABLEMENT_FIX (dependency added)
+    AND same validation has code changes too,
+    THEN code changes are SECONDARY (revealed by enablement).
+    """
+    cascades = []
+    groups_data = validation_groups.get('validation_groups', {})
+
+    for failure in matched_failures:
+        if failure.get('fix_type') != 'ENABLEMENT_FIX':
+            continue
+
+        val_order = failure.get('validation_order')
+        if val_order is None:
+            continue
+
+        val_group = groups_data.get(str(val_order))
+        if not val_group:
+            continue
+
+        # Check if there are code changes in same validation
+        all_changes = val_group.get('all_changes', [])
+        code_changes = [c for c in all_changes if not _is_dependency_file(c.get('file', ''))]
+
+        if code_changes:
+            # This enablement REVEALS secondary failures
+            cascade = {
+                "primary_failure_id": failure['failure_id'],
+                "validation_order": val_order,
+                "validation_cmd": val_group.get('validation_cmd', ''),
+                "enablement_type": "dependency_installation",
+                "reveals_secondary_failures": True,
+                "secondary_changes": code_changes,
+                "secondary_file_count": len(set(c.get('file') for c in code_changes)),
+                "cascade_explanation": f"Enabling validation reveals {len(set(c.get('file') for c in code_changes))} files with violations"
+            }
+            cascades.append(cascade)
+
+    return cascades
+
+
+def build_correlation_context(
+    ci_context: Dict[str, Any],
+    validation_groups: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Build complete layered correlation context.
+
+    This is DETERMINISTIC - no LLM needed.
+
+    Returns structure showing:
+    - Layer 1: Primary CI failures
+    - Layer 2: How each was addressed (direct/enablement/missing/unresolved)
+    - Layer 3: Enablement cascades
+    - Layer 4: Secondary failures revealed
+    """
+    # Layer 1: Extract primary failures
+    primary_failures = extract_primary_ci_failures(ci_context)
+
+    # Layer 2: Match with diff fixes
+    matched_failures = match_failures_with_diff_fixes(primary_failures, validation_groups)
+
+    # Layer 3: Detect enablement cascades
+    enablement_cascades = detect_enablement_cascades(matched_failures, validation_groups)
+
+    # Categorize by fix type
+    direct_fixes = [f for f in matched_failures if f.get('fix_type') == 'DIRECT_FIX']
+    enablement_fixes = [f for f in matched_failures if f.get('fix_type') == 'ENABLEMENT_FIX']
+    missing_fixes = [f for f in matched_failures if f.get('fix_type') == 'MISSING_FIX']
+    unresolved = [f for f in matched_failures if f.get('fix_type') == 'UNRESOLVED']
+
+    return {
+        "primary_failures": primary_failures,
+        "matched_failures": matched_failures,
+        "direct_fixes": direct_fixes,
+        "enablement_fixes": enablement_fixes,
+        "missing_fixes": missing_fixes,
+        "unresolved": unresolved,
+        "enablement_cascades": enablement_cascades,
+        "total_layers": {
+            "layer_1_primary": len(primary_failures),
+            "layer_2_direct_fixes": len(direct_fixes),
+            "layer_2_enablements": len(enablement_fixes),
+            "layer_2_missing": len(missing_fixes),
+            "layer_3_cascades": len(enablement_cascades),
+        }
+    }
+
+
+def merge_chunks_by_validation(
+    chunk_findings: List[Dict[str, Any]],
+    validation_sequence: List[Dict[str, Any]],
+    structured_chunks: List[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Step 2: Merge chunk findings by validation (deterministic, no LLM).
+
+    Groups all files and changes by validation_order.
+    Detects cross-chunk patterns.
+    Handles sub-problems (multiple failure types per validation).
+
+    Args:
+        chunk_findings: LLM classification output (which files go to which validations)
+        validation_sequence: The validation sequence from CI workflow
+        structured_chunks: Original parsed diff chunks with actual changes
+    """
+    validation_groups = {}
+
+    for chunk in chunk_findings:
+        for val_entry in chunk.get("validations_in_this_chunk", []):
+            val_order = val_entry.get("validation_order")
+            val_cmd = val_entry.get("validation_cmd")
+            if val_order in (None, "unknown") or not val_cmd or val_cmd == "unknown":
+                continue
+
+            # Check if this validation has multiple failure types
+            if val_entry.get("has_multiple_failure_types"):
+                # Handle sub-problems
+                for sub_problem in val_entry.get("sub_problems", []):
+                    # Unique key: validation_order + sub_problem_id
+                    sub_id = sub_problem.get("sub_problem_id", "")
+                    key = f"{val_order}_{sub_id}" if sub_id else str(val_order)
+
+                    if key not in validation_groups:
+                        validation_groups[key] = {
+                            "validation_order": val_order,
+                            "validation_cmd": val_cmd,
+                            "has_sub_problems": True,
+                            "sub_problem_id": sub_id,
+                            "failure_type": sub_problem.get("failure_type"),
+                            "error_code": sub_problem.get("error_code"),
+                            "chunks": [],
+                            "all_files": [],
+                            "all_changes": [],
+                            "has_pattern": False,
+                            "total_files": 0,
+                        }
+
+                    validation_groups[key]["chunks"].append(chunk["chunk_index"])
+                    validation_groups[key]["all_files"].extend(sub_problem.get("files", []))
+                    validation_groups[key]["all_changes"].extend(sub_problem.get("changes", []))
+                    validation_groups[key]["total_files"] += sub_problem.get("total_files", len(sub_problem.get("files", [])))
+
+                    # Cross-chunk pattern detection
+                    if sub_problem.get("has_pattern"):
+                        validation_groups[key]["has_pattern"] = True
+            else:
+                # Single failure type - use validation_order as key
+                key = str(val_order)
+
+                if key not in validation_groups:
+                    validation_groups[key] = {
+                        "validation_order": val_order,
+                        "validation_cmd": val_cmd,
+                        "has_sub_problems": False,
+                        "chunks": [],
+                        "all_files": [],
+                        "all_changes": [],
+                        "has_pattern": False,
+                        "total_files": 0,
+                    }
+
+                validation_groups[key]["chunks"].append(chunk["chunk_index"])
+                validation_groups[key]["all_files"].extend(val_entry.get("files", []))
+                validation_groups[key]["all_changes"].extend(val_entry.get("changes", []))
+                validation_groups[key]["total_files"] += val_entry.get("total_files", len(val_entry.get("files", [])))
+
+                # Cross-chunk pattern detection
+                if val_entry.get("has_pattern"):
+                    validation_groups[key]["has_pattern"] = True
+
+    # CRITICAL FIX: Attach actual file changes to validation groups
+    # Build a lookup of file -> changes from the original structured chunks
+    file_changes_lookup = {}
+    if structured_chunks:
+        for chunk in structured_chunks:
+            if "files" in chunk:
+                for file_info in chunk["files"]:
+                    file_path = file_info.get("path", "")
+                    if file_path and "changes" in file_info:
+                        if file_path not in file_changes_lookup:
+                            file_changes_lookup[file_path] = []
+                        file_changes_lookup[file_path].extend(file_info["changes"])
+
+    # Now attach changes to each validation group
+    for val_group in validation_groups.values():
+        for file_path in val_group["all_files"]:
+            if file_path in file_changes_lookup:
+                # Add all changes for this file
+                file_changes = file_changes_lookup[file_path]
+                for change in file_changes:
+                    # Add file context to each change
+                    change_with_file = change.copy()
+                    change_with_file["file"] = file_path
+                    val_group["all_changes"].append(change_with_file)
+
+    # Sort by validation order for sequential processing. LLMs should return
+    # numeric orders, but keep this deterministic if a string slips through.
+    def _validation_sort_key(item: tuple[str, Dict[str, Any]]) -> tuple[int, str]:
+        order = item[1].get("validation_order")
+        try:
+            return (int(order), str(order))
+        except (TypeError, ValueError):
+            return (10**9, str(order))
+
+    sorted_groups = dict(sorted(validation_groups.items(), key=_validation_sort_key))
+
+    return {
+        "validation_groups": sorted_groups,
+        "total_validations": len(set(g["validation_order"] for g in sorted_groups.values())),
+        "total_groups": len(sorted_groups),  # May be > total_validations if sub-problems exist
+    }
+
+
 def consolidate_chunk_findings(
     issue: Dict,
     benchmark_context: Dict[str, Any],
@@ -633,15 +1138,16 @@ OUTPUT FORMAT
       "validation_cmd": "ruff check",
       "what_validates": "Code style and imports",
       "visibility": "visible_candidate | hidden_candidate | unclear",
-      
-
+      "failed_type": "<failure category:e.g., syntax error, type error, test failure>",
+      "issue_type": " <failure sub category> e.g., missing import, unused variable, test assertion failure>",
       "why_failed": "Clear explanation of root cause",
 
       "affected_files": [
         {{
           "file": "path/to/file.py",
           "what_is_wrong": "Specific issue in this file",
-          "fix_strategy": "What needs to be modified in this file"
+          "fix_strategy": "What needs to be modified overall in this file to fix",
+          "why_fix_works": "Short explanation why this fix would resolve the validation failure"
         }}
       ]
     }}
@@ -730,12 +1236,11 @@ OUTPUT FORMAT
           "file": "path/to/file.py",
           "what_is_wrong": "Specific issue",
           "fix_strategy": "What needs to be modified in this file"
+          "why_fix_works": "Short explanation why this fix would resolve the validation failure"
         }}
       ]
     }}
   ],
-
-  "summary": "One paragraph summary of all changes"
 }}
 
 RULES:
@@ -775,23 +1280,447 @@ RULES:
     }
 
 
+def _estimate_tokens(data: Any) -> int:
+    """
+    Rough token estimation for data.
+
+    Rule of thumb: 1 token ≈ 4 characters
+    This is approximate but good enough for batching.
+    """
+    json_str = json.dumps(data)
+    return len(json_str) // 4
+
+
+def _chunk_validation_changes(
+    val_group: Dict[str, Any],
+    max_changes_per_chunk: int = 400
+) -> List[Dict[str, Any]]:
+    """
+    Chunk a single validation if it has too many changes.
+
+    Returns: List of chunks, where each chunk is a subset of val_group
+    """
+    all_changes = val_group.get('all_changes', [])
+
+    if len(all_changes) <= max_changes_per_chunk:
+        # Small enough, return as single chunk
+        return [val_group]
+
+    # Split into chunks
+    chunks = []
+    for start_idx in range(0, len(all_changes), max_changes_per_chunk):
+        chunk_changes = all_changes[start_idx:start_idx + max_changes_per_chunk]
+
+        chunk = {
+            'validation_cmd': val_group.get('validation_cmd', ''),
+            'failure_type': val_group.get('failure_type', ''),
+            'all_files': val_group.get('all_files', []),  # Keep full file list
+            'all_changes': chunk_changes,
+            'chunk_info': f"Changes {start_idx + 1}-{start_idx + len(chunk_changes)} of {len(all_changes)} total"
+        }
+        chunks.append(chunk)
+
+    return chunks
+
+
+def _create_previous_findings_summary(problems: List[Dict[str, Any]]) -> str:
+    """
+    Create a compact summary of previous problems for context.
+    """
+    if not problems:
+        return "No previous problems identified yet (this is the first validation)."
+
+    summary_items = []
+    for p in problems:
+        item = (
+            f"Problem {p.get('problem_id')}: "
+            f"{p.get('problem_type', 'unknown')} - "
+            f"{p.get('issue_type', 'N/A')} "
+            f"(validation {p.get('validation_order')})"
+        )
+
+        # Add key relationships
+        if p.get('enables_validation'):
+            item += " [ENABLES future validations]"
+        if p.get('enabled_by'):
+            item += f" [ENABLED BY: {p.get('enabled_by')}]"
+        if p.get('is_workaround'):
+            item += f" [WORKAROUND for Problem {p.get('related_to')}]"
+
+        summary_items.append(item)
+
+    return "\n".join(summary_items)
+
+
+def _verify_config_files_included(
+    chunk: Dict[str, Any],
+    chunk_problems: List[Dict[str, Any]],
+    chunk_idx: int
+) -> None:
+    """
+    CRITICAL: Verify that config/dependency files are not filtered out.
+
+    This is a safety check to ensure ground truth config changes are preserved.
+    """
+    config_file_patterns = [
+        'pyproject.toml', 'package.json', 'requirements.txt', 'setup.py',
+        'Cargo.toml', 'pom.xml', 'build.gradle', 'Gemfile', 'go.mod',
+        '.config.js', '.config.ts', 'tsconfig.json', 'webpack.config',
+        '.github/workflows/', '.circleci/config.yml'
+    ]
+
+    # Get all files from chunk changes
+    all_changes = chunk.get('all_changes', [])
+    config_files_in_chunk = set()
+
+    for change in all_changes:
+        file_path = change.get('file', '')
+        if any(pattern in file_path for pattern in config_file_patterns):
+            config_files_in_chunk.add(file_path)
+
+    if not config_files_in_chunk:
+        return  # No config files in this chunk
+
+    # Get all files from problems
+    files_in_problems = set()
+    for problem in chunk_problems:
+        files_in_problems.update(problem.get('affected_files', []))
+
+    # Check for missing config files
+    missing_config_files = config_files_in_chunk - files_in_problems
+
+    if missing_config_files:
+        print(f"        ⚠️  WARNING: Config files found in chunk but NOT in problems!")
+        print(f"            Missing: {missing_config_files}")
+        print(f"            This violates the rule: NEVER remove config file changes")
+        print(f"            These files MUST appear in enablement_fix problems")
+        # This is a warning, not an error - the LLM should have included them
+
+
+def _final_verify_config_files(
+    validation_groups: Dict[str, Any],
+    all_atomic_problems: List[Dict[str, Any]]
+) -> None:
+    """
+    Final verification that ALL config files from ground truth are included.
+
+    This runs after all problems are created to catch any config files that
+    might have been filtered out during processing.
+    """
+    config_file_patterns = [
+        'pyproject.toml', 'package.json', 'requirements.txt', 'setup.py',
+        'Cargo.toml', 'pom.xml', 'build.gradle', 'Gemfile', 'go.mod'
+    ]
+
+    # Collect all config files from validation groups
+    all_config_files = set()
+    groups_data = validation_groups.get('validation_groups', {})
+
+    for val_order, val_group in groups_data.items():
+        for change in val_group.get('all_changes', []):
+            file_path = change.get('file', '')
+            if any(pattern in file_path for pattern in config_file_patterns):
+                all_config_files.add(file_path)
+
+    if not all_config_files:
+        return  # No config files to verify
+
+    # Collect all files from problems
+    files_in_problems = set()
+    for problem in all_atomic_problems:
+        files_in_problems.update(problem.get('affected_files', []))
+
+    # Check for missing config files
+    missing_config_files = all_config_files - files_in_problems
+
+    if missing_config_files:
+        print(f"\n  🚨 CRITICAL ERROR: Config files missing from decomposition!")
+        print(f"     Config files in ground truth: {all_config_files}")
+        print(f"     Missing from problems: {missing_config_files}")
+        print(f"\n     These files MUST be included in enablement_fix problems.")
+        print(f"     This is a violation of: NEVER remove config file changes from ground truth")
+    else:
+        print(f"  ✓ Config file verification: All {len(all_config_files)} config files included in problems")
+        # If this happens frequently, we need to strengthen the prompt
+
+
+def analyze_validation_groups_with_reasoning(
+    validation_groups: Dict[str, Any],
+    validation_sequence: List[Dict[str, Any]],
+    ci_context: Dict[str, Any],
+    correlation_context: Dict[str, Any],
+    llm: Any,
+) -> Dict[str, Any]:
+    """
+    Step 3: Deep reasoning on merged validation groups with CI-Diff correlation.
+
+    Creates specific, actionable problem statements for mini-swe-agent.
+    Uses layered structure from correlation to understand:
+    - Primary failures (Layer 1)
+    - How each was fixed (Layer 2)
+    - Enablement cascades (Layer 3)
+    - Secondary failures (Layer 4)
+    """
+
+    groups_data = validation_groups.get("validation_groups", {})
+
+    # Count validation groups
+    validation_group_count = len(groups_data)
+    validation_orders = sorted([int(k) for k in groups_data.keys()])
+
+    # Extract correlation info for prompt
+    direct_fixes = correlation_context.get('direct_fixes', [])
+    enablement_fixes = correlation_context.get('enablement_fixes', [])
+    missing_fixes = correlation_context.get('missing_fixes', [])
+    unresolved = correlation_context.get('unresolved', [])
+    cascades = correlation_context.get('enablement_cascades', [])
+
+    # Process validations SEQUENTIALLY with context flow
+    print(f"  Step 3a: Processing {validation_group_count} validation groups sequentially...")
+
+    all_atomic_problems = []
+    next_problem_id = 1
+
+    # Sort by validation order (sequential processing)
+    sorted_validations = sorted(groups_data.items(), key=lambda x: int(x[0]))
+
+    for val_idx, (val_order, val_group) in enumerate(sorted_validations, 1):
+        val_order_int = int(val_order)
+
+        print(f"    Validation {val_idx}/{validation_group_count}: Order {val_order} ({val_group.get('validation_cmd', '')})")
+
+        # Get correlation for THIS validation
+        val_direct_fixes = [f for f in direct_fixes if f.get('validation_order') == val_order_int]
+        val_enablement_fixes = [f for f in enablement_fixes if f.get('validation_order') == val_order_int]
+        val_missing_fixes = [f for f in missing_fixes if f.get('validation_order') == val_order_int]
+        val_cascades = [c for c in cascades if c.get('validation_order') == val_order_int]
+
+        # Check if validation needs chunking
+        num_changes = len(val_group.get('all_changes', []))
+        chunks = _chunk_validation_changes(val_group, max_changes_per_chunk=400)
+
+        if len(chunks) > 1:
+            print(f"      Large validation ({num_changes} changes) → splitting into {len(chunks)} chunks")
+
+        # Process each chunk of this validation
+        validation_problems = []
+
+        for chunk_idx, chunk in enumerate(chunks, 1):
+            # Create summary of previous findings
+            previous_findings = _create_previous_findings_summary(all_atomic_problems)
+
+            chunk_suffix = f" - Chunk {chunk_idx}/{len(chunks)}" if len(chunks) > 1 else ""
+            print(f"      Processing{chunk_suffix}...")
+
+            prompt = f"""Create atomic problems for Validation {val_order}{chunk_suffix} (#{val_idx}/{validation_group_count})
+
+CONTEXT:
+- Start problem IDs from: {next_problem_id}
+- Previous problems: {len(all_atomic_problems)}
+
+{previous_findings if previous_findings else '(No previous problems yet)'}
+
+CORRELATION (use to set problem_type):
+- Direct: {len(val_direct_fixes)} | Enablement: {len(val_enablement_fixes)} | Missing: {len(val_missing_fixes)} | Cascades: {len(val_cascades)}
+
+DATA:
+Validation: {chunk.get('validation_cmd', '')}
+Changes: {json.dumps(chunk.get('all_changes', []), indent=2)}
+
+PROBLEM TYPE MAPPING:
+- Direct fixes → primary_failure
+- Enablement fixes → enablement_fix (config/dependency changes)
+- Missing fixes → 2 problems: unresolved_root_cause + workaround_fix
+- Cascades → 2 problems: enablement_fix (config) + secondary_failure (code)
+
+CONFIG FILE RULES (CRITICAL):
+1. If any config file in all_changes (pyproject.toml, package.json, requirements.txt, Cargo.toml, pom.xml, build.gradle, etc.) → MUST be in a problem's affected_files
+2. Always quote actual changes: "Line X: changed from 'BEFORE' to 'AFTER'"
+3. Create separate enablement_fix for all config changes
+
+HOW TO UNDERSTAND AND EXPLAIN TOOLS:
+
+Step 1: LOOK AT THE EVIDENCE
+- validation_cmd shows: tool name + what it checks + which files/directories
+  Example: "taplo fmt --check ../benchmarks ../examples"
+  → Tool: taplo, Action: fmt --check (format checking), Target: benchmarks/examples dirs
+
+Step 2: INFER TOOL PURPOSE from command structure
+- "fmt --check" → formatting/style checking
+- File extensions in target dirs → what file type (look at the actual directory)
+- Tool name + command → specific capability
+  Example: "taplo fmt --check" on dirs with .toml files → TOML formatter
+
+Step 3: CHECK CI ERRORS for what actually failed
+- CI error mentions the tool + what was wrong
+- Use this to confirm/refine your understanding
+
+Step 4: EXPLAIN THE COMPLETE PICTURE (all 4 required fields):
+
+**problem**: What failed + WHY + what feature/capability was blocked
+Format: "Validation '<cmd>' failed because <root issue>, preventing <capability> from running"
+Example: "Validation 'taplo fmt --check ../benchmarks ../examples' failed because taplo dependency was disabled in pyproject.toml, preventing TOML formatting validation in benchmarks/examples directories from running"
+
+**root_cause**: Technical reason WHY it failed (cite specific before state)
+Format: "Dependency/file X was <before state> at line Y, causing <technical consequence>"
+Example: "The taplo dependency was commented out in dev/pyproject.toml (line 18) and framework/pyproject.toml (line 98), preventing the taplo TOML formatter from being installed. Without taplo installed, the validation command 'taplo fmt --check' cannot execute."
+
+**how_fixed**: Exact before→after changes with line numbers
+Format: "File:line changed from '<before>' to '<after>'"
+Example: "dev/pyproject.toml line 18: changed from '#taplo = \"==0.9.3\"' to 'taplo = \"==0.9.3\"'; framework/pyproject.toml line 98: changed from '#taplo = \"==0.9.3\"' to 'taplo = \"==0.9.3\"'"
+
+**why_fix_works**: Technical explanation of HOW the fix resolves the issue + what capability it enables
+Format: "Doing X enables Y, allowing Z validation to run on W files"
+Example: "Uncommenting the taplo dependency enables installation of the taplo TOML formatter. With taplo installed, the 'taplo fmt --check' command can now validate TOML file formatting in ../benchmarks and ../examples directories, checking that TOML configuration files follow proper formatting standards."
+
+GOOD vs BAD:
+✓ GOOD: "Validation 'taplo fmt --check' failed because taplo was disabled, preventing TOML formatting validation"
+✗ BAD: "Enabled taplo for RST validation" (wrong file type - inferred incorrectly)
+✗ BAD: "Fixed configuration" (vague, no explanation)
+✗ BAD: "Uncommented taplo" (missing what taplo does and why it matters)
+
+QUALITY RULES:
+- Be SPECIFIC and TECHNICAL in all explanations
+- Use EVIDENCE from validation_cmd, all_changes, CI errors
+- Quote exact before→after code in how_fixed
+- Group same-pattern files into ONE problem
+
+{STRICT_JSON_RULES}
+
+OUTPUT:
+{{
+  "atomic_problems": [
+    {{
+      "problem_id": <int starting from {next_problem_id}>,
+      "problem_type": "primary_failure|enablement_fix|secondary_failure|unresolved_root_cause|workaround_fix",
+      "validation_order": {val_order},
+      "validation_cmd": "<exact command>",
+      "failure_type": "<Type Checking|Code Formatting|etc>",
+      "issue_type": "<Import Error|Heading Style|etc>",
+      "problem": "<what failed - be specific>",
+      "root_cause": "<why failed - cite all_changes>",
+      "how_fixed": "<quote before→after changes>",
+      "why_fix_works": "<why fix works>",
+      "affected_files": ["<exact files from all_changes>"],
+      "depends_on": [<ids or empty>],
+      "enables_validation": true, // if enablement_fix
+      "reveals_secondary": true,  // if cascade
+      "enabled_by": [<id>],       // if secondary_failure
+      "unresolved": true,         // if unresolved_root_cause
+      "proper_fix": "<what should have been done>",
+      "is_workaround": true,      // if workaround_fix
+      "related_to": <id>          // if workaround_fix
+    }}
+  ]
+}}
+"""
+
+            chunk_result = _invoke_json(llm, prompt)
+
+            # Normalize result
+            if isinstance(chunk_result, list):
+                if len(chunk_result) == 1 and isinstance(chunk_result[0], dict):
+                    chunk_result = chunk_result[0]
+                else:
+                    chunk_result = {"atomic_problems": chunk_result if isinstance(chunk_result, list) else []}
+
+            if not isinstance(chunk_result, dict):
+                print(f"        Warning: Chunk {chunk_idx} returned {type(chunk_result).__name__}, expected dict")
+                chunk_result = {"atomic_problems": []}
+
+            # Extract problems from this chunk
+            chunk_problems = chunk_result.get("atomic_problems", [])
+            print(f"        ✓ Chunk {chunk_idx}: {len(chunk_problems)} atomic problems created")
+
+            # CRITICAL: Verify config files are not filtered out
+            _verify_config_files_included(chunk, chunk_problems, chunk_idx)
+
+            # Renumber problem IDs sequentially
+            for problem in chunk_problems:
+                old_id = problem.get("problem_id", 1)
+                problem["problem_id"] = next_problem_id
+
+                # Update references to account for sequential numbering
+                if "depends_on" in problem and isinstance(problem["depends_on"], list):
+                    problem["depends_on"] = [dep_id + (next_problem_id - old_id) if dep_id < next_problem_id else dep_id for dep_id in problem["depends_on"]]
+
+                if "enabled_by" in problem and isinstance(problem["enabled_by"], list):
+                    problem["enabled_by"] = [en_id + (next_problem_id - old_id) if en_id < next_problem_id else en_id for en_id in problem["enabled_by"]]
+
+                if "revealed_by" in problem and isinstance(problem["revealed_by"], int):
+                    if problem["revealed_by"] < next_problem_id:
+                        problem["revealed_by"] = problem["revealed_by"] + (next_problem_id - old_id)
+
+                if "related_to" in problem and isinstance(problem["related_to"], int):
+                    if problem["related_to"] < next_problem_id:
+                        problem["related_to"] = problem["related_to"] + (next_problem_id - old_id)
+
+                next_problem_id += 1
+
+            # Add chunk problems to validation problems
+            validation_problems.extend(chunk_problems)
+
+        # Add validation problems to all problems
+        all_atomic_problems.extend(validation_problems)
+        print(f"      ✓ Validation {val_order}: {len(validation_problems)} total atomic problems")
+
+    # Final result with all merged problems
+    result = {
+        "atomic_problems": all_atomic_problems,
+        "sequential_workflow_metadata": {}  # Can merge from batches if needed
+    }
+
+    # CRITICAL: Final verification that config files are included
+    _final_verify_config_files(validation_groups, all_atomic_problems)
+
+    # Report on validation group coverage
+    atomic_problems = all_atomic_problems
+    print(f"  ✓ All {validation_group_count} validations processed sequentially → {len(atomic_problems)} total atomic problems created")
+
+    if len(atomic_problems) < validation_group_count:
+        # Show which validation orders are missing
+        found_orders = set(p.get("validation_order") for p in atomic_problems)
+        missing_orders = set(validation_orders) - found_orders
+        if missing_orders:
+            print(f"  ⚠️  WARNING: Some validation groups have no atomic problems!")
+            print(f"         Missing validation orders: {sorted(missing_orders)}")
+            print(f"         Expected: Changes in these groups should have problems too")
+
+    # Show dependencies
+    deps_count = sum(1 for p in atomic_problems if p.get("depends_on"))
+    if deps_count > 0:
+        print(f"  ✓ {deps_count} problem(s) have sequential dependencies (depends_on)")
+
+    return result
+
+
 def analyze_diff_chunks(
     issue: Dict,
     benchmark_context: Dict[str, Any],
     llm: Any,
 ) -> Dict[str, Any]:
     """
-    Run independent file-aware diff chunk analysis before final reasoning.
-
-    Each chunk sees only visible failure context, validation sequence, and its
-    own complete file-diff sections. Cross-chunk reasoning happens later in the
-    final decomposition prompt.
+    Three-step diff analysis with deterministic pre-processing:
+    0. Parse diff into structured format (deterministic, no LLM)
+    1. Chunk and classify by validation (per chunk, LLM only for classification)
+    2. Merge by validation (deterministic)
+    3. Deep reasoning with full context (LLM)
     """
     diff = str(issue.get("diff") or "")
     if not diff.strip():
         raise ValueError(f"Issue {issue.get('id')} has no ground-truth diff")
 
-    chunks = chunk_diff_by_file(diff)
+    # Step 0: Deterministic diff parsing (NEW!)
+    print(f"  Step 0: Parsing diff into structured format...")
+
+
+    structured_diff = parse_diff_to_structured(diff)
+    total_files = structured_diff["total_files"]
+    total_changes = structured_diff["total_changes"]
+    print(f"    Parsed {total_files} files with {total_changes} changes")
+
+    # Chunk by file count (not char count) - cleaner and more predictable
+    chunks = chunk_structured_diff(structured_diff, max_files_per_chunk=15)
     if not chunks:
         raise ValueError(f"Issue {issue.get('id')} ground-truth diff could not be chunked")
 
@@ -799,683 +1728,188 @@ def analyze_diff_chunks(
     validation_sequence = benchmark_context.get("validation_sequence") or []
     chunk_findings: List[Dict[str, Any]] = []
 
-    print(f"  Analyzing ground-truth diff ({len(diff)} chars) in {len(chunks)} complete-file chunk(s)...")
+    print(f"  Step 1: Classifying patch changes by repaired validation ({total_files} files in {len(chunks)} chunk(s))...")
 
     for index, chunk in enumerate(chunks, start=1):
-        oversized_note = (
-            "This chunk contains one complete file diff that exceeds the normal chunk size. "
-            "It is intentionally NOT truncated."
-            if chunk.get("oversized_single_file")
-            else "This chunk contains complete file diff sections and is not truncated."
-        )
-        prompt = f"""You are pre-analyzing one chunk of a ground-truth diff for CI repair reverse engineering.
+        prompt = f"""# TASK: Match Changed Files to Validations That Were Repaired
 
-CRITICAL: Provide CONCRETE, ACTIONABLE details in your analysis:
-- Extract line numbers from diff hunks (@@ -X,Y +A,B @@)
-- Include before/after code snippets (2-3 lines, not full diff)
-- Identify specific error messages or validation failures
-- Explain WHY each change fixes the problem with technical reasoning
-- If 5+ files have identical changes, note the PATTERN explicitly
+You are analyzing a CI fix. The CI had failures, and this diff fixes them.
+Your job: For EACH changed file, determine WHICH validation it repairs.
 
-Use ONLY the visible failure context, validation sequence, and current diff chunk.
-Do NOT invent files, workflow steps, failures, or fixes.
+## CI FAILURE CONTEXT (What Actually Broke)
 
-Goal:
-- Extract what this diff chunk appears to fix WITH CONCRETE EXAMPLES.
-- Group changes into candidate atomic problems.
-- Preserve exact file paths and concrete diff evidence.
-- For each file: note line numbers, what was wrong, what changed, why it fixes the issue.
-- Note whether each candidate seems related to the visible CI failure or a hidden downstream failure.
-- Only return files/changes that have evidence linking them to:
-  1. the visible CI failure context, or
-  2. a command/stage in the provided CI validation sequence, or
-  3. a hidden downstream CI validation failure that would appear after earlier fixes.
-- If a file/change cannot be a reason for any provided CI validation command to pass/fail, ignore it completely.
-- Do not include ignored files in files_analyzed, affected_files, or any candidate problem.
-- A file is relevant when its path, file type, generated artifact, configuration role, dependency role, or test/code/docs role matches a command or target in the provided validation sequence.
-- Decide relevance dynamically from the actual validation commands and their path arguments; do not rely on hardcoded file extensions or tool names.
-- Include a file only when the diff evidence explains how that file could make one of the provided validation commands pass or fail.
-- Large repairs may have many files for one atomic problem. Group same-pattern file changes, but do not merge unrelated problem types.
-
---- CI FAILURE CONTEXT ---
 {json.dumps(visible_failure_context, indent=2)}
 
---- CI VALIDATION SEQUENCE ---
+**These failures tell you WHICH validations broke and what are the issues or failures. Use this to match files!**
+
+## VALIDATION SEQUENCE (All Validation Steps in Order)
+
 {json.dumps(validation_sequence, indent=2)}
 
---- CURRENT DIFF CHUNK {index}/{len(chunks)} ---
-Files in this chunk: {', '.join(chunk.get("files", []))}
-Chunk metadata: file_count={chunk.get("file_count", 0)}, char_count={chunk.get("char_count", len(chunk.get("diff", "")))}, oversized_single_file={bool(chunk.get("oversized_single_file"))}
-{oversized_note}
+## CHANGED FILES IN THIS CHUNK ({index}/{len(chunks)})
 
-{chunk["diff"]}
+{format_structured_for_llm(chunk)}
 
-{STRICT_JSON_RULES}
+## MATCHING LOGIC
 
-IMPORTANT: Return a SINGLE JSON OBJECT (not an array). Your response must start with {{ and end with }}.
+For EACH file, determine which validation it repairs:
 
-Return this JSON object with CONCRETE details:
+**Step 1: What type of change?**
+- Look at before → after examples
+- Identify change type: type annotation, import, formatting, dependency, config, etc.
+
+**Step 2: Which validation does this fix?**
+- Check CI FAILURE CONTEXT first - which validations failed?
+- Match change type to validation command:
+  - Type annotation change → type checking validation (mypy, pyright)
+  - Import/unused import → linting validation (ruff, pylint)
+  - Formatting change → formatting validation (black, prettier, taplo)
+  - Dependency change in pyproject.toml → validation that uses that tool
+  - Config change → validation that uses that config
+
+**Step 3: Find exact validation_order**
+- Locate the validation in the sequence above
+- Copy EXACT validation_order number and validation_cmd
+
+**IMPORTANT RULES:**
+
+1. **Don't skip files** - Every file repairs some validation
+2. **Use CI failures as guide** - Prioritize matching to validations that failed
+3. **Dependency files can affect multiple validations** - Include in all affected groups
+4. **Be specific** - Match to the actual validation, not a guess
+5. **Check file extension AND content** - .py file with type changes → type validation
+
+## OUTPUT FORMAT
+
 {{
   "chunk_index": {index},
-  "files_analyzed": ["only/files/with/ci-validation-evidence.py"],
-  "candidate_atomic_problems": [
+  "validations_in_this_chunk": [
     {{
-      "candidate_id": "c{index}_1",
-      "problem_type": "short dynamic problem category",
-      "visibility_guess": "visible_candidate | hidden_candidate | unclear",
-      "symptom_inferred": "CONCRETE symptom with error message or line reference. Example: 'Line 12: F401 unused import Qux' not just 'import error'",
-      "affected_files": [
-        {{
-          "file": "path/to/file.py",
-          "line_range": "lines 45-52 or line 12",
-          "what_was_wrong": "Specific issue at specific location. Example: 'Import statement includes unused Qux at line 12'",
-          "before_snippet": "from foo import Bar, Baz, Qux",
-          "after_snippet": "from foo import Bar, Baz",
-          "why_wrong": "Root cause. Example: 'Ruff F401: Qux imported but never referenced'",
-          "how_fixed": "What changed. Example: 'Removed Qux from import list'",
-          "why_fix_works": "Technical reasoning. Example: 'Eliminating unused import satisfies ruff F401 rule'"
-        }}
-      ],
-      "root_cause_hypothesis": "Evidence-based failure cause with technical explanation",
-      "fix_summary": "What the changes made to fix it",
-      "verification_command": "Command from validation_sequence to verify, or null",
-      "pattern_detected": {{
-        "is_pattern": false,
-        "pattern_type": "remove_unused_imports | rst_title_fix | type_annotation_update | etc",
-        "files_with_pattern": 1,
-        "explanation": "If 5+ files have same fix, describe the pattern"
-      }}
+      "validation_order": <NUMBER from validation sequence>,
+      "validation_cmd": "<EXACT command from validation sequence>",
+      "failure_type": "<Type Checking | Formatting | Linting | etc>",
+      "files": ["file1.py", "file2.py"],
+      "total_files": 2,
+      "has_pattern": true
     }}
   ]
 }}
+
+**Critical:**
+- validation_order must be exact number from sequence
+- validation_cmd must exactly match sequence
+- Include ALL files from chunk in some validation group
+- Don't return empty unless chunk truly has no matchable files (rare)
+
+{STRICT_JSON_RULES}
 """
         try:
             finding = _invoke_json(llm, prompt)
-
-            # Handle case where LLM returns array instead of object
+            
+            # Normalize LLM response to dict with validations_in_this_chunk
             if isinstance(finding, list):
-                if len(finding) == 1 and isinstance(finding[0], dict):
-                    # LLM wrapped the object in an array, unwrap it
-                    finding = finding[0]
-                elif len(finding) > 1:
-                    # LLM returned multiple objects, merge them
-                    merged = {
-                        "chunk_index": index,
-                        "files_analyzed": [],
-                        "candidate_atomic_problems": [],
-                    }
-                    for item in finding:
-                        if isinstance(item, dict):
-                            merged["files_analyzed"].extend(item.get("files_analyzed", []))
-                            merged["candidate_atomic_problems"].extend(
-                                item.get("candidate_atomic_problems", [])
-                            )
-                    finding = merged
-                else:
-                    # Empty array or invalid
-                    raise ValueError(f"Chunk analysis returned empty or invalid array")
+                finding = {"chunk_index": index, "validations_in_this_chunk": finding}
+            elif not isinstance(finding, dict):
+                print(f"    Chunk {index}/{len(chunks)} WARNING: LLM returned {type(finding).__name__}, treating as empty")
+                finding = {"chunk_index": index, "validations_in_this_chunk": []}
 
-            if not isinstance(finding, dict):
-                raise ValueError(
-                    f"Chunk analysis returned {type(finding).__name__}, expected object. "
-                    f"Value: {str(finding)[:200]}"
-                )
-
+            # Ensure required fields exist
             finding.setdefault("chunk_index", index)
-            finding.setdefault("files_analyzed", chunk.get("files", []))
-            finding.setdefault("candidate_atomic_problems", [])
+            finding.setdefault("validations_in_this_chunk", [])
+
+            # Validate and log results
+            validations = finding.get("validations_in_this_chunk", [])
+
+            # Filter out validations with null/missing order (LLM didn't follow instructions)
+            valid_validations = []
+            invalid_count = 0
+            for v in validations:
+                order = v.get("validation_order")
+                if order is not None and order != "null":
+                    valid_validations.append(v)
+                else:
+                    invalid_count += 1
+
+            # Update finding with only valid validations
+            finding["validations_in_this_chunk"] = valid_validations
+
+            if not valid_validations:
+                if invalid_count > 0:
+                    print(f"    Chunk {index}/{len(chunks)} WARNING: {invalid_count} validation(s) had null order (rejected)")
+                else:
+                    print(f"    Chunk {index}/{len(chunks)} WARNING: No validations found (LLM returned empty result)")
+            else:
+                val_orders = [v.get("validation_order") for v in valid_validations]
+                if invalid_count > 0:
+                    print(f"    Chunk {index}/{len(chunks)}: {len(valid_validations)} validation(s), orders={val_orders} ({invalid_count} rejected for null order)")
+                else:
+                    print(f"    Chunk {index}/{len(chunks)}: {len(valid_validations)} validation(s), orders={val_orders}")
+
         except Exception as exc:
+            print(f"    Chunk {index}/{len(chunks)} FAILED with exception: {type(exc).__name__}: {exc}")
             import traceback
-            error_trace = traceback.format_exc()
-            print(f"Chunk {index}/{len(chunks)} JSON parsing failed: {exc}")
-            print(f"    Error type: {type(exc).__name__}")
-            print(f"    Full trace:\n{error_trace}")
+            traceback.print_exc()
             finding = {
                 "chunk_index": index,
-                "files_analyzed": [],
-                "candidate_atomic_problems": [],
-                "error_trace": error_trace,
+                "validations_in_this_chunk": [],
+                "error": str(exc),
             }
+
         chunk_findings.append(finding)
 
-    consolidated = consolidate_chunk_findings(issue, benchmark_context, chunk_findings, llm)
+    # Step 2: Merge by validation (deterministic)
+    print(f"  Step 2: Merging chunks by validation...")
+    validation_groups = merge_chunks_by_validation(chunk_findings, validation_sequence, chunks)
+    print(f"    Found {validation_groups['total_groups']} groups from {validation_groups['total_validations']} validations")
 
+    # Step 2.5: CI-Diff Correlation (deterministic)
+    print(f"  Step 2.5: Analyzing CI-Diff correlation (layered structure)...")
+    ci_context = _compact_context_for_diff_analysis(issue, benchmark_context)
+    correlation_context = build_correlation_context(ci_context, validation_groups)
+
+    layers = correlation_context['total_layers']
+    print(f"    Layer 1 (Primary CI failures): {layers['layer_1_primary']}")
+    print(f"    Layer 2 (Direct fixes): {layers['layer_2_direct_fixes']}")
+    print(f"    Layer 2 (Enablement fixes): {layers['layer_2_enablements']}")
+    print(f"    Layer 2 (Missing fixes): {layers['layer_2_missing']}")
+    print(f"    Layer 3 (Enablement cascades): {layers['layer_3_cascades']}")
+
+    # Step 3: Deep reasoning with full context + correlation
+    print(f"  Step 3: Deep reasoning with correlation context...")
+    reasoning_result = analyze_validation_groups_with_reasoning(
+        validation_groups,
+        validation_sequence,
+        ci_context,
+        correlation_context,
+        llm
+    )
+    # Log results
+    atomic_problems = reasoning_result.get("atomic_problems", [])
+    if atomic_problems:
+        print(f"  ✓ Identified {len(atomic_problems)} atomic problems")
+    else:
+        print(f"  WARNING: No atomic problems identified")
     return {
-        "mode": "file_chunk_diff_analysis",
-        "diff_char_count": len(diff),
+        "mode": "structured_diff_3step",
+        "total_files": total_files,
+        "total_changes": total_changes,
         "chunk_count": len(chunks),
         "chunk_findings": chunk_findings,
-        "consolidated_chunk_findings": consolidated,
+        "validation_groups": validation_groups,
+        "atomic_problems": atomic_problems,
+        "sequential_workflow_metadata": reasoning_result.get("sequential_workflow_metadata", {}),
     }
-
-
-def _build_decomposition_prompt(
-    issue: Dict,
-    benchmark_context: Dict[str, Any],
-    *,
-    diff_block_title: str,
-    diff_instruction: str,
-    diff_block: str,
-    mode_rule: str,
-) -> str:
-    """
-    Build prompt to REVERSE ENGINEER atomic problems from:
-    - CI failure log (shows FIRST failure only)
-    - Ground truth diff (fixes ALL problems)
-    - Changed files
-    - CI workflow context
-
-    Key: CI stops at first failure, but diff fixes multiple problems.
-    We must infer hidden problems!
-    """
-
-    repo = issue.get("repo_name", issue.get("repo", "unknown"))
-    sha = issue.get("sha_fail", "")[:12]
-    error_type = issue.get("error_type", [])
-    if isinstance(error_type, list):
-        error_type = ", ".join(error_type)
-
-    # Get changed files
-    changed_files = issue.get("changed_files", [])
-
-    context = benchmark_context.get("context") or {}
-    log_analysis = benchmark_context.get("log_analysis") or {}
-    validation_sequence = benchmark_context.get("validation_sequence") or []
-    workflow_path = benchmark_context.get("workflow_path") or ""
-    workflow_name = benchmark_context.get("workflow_name") or ""
-
-    analyzer_context = {
-        "id": context.get("id"),
-        "sha_fail": context.get("sha_fail"),
-        "repo": context.get("repo"),
-        "overall_failure_reasons": context.get("overall_failure_reasons", []),
-        "overall_error_types": context.get("overall_error_types", []),
-        "effected_files": context.get("effected_files", []),
-        "failed_jobs": context.get("failed_jobs", []),
-        "overall_ci_summary": log_analysis.get("overall_ci_summary", ""),
-        "error_context": log_analysis.get("error_context", []),
-        "relevant_files": log_analysis.get("relevant_files", []),
-        "error_types": log_analysis.get("error_types", []),
-        "failed_job": log_analysis.get("failed_job", []),
-    }
-    return f"""You are a CI failure analysis expert doing REVERSE ENGINEERING.
-
-CRITICAL CONTEXT:
-- The structured CI context below comes from CILogAnalyzer / benchmark CI analysis.
-- It represents the FIRST observed CI failure context because CI stops at first error.
-- The ground truth diff fixes ALL problems (visible + hidden)
-- Your job: first build a clear case analysis, then infer HIDDEN problems from the diff
-- Use ONLY the provided structured CI context, ground-truth diff, changed files, and validation_sequence.
-- Do NOT invent workflow steps, commands, files, failures, or fixes. If evidence is missing, use null or explain the uncertainty.
-- {mode_rule}
-
-════════════════════════════════════════════════════════════════════════════════
-INPUTS
-════════════════════════════════════════════════════════════════════════════════
-
-Repository: {repo}
-Commit: {sha}
-Error Type: {error_type}
-Changed Files ({len(changed_files)}): {', '.join(changed_files)}
-Workflow Name: {workflow_name}
-Workflow Path: {workflow_path}
-
---- STRUCTURED CI FAILURE CONTEXT FROM CILogAnalyzer ---
-{json.dumps(analyzer_context, indent=2)}
-
---- {diff_block_title} ---
-{diff_instruction}
-
-{diff_block}
-
---- CI VALIDATION SEQUENCE ---
-{json.dumps(validation_sequence, indent=2)}
-
-════════════════════════════════════════════════════════════════════════════════
-	YOUR TASK: REVERSE ENGINEER ATOMIC PROBLEMS ONLY
-	════════════════════════════════════════════════════════════════════════════════
-	
-	The structured CI context shows Problem 1. The chunk-level diff analysis shows what the
-	ground-truth patch changed across all files. Your job is to analyze ALL chunk findings
-	together against the ordered CI validation_sequence.
-	
-	Use validation_sequence as the ordering spine:
-	- The first visible problem must map to the earliest failed validation evidenced by the structured CI context.
-	- Hidden problems must map to later validation commands that would run only after earlier blockers are fixed.
-	- If several problems map to the same validation command, keep them separate only when their root cause/fix pattern differs.
-	- If a later file change does not correspond to any validation step, mark it supporting/unclear instead of inventing a failure.
-	
-	The diff changes {len(changed_files)} files. This may mean multiple problems were fixed.
-
-Identify:
-- What failed first?
-- Which workflow step and command failed?
-- Which files and diff hunks fix THIS problem?
-- Look at changed files not explained by the visible failure.
-- Infer which hidden problems those files fix.
-	- Map each hidden problem to the ordered validation step that WOULD fail after earlier fixes.
-	- Infer the sequence: after fixing each problem, which validation command runs next and what would fail/pass.
-	- Evidence for each problem: CI analyzer evidence for visible problem, diff evidence for all problems, workflow evidence for mapped stages.
-- Ignore files that do not map to visible or hidden CI validation failures.
-- For large repairs with many changed files, group same-pattern changes into one atomic problem, but keep unrelated failures separate.
-- Do not overfit to each file as a separate problem; atomic problem means one distinct failure/root-cause/fix pattern.
-
-**Example reasoning:**
-Structured CI context: "ERROR: No matching distribution for fish-audio-sdk>=2024.12.5"
--> Problem 1 (VISIBLE): Dependency constraint
--> Files: pyproject.toml
--> CI stage: pip install
-
-Diff ALSO changes: src/audio/*.py (11 files, type hints changed)
--> Problem 2 (HIDDEN): Type errors after SDK upgrade
--> Would fail at: mypy src/
--> Depends on: Problem 1 (can't check types until SDK installable)
-
-	Diff ALSO changes: tests/test_audio.py
-	-> Problem 3 (HIDDEN): Test expectations outdated
-	-> Would fail at: pytest tests/
-	-> Depends on: Problem 2
-	
-	════════════════════════════════════════════════════════════════════════════════
-	REQUIRED REASONING STEPS
-	════════════════════════════════════════════════════════════════════════════════
-	
-	1. Read the validation_sequence in order.
-	2. Match the structured CI failure context to the first failed validation command.
-	3. Group chunk-level diff findings by validation command/root-cause/fix pattern.
-	4. Decide which group fixes the visible failure.
-	5. For remaining groups, infer hidden downstream failures by validation order.
-	6. Build a workflow-ordered problem flow:
-	   - current problem
-	   - fix
-	   - validation command to run
-	   - expected result
-	   - next problem exposed, if any
-	7. Keep only files relevant to visible or hidden CI validation failures.
-
-════════════════════════════════════════════════════════════════════════════════
-{STRICT_JSON_RULES}
-
-IMPORTANT: Return a SINGLE JSON OBJECT (not an array). Your response must start with {{ and end with }}.
-
-OUTPUT FORMAT
-════════════════════════════════════════════════════════════════════════════════
-
-{{
-  "total_problems": 2,
-  "total_changed_files": {len(changed_files)},
-  "problems": [
-    {{
-      "problem_id": 1,
-      "visibility": "visible_in_log",
-      "problem_type": "short dynamic category",
-      "symptom": "specific visible or inferred failure",
-      "evidence_in_ci_log": "structured CI evidence for visible problem, else null",
-      "root_cause": "concise root cause",
-      "how_fixed": "concise fix summary",
-      "why_fix_works": "why this fix satisfies the validation",
-      "affected_files": ["path/to/file.py"],
-      "fix_strategy": "what needs to be modified to fix this problem",
-      "workflow_validation_order": 1,
-      "ci_workflow_step": "validation name from validation_sequence",
-      "ci_command": "exact validation or install command",
-      "workflow_evidence": "validation_sequence evidence, or null",
-      "depends_on": null,
-      "dependency_reason": null,
-      "verification_after_fix": "exact command to run",
-      "next_failure_after_fix": "next problem summary or null"
-    }}
-  ],
-  "workflow_ordered_problem_flow": [
-    {{
-      "sequence_step": 1,
-      "problem_id": 1,
-      "validation_order": 1,
-      "validation_command": "command from validation_sequence",
-      "visibility": "visible_in_log | hidden",
-      "fix_summary": "short fix summary",
-      "expected_after_fix": "pass | would expose next problem | unknown",
-      "next_problem_id": 2
-    }}
-  ],
-  "overall_failure_summary": "one concise paragraph",
-  "workflow_reasoning": "one concise paragraph explaining validation order and hidden failures"
-}}
-
-════════════════════════════════════════════════════════════════════════════════
-CRITICAL RULES
-════════════════════════════════════════════════════════════════════════════════
-
-1. Problem 1 MUST have visibility="visible_in_log" and evidence_in_ci_log from structured CI context
-2. Problems 2, 3, ... MUST have visibility="hidden" and evidence_in_ci_log=null
-3. Infer hidden problems from:
-   - Changed files not related to visible problem
-   - Actual ordered CI validation sequence from the benchmark workflow
-   - File types (config vs code vs tests)
-4. If 10 files have same type of change (type hints), that's ONE atomic problem, not 10
-5. Include depends_on/dependency_reason when a hidden problem only appears after an earlier problem is fixed
-6. Keep output compact. Do not create per-file nested records.
-7. Make each problem actionable through root_cause, how_fixed, affected_files, fix_strategy, and verification_after_fix.
-8. If one repair has 3 distinct problems, return 3 distinct atomic problems; do not merge unrelated install/type/test/config fixes
-9. workflow_evidence must cite the provided validation_sequence. If no matching workflow evidence exists, set workflow_evidence=null.
-10. Do not account for every changed file; include only files relevant to inferred CI validation failures.
-11. For documentation-formatting bursts, test-fixture updates, generated artifacts, or broad API migrations, group same-pattern files into one problem and list affected files.
-12. workflow_validation_order must match the ordered validation_sequence when there is workflow evidence.
-13. workflow_ordered_problem_flow must be ordered by validation_sequence and problem dependencies.
-14. Do not order hidden problems by file order or chunk order. Chunk order is only evidence collection; CI validation_sequence determines repair order.
-""".strip()
-
-
-def format_diff_evidence_for_prompt(diff_context: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Convert chunk-level diff analysis into the evidence block used by the
-    final decomposition prompt.
-    """
-    consolidated = diff_context.get("consolidated_chunk_findings") or {}
-    if consolidated.get("consolidated"):
-        findings_payload = {
-            "diff_char_count": diff_context.get("diff_char_count"),
-            "chunk_count": diff_context.get("chunk_count"),
-            "chunks": diff_context.get("chunks", []),
-            "diff_analysis_summary": consolidated.get("diff_analysis_summary", {}),
-        }
-        instruction = (
-            "Use the consolidated file-aware diff summary below as the diff evidence. It was "
-            "produced from all chunk findings and preserves candidate problems plus relevant "
-            "file evidence."
-        )
-    else:
-        findings_payload = {
-            "diff_char_count": diff_context.get("diff_char_count"),
-            "chunk_count": diff_context.get("chunk_count"),
-            "chunks": diff_context.get("chunks", []),
-            "chunk_findings": consolidated.get("chunk_findings", diff_context.get("chunk_findings", [])),
-        }
-        instruction = (
-            "Use the file-aware chunk findings below as the diff evidence. Reconcile candidate "
-            "problems across chunks before deciding the final atomic problems."
-        )
-
-    return {
-        "title": "GROUND TRUTH DIFF CHUNK ANALYSIS",
-        "instruction": instruction,
-        "block": json.dumps(findings_payload, indent=2),
-        "mode_rule": (
-            "This prompt contains chunk-level diff analysis, not raw diff text. Use the chunk "
-            "evidence and do not assume raw diff lines beyond those findings."
-        ),
-    }
-
-
-def build_decomposition_prompt(
-    issue: Dict,
-    benchmark_context: Dict[str, Any],
-    diff_context: Dict[str, Any],
-) -> str:
-    diff_evidence = format_diff_evidence_for_prompt(diff_context)
-    return _build_decomposition_prompt(
-        issue,
-        benchmark_context,
-        diff_block_title=diff_evidence["title"],
-        diff_instruction=diff_evidence["instruction"],
-        diff_block=diff_evidence["block"],
-        mode_rule=diff_evidence["mode_rule"],
-    )
-
-
-def build_repair_trajectory_prompt(
-    issue: Dict,
-    benchmark_context: Dict[str, Any],
-    atomic_result: Dict[str, Any],
-) -> str:
-    """Build a second prompt that derives repair trajectory from atomic problems."""
-    validation_sequence = benchmark_context.get("validation_sequence") or []
-    workflow_path = benchmark_context.get("workflow_path") or ""
-    context = benchmark_context.get("context") or {}
-
-    compact_context = {
-        "workflow_path": workflow_path,
-        "validation_sequence": validation_sequence,
-        "failed_jobs": context.get("failed_jobs", []),
-        "overall_failure_reasons": context.get("overall_failure_reasons", []),
-    }
-
-    return f"""You are building a CI repair trajectory from already extracted atomic problems.
-
-Use ONLY:
-- the atomic problems JSON
-- workflow_ordered_problem_flow from the atomic problems JSON, if present
-- the actual ordered validation_sequence extracted from the benchmark workflow
-- the visible CI failure context
-
-Do NOT invent new atomic problems. Do NOT change problem root causes or affected files.
-Your job is only to order the problems through the CI pipeline and explain what runs/fails after each fix.
-If workflow_ordered_problem_flow is present, use it as the primary ordering evidence and convert it into the detailed repair_trajectory_inference.
-If multiple problems map to the same workflow stage, keep them as separate trajectory steps only if they have distinct root causes/fix patterns; otherwise preserve their single atomic problem.
-
---- ATOMIC PROBLEMS JSON ---
-{json.dumps(atomic_result, indent=2)}
-
---- CI CONTEXT ---
-{json.dumps(compact_context, indent=2)}
-
---- CI VALIDATION SEQUENCE ---
-{json.dumps(validation_sequence, indent=2)}
-
-{STRICT_JSON_RULES}
-
-IMPORTANT: Return a SINGLE JSON OBJECT (not an array). Your response must start with {{ and end with }}.
-
-Return this JSON object:
-{{
-  "ci_workflow_stages": [
-    {{
-      "stage_order": 1,
-      "stage_name": "install | lint | type_check | test | build | other",
-      "workflow_step": "Workflow step name",
-      "command": "exact command from validation_sequence",
-      "validation_purpose": "what this command validates",
-      "would_run_after": null
-    }}
-  ],
-
-  "repair_trajectory_inference": [
-    {{
-      "step": 1,
-      "problem_fixed": 1,
-      "problem": "p1",
-      "problem_summary": "short summary of the atomic problem fixed in this step",
-      "visible_failure": "failure seen or inferred at this step",
-      "observability": "visible_in_log | hidden_inferred_from_diff",
-      "ci_stage": "install | lint | type_check | test | build | other",
-      "workflow_stage_order": 1,
-      "validation_command_to_run_now": "command to verify this fix",
-      "files_to_fix": [
-        {{
-          "file": "path/to/file.py",
-          "change_needed": "actual fix from atomic problem files[]",
-          "why_needed": "failure/risk in this file"
-        }}
-      ],
-      "fix": "short fix summary from atomic problem",
-      "result_after_fix": "success expected after this fix",
-      "next_validation_to_run": {{
-        "workflow_stage_order": 2,
-        "command": "next command from validation_sequence",
-        "validates": "what next command validates"
-      }},
-      "expected_result": "WOULD FAIL with p2 | PASS | unknown",
-      "expected_next_failure": {{
-        "problem_id": 2,
-        "why_it_appears_next": "workflow order/dependency reason",
-        "files_likely_involved": ["src/f1.py"]
-      }}
-    }}
-  ],
-
-  "problem_links": [
-    {{
-      "from_problem": 1,
-      "to_problem": 2,
-      "link_type": "unblocks | depends_on | sequence",
-      "reason": "why fixing one problem exposes/enables the next workflow failure"
-    }}
-  ],
-
-  "repair_trajectory_summary": "Concise explanation of the full repair order through the CI workflow."
-}}
-
-Rules:
-1. Keep the same problem IDs from atomic problems.
-2. The first trajectory step must be the visible CI failure.
-3. Hidden problems should appear only after the earlier workflow-blocking problem is fixed.
-4. validation and next_ci_stage_to_run must come from validation_sequence when available.
-5. If a problem has no workflow command evidence, use null and explain uncertainty in the summary.
-6. Do not add new problem IDs. The trajectory is an ordering of existing atomic problems only.
-7. If two hidden problems would be exposed by the same validation command, order them by dependency evidence from depends_on; if no dependency exists, keep workflow_stage_order equal and explain they are same-stage findings.
-8. files_to_fix must come from atomic problems' files[]/affected_files; do not invent files.
-""".strip()
-
-
-def add_coverage_diagnostics(issue: Dict, result: Dict[str, Any]) -> None:
-    changed_files = [str(f) for f in issue.get("changed_files", []) if str(f).strip()]
-    covered = set()
-    for problem in result.get("problems", []):
-        for file_path in problem.get("affected_files", []) or []:
-            covered.add(str(file_path))
-    for item in result.get("unmapped_or_supporting_files", []) or []:
-        if isinstance(item, dict):
-            covered.add(str(item.get("file") or ""))
-        else:
-            covered.add(str(item))
-
-    missing = [f for f in changed_files if f not in covered]
-    result["coverage_diagnostics"] = {
-        "changed_files_total": len(changed_files),
-        "covered_files_total": len([f for f in covered if f]),
-        "missing_changed_files": missing,
-        "coverage_complete": not missing,
-    }
-
-
-def finalize_decomposition_result(
-    issue: Dict[str, Any],
-    result: Dict[str, Any],
-    trajectory_result: Dict[str, Any],
-    benchmark_context: Dict[str, Any],
-    diff_context: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Attach only the normalized fields needed by memory building/retrieval.
-
-    The LLM-produced decomposition remains the source of truth. This helper
-    only adds trajectory output, metadata, compact context, and compatibility
-    aliases used by the current memory builder.
-    """
-    # Simple trajectory summary
-    problems_list = result.get("problems", [])
-    visible_count = sum(1 for p in problems_list if p.get("visibility") == "visible_in_log")
-
-    result["trajectory_summary"] = {
-        "total_problems": len(problems_list),
-        "visible_problems": visible_count,
-        "hidden_problems": len(problems_list) - visible_count,
-        "repair_sequence": trajectory_result.get("repair_trajectory_summary", ""),
-        "problem_links": trajectory_result.get("problem_links", []),
-    }
-    result.setdefault("total_changed_files", len(issue.get("changed_files", [])))
-    add_coverage_diagnostics(issue, result)
-
-    context = benchmark_context.get("context", {})
-    log_analysis = benchmark_context.get("log_analysis", {})
-    result.update({
-        "original_issue_id": issue.get("id"),
-        "sha_fail": issue.get("sha_fail"),
-        "repo": issue.get("repo_name", issue.get("repo")),
-        "original_error_type": issue.get("error_type"),
-        "benchmark_ci_context": {
-            "workflow_path": benchmark_context.get("workflow_path"),
-            "workflow_name": benchmark_context.get("workflow_name"),
-            "workflow_validation_context": benchmark_context.get("workflow_validation_context", {}),
-            "validation_sequence": benchmark_context.get("validation_sequence", []),
-            "overall_failure_reasons": context.get("overall_failure_reasons", []),
-            "overall_error_types": context.get("overall_error_types", []),
-            "effected_files": context.get("effected_files", []),
-            "failed_jobs": context.get("failed_jobs", []),
-            "log_analysis": {
-                "error_context": log_analysis.get("error_context", []),
-                "relevant_files": log_analysis.get("relevant_files", []),
-                "error_types": log_analysis.get("error_types", []),
-                "failed_job": log_analysis.get("failed_job", []),
-                "overall_ci_summary": log_analysis.get("overall_ci_summary", ""),
-                "analysis_document": log_analysis.get("analysis_document", ""),
-                "chunk_summaries": log_analysis.get("chunk_summaries", []),
-            },
-        },
-        "diff_analysis_context": {
-            "mode": diff_context.get("mode"),
-            "diff_char_count": diff_context.get("diff_char_count"),
-            "chunk_count": diff_context.get("chunk_count", 0),
-            "chunks": diff_context.get("chunks", []),
-        },
-    })
-    return result
-
-
-def reverse_engineer_atomic_problems(
-    issue: Dict[str, Any],
-    benchmark_context: Dict[str, Any],
-    diff_context: Dict[str, Any],
-    llm: Any,
-) -> Dict[str, Any]:
-    """Run the first reasoning pass: visible failure + hidden atomic problems."""
-    prompt = build_decomposition_prompt(issue, benchmark_context, diff_context)
-    return _invoke_json(llm, prompt)
-
-
-def infer_repair_trajectory(
-    issue: Dict[str, Any],
-    benchmark_context: Dict[str, Any],
-    atomic_result: Dict[str, Any],
-    llm: Any,
-) -> Dict[str, Any]:
-    """Run the second reasoning pass: order atomic problems by CI validation sequence."""
-    prompt = build_repair_trajectory_prompt(issue, benchmark_context, atomic_result)
-    result = _invoke_json(llm, prompt)
-
-    # Handle case where LLM returns array instead of object
-    if isinstance(result, list):
-        if len(result) == 1 and isinstance(result[0], dict):
-            result = result[0]
-        else:
-            # Invalid response, return empty structure
-            print(f"  Warning: Trajectory inference returned array with {len(result)} items, expected object")
-            return {
-                "ci_workflow_stages": [],
-                "repair_trajectory_inference": [],
-                "problem_links": [],
-                "repair_trajectory_summary": ""
-            }
-
-    if not isinstance(result, dict):
-        print(f"  Warning: Trajectory inference returned {type(result).__name__}, expected object")
-        return {
-            "ci_workflow_stages": [],
-            "repair_trajectory_inference": [],
-            "problem_links": [],
-            "repair_trajectory_summary": ""
-        }
-
-    return result
 
 
 def decompose_issue(issue: Dict, llm) -> Dict:
     """
-    Reverse engineer atomic problems from CI failure + ground truth diff.
+    Three-step reverse engineering from CI failure + ground truth diff:
 
-    Returns decomposed problems with visibility markers:
-    - visible_in_log: Problem 1 (from structured CI context)
-    - hidden: Problems 2+ (inferred from diff)
+    1. Classify chunks by validation (per chunk)
+    2. Merge by validation (deterministic)
+    3. Deep reasoning with full context (ConRAD/STAIR style)
+
+    Returns specific, actionable atomic problems for mini-swe-agent.
     """
 
     issue_id = issue.get('id', '?')
@@ -1494,22 +1928,63 @@ def decompose_issue(issue: Dict, llm) -> Dict:
         if not validate_required_ci_inputs(benchmark_context):
             return {}
 
+        # Three-step analysis
         diff_context = analyze_diff_chunks(issue, benchmark_context, llm)
-        print(f"  Calling LLM to reverse engineer atomic problems...")
-        result = reverse_engineer_atomic_problems(issue, benchmark_context, diff_context, llm)
-        if not result:
-            print("  ERROR Atomic problem JSON parsing failed; returning empty result")
+
+        atomic_problems = diff_context.get("atomic_problems", [])
+        sequential_metadata = diff_context.get("sequential_workflow_metadata", {})
+
+        if not atomic_problems:
+            print("  WARNING: No atomic problems identified")
             return {}
 
-        print(f"  Calling LLM to build repair trajectory...")
-        trajectory_result = infer_repair_trajectory(issue, benchmark_context, result, llm)
-        return finalize_decomposition_result(
-            issue=issue,
-            result=result,
-            trajectory_result=trajectory_result,
-            benchmark_context=benchmark_context,
-            diff_context=diff_context,
-        )
+        print(f"  ✓ Identified {len(atomic_problems)} atomic problems")
+
+        # Build final result
+        context = benchmark_context.get("context", {})
+        log_analysis = benchmark_context.get("log_analysis", {})
+
+        result = {
+            "original_issue_id": issue_id,
+            "sha_fail": issue.get("sha_fail"),
+            "repo": issue.get("repo_name", issue.get("repo")),
+            "original_error_type": issue.get("error_type"),
+
+            # Atomic problems from three-step analysis
+            "problems": atomic_problems,
+            "total_problems": len(atomic_problems),
+            "total_changed_files": len(issue.get("changed_files", [])),
+
+            # Sequential workflow metadata
+            "sequential_workflow_metadata": sequential_metadata,
+
+            # Benchmark CI context (cleaned - no redundancy)
+            "benchmark_ci_context": {
+                "workflow_path": benchmark_context.get("workflow_path"),
+                "workflow_name": benchmark_context.get("workflow_name"),
+                "validation_sequence": benchmark_context.get("validation_sequence", []),
+
+                # Summary level (for quick access)
+                "overall_failure_reasons": context.get("overall_failure_reasons", []),
+                "overall_error_types": context.get("overall_error_types", []),
+
+                # Detailed analysis (structured)
+                "error_types": log_analysis.get("error_types", []),  # Detailed with subcategory + evidence
+                "relevant_files": log_analysis.get("relevant_files", []),  # Files with line numbers
+                "failed_jobs": log_analysis.get("failed_job", []),  # Job/step/command info
+            },
+
+            # Structured diff analysis metadata
+            "diff_analysis_context": {
+                "mode": diff_context.get("mode"),
+                "total_files": diff_context.get("total_files", 0),
+                "total_changes": diff_context.get("total_changes", 0),
+                "chunk_count": diff_context.get("chunk_count", 0),
+                "validation_groups_count": diff_context.get("validation_groups", {}).get("total_groups", 0),
+            },
+        }
+
+        return result
 
     except Exception as e:
         import traceback
@@ -1573,11 +2048,38 @@ def main():
     print(f"{'='*80}")
     llm = LitellmModel(model_name=args.model)
 
-    # Decompose issues
+    # Prepare output path
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing results if file exists (for resume capability)
     results = []
     errors = []
+    processed_ids = set()
 
+    if output_path.exists():
+        try:
+            with open(output_path) as f:
+                existing = json.load(f)
+                if isinstance(existing, list):
+                    results = existing
+                    # Track already processed issues
+                    for r in results:
+                        if "original_issue_id" in r:
+                            processed_ids.add(str(r["original_issue_id"]))
+                    print(f"Loaded {len(results)} existing results (will skip already processed issues)")
+        except Exception as e:
+            print(f"Warning: Could not load existing results: {e}")
+
+    # Decompose issues with incremental saving
     for i, issue in enumerate(issues, 1):
+        issue_id = str(issue.get("id"))
+
+        # Skip if already processed
+        if issue_id in processed_ids:
+            print(f"\nProgress: {i}/{len(issues)} - Issue {issue_id} already processed, skipping")
+            continue
+
         print(f"\nProgress: {i}/{len(issues)}")
         result = decompose_issue(issue, llm)
 
@@ -1586,10 +2088,15 @@ def main():
 
         results.append(result)
 
-    # Save results
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Incremental save after each issue
+        try:
+            with open(output_path, "w") as f:
+                json.dump(results, f, indent=2)
+            print(f"  ✓ Saved progress ({len(results)} issues total)")
+        except Exception as e:
+            print(f"  WARNING: Could not save progress: {e}")
 
+    # Final save (redundant but ensures completion)
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2)
 

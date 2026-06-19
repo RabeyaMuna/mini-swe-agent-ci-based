@@ -717,6 +717,316 @@ def setup_local_environment(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Sequential Repair: Fix problems one at a time
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_single_problem_task(problem: Dict[str, Any], problem_num: int, total_problems: int) -> str:
+    """
+    Build a focused task for ONE specific problem.
+
+    Agent receives ONLY this problem's information, not all problems.
+    """
+    status = problem.get("status", "unknown")
+    stage = problem.get("validation_stage", "")
+    validation_cmd = problem.get("verification_cmd", "")
+    validation_order = problem.get("validation_order", "?")
+
+    # Get detailed problem info
+    problem_statement = problem.get("problem_statement", "")
+    root_cause = problem.get("root_cause", "")
+    fix_strategy = problem.get("fix_strategy", "")
+    error_type = problem.get("error_type", "")
+    error_desc = problem.get("error_description", "")
+
+    files = problem.get("files", [])
+    check_first = problem.get("check_first", False)
+    reasoning = problem.get("reasoning", "")
+    interdep = problem.get("interdependency", "")
+
+    status_label = "CONFIRMED - Currently Failing" if status == "confirmed" else "PROBABLE - Check First"
+
+    # Build focused task
+    task = f"""# CI Repair - Problem {problem_num}/{total_problems}
+
+## Problem {problem_num}: {status_label}
+
+**Validation Stage**: {stage}
+**Validation Order**: {validation_order}
+**Verification Command**: `{validation_cmd}`
+
+### Problem Statement
+
+{problem_statement}
+
+"""
+
+    if root_cause:
+        task += f"""### Root Cause
+
+{root_cause}
+
+"""
+
+    if fix_strategy:
+        task += f"""### Fix Strategy
+
+{fix_strategy}
+
+"""
+
+    if files:
+        task += """### Files to Fix
+
+"""
+        for idx, f in enumerate(files, 1):
+            path = f.get("path", "")
+            line = f.get("line", "")
+            current = f.get("current_code", "")
+            required = f.get("required_fix", "")
+            context = f.get("context", "")
+
+            task += f"""**File {idx}**: `{path}`"""
+            if line:
+                task += f" (line {line})"
+            task += "\n"
+
+            if current:
+                task += f"- **Current Code**: `{current}`\n"
+            if required:
+                task += f"- **Required Fix**: {required}\n"
+            if context:
+                task += f"- **Context**: {context}\n"
+            task += "\n"
+
+    if check_first:
+        task += f"""### Important: Check First!
+
+This problem is PREDICTED (not confirmed). Before fixing:
+1. Run the verification command: `{validation_cmd}`
+2. If it PASSES (exit code 0), this problem doesn't exist - SKIP it
+3. If it FAILS, proceed with the fix
+
+"""
+
+    if reasoning:
+        task += f"""### Reasoning
+
+{reasoning}
+
+"""
+
+    if interdep:
+        task += f"""### Interdependency
+
+{interdep}
+
+"""
+
+    task += f"""### Your Task
+
+1. {"Check if this problem exists first by running the verification command" if check_first else "Fix this problem"}
+2. Make MINIMAL changes (only what's needed for THIS problem)
+3. After your fix, run: `{validation_cmd}`
+4. Expected result: EXIT CODE 0 (success)
+
+### Submission
+
+When done, submit your fix using:
+```
+echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat <testbed_path>/patch.txt
+```
+"""
+
+    return task
+
+
+def _verify_validation_passes(testbed_path: Path, validation_cmd: str, timeout: int = 300) -> bool:
+    """
+    Run validation command and check if it passes.
+
+    Returns:
+        True if validation passes (exit code 0), False otherwise
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            validation_cmd,
+            shell=True,
+            cwd=str(testbed_path),
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+
+        passed = result.returncode == 0
+        logger.info(f"[CIBench] Validation '{validation_cmd}' → exit code {result.returncode}")
+
+        if not passed and result.stderr:
+            logger.debug(f"[CIBench] Validation error: {result.stderr[:500]}")
+
+        return passed
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"[CIBench] Validation '{validation_cmd}' timed out (>{timeout}s)")
+        return False
+    except Exception as e:
+        logger.error(f"[CIBench] Validation '{validation_cmd}' error: {e}")
+        return False
+
+
+def _combine_partial_fixes(partial_fixes: List[Dict[str, Any]]) -> str:
+    """
+    Combine multiple partial fixes into a unified diff.
+    """
+    if not partial_fixes:
+        return ""
+
+    unified = []
+    for fix in partial_fixes:
+        problem_id = fix.get('problem_id', '?')
+        patch = fix.get('patch', '')
+        if patch:
+            unified.append(f"# Problem {problem_id} fix")
+            unified.append(patch)
+            unified.append("")  # Blank line
+
+    return "\n".join(unified)
+
+
+def _run_sequential_repair(
+    agent: Any,
+    problems: List[Dict[str, Any]],
+    testbed_path: Path,
+    progress_manager: Any,
+    instance_id: str
+) -> Tuple[Dict[str, Any], str]:
+    """
+    Fix problems sequentially, one at a time.
+
+    For each problem:
+    1. Build focused task (ONLY this problem)
+    2. Agent fixes THIS problem
+    3. Verify validation passes
+    4. Save partial fix or stop
+
+    Returns:
+        (info_dict, unified_diff)
+    """
+    partial_fixes = []
+    total_problems = len(problems)
+
+    logger.info(f"[CIBench] Starting sequential repair: {total_problems} problems")
+
+    for i, problem in enumerate(problems, 1):
+        logger.info(f"[CIBench] {'='*60}")
+        logger.info(f"[CIBench] Problem {i}/{total_problems}")
+        logger.info(f"[CIBench] {'='*60}")
+
+        status = problem.get("status", "unknown")
+        validation_cmd = problem.get("verification_cmd", "")
+        stage = problem.get("validation_stage", "")
+        check_first = problem.get("check_first", False)
+
+        logger.info(f"[CIBench] Status: {status}")
+        logger.info(f"[CIBench] Stage: {stage}")
+        logger.info(f"[CIBench] Validation: {validation_cmd}")
+        logger.info(f"[CIBench] Check first: {check_first}")
+
+        # For PROBABLE problems, check if they exist first
+        if check_first and validation_cmd:
+            logger.info(f"[CIBench] Checking if problem exists...")
+            if _verify_validation_passes(testbed_path, validation_cmd):
+                logger.info(f"[CIBench] ✓ Problem {i} does not exist (validation passes). Skipping.")
+                continue
+            else:
+                logger.info(f"[CIBench] ✗ Problem {i} exists (validation fails). Proceeding to fix.")
+
+        # Build focused task for THIS problem only
+        single_task = _build_single_problem_task(problem, i, total_problems)
+
+        logger.info(f"[CIBench] Task preview (first 300 chars):")
+        logger.info(single_task[:300] + "...")
+
+        # Update progress
+        progress_manager.update_instance_status(
+            instance_id,
+            f"Fixing problem {i}/{total_problems}"
+        )
+
+        # Agent fixes THIS problem
+        logger.info(f"[CIBench] Running agent for problem {i}...")
+        try:
+            info = agent.run(single_task)
+            exit_status = info.get("exit_status")
+
+            # Extract patch
+            raw_submission = info.get("submission") or ""
+            patch = _extract_diff(raw_submission)
+
+            if not patch or not patch.strip():
+                logger.warning(f"[CIBench] ✗ Problem {i}: Agent returned no patch")
+                break
+
+            logger.info(f"[CIBench] ✓ Problem {i}: Agent generated patch ({len(patch)} chars)")
+
+            # Verify validation passes
+            if validation_cmd:
+                logger.info(f"[CIBench] Verifying problem {i} fix...")
+                if _verify_validation_passes(testbed_path, validation_cmd):
+                    logger.info(f"[CIBench] ✓ Problem {i} FIXED! Validation passes.")
+                    partial_fixes.append({
+                        'problem_id': i,
+                        'problem_number': problem.get('problem_number', i),
+                        'status': status,
+                        'validation_stage': stage,
+                        'patch': patch,
+                        'verified': True
+                    })
+                else:
+                    logger.warning(f"[CIBench] ✗ Problem {i} FAILED! Validation still fails.")
+                    logger.info(f"[CIBench] Stopping sequential repair at problem {i}")
+                    break
+            else:
+                logger.warning(f"[CIBench] Problem {i}: No verification command, assuming success")
+                partial_fixes.append({
+                    'problem_id': i,
+                    'problem_number': problem.get('problem_number', i),
+                    'status': status,
+                    'validation_stage': stage,
+                    'patch': patch,
+                    'verified': False
+                })
+
+        except Exception as e:
+            logger.error(f"[CIBench] ✗ Problem {i}: Agent error: {e}")
+            break
+
+    # Combine all successful partial fixes
+    unified_diff = _combine_partial_fixes(partial_fixes)
+
+    logger.info(f"[CIBench] Sequential repair complete:")
+    logger.info(f"[CIBench]   Total problems: {total_problems}")
+    logger.info(f"[CIBench]   Fixed problems: {len(partial_fixes)}")
+    logger.info(f"[CIBench]   Success rate: {len(partial_fixes)}/{total_problems} = {100*len(partial_fixes)/total_problems:.1f}%")
+    logger.info(f"[CIBench]   Unified diff: {len(unified_diff)} chars")
+
+    # Build info dict
+    info = {
+        'exit_status': 'submitted' if unified_diff else 'failed',
+        'submission': unified_diff,
+        'sequential_repair': {
+            'total_problems': total_problems,
+            'fixed_problems': len(partial_fixes),
+            'success_rate': len(partial_fixes) / total_problems if total_problems > 0 else 0,
+            'partial_fixes': partial_fixes
+        }
+    }
+
+    return info, unified_diff
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Per-instance processing
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -812,13 +1122,41 @@ def process_instance(
 
         # ── Phase 3: run agent ────────────────────────────────────────────────
         progress_manager.update_instance_status(instance_id, "Running agent")
-        info = agent.run(task)
-        exit_status = info.get("exit_status")
 
-        # Agent submits via:
-        #   echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat <testbed_path>/patch.txt
-        raw_submission = info.get("submission") or ""
-        diff = _extract_diff(raw_submission)
+        # Check if we have a structured repair plan with multiple problems
+        llm_sel = ci_memory.get("llm_selection") or {}
+        guidance_doc = llm_sel.get("guidance_document") or {}
+        problems = guidance_doc.get("problems", [])
+
+        if problems and len(problems) > 1:
+            # SEQUENTIAL REPAIR MODE: Fix problems one at a time
+            logger.info(f"[CIBench] Sequential repair mode: {len(problems)} problems to fix")
+            info, diff = _run_sequential_repair(
+                agent=agent,
+                problems=problems,
+                testbed_path=testbed_path,
+                progress_manager=progress_manager,
+                instance_id=instance_id
+            )
+            exit_status = info.get("exit_status")
+
+            # Save sequential repair metadata
+            sequential_metadata = info.get("sequential_repair", {})
+            extra_info["sequential_repair"] = sequential_metadata
+            logger.info(
+                f"[CIBench] Sequential repair: {sequential_metadata.get('fixed_problems', 0)}/"
+                f"{sequential_metadata.get('total_problems', 0)} problems fixed"
+            )
+        else:
+            # STANDARD MODE: Fix all problems together (old behavior)
+            logger.info(f"[CIBench] Standard repair mode: single agent call")
+            info = agent.run(task)
+            exit_status = info.get("exit_status")
+
+            # Agent submits via:
+            #   echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat <testbed_path>/patch.txt
+            raw_submission = info.get("submission") or ""
+            diff = _extract_diff(raw_submission)
 
         # ── Phase 4: save memory record ───────────────────────────────────────
         if save_memory and diff and ci_ctx and memory_root:

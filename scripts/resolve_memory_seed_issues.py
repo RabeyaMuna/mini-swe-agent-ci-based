@@ -36,9 +36,27 @@ def _load_json(path: Path) -> Any:
         return json.load(fh)
 
 
+def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    with path.open(encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSONL at {path}:{line_no}: {exc}") from exc
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
 def _load_dataset_rows(dataset_spec: str) -> List[Dict[str, Any]]:
     path = Path(dataset_spec)
     if path.exists():
+        if path.suffix == ".jsonl":
+            return _load_jsonl(path)
         data = _load_json(path)
         if not isinstance(data, list):
             raise ValueError(f"local dataset must be a JSON list: {path}")

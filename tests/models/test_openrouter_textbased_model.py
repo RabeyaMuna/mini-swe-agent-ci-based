@@ -7,6 +7,7 @@ import requests
 
 from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.models.openrouter_model import (
+    OpenRouterAPIError,
     OpenRouterAuthenticationError,
 )
 from minisweagent.models.openrouter_textbased_model import (
@@ -19,7 +20,9 @@ def mock_response():
     """Create a mock successful OpenRouter API response."""
     # Response must include bash block to avoid FormatError from parse_action
     return {
-        "choices": [{"message": {"content": "```mswea_bash_command\necho '2+2 equals 4'\n```"}}],
+        "choices": [
+            {"message": {"content": "```mswea_bash_command\necho '2+2 equals 4'\n```"}}
+        ],
         "usage": {
             "prompt_tokens": 16,
             "completion_tokens": 13,
@@ -41,7 +44,9 @@ def mock_response_no_cost():
     """Create a mock OpenRouter API response without cost information."""
     # Response must include bash block to avoid FormatError from parse_action
     return {
-        "choices": [{"message": {"content": "```mswea_bash_command\necho '2+2 equals 4'\n```"}}],
+        "choices": [
+            {"message": {"content": "```mswea_bash_command\necho '2+2 equals 4'\n```"}}
+        ],
         "usage": {"prompt_tokens": 16, "completion_tokens": 13, "total_tokens": 29},
     }
 
@@ -49,7 +54,9 @@ def mock_response_no_cost():
 def test_openrouter_model_successful_query(mock_response):
     """Test successful OpenRouter API query with cost tracking."""
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-        model = OpenRouterTextbasedModel(model_name="anthropic/claude-3.5-sonnet", model_kwargs={"temperature": 0.7})
+        model = OpenRouterTextbasedModel(
+            model_name="anthropic/claude-3.5-sonnet", model_kwargs={"temperature": 0.7}
+        )
 
         initial_cost = GLOBAL_MODEL_STATS.cost
 
@@ -82,7 +89,9 @@ def test_openrouter_model_successful_query(mock_response):
             assert payload["temperature"] == 0.7
 
             # Verify response
-            assert result["content"] == "```mswea_bash_command\necho '2+2 equals 4'\n```"
+            assert (
+                result["content"] == "```mswea_bash_command\necho '2+2 equals 4'\n```"
+            )
             assert result["extra"]["actions"] == [{"command": "echo '2+2 equals 4'"}]
             assert result["extra"]["response"] == mock_response
 
@@ -101,7 +110,9 @@ def test_openrouter_model_authentication_error():
             mock_response.status_code = 401
             mock_response.text = "Unauthorized"
             mock_post.return_value = mock_response
-            mock_post.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError()
+            mock_post.return_value.raise_for_status.side_effect = (
+                requests.exceptions.HTTPError()
+            )
 
             messages = [{"role": "user", "content": "test"}]
 
@@ -110,6 +121,34 @@ def test_openrouter_model_authentication_error():
 
             assert "Authentication failed" in str(exc_info.value)
             assert "mini-extra config set OPENROUTER_API_KEY" in str(exc_info.value)
+
+
+def test_openrouter_model_invalid_json_response_includes_diagnostics():
+    """Test invalid JSON responses include enough context to diagnose provider failures."""
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+        model = OpenRouterTextbasedModel(model_name="anthropic/claude-3.5-sonnet")
+
+        with patch("requests.post") as mock_post:
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.headers = {"content-type": "text/html"}
+            mock_response.text = "<html>bad gateway</html>"
+            mock_response.raise_for_status.return_value = None
+            mock_response.json.side_effect = requests.exceptions.JSONDecodeError(
+                "Expecting value", "", 0
+            )
+            mock_post.return_value = mock_response
+
+            messages = [{"role": "user", "content": "test"}]
+
+            with pytest.raises(OpenRouterAPIError) as exc_info:
+                model._query(messages)
+
+            message = str(exc_info.value)
+            assert "Invalid JSON response from OpenRouter" in message
+            assert "status=200" in message
+            assert "content-type='text/html'" in message
+            assert "<html>bad gateway</html>" in message
 
 
 def test_openrouter_model_no_cost_information(mock_response_no_cost):
@@ -134,7 +173,9 @@ def test_openrouter_model_no_cost_information(mock_response_no_cost):
 def test_openrouter_model_free_model_zero_cost(mock_response_no_cost):
     """Test that free models with zero cost work correctly when cost_tracking='ignore_errors' is set."""
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-        model = OpenRouterTextbasedModel(model_name="anthropic/claude-3.5-sonnet", cost_tracking="ignore_errors")
+        model = OpenRouterTextbasedModel(
+            model_name="anthropic/claude-3.5-sonnet", cost_tracking="ignore_errors"
+        )
 
         initial_cost = GLOBAL_MODEL_STATS.cost
 
@@ -149,7 +190,9 @@ def test_openrouter_model_free_model_zero_cost(mock_response_no_cost):
             result = model.query(messages)
 
             # Verify response
-            assert result["content"] == "```mswea_bash_command\necho '2+2 equals 4'\n```"
+            assert (
+                result["content"] == "```mswea_bash_command\necho '2+2 equals 4'\n```"
+            )
             assert result["extra"]["actions"] == [{"command": "echo '2+2 equals 4'"}]
             assert result["extra"]["response"] == mock_response_no_cost
 
@@ -162,7 +205,8 @@ def test_openrouter_model_config():
     """Test OpenRouter model configuration."""
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
         model = OpenRouterTextbasedModel(
-            model_name="anthropic/claude-3.5-sonnet", model_kwargs={"temperature": 0.5, "max_tokens": 1000}
+            model_name="anthropic/claude-3.5-sonnet",
+            model_kwargs={"temperature": 0.5, "max_tokens": 1000},
         )
 
         assert model.config.model_name == "anthropic/claude-3.5-sonnet"
@@ -187,7 +231,9 @@ def test_openrouter_model_uses_configured_base_url():
 def test_openrouter_model_get_template_vars():
     """Test get_template_vars method."""
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-        model = OpenRouterTextbasedModel(model_name="anthropic/claude-3.5-sonnet", model_kwargs={"temperature": 0.7})
+        model = OpenRouterTextbasedModel(
+            model_name="anthropic/claude-3.5-sonnet", model_kwargs={"temperature": 0.7}
+        )
 
         template_vars = model.get_template_vars()
 
@@ -207,7 +253,9 @@ def test_openrouter_model_no_api_key():
             mock_response.status_code = 401
             mock_response.text = "Unauthorized"
             mock_post.return_value = mock_response
-            mock_post.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError()
+            mock_post.return_value.raise_for_status.side_effect = (
+                requests.exceptions.HTTPError()
+            )
 
             messages = [{"role": "user", "content": "test"}]
 

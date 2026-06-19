@@ -1086,46 +1086,186 @@ INTERDEPENDENCY EXAMPLES:
 - "Problem #1 is ruff lint (order 11). After fixing, mypy runs (order 12). Memory shows Union errors → Problem #2 = mypy Union errors."
 - "Problem #1 is mypy type error (order 12). After fixing, pytest runs (order 14). Type errors prevent imports → Problem #2 = pytest ImportError."
 
-OUTPUT STRICT JSON:
+OUTPUT STRICT JSON - DYNAMIC TEMPLATE:
+
+Each problem MUST include these fields (adapt to ANY problem type):
+
 {{
   "total_problems": <number>,
   "problems": [
     {{
       "problem_number": 1,
-      "status": "confirmed",
-      "validation_stage": "Code linting (ruff)",
-      "error_type": "F632",
-      "error_description": "use of 'is' instead of '==' for comparing constant literals",
+      "status": "confirmed",  // Always "confirmed" for Problem #1
+      "validation_stage": "<exact validation stage name>",
+      "validation_cmd": "<exact command that verifies this problem is fixed>",
+      "validation_order": <number from validation sequence>,
+
+      "problem_statement": "<DETAILED description - see requirements below>",
+      "root_cause": "<WHY this problem occurs - deep analysis>",
+      "fix_strategy": "<HOW to fix it - specific actionable steps>",
+
+      "error_type": "<error category: type-error, lint-error, import-error, dependency-error, config-error, test-failure, build-error, etc>",
+      "error_description": "<exact error message from CI logs>",
+
       "files": [
         {{
-          "path": "py/flwr/supernode/start_client_internal.py",
-          "line": "389",
-          "current_code": "while (content := object_store.get(tree.object_id)) is b\\\"\\\":",
-          "required_fix": "Change `is b\\\"\\\"` to `== b\\\"\\\"`"
+          "path": "<relative file path>",
+          "line": "<line number or range>",
+          "current_code": "<code that causes the error>",
+          "required_fix": "<what to change it to>",
+          "context": "<why this file is affected>"
         }}
       ],
-      "fix_strategy": "Replace is operator with == for literal comparison",
-      "verification_cmd": "python -m ruff check py/flwr --no-respect-gitignore",
-      "check_first": false,
-      "reasoning": "This is the current CI failure from the log - confirmed"
+
+      "check_first": false,  // Always false for Problem #1
+      "reasoning": "<why this is Problem #1 - reference CI logs>"
     }},
     {{
       "problem_number": 2,
-      "status": "probable",
-      "validation_stage": "Type checking (mypy)",
-      "error_type": "type-error",
-      "error_description": "...",
-      "files": [...],
-      "fix_strategy": "...",
-      "verification_cmd": "python -m mypy py",
-      "check_first": true,
-      "reasoning": "After ruff passes, mypy runs (validation order 12). Memory shows Union type errors in this repo.",
-      "interdependency": "Problem #1 must be fixed first for mypy to run"
+      "status": "probable",  // Always "probable" for Problem #2+
+      "validation_stage": "<exact validation stage name>",
+      "validation_cmd": "<exact verification command>",
+      "validation_order": <number from validation sequence>,
+
+      "problem_statement": "<DETAILED description - see requirements below>",
+      "root_cause": "<WHY this problem occurs>",
+      "fix_strategy": "<HOW to fix it>",
+
+      "error_type": "<error category>",
+      "error_description": "<predicted error based on memories>",
+
+      "files": [
+        {{
+          "path": "<predicted file path from memories>",
+          "line": "<predicted line or section>",
+          "current_code": "<code pattern that likely fails>",
+          "required_fix": "<fix pattern from memories>",
+          "context": "<why this file will be affected>"
+        }}
+      ],
+
+      "check_first": true,  // Always true for Problem #2+
+      "reasoning": "<why this problem is predicted - reference memories + interdependencies>",
+      "interdependency": "<how this relates to Problem #1 or previous problems>"
     }}
   ],
-  "agent_problem_statement": "# CI Repair Plan - Sequential Multi-Problem Fix\\n\\n**IMPORTANT**: This is a MULTI-PROBLEM repair plan. You must fix ALL problems in sequence, verifying each one before proceeding to the next.\\n\\n## Repair Sequence\\n\\n### Problem #1 (CONFIRMED - Currently Failing)\\n**Validation Stage**: Code linting (ruff)\\n**Error Type**: F632 - use of 'is' instead of '==' for comparing constant literals\\n**File**: py/flwr/supernode/start_client_internal.py:389\\n**Current Code**: `while (content := object_store.get(tree.object_id)) is b\\\"\\\"`\\n**Required Fix**: Change `is b\\\"\\\"` to `== b\\\"\\\"`\\n**Verification**: `python -m ruff check py/flwr --no-respect-gitignore`\\n**Status**: check_first=false (already confirmed failing)\\n\\n### Problem #2 (PROBABLE - Will Appear After #1)\\n**Validation Stage**: Type checking (mypy)\\n**Interdependency**: After ruff passes (Problem #1 fixed), mypy validation runs\\n**Error Type**: type-error\\n**Files**: [predicted from memories]\\n**Fix Strategy**: [from memories]\\n**Verification**: `python -m mypy py`\\n**Status**: check_first=true (verify this problem exists before fixing)\\n**Reasoning**: Validation sequence shows mypy runs after ruff. Memories indicate Union type errors in this repo.\\n\\n## Execution Instructions\\n1. **Fix Problem #1**: Apply fix → run verification command\\n2. **Check Problem #2**: Run verification command to see if it exists\\n3. **If Problem #2 exists**: Apply fix → run verification command\\n4. **Repeat for all problems**\\n5. **Final verification**: Run full CI workflow",
-  "summary": "Found N problems: 1 confirmed (current CI), M probable (predicted from memories + interdependencies)"
+  "agent_problem_statement": "<markdown formatted repair plan for agent - see formatting requirements below>",
+  "summary": "<brief summary of total problems found>"
 }}
+
+═══════════════════════════════════════════════════════════════════
+CRITICAL REQUIREMENTS FOR "problem_statement" FIELD:
+═══════════════════════════════════════════════════════════════════
+
+The "problem_statement" field MUST be DETAILED and SPECIFIC. It should include:
+
+1. **Exact validation command** that fails
+   Example: "Validation 'python -m mypy py' fails..."
+
+2. **Exact file path** where error occurs
+   Example: "...on file 'src/py/flwr/common/ndarrays_arithmetic.py'..."
+
+3. **Exact line number or range**
+   Example: "...at line 42..." or "...at import section (lines 15-20)..."
+
+4. **Exact error message** from CI logs or predicted from memories
+   Example: "...Error: 'Module \\"numpy.typing\\" has no attribute \\"DTypeLike\\" [attr-defined]'..."
+
+5. **What caused the error** (immediate trigger)
+   Example: "...The import statement uses DTypeLike from numpy.typing which is a private module..."
+
+6. **Impact explanation** (why it breaks the build)
+   Example: "...Mypy cannot access private modules, causing type checking to fail..."
+
+EXAMPLE DETAILED PROBLEM STATEMENTS (for different error types):
+
+Type Error:
+"Validation 'python -m mypy py' fails on file 'src/py/flwr/common/ndarrays_arithmetic.py' at line 42. Error: 'Module \\"numpy.typing\\" has no attribute \\"DTypeLike\\" [attr-defined]'. The import statement uses DTypeLike from numpy.typing which is a private module (_typing). Mypy cannot access private modules, causing type checking to fail."
+
+Dependency Error:
+"Validation 'taplo fmt --check' fails on file 'framework/pyproject.toml' at line 77. Error: 'TOML formatting error - missing required dependency entry'. The pyproject.toml is missing a 'click' dependency entry that is required for typer/click compatibility, causing pytest import failures with 'TypeError: Secondary flag is not valid for non-boolean flag'."
+
+Import Error:
+"Validation 'pytest tests/' fails on file 'tests/test_client.py' at line 5. Error: 'ModuleNotFoundError: No module named \\"flwr.common\\"'. The test imports from flwr.common but the package is not installed in the test environment, causing test collection to fail."
+
+Lint Error:
+"Validation 'python -m ruff check src/' fails on file 'src/utils/helpers.py' at line 23. Error: 'F401 [*] `typing.Union` imported but unused'. After fixing type annotations to use | operator instead of Union, the Union import at line 23 is no longer used, triggering ruff's unused import check."
+
+Config Error:
+"Validation 'pre-commit run --all-files' fails on config file '.pre-commit-config.yaml' at hook 'mypy'. Error: 'additional_dependencies list is missing types-requests stub package'. The mypy hook configuration is missing required type stubs for the requests library, causing mypy to fail on files that import requests."
+
+═══════════════════════════════════════════════════════════════════
+REQUIREMENTS FOR "root_cause" FIELD:
+═══════════════════════════════════════════════════════════════════
+
+Explain WHY the problem occurs at a deeper level:
+- What is the underlying issue? (API change, missing config, wrong assumption, etc.)
+- What triggered it? (code change, dependency update, environment difference, etc.)
+- Why does it break? (incompatibility, missing requirement, incorrect usage, etc.)
+
+═══════════════════════════════════════════════════════════════════
+REQUIREMENTS FOR "fix_strategy" FIELD:
+═══════════════════════════════════════════════════════════════════
+
+Explain HOW to fix it with specific actionable steps:
+- What exact changes to make? (add line, remove line, replace text, update config, etc.)
+- Where to make them? (specific files and lines)
+- What values to use? (specific imports, specific versions, specific syntax, etc.)
+- How to verify? (what command to run, what output to expect)
+
+═══════════════════════════════════════════════════════════════════
+REQUIREMENTS FOR "agent_problem_statement" FIELD:
+═══════════════════════════════════════════════════════════════════
+
+This field contains the markdown-formatted repair plan that the agent will receive.
+It should be structured as:
+
+# CI Repair Plan - Sequential Multi-Problem Fix
+
+**IMPORTANT**: This is a MULTI-PROBLEM repair plan with N problems. You must fix them in sequence.
+
+## Problem #1 (CONFIRMED - Currently Failing)
+
+**Validation**: <exact command>
+**File**: <path:line>
+**Error**: <exact error message>
+
+<full problem_statement text>
+
+**Root Cause**: <root_cause text>
+
+**Fix Strategy**: <fix_strategy text>
+
+**Verification**: Run `<validation_cmd>` → must return exit code 0
+
+**Status**: This problem is CONFIRMED (already failing in CI). Fix it immediately.
+
+---
+
+## Problem #2 (PROBABLE - Check First)
+
+**Validation**: <exact command>
+**Interdependency**: <how it relates to Problem #1>
+
+<full problem_statement text>
+
+**Root Cause**: <root_cause text>
+
+**Fix Strategy**: <fix_strategy text>
+
+**Verification**: Run `<validation_cmd>` → must return exit code 0
+
+**Status**: This problem is PREDICTED. Check if it exists first by running the verification command.
+
+---
+
+## Execution Instructions
+
+1. **Fix Problem #1**: Apply fix → run verification
+2. **Check Problem #2**: Run verification to see if it exists
+3. **If exists**: Apply fix → run verification
+4. **Repeat for all N problems**
+5. **Final verification**: Run full CI
 
 RULES:
 - Problem #1 MUST be the current CI failure (status="confirmed", check_first=false)
