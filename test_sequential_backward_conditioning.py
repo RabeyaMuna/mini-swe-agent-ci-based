@@ -76,7 +76,7 @@ def show_wrong_backward_conditioning():
     """Show what WRONG backward conditioning looks like (ignores sequence)."""
 
     print("="*80)
-    print("❌ WRONG: Backward Conditioning WITHOUT Sequential Awareness")
+    print("WRONG: Backward Conditioning WITHOUT Sequential Awareness")
     print("="*80)
     print()
 
@@ -104,10 +104,10 @@ def show_wrong_backward_conditioning():
     print(json.dumps(wrong_output, indent=2))
     print()
     print("PROBLEMS:")
-    print("  ❌ Lumps TWO validations into ONE problem")
-    print("  ❌ Doesn't show validation 1 BLOCKED validation 2")
-    print("  ❌ Doesn't show mdformat error was HIDDEN until mypy passed")
-    print("  ❌ Agent can't learn sequential repair strategy")
+    print("  FAIL Lumps TWO validations into ONE problem")
+    print("  FAIL Doesn't show validation 1 BLOCKED validation 2")
+    print("  FAIL Doesn't show mdformat error was HIDDEN until mypy passed")
+    print("  FAIL Agent can't learn sequential repair strategy")
     print()
 
 
@@ -115,7 +115,7 @@ def show_correct_sequential_backward_conditioning():
     """Show what CORRECT sequential backward conditioning looks like."""
 
     print("="*80)
-    print("✅ CORRECT: Sequential Backward Conditioning")
+    print("OK CORRECT: Sequential Backward Conditioning")
     print("="*80)
     print()
 
@@ -275,27 +275,27 @@ def show_correct_sequential_backward_conditioning():
                 }
             },
             "repair_order_sequence": [
-                "Step 1: Validation 1 (mypy) failed → saw error in ndarrays_arithmetic.py",
+                "Step 1: Validation 1 (mypy) failed -> saw error in ndarrays_arithmetic.py",
                 "Step 2: Fixed ndarrays_arithmetic.py (from VERIFIED PATCH: replaced numpy._typing)",
-                "Step 3: Validation 1 passed → REVEALED validation 2 (mdformat)",
+                "Step 3: Validation 1 passed -> REVEALED validation 2 (mdformat)",
                 "Step 4: Saw mdformat error (88 RST files missing overlines)",
                 "Step 5: Fixed 88 RST files (from VERIFIED PATCH: added overlines)",
-                "Step 6: Validation 2 passed → ALL PASS ✓"
+                "Step 6: Validation 2 passed -> ALL PASS OK"
             ]
         },
 
-        "repair_trajectory_summary": "SEQUENTIAL REPAIR: First fixed mypy (ndarrays_arithmetic.py - numpy._typing → np.dtype[Any]) which unblocked validation 1. This revealed mdformat failures (88 RST files). Then fixed RST overlines, passing validation 2. Total: 2 validations fixed in dependency order."
+        "repair_trajectory_summary": "SEQUENTIAL REPAIR: First fixed mypy (ndarrays_arithmetic.py - numpy._typing -> np.dtype[Any]) which unblocked validation 1. This revealed mdformat failures (88 RST files). Then fixed RST overlines, passing validation 2. Total: 2 validations fixed in dependency order."
     }
 
     print(json.dumps(correct_output, indent=2))
     print()
     print("BENEFITS:")
-    print("  ✅ Shows TWO distinct validations (not lumped together)")
-    print("  ✅ Shows validation 1 BLOCKS validation 2")
-    print("  ✅ Shows mdformat error was HIDDEN until mypy passed")
-    print("  ✅ Maps patch changes to WHICH validation they fix")
-    print("  ✅ Shows SEQUENTIAL repair timeline")
-    print("  ✅ Agent learns: 'Fix blocker first → reveals next → fix next'")
+    print("  OK Shows TWO distinct validations (not lumped together)")
+    print("  OK Shows validation 1 BLOCKS validation 2")
+    print("  OK Shows mdformat error was HIDDEN until mypy passed")
+    print("  OK Maps patch changes to WHICH validation they fix")
+    print("  OK Shows SEQUENTIAL repair timeline")
+    print("  OK Agent learns: 'Fix blocker first -> reveals next -> fix next'")
     print()
 
 
@@ -314,7 +314,7 @@ Validation sequence:
 1. mypy (blocks: 2)
 2. mdformat (depends_on: 1)
 
-→ Validation 1 is the blocker, validation 2 runs AFTER validation 1 passes
+-> Validation 1 is the blocker, validation 2 runs AFTER validation 1 passes
 """)
 
     print()
@@ -323,12 +323,12 @@ Validation sequence:
     print("""
 Verified patch shows TWO file groups:
 Group A: framework/py/flwr/common/secure_aggregation/ndarrays_arithmetic.py
-         Change: numpy._typing.DTypeLike → np.dtype[Any] | type[Any]
+         Change: numpy._typing.DTypeLike -> np.dtype[Any] | type[Any]
 
 Group B: framework/docs/source/*.rst (88 files)
          Change: Add '=====' above each 'Title\n====='
 
-→ Two distinct fix patterns = Two distinct validations fixed
+-> Two distinct fix patterns = Two distinct validations fixed
 """)
 
     print()
@@ -338,14 +338,14 @@ Group B: framework/docs/source/*.rst (88 files)
 Question: Which validation does Group A fix?
 - Validation 1 command: python -m mypy py
 - Group A file: ndarrays_arithmetic.py (Python file)
-- Group A change: Type annotation fix (DTypeLike → np.dtype)
-→ Group A fixes VALIDATION 1 (mypy type checking)
+- Group A change: Type annotation fix (DTypeLike -> np.dtype)
+-> Group A fixes VALIDATION 1 (mypy type checking)
 
 Question: Which validation does Group B fix?
 - Validation 2 command: python -m mdformat --check docs/source
 - Group B files: docs/source/*.rst (documentation)
 - Group B change: RST heading format
-→ Group B fixes VALIDATION 2 (mdformat)
+-> Group B fixes VALIDATION 2 (mdformat)
 """)
 
     print()
@@ -361,10 +361,10 @@ Timeline (working BACKWARD from patch):
 Sequential repair (FORWARD in time):
 1. Developer saw validation 1 error (mypy)
 2. Applied Group A fix (ndarrays_arithmetic.py)
-3. Validation 1 passed → validation 2 NOW RUNS
+3. Validation 1 passed -> validation 2 NOW RUNS
 4. Developer saw validation 2 error (mdformat) - this was HIDDEN before
 5. Applied Group B fix (88 RST files)
-6. Validation 2 passed → issue resolved
+6. Validation 2 passed -> issue resolved
 """)
 
     print()
@@ -375,7 +375,7 @@ atomic_problems: [
   {
     problem_id: 1,
     validation_order: 1,
-    file_changes: [Group A files ONLY],  ← Not Group B!
+    file_changes: [Group A files ONLY],  <- Not Group B!
     verification_result: { unblocks_validations: [2] }
   },
   {
@@ -383,11 +383,11 @@ atomic_problems: [
     validation_order: 2,
     depends_on_validations: [1],
     revealed_after: "validation_1_passed",
-    file_changes: [Group B files ONLY]  ← Not Group A!
+    file_changes: [Group B files ONLY]  <- Not Group A!
   }
 ]
 
-repair_trajectory_summary: "Sequential repair: Fixed validation 1 (Group A) → revealed validation 2 → fixed validation 2 (Group B)"
+repair_trajectory_summary: "Sequential repair: Fixed validation 1 (Group A) -> revealed validation 2 -> fixed validation 2 (Group B)"
 """)
 
 

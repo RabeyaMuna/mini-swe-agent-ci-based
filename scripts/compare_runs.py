@@ -192,7 +192,7 @@ def print_summary(categories: Dict):
     for cat, records in categories.items():
         label = {
             "HELPED":      "Memory HELPED  (baseline failed, memory succeeded)",
-            "HURT":        "Memory HURT    (baseline succeeded, memory failed) ← investigate",
+            "HURT":        "Memory HURT    (baseline succeeded, memory failed) <- investigate",
             "BOTH_FIXED":  "Both succeeded",
             "BOTH_FAILED": "Both failed",
         }[cat]
@@ -280,7 +280,7 @@ def main():
 
     print_summary(categories)
     print_category(categories["HELPED"],      "MEMORY HELPED",      args.show_matches, args.limit)
-    print_category(categories["HURT"],        "MEMORY HURT ← key",  args.show_matches, args.limit)
+    print_category(categories["HURT"],        "MEMORY HURT <- key",  args.show_matches, args.limit)
     print_category(categories["BOTH_FAILED"], "BOTH FAILED",         args.show_matches, limit=5)
 
     if args.output:

@@ -25,7 +25,7 @@ def test_single_chunk():
 
     issue = next((i for i in all_issues if str(i.get('id')) == '121'), None)
     if not issue:
-        print("❌ Issue 121 not found!")
+        print("FAIL Issue 121 not found!")
         return False
 
     # Get diff
@@ -98,7 +98,7 @@ CRITICAL: validation_order MUST be a NUMBER, never null.
         from decompose_ci_failure import _invoke_json
         result = _invoke_json(llm, prompt)
 
-        print("\n✅ LLM Response:")
+        print("\nOK LLM Response:")
         print(json.dumps(result, indent=2))
 
         # Check for null validation_order
@@ -110,27 +110,27 @@ CRITICAL: validation_order MUST be a NUMBER, never null.
             order = v.get("validation_order")
             if order is None or order == "null":
                 null_count += 1
-                print(f"\n❌ FOUND NULL ORDER: {v}")
+                print(f"\nFAIL FOUND NULL ORDER: {v}")
             else:
                 valid_count += 1
-                print(f"\n✅ Valid order {order}: {v.get('validation_cmd', '')[:60]}")
+                print(f"\nOK Valid order {order}: {v.get('validation_cmd', '')[:60]}")
 
         print("\n" + "="*80)
         print(f"Results: {valid_count} valid, {null_count} null")
         print("="*80)
 
         if null_count == 0 and valid_count > 0:
-            print("\n✅ SUCCESS: All validations have proper order numbers!")
+            print("\nOK SUCCESS: All validations have proper order numbers!")
             return True
         elif null_count > 0:
-            print(f"\n❌ FAILURE: {null_count} validation(s) have null order")
+            print(f"\nFAIL FAILURE: {null_count} validation(s) have null order")
             return False
         else:
-            print("\n⚠️  WARNING: No validations found")
+            print("\nWARNING  WARNING: No validations found")
             return False
 
     except Exception as e:
-        print(f"\n❌ ERROR: {type(e).__name__}: {e}")
+        print(f"\nFAIL ERROR: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         return False

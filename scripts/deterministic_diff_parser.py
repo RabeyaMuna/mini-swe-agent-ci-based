@@ -180,52 +180,43 @@ def chunk_structured_diff(structured: Dict[str, Any], max_files_per_chunk: int =
 
 def format_structured_for_llm(chunk: Dict[str, Any]) -> str:
     """
-    Format structured chunk for LLM prompt (concise, no raw code).
+    Format structured chunk for LLM prompt.
 
-    Instead of sending full code, send:
-    - File paths
-    - File types
-    - Change counts
-    - Change types (added/modified/deleted)
-
-    LLM only needs to map files to validations, not parse code.
+    Shows file path, change counts, and 2-3 example changes so LLM can
+    understand the type of changes (imports, types, formatting, etc.)
     """
     lines = []
-    lines.append(f"Chunk {chunk['chunk_index']}/{chunk['total_chunks']}")
-    lines.append(f"Files: {chunk['total_files']}, Changes: {chunk['total_changes']}")
-    lines.append("")
 
     for file_info in chunk["files"]:
         file_path = file_info["path"]
-        file_type = file_info["file_type"]
         changes = file_info["changes"]
 
-        # Summarize changes
+        if not changes:
+            continue
+
+        # Count change types
+        modified = sum(1 for c in changes if c["change_type"] == "modified")
         added = sum(1 for c in changes if c["change_type"] == "added")
         deleted = sum(1 for c in changes if c["change_type"] == "deleted")
-        modified = sum(1 for c in changes if c["change_type"] == "modified")
 
-        lines.append(f"File: {file_path}")
-        lines.append(f"  Type: {file_type}")
-        lines.append(f"  Changes: {modified} modified, {added} added, {deleted} deleted")
+        # File header with counts
+        lines.append(f"{file_path}: {len(changes)} changes ({modified}M, {added}A, {deleted}D)")
 
-        # Show first 3 changes as examples
-        if changes:
-            lines.append("  Examples:")
-            for change in changes[:3]:
-                line_num = change["line"]
-                change_type = change["change_type"]
-                before = change.get("before", "")  # First 60 chars
-                after = change.get("after", "")
+        # Show up to 3 example changes (helps LLM understand change type)
+        examples = changes[:3]
+        for change in examples:
+            change_type = change.get("change_type", "")
+            before = (change.get("before", "") or "")[:80]  # Limit to 80 chars
+            after = (change.get("after", "") or "")[:80]
 
-                if change_type == "modified":
-                    lines.append(f"    Line {line_num}: '{before}' → '{after}'")
-                elif change_type == "added":
-                    lines.append(f"    Line {line_num}: +'{after}'")
-                else:
-                    lines.append(f"    Line {line_num}: -'{before}'")
+            if change_type == "modified" and before and after:
+                lines.append(f"  - Modified: '{before}' -> '{after}'")
+            elif change_type == "added" and after:
+                lines.append(f"  - Added: '{after}'")
+            elif change_type == "deleted" and before:
+                lines.append(f"  - Deleted: '{before}'")
 
-        lines.append("")
+        lines.append("")  # Blank line between files
 
     return "\n".join(lines)
 

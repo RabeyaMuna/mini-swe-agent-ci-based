@@ -60,7 +60,7 @@ def test_build_single_problem_task():
     assert "Fix Strategy" in task
     assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in task
 
-    print("\n✓ Test passed! Single problem task is correctly built.")
+    print("\nOK Test passed! Single problem task is correctly built.")
     print(f"  Task length: {len(task)} chars")
     print(f"  Contains verification command: python -m mypy py")
     print(f"  Contains file path: ndarrays_arithmetic.py")
@@ -93,7 +93,7 @@ def test_sequential_mode_detection():
     print(f"Should use sequential mode: {should_use_sequential}")
 
     assert should_use_sequential == True
-    print("✓ Test passed! Sequential mode correctly detected.")
+    print("OK Test passed! Sequential mode correctly detected.")
 
     # Test with single problem
     guidance_doc_single = {
@@ -111,7 +111,7 @@ def test_sequential_mode_detection():
     print(f"Should use sequential mode: {should_use_sequential_single}")
 
     assert should_use_sequential_single == False
-    print("✓ Test passed! Standard mode correctly selected for single problem.")
+    print("OK Test passed! Standard mode correctly selected for single problem.")
 
     return True
 
@@ -154,7 +154,7 @@ def test_combine_partial_fixes():
     assert "fixed line 2" in unified
     assert "fixed line 3" in unified
 
-    print("\n✓ Test passed! Partial fixes correctly combined.")
+    print("\nOK Test passed! Partial fixes correctly combined.")
     print(f"  Unified diff length: {len(unified)} chars")
     print(f"  Contains 3 problem fixes")
 
@@ -172,17 +172,17 @@ if __name__ == "__main__":
         test_combine_partial_fixes()
 
         print("\n" + "="*70)
-        print("ALL TESTS PASSED! ✓")
+        print("ALL TESTS PASSED! OK")
         print("="*70)
         print("\nSequential repair implementation is working correctly!")
         print("\nKey features verified:")
-        print("  ✓ Single problem task generation")
-        print("  ✓ Sequential mode detection (multiple problems)")
-        print("  ✓ Standard mode fallback (single problem)")
-        print("  ✓ Partial fix combination")
+        print("  OK Single problem task generation")
+        print("  OK Sequential mode detection (multiple problems)")
+        print("  OK Standard mode fallback (single problem)")
+        print("  OK Partial fix combination")
 
     except Exception as e:
-        print(f"\n✗ TEST FAILED: {e}")
+        print(f"\nFAIL TEST FAILED: {e}")
         import traceback
         traceback.print_exc()
         exit(1)

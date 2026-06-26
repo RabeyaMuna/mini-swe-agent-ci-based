@@ -51,6 +51,17 @@ def mock_response_no_cost():
     }
 
 
+def test_openrouter_model_accepts_minimax_api_key():
+    with patch.dict(
+        os.environ,
+        {"MINIMAX_API_KEY": "minimax-key"},
+        clear=True,
+    ):
+        model = OpenRouterTextbasedModel(model_name="minimax/minimax-m2.5")
+
+    assert model._api_key == "minimax-key"
+
+
 def test_openrouter_model_successful_query(mock_response):
     """Test successful OpenRouter API query with cost tracking."""
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):

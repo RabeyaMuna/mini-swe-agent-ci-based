@@ -357,7 +357,7 @@ def main():
 
     # Summary
     print("\n" + "="*80)
-    print("PIPELINE COMPLETE ✅")
+    print("PIPELINE COMPLETE OK")
     print("="*80)
     print(f"\nProcessed: {len(raw_issues)} raw issues → {len(decomposed_issues)} decomposed → {total_problems} atomic problems")
     print(f"\nOutput directory: {output_dir}")
@@ -367,12 +367,12 @@ def main():
     print(f"  - repo_memory.json       (L2: {len(l2_memories)} issues, {total_problems} problems)")
     print(f"  - cross_memory.json      (L3: {len(l3_principles)} universal patterns)")
 
-    print("\n📊 Performance:")
+    print("\nPerformance Performance:")
     print(f"  - Format: CLEAN (your design)")
     print(f"  - L1/L2/L3 build: <1 second (transform-only, no LLM)")
     print(f"  - Cost: $0 for memory building")
 
-    print("\n🔍 Inspect outputs:")
+    print("\nInspect Inspect outputs:")
     print(f"  # View decomposed issue")
     print(f"  cat {decomposed_output} | jq '.[0]'")
     print(f"\n  # View L2 clean format")

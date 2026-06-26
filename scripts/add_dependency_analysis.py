@@ -187,7 +187,7 @@ def remove_redundancy_and_add_dependencies(input_file: str, output_file: str, ll
         if "validation_sequence" in issue and "benchmark_ci_context" in issue:
             if "validation_sequence" in issue["benchmark_ci_context"]:
                 # validation_sequence exists in both places - remove top-level one
-                print(f"  ✓ Removing redundant validation_sequence (keeping in benchmark_ci_context)")
+                print(f"  OK Removing redundant validation_sequence (keeping in benchmark_ci_context)")
                 del issue["validation_sequence"]
         
         # Also remove from workflow_validation_context if it duplicates
@@ -197,7 +197,7 @@ def remove_redundancy_and_add_dependencies(input_file: str, output_file: str, ll
                 wf_ctx = ci_ctx["workflow_validation_context"]
                 if "validation_sequence" in wf_ctx and "validation_sequence" in ci_ctx:
                     # Duplicate - remove from workflow_validation_context
-                    print(f"  ✓ Removing redundant workflow_validation_context.validation_sequence")
+                    print(f"  OK Removing redundant workflow_validation_context.validation_sequence")
                     del wf_ctx["validation_sequence"]
         
         # 2. Add dependency analysis (only if LLM provided)
@@ -207,15 +207,15 @@ def remove_redundancy_and_add_dependencies(input_file: str, output_file: str, ll
             
             if dependencies:
                 issue["file_dependencies"] = dependencies
-                print(f"  ✓ Found {len(dependencies)} dependency relationships")
+                print(f"  OK Found {len(dependencies)} dependency relationships")
             else:
-                print(f"  ℹ️  No cross-file dependencies detected")
+                print(f"  INFO  No cross-file dependencies detected")
     
     # Save
     with open(output_file, 'w') as f:
         json.dump(issues, f, indent=2)
     
-    print(f"\n✓ Saved to {output_file}")
+    print(f"\nOK Saved to {output_file}")
 
 
 def main():

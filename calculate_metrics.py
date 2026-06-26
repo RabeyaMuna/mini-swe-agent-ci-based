@@ -204,12 +204,12 @@ def print_detailed_results(results: Dict[str, any], show_all: bool = False):
             print(f"      - {f}")
 
         if instance['intersection']:
-            print(f"\n    ✓ Correct ({len(instance['intersection'])}):")
+            print(f"\n    OK Correct ({len(instance['intersection'])}):")
             for f in instance['intersection']:
                 print(f"      - {f}")
 
         if instance['missing']:
-            print(f"\n    ✗ Missing ({len(instance['missing'])}):")
+            print(f"\n    FAIL Missing ({len(instance['missing'])}):")
             for f in instance['missing']:
                 print(f"      - {f}")
 
@@ -247,7 +247,7 @@ def main():
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=2)
 
-    print(f"\n✓ Detailed results saved to: {output_path}")
+    print(f"\nOK Detailed results saved to: {output_path}")
     print("\nTo see all instances (including successes), set show_all=True in the script.")
 
 

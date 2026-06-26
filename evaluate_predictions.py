@@ -212,9 +212,9 @@ def print_results_table(results: Dict):
 
     # Summary statistics
     print("Summary:")
-    print(f"  ✓ Perfect matches (Exact Match): {agg['exact_match_count']}/{agg['total_instances']}")
-    print(f"  ✓ Contains all GT files (Top-1): {agg['top_1_count']}/{agg['total_instances']}")
-    print(f"  ✗ Failures: {agg['total_instances'] - agg['exact_match_count']}/{agg['total_instances']}")
+    print(f"  OK Perfect matches (Exact Match): {agg['exact_match_count']}/{agg['total_instances']}")
+    print(f"  OK Contains all GT files (Top-1): {agg['top_1_count']}/{agg['total_instances']}")
+    print(f"  FAIL Failures: {agg['total_instances'] - agg['exact_match_count']}/{agg['total_instances']}")
     print("="*100)
 
 
@@ -223,7 +223,7 @@ def print_detailed_failures(results: Dict):
     failures = [inst for inst in results["per_instance"] if not inst["exact_match"]]
 
     if not failures:
-        print("\n✓ All instances have exact matches!")
+        print("\nOK All instances have exact matches!")
         return
 
     print("\n" + "="*100)
@@ -232,25 +232,25 @@ def print_detailed_failures(results: Dict):
 
     for i, inst in enumerate(failures, 1):
         print(f"\n[{i}] Instance ID: {inst['instance_id']} | SHA: {inst['sha_fail'][:12]}...")
-        print(f"    Metrics: Precision={inst['precision']:.1%}, Recall={inst['recall']:.1%}, F1={inst['f1']:.1%}, Top-1={'✓' if inst['top_1'] else '✗'}")
+        print(f"    Metrics: Precision={inst['precision']:.1%}, Recall={inst['recall']:.1%}, F1={inst['f1']:.1%}, Top-1={'OK' if inst['top_1'] else 'FAIL'}")
         print(f"    Files: GT={inst['counts']['ground_truth']}, Pred={inst['counts']['predicted']}, Correct={inst['counts']['correct']}")
 
         print(f"\n    Ground Truth ({inst['counts']['ground_truth']} files):")
         for f in inst['ground_truth_files']:
-            print(f"      • {f}")
+            print(f"      - {f}")
 
         print(f"\n    Predicted ({inst['counts']['predicted']} files):")
         for f in inst['predicted_files']:
-            status = "✓" if f in inst['intersection'] else "✗"
+            status = "OK" if f in inst['intersection'] else "FAIL"
             print(f"      {status} {f}")
 
         if inst['missing']:
-            print(f"\n    ⚠ Missing from prediction ({len(inst['missing'])} files):")
+            print(f"\n    WARNING Missing from prediction ({len(inst['missing'])} files):")
             for f in inst['missing']:
                 print(f"      - {f}")
 
         if inst['extra']:
-            print(f"\n    ⚠ Extra in prediction ({len(inst['extra'])} files):")
+            print(f"\n    WARNING Extra in prediction ({len(inst['extra'])} files):")
             for f in inst['extra']:
                 print(f"      + {f}")
 
@@ -284,7 +284,7 @@ def main():
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=2)
 
-    print(f"\n✓ Detailed results saved to: {output_path}\n")
+    print(f"\nOK Detailed results saved to: {output_path}\n")
 
 
 if __name__ == "__main__":

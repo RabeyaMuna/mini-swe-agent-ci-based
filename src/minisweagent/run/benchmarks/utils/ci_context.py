@@ -56,10 +56,10 @@ Phase C — Memory Retrieval (CIMemorySystem — 5 explicit steps)
 
   Step 5 LLM Relevance Gate
       ALL ranked candidates -> LLM prompt that:
-       • Compares each candidate against the CURRENT failure context
-       • Selects ONLY genuinely relevant items
-       • Returns selected items + key_insight + fix_direction per item
-       • Produces an analysis_summary (2–3 sentences)
+       - Compares each candidate against the CURRENT failure context
+       - Selects ONLY genuinely relevant items
+       - Returns selected items + key_insight + fix_direction per item
+       - Produces an analysis_summary (2–3 sentences)
 
 Phase D — CI Document Assembly
   Build the final problem_statement from:
@@ -178,14 +178,14 @@ def _log_analysis_to_context(
     or os.path.splitext(os.path.basename(workflow_path))[0]
   )
 
-  # overall_failure_reasons ← error_context (list of strings)
+  # overall_failure_reasons <- error_context (list of strings)
   error_context = log_result.get("error_context") or []
   if isinstance(error_context, list):
     overall_failure_reasons = [str(x) for x in error_context if str(x).strip()]
   else:
     overall_failure_reasons = [str(error_context)] if error_context else []
 
-  # overall_error_types ← error_types[*].category
+  # overall_error_types <- error_types[*].category
   raw_error_types = log_result.get("error_types") or []
   overall_error_types: List[str] = []
   for et in raw_error_types:
@@ -198,7 +198,7 @@ def _log_analysis_to_context(
       if s:
         overall_error_types.append(s)
 
-  # effected_files ← relevant_files
+  # effected_files <- relevant_files
   raw_files = log_result.get("relevant_files") or []
   effected_files: List[Dict[str, Any]] = []
   for f in raw_files:
@@ -216,7 +216,7 @@ def _log_analysis_to_context(
     elif isinstance(f, str) and f.strip():
       effected_files.append({"file": f.strip(), "reason": "", "issue_type": ""})
 
-  # failed_jobs ← failed_job
+  # failed_jobs <- failed_job
   raw_jobs = log_result.get("failed_job") or log_result.get("failed_jobs") or []
   failed_jobs: List[Dict[str, Any]] = []
   for j in (raw_jobs if isinstance(raw_jobs, list) else []):
@@ -861,8 +861,8 @@ def _parse_workflow_yaml_commands(workflow_yaml: str) -> Dict[str, Any]:
   Used as Phase B fallback when ErrorContextAgent is unavailable.
 
   Heuristics:
-   • Lines with 'pip install', 'npm install', 'poetry install', etc. -> installation_cmd
-   • Lines with 'pytest', 'python -m pytest', 'npm test', etc. -> validation_cmd
+   - Lines with 'pip install', 'npm install', 'poetry install', etc. -> installation_cmd
+   - Lines with 'pytest', 'python -m pytest', 'npm test', etc. -> validation_cmd
   """
   installation_cmd: List[str] = []
   validation_cmd:  List[str] = []
@@ -1090,7 +1090,7 @@ def _fmt_install_cmds(profile: Dict[str, Any]) -> str:
 def _fmt_chunk_summaries(log_analysis: Dict[str, Any]) -> str:
   chunks = log_analysis.get("chunk_summaries") or []
   lines = []
-  for chunk in chunks[:8]:
+  for chunk in chunks:
     if not isinstance(chunk, dict):
       continue
     step_name = str(chunk.get("step_name") or "").strip()
@@ -1323,8 +1323,8 @@ def build_ci_context(
 
   llm
     LLM client passed to:
-     • Phase A (CILogAnalyzer) — for log summarisation
-     • Phase C (CIMemorySystem) — for Step-5 LLM relevance gate
+     - Phase A (CILogAnalyzer) — for log summarisation
+     - Phase C (CIMemorySystem) — for Step-5 LLM relevance gate
      Supports: LangChain ChatModel, memci LLMClient, Any callable(prompt)->str
 
   Returns
@@ -1412,9 +1412,11 @@ def build_ci_context(
   # Single production direction:
   #   Phase C two-prompt memory synthesis -> agent_problem_statement -> repair agent.
   # If memory/LLM synthesis is unavailable, fall back to the standard CI report.
+  import pdb; pdb.set_trace()
   agent_problem_statement = format_memory_context(memory).strip()
+  import pdb; pdb.set_trace()
   problem_statement = agent_problem_statement or build_problem_statement(context, memory)
-
+  import pdb; pdb.set_trace()
   logger.info(
     "[CIContext] DONE sha=%s problem_statement=%d chars",
     str(context.get("sha_fail") or "")[:12],

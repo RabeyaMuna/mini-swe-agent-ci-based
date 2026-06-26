@@ -29,7 +29,7 @@ def test_diff_parsing():
 
     issue = next((i for i in all_issues if str(i.get('id')) == '121'), None)
     if not issue:
-        print("❌ Issue 121 not found!")
+        print("FAIL Issue 121 not found!")
         return False
 
     diff = issue.get('diff', '')
@@ -39,7 +39,7 @@ def test_diff_parsing():
     from deterministic_diff_parser import parse_diff_to_structured, chunk_structured_diff
 
     structured = parse_diff_to_structured(diff)
-    print(f"✅ Parsed {structured['total_files']} files with {structured['total_changes']} changes")
+    print(f"OK Parsed {structured['total_files']} files with {structured['total_changes']} changes")
 
     # Show sample files
     print("\nSample files:")
@@ -48,7 +48,7 @@ def test_diff_parsing():
 
     # Chunk
     chunks = chunk_structured_diff(structured, max_files_per_chunk=10)
-    print(f"\n✅ Created {len(chunks)} chunks (max 10 files each)")
+    print(f"\nOK Created {len(chunks)} chunks (max 10 files each)")
 
     for i, chunk in enumerate(chunks[:3], 1):
         print(f"  Chunk {i}: {chunk['total_files']} files, {chunk['total_changes']} changes")
@@ -87,7 +87,7 @@ def test_llm_format():
     print(formatted[:500])
     print("-" * 80)
 
-    print(f"\n✅ Formatted length: {len(formatted)} chars")
+    print(f"\nOK Formatted length: {len(formatted)} chars")
     print(f"   Original diff chunk would be: ~{len(diff) // len(chunks)} chars")
     print(f"   Reduction: {100 - (len(formatted) / (len(diff) // len(chunks)) * 100):.1f}%")
 
@@ -106,11 +106,11 @@ def test_full_integration():
     print("  2. Decomposition with structured data")
     print("  3. L1/L2/L3 building")
     print("\nCheck output for:")
-    print("  ✓ 'Step 0: Parsing diff into structured format...'")
-    print("  ✓ 'Parsed 88 files with XXX changes'")
-    print("  ✓ 'Step 1: Classifying files by validation (88 files in X chunk(s))...'")
-    print("  ✓ No JSON parsing errors")
-    print("  ✓ High success rate (most chunks should succeed)")
+    print("  OK 'Step 0: Parsing diff into structured format...'")
+    print("  OK 'Parsed 88 files with XXX changes'")
+    print("  OK 'Step 1: Classifying files by validation (88 files in X chunk(s))...'")
+    print("  OK No JSON parsing errors")
+    print("  OK High success rate (most chunks should succeed)")
 
     return True
 
@@ -129,11 +129,11 @@ if __name__ == "__main__":
         try:
             if test_func():
                 passed += 1
-                print(f"\n✅ {name} PASSED")
+                print(f"\nOK {name} PASSED")
             else:
-                print(f"\n❌ {name} FAILED")
+                print(f"\nFAIL {name} FAILED")
         except Exception as e:
-            print(f"\n❌ {name} FAILED with exception: {e}")
+            print(f"\nFAIL {name} FAILED with exception: {e}")
             import traceback
             traceback.print_exc()
 
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     print("="*80)
 
     if passed == len(tests):
-        print("\n✅ All tests passed! Ready to run full pipeline.")
+        print("\nOK All tests passed! Ready to run full pipeline.")
         print("\nNext step:")
         print("  python scripts/build_memory_pipeline.py \\")
         print("      --raw-issues data/trs/memory_seed_issues.json \\")
@@ -153,6 +153,6 @@ if __name__ == "__main__":
         print("      --model openrouter/minimax/minimax-m2.5 \\")
         print("      --no-reuse-decomposed")
     else:
-        print(f"\n❌ {len(tests) - passed} test(s) failed. Fix before proceeding.")
+        print(f"\nFAIL {len(tests) - passed} test(s) failed. Fix before proceeding.")
 
     sys.exit(0 if passed == len(tests) else 1)

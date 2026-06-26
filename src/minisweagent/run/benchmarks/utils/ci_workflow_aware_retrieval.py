@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -75,15 +76,47 @@ def _load_json(content: str, default: Any) -> Any:
             lines = lines[:-1]
         content = "\n".join(lines).strip()
 
+    # Try direct JSON parse first
     try:
         return json.loads(content)
     except json.JSONDecodeError as json_err:
+        # If direct parse fails, try to extract JSON from text
+        # Look for JSON array [...] or object {...}
+        extracted = None
+
+        # Try to find JSON array
+        array_match = re.search(r'\[[\s\S]*\]', content)
+        if array_match:
+            extracted = array_match.group(0)
+
+        # If no array found, try to find JSON object
+        if not extracted:
+            obj_match = re.search(r'\{[\s\S]*\}', content)
+            if obj_match:
+                extracted = obj_match.group(0)
+
+        # Try parsing the extracted JSON
+        if extracted:
+            try:
+                return json.loads(extracted)
+            except json.JSONDecodeError:
+                pass  # Fall through to demjson3
+
+        # Last resort: try demjson3
         demjson3_err: Any = "demjson3 is not installed"
         try:
             if demjson3 is not None:
-                return demjson3.decode(content)
+                # Try on original content first
+                try:
+                    return demjson3.decode(content)
+                except Exception:
+                    # If that fails and we extracted something, try on extracted
+                    if extracted:
+                        return demjson3.decode(extracted)
+                    raise
         except Exception as exc:
             demjson3_err = exc
+
         LOGGER.warning(
             "Workflow JSON parse failed: json=%s; demjson3=%s",
             json_err,

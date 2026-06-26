@@ -4,9 +4,9 @@ cibench.py
 Run mini-SWE-agent on CI-failure repair instances in batch mode.
 
 Each instance is processed entirely locally:
-  • The repository is cloned from GitHub at run time (no Docker images needed).
-  • The failing commit (sha_fail) is checked out inside the clone.
-  • The agent runs in a LocalEnvironment against that checkout.
+  - The repository is cloned from GitHub at run time (no Docker images needed).
+  - The failing commit (sha_fail) is checked out inside the clone.
+  - The agent runs in a LocalEnvironment against that checkout.
 
 Input dataset  (JSONL or HuggingFace)
 --------------------------------------
@@ -69,6 +69,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import litellm
 import typer
 from jinja2 import StrictUndefined, Template
 from rich.live import Live
@@ -79,6 +80,8 @@ from minisweagent.models import get_model
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.benchmarks.utils.common import ProgressTrackingAgent
 from minisweagent.run.benchmarks.utils.ci_context import build_ci_context, save_memory_after_patch
+# Memory-guided repair is now integrated into ci_memory_system.py
+# No need for separate import
 from minisweagent.utils.log import add_file_handler, logger
 from minisweagent.utils.project_env import load_project_env
 from minisweagent.utils.serialize import UNSET, recursive_merge
@@ -90,53 +93,41 @@ app = typer.Typer(rich_markup_mode="rich", add_completion=False)
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 REPO_CACHE_ROOT = Path(os.getenv("MSWEA_REPO_CACHE_ROOT") or (PROJECT_ROOT / "repo")).resolve()
 
-def _make_context_llm(config: Dict[str, Any]) -> Any:
+def _make_context_llm(config: Dict[str, Any], context_model: Optional[str] = None) -> Any:
     """
     Build a plain callable (prompt: str) -> str for Phase A and Phase C
-    using the SAME model already configured for the repair agent.
+    using chat completion directly.
 
-    Reuses OpenRouterModel directly — no LiteLLM, no separate credentials.
-    The model reads OPENROUTER_API_KEY / OPENROUTER_BASE_URL from env,
-    exactly as the repair agent does.
+    The repair-agent model wrappers may add the bash tool and parse bash actions.
+    Context extraction prompts only need raw text/JSON, and some OpenRouter
+    models do not expose tool-calling endpoints.
     """
-    try:
-        model = get_model(config=config.get("model", {}))
+    model_config = config.get("model", {})
+    model_name = context_model or model_config.get("model_name")
+    model_kwargs = dict(model_config.get("model_kwargs") or {})
 
-        def _call(prompt: str) -> str:
-            try:
-                # query() expects a messages list; we pass a single user turn.
-                # We bypass the bash-tool parsing and just read raw content.
-                import json as _json
-                api_key  = os.getenv("OPENROUTER_API_KEY", "")
-                api_base = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-                model_name = config.get("model", {}).get("model_name", "minimax/minimax-m2.5")
-
-                import requests as _req
-                payload = {
-                    "model":    model_name,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.0,
-                }
-                resp = _req.post(
-                    f"{api_base}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type":  "application/json",
-                    },
-                    data=_json.dumps(payload),
-                    timeout=120,
-                )
-                resp.raise_for_status()
-                return (resp.json()["choices"][0]["message"]["content"] or "").strip()
-            except Exception as exc:
-                logger.warning("[CIBench] context LLM call failed: %s", exc)
-                return ""
-
-        return _call
-
-    except Exception as exc:
-        logger.warning("[CIBench] Could not build context LLM: %s", exc)
+    if not model_name:
+        logger.warning("[CIBench] Could not build context LLM: no model configured")
         return None
+
+    def _call(prompt: str) -> str:
+        try:
+            response = litellm.completion(
+                model=str(model_name),
+                messages=[{"role": "user", "content": prompt}],
+                **model_kwargs,
+            )
+            return str(response.choices[0].message.content or "").strip()
+        except Exception as exc:
+            logger.warning("[CIBench] context LLM call failed: %s", exc)
+            return ""
+
+    return _call
+
+
+def _resolve_context_model(context_model: Optional[str], config: Dict[str, Any]) -> str:
+    """Use the repair model for every LLM stage unless explicitly overridden."""
+    return context_model or str(config["model"]["model_name"])
 
 
 _HELP_TEXT = """
@@ -556,10 +547,10 @@ def setup_local_environment(
     """
     Prepare a local repository checkout and return *(env, testbed_path)*.
 
-    • Keeps a shared network clone cache at ``<project_root>/repo/``.
-    • Creates ``<instance_dir>/testbed/`` from that cache when needed.
-    • Checks out the failing commit (``sha_fail``).
-    • Wraps the directory in a ``LocalEnvironment`` using settings from the
+    - Keeps a shared network clone cache at ``<project_root>/repo/``.
+    - Creates ``<instance_dir>/testbed/`` from that cache when needed.
+    - Checks out the failing commit (``sha_fail``).
+    - Wraps the directory in a ``LocalEnvironment`` using settings from the
       ``environment`` section of the config (timeout, interpreter, env vars).
 
     If the testbed directory already contains a ``.git`` folder (re-run),
@@ -720,12 +711,128 @@ def setup_local_environment(
 # Sequential Repair: Fix problems one at a time
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _build_new_format_task(problem: Dict[str, Any], problem_num: int, total_problems: int) -> str:
+    """
+    Build task from new intelligent selection format.
+
+    New format has:
+    - problem_statement: {description, root_cause, affected_files, validation_cmd}
+    - repair_plan: {approach, steps, code_changes, examples}
+    - verification: {validation_cmd, check_first}
+    """
+
+    is_primary = problem.get("is_primary", False)
+    problem_stmt = problem.get("problem_statement", {})
+    repair_plan = problem.get("repair_plan", {})
+    verification = problem.get("verification", {})
+
+    status_label = "PRIMARY - Confirmed CI Failure" if is_primary else "CONSECUTIVE - Predicted Problem"
+
+    task = f"""# CI Repair - Problem {problem_num}/{total_problems}
+
+## Problem {problem_num}: {status_label}
+
+**Verification Command**: `{verification.get('validation_cmd', 'unknown')}`
+
+### Problem Description
+
+{problem_stmt.get('description', 'No description')}
+
+### Root Cause
+
+{problem_stmt.get('root_cause', 'See problem description')}
+
+### Affected Files
+
+"""
+
+    affected_files = problem_stmt.get('affected_files', [])
+    if affected_files:
+        for f in affected_files[:10]:
+            task += f"- `{f}`\n"
+    else:
+        task += "- (No specific files identified)\n"
+
+    task += f"""
+### Repair Plan
+
+**Approach**: {repair_plan.get('approach', 'Fix the issue')}
+
+**Steps to Follow**:
+"""
+
+    steps = repair_plan.get('steps', [])
+    if steps:
+        for step in steps:
+            task += f"{step}\n"
+    else:
+        task += "1. Analyze the problem\n2. Apply fix\n3. Verify\n"
+
+    # Add code changes if available
+    code_changes = repair_plan.get('code_changes', [])
+    if code_changes:
+        task += "\n**Code Changes**:\n"
+        for change in code_changes:
+            task += f"""
+- File: `{change.get('file', 'unknown')}`
+  Type: {change.get('change_type', 'modify')}
+  Change: {change.get('description', 'See above')}
+"""
+
+    # Add examples if available
+    examples = repair_plan.get('examples', [])
+    if examples:
+        task += "\n**Examples from Memory**:\n"
+        for ex in examples[:3]:
+            task += f"""
+File: `{ex.get('file', 'example.py')}`
+```python
+# Before
+{ex.get('before', 'old code')}
+
+# After
+{ex.get('after', 'new code')}
+```
+"""
+
+    # Add check first instruction if needed
+    if verification.get('check_first', False):
+        task += f"""
+### Important: Check First!
+
+This is a PREDICTED problem (not confirmed). Before fixing:
+1. Run: `{verification.get('validation_cmd', 'unknown')}`
+2. If it PASSES (exit 0) -> problem doesn't exist, SKIP this fix
+3. If it FAILS -> proceed with the fix
+"""
+
+    task += """
+### Instructions
+
+1. Read the affected files carefully
+2. Follow the repair plan steps above
+3. Make minimal, targeted changes
+4. Do NOT modify unrelated files
+5. Submit your patch when complete
+"""
+
+    return task
+
+
 def _build_single_problem_task(problem: Dict[str, Any], problem_num: int, total_problems: int) -> str:
     """
     Build a focused task for ONE specific problem.
 
     Agent receives ONLY this problem's information, not all problems.
+
+    Supports both old and new problem formats.
     """
+
+    # Check if new format (from intelligent selection)
+    if "problem_statement" in problem and isinstance(problem["problem_statement"], dict):
+        return _build_new_format_task(problem, problem_num, total_problems)
+
+    # Old format
     status = problem.get("status", "unknown")
     stage = problem.get("validation_stage", "")
     validation_cmd = problem.get("verification_cmd", "")
@@ -860,7 +967,7 @@ def _verify_validation_passes(testbed_path: Path, validation_cmd: str, timeout: 
         )
 
         passed = result.returncode == 0
-        logger.info(f"[CIBench] Validation '{validation_cmd}' → exit code {result.returncode}")
+        logger.info(f"[CIBench] Validation '{validation_cmd}' -> exit code {result.returncode}")
 
         if not passed and result.stderr:
             logger.debug(f"[CIBench] Validation error: {result.stderr[:500]}")
@@ -910,6 +1017,10 @@ def _run_sequential_repair(
     3. Verify validation passes
     4. Save partial fix or stop
 
+    Supports two problem formats:
+    - Old format: {status, verification_cmd, validation_stage, check_first, ...}
+    - New format: {problem_id, is_primary, problem_statement, repair_plan, verification}
+
     Returns:
         (info_dict, unified_diff)
     """
@@ -923,10 +1034,26 @@ def _run_sequential_repair(
         logger.info(f"[CIBench] Problem {i}/{total_problems}")
         logger.info(f"[CIBench] {'='*60}")
 
-        status = problem.get("status", "unknown")
-        validation_cmd = problem.get("verification_cmd", "")
-        stage = problem.get("validation_stage", "")
-        check_first = problem.get("check_first", False)
+        # Support both old and new problem formats
+        if "problem_statement" in problem:
+            # New format from intelligent selection
+            problem_id = problem.get("problem_id", i)
+            is_primary = problem.get("is_primary", False)
+            validation_cmd = problem.get("verification", {}).get("validation_cmd", "")
+            check_first = problem.get("verification", {}).get("check_first", False)
+            status = "PRIMARY" if is_primary else "CONSECUTIVE"
+            stage = ""
+
+            logger.info(f"[CIBench] Problem ID: {problem_id}")
+            logger.info(f"[CIBench] Is Primary: {is_primary}")
+            logger.info(f"[CIBench] Description: {problem['problem_statement'].get('description', '')[:100]}")
+        else:
+            # Old format
+            status = problem.get("status", "unknown")
+            validation_cmd = problem.get("verification_cmd", "")
+            stage = problem.get("validation_stage", "")
+            check_first = problem.get("check_first", False)
+            is_primary = (status == "PRIMARY")
 
         logger.info(f"[CIBench] Status: {status}")
         logger.info(f"[CIBench] Stage: {stage}")
@@ -937,10 +1064,10 @@ def _run_sequential_repair(
         if check_first and validation_cmd:
             logger.info(f"[CIBench] Checking if problem exists...")
             if _verify_validation_passes(testbed_path, validation_cmd):
-                logger.info(f"[CIBench] ✓ Problem {i} does not exist (validation passes). Skipping.")
+                logger.info(f"[CIBench] OK Problem {i} does not exist (validation passes). Skipping.")
                 continue
             else:
-                logger.info(f"[CIBench] ✗ Problem {i} exists (validation fails). Proceeding to fix.")
+                logger.info(f"[CIBench] FAIL Problem {i} exists (validation fails). Proceeding to fix.")
 
         # Build focused task for THIS problem only
         single_task = _build_single_problem_task(problem, i, total_problems)
@@ -965,16 +1092,16 @@ def _run_sequential_repair(
             patch = _extract_diff(raw_submission)
 
             if not patch or not patch.strip():
-                logger.warning(f"[CIBench] ✗ Problem {i}: Agent returned no patch")
+                logger.warning(f"[CIBench] FAIL Problem {i}: Agent returned no patch")
                 break
 
-            logger.info(f"[CIBench] ✓ Problem {i}: Agent generated patch ({len(patch)} chars)")
+            logger.info(f"[CIBench] OK Problem {i}: Agent generated patch ({len(patch)} chars)")
 
             # Verify validation passes
             if validation_cmd:
                 logger.info(f"[CIBench] Verifying problem {i} fix...")
                 if _verify_validation_passes(testbed_path, validation_cmd):
-                    logger.info(f"[CIBench] ✓ Problem {i} FIXED! Validation passes.")
+                    logger.info(f"[CIBench] OK Problem {i} FIXED! Validation passes.")
                     partial_fixes.append({
                         'problem_id': i,
                         'problem_number': problem.get('problem_number', i),
@@ -984,9 +1111,14 @@ def _run_sequential_repair(
                         'verified': True
                     })
                 else:
-                    logger.warning(f"[CIBench] ✗ Problem {i} FAILED! Validation still fails.")
-                    logger.info(f"[CIBench] Stopping sequential repair at problem {i}")
-                    break
+                    logger.warning(f"[CIBench] FAIL Problem {i} FAILED! Validation still fails.")
+                    if is_primary:
+                        logger.info(f"[CIBench] PRIMARY problem failed - STOPPING sequential repair")
+                        break
+                    else:
+                        logger.info(f"[CIBench] Non-primary problem failed - CONTINUING to next problem")
+                        # Revert changes for failed non-primary
+                        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=testbed_path, check=False)
             else:
                 logger.warning(f"[CIBench] Problem {i}: No verification command, assuming success")
                 partial_fixes.append({
@@ -999,7 +1131,7 @@ def _run_sequential_repair(
                 })
 
         except Exception as e:
-            logger.error(f"[CIBench] ✗ Problem {i}: Agent error: {e}")
+            logger.error(f"[CIBench] FAIL Problem {i}: Agent error: {e}")
             break
 
     # Combine all successful partial fixes
@@ -1069,7 +1201,7 @@ def process_instance(
 
     # ── Phase 1: build enriched CI problem statement ──────────────────────────
     try:
-        context_llm = _make_context_llm(config)
+        context_llm = _make_context_llm(config, context_model=context_model)
         ci_result = build_ci_context(
             instance,
             memory_root=memory_root,
@@ -1123,10 +1255,25 @@ def process_instance(
         # ── Phase 3: run agent ────────────────────────────────────────────────
         progress_manager.update_instance_status(instance_id, "Running agent")
 
-        # Check if we have a structured repair plan with multiple problems
-        llm_sel = ci_memory.get("llm_selection") or {}
-        guidance_doc = llm_sel.get("guidance_document") or {}
-        problems = guidance_doc.get("problems", [])
+        # ══════════════════════════════════════════════════════════════════
+        # MEMORY-GUIDED REPAIR PIPELINE (ONE CLEAN APPROACH)
+        # ══════════════════════════════════════════════════════════════════
+
+        problems = []
+
+        if memory_enabled and ci_memory:
+            # Memory-guided repair is now integrated into ci_memory_system.py
+            # Separate problems are generated in build_ci_context()
+            llm_sel = ci_memory.get("llm_selection", {})
+            separate_problems = llm_sel.get("separate_problems", [])
+
+            if separate_problems:
+                logger.info(f"[CIBench] Using {len(separate_problems)} separate problems from STAIR-inspired pipeline")
+                problems = separate_problems
+            else:
+                logger.info("[CIBench] No separate problems - using standard single problem mode")
+
+        # ══════════════════════════════════════════════════════════════════
 
         if problems and len(problems) > 1:
             # SEQUENTIAL REPAIR MODE: Fix problems one at a time
@@ -1455,12 +1602,12 @@ def _extract_diff(submission: str) -> str:
 @app.command(help=_HELP_TEXT)
 def main(
     dataset: str = typer.Option(
-        ..., "--dataset", "-d",
+        "ci-benchmark-user/ci-repair-bench", "--dataset", "-d",
         help="Path to JSONL dataset or HuggingFace dataset name",
         rich_help_panel="Data selection",
     ),
     split: str = typer.Option(
-        "test", "--split",
+        "train", "--split",
         help="Dataset split (for HuggingFace datasets)",
         rich_help_panel="Data selection",
     ),
@@ -1544,9 +1691,9 @@ def main(
         rich_help_panel="Memory",
     ),
     # ── Context / log analysis options ───────────────────────────────────────
-    context_model: str = typer.Option(
-        "gpt-4o-mini", "--context-model",
-        help="LLM model for CILogAnalyzer (log parsing + workflow analysis)",
+    context_model: Optional[str] = typer.Option(
+        None, "--context-model",
+        help="Model name for log-analysis tokenization (defaults to --model)",
         rich_help_panel="Advanced",
     ),
 ) -> None:
@@ -1560,6 +1707,12 @@ def main(
     if not output:
         output = f"ci_repair_results_{int(time.time())}"
     output_path = Path(output)
+
+    # Create subdirectory based on memory ablation level
+    if memory_enabled:
+        ablation_folder = memory_ablation_levels.replace("+", "_")
+        output_path = output_path / ablation_folder
+
     output_path.mkdir(parents=True, exist_ok=True)
     logger.info("[CIBench] Results will be saved to %s", output_path)
     add_file_handler(output_path / "cibench.log")
@@ -1595,6 +1748,13 @@ def main(
         },
     })
     config = recursive_merge(*configs)
+    resolved_context_model = _resolve_context_model(context_model, config)
+    logger.info(
+        "[CIBench] Model: %s  class=%s  context_model=%s",
+        config["model"]["model_name"],
+        config["model"].get("model_class") or "auto",
+        resolved_context_model,
+    )
 
     # ── Progress ──────────────────────────────────────────────────────────────
     progress_manager = RunBatchProgressManager(
@@ -1613,7 +1773,7 @@ def main(
             memory_top_k=memory_top_k,
             memory_ablation_levels=memory_ablation_levels,
             memory_plugin_path=memory_plugin_path,
-            context_model=context_model,
+            context_model=resolved_context_model,
             save_memory=save_memory and memory_enabled,
         )
 

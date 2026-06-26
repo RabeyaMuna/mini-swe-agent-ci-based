@@ -173,7 +173,7 @@ def decompose_issue_enhanced(issue: dict, llm) -> dict:
         }
     }
 
-    print(f"  ✓ Enhanced decomposition complete")
+    print(f"  OK Enhanced decomposition complete")
     return result
 
 

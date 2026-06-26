@@ -3,8 +3,8 @@
 Test backward conditioning vs forward reasoning for L2 memory building.
 
 This script demonstrates the difference between:
-1. Forward reasoning: Analyze issue → guess what might have been done
-2. Backward conditioning: Issue + verified patch → reason backward from ground truth
+1. Forward reasoning: Analyze issue -> guess what might have been done
+2. Backward conditioning: Issue + verified patch -> reason backward from ground truth
 
 Usage:
     python test_backward_conditioning.py
@@ -68,7 +68,7 @@ def show_forward_vs_backward():
     print()
 
     # FORWARD REASONING PROMPT
-    print("❌ FORWARD REASONING (Current - speculative)")
+    print("FAIL FORWARD REASONING (Current - speculative)")
     print("-" * 80)
     forward_prompt = f"""Analyze this CI failure and create L2 memory.
 
@@ -83,11 +83,11 @@ Create repair trajectory showing what was likely done to fix this.
     print("  - 'Developer manually reordered imports'")
     print("  - 'Used automated tool to fix'")
     print("  - 'Checked Python style guide'")
-    print("  → These may not reflect what ACTUALLY happened!")
+    print("  -> These may not reflect what ACTUALLY happened!")
     print()
 
     # BACKWARD CONDITIONING PROMPT
-    print("✅ BACKWARD CONDITIONING (Enhanced - ground truth)")
+    print("OK BACKWARD CONDITIONING (Enhanced - ground truth)")
     print("-" * 80)
     backward_prompt = f"""Analyze this CI failure and create L2 memory.
 
@@ -106,17 +106,17 @@ CRITICAL: Work BACKWARD from this verified patch.
 - Do not invent speculative steps that don't align with the verified fix
 
 For file_changes, explain:
-1. WHY this file? → Because patch modifies examples/community/ip_adapter_face_id.py
-2. WHAT changed? → safetensors import moved from line 17 to line 22 (after version)
-3. WHY this works? → Places safetensors in correct alphabetical position
+1. WHY this file? -> Because patch modifies examples/community/ip_adapter_face_id.py
+2. WHAT changed? -> safetensors import moved from line 17 to line 22 (after version)
+3. WHY this works? -> Places safetensors in correct alphabetical position
 """
     print(backward_prompt)
     print()
     print("BENEFITS:")
-    print("  ✓ LLM reasoning is CONSTRAINED by actual patch")
-    print("  ✓ No speculation about what 'might' have been done")
-    print("  ✓ Captures ACTUAL fix pattern (move safetensors, not 'reorder all')")
-    print("  ✓ More accurate, transferable knowledge")
+    print("  OK LLM reasoning is CONSTRAINED by actual patch")
+    print("  OK No speculation about what 'might' have been done")
+    print("  OK Captures ACTUAL fix pattern (move safetensors, not 'reorder all')")
+    print("  OK More accurate, transferable knowledge")
     print()
 
     # SHOW EXPECTED OUTPUT DIFFERENCE
@@ -125,7 +125,7 @@ For file_changes, explain:
     print("="*80)
     print()
 
-    print("❌ FORWARD (might generate):")
+    print("FAIL FORWARD (might generate):")
     print("-" * 80)
     forward_output = {
         "atomic_problems": [{
@@ -135,17 +135,17 @@ For file_changes, explain:
             "problem": "isort validation fails due to incorrect import ordering",
             "file_changes": [{
                 "file": "examples/community/ip_adapter_face_id.py",
-                "fix": "Reorder imports to be alphabetical"  # ← VAGUE
+                "fix": "Reorder imports to be alphabetical"  # <- VAGUE
             }]
         }],
-        "repair_trajectory_summary": "Fixed import ordering to comply with isort"  # ← VAGUE
+        "repair_trajectory_summary": "Fixed import ordering to comply with isort"  # <- VAGUE
     }
     print(json.dumps(forward_output, indent=2))
     print()
     print("PROBLEM: Too vague - doesn't capture WHAT specifically was reordered!")
     print()
 
-    print("✅ BACKWARD (will generate):")
+    print("OK BACKWARD (will generate):")
     print("-" * 80)
     backward_output = {
         "atomic_problems": [{
@@ -155,15 +155,15 @@ For file_changes, explain:
             "problem": "isort validation fails because safetensors import appears before torch/packaging imports, violating alphabetical order",
             "file_changes": [{
                 "file": "examples/community/ip_adapter_face_id.py",
-                "fix": "Move 'from safetensors import safe_open' from line 17 to line 22, placing it after 'from packaging import version' to maintain alphabetical order"  # ← SPECIFIC
+                "fix": "Move 'from safetensors import safe_open' from line 17 to line 22, placing it after 'from packaging import version' to maintain alphabetical order"  # <- SPECIFIC
             }]
         }],
-        "repair_trajectory_summary": "Moved safetensors import to correct alphabetical position (after packaging, before transformers) to satisfy isort validation in ip_adapter_face_id.py"  # ← SPECIFIC
+        "repair_trajectory_summary": "Moved safetensors import to correct alphabetical position (after packaging, before transformers) to satisfy isort validation in ip_adapter_face_id.py"  # <- SPECIFIC
     }
     print(json.dumps(backward_output, indent=2))
     print()
     print("BENEFIT: Captures EXACT pattern - move safetensors after packaging!")
-    print("  → Agent learning this can apply same pattern to similar issues")
+    print("  -> Agent learning this can apply same pattern to similar issues")
     print()
 
     # TRANSFERABILITY EXAMPLE
@@ -176,16 +176,16 @@ For file_changes, explain:
     print("  Error: 'from requests import get' appears before 'import os'")
     print()
 
-    print("❌ With FORWARD memory:")
+    print("FAIL With FORWARD memory:")
     print("  Agent retrieves: 'Reorder imports to be alphabetical'")
-    print("  → Too vague, agent doesn't know HOW to reorder")
+    print("  -> Too vague, agent doesn't know HOW to reorder")
     print()
 
-    print("✅ With BACKWARD memory:")
+    print("OK With BACKWARD memory:")
     print("  Agent retrieves: 'Move safetensors after packaging to maintain alphabetical order'")
-    print("  → Pattern: third-party imports after stdlib, alphabetical within groups")
-    print("  → Agent can apply: Move 'requests' import after 'os' import")
-    print("  → ACTIONABLE!")
+    print("  -> Pattern: third-party imports after stdlib, alphabetical within groups")
+    print("  -> Agent can apply: Move 'requests' import after 'os' import")
+    print("  -> ACTIONABLE!")
     print()
 
 

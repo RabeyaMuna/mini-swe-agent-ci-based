@@ -47,7 +47,7 @@ for inst in failures:
     print(f"    - Predicted: {pred_count} file(s)")
     print(f"    - Correct: {correct_count} file(s)")
     print(f"    - Precision: {precision:.1%}")
-    print(f"    - Top-1: {'✓' if inst['top_1'] else '✗'}")
+    print(f"    - Top-1: {'OK' if inst['top_1'] else 'FAIL'}")
 
 print()
 print("="*80)

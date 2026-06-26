@@ -365,8 +365,8 @@ async def test_trajectory_inspector_quit_binding(temp_trajectory_files):
 def test_trajectory_inspector_binding_labels():
     """Test that binding labels use arrow symbols."""
     bindings = {b.action: b.description for b in TrajectoryInspector.BINDINGS}
-    assert bindings["scroll_down"] == "↓"
-    assert bindings["scroll_up"] == "↑"
+    assert bindings["scroll_down"] == "down"
+    assert bindings["scroll_up"] == "up"
 
 
 @pytest.fixture

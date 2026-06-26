@@ -52,10 +52,10 @@ Output ONLY valid JSON - nothing else."""
     print("Sending prompt to LLM...")
     try:
         result = _invoke_json(llm, test_prompt)
-        print(f"\n✅ Result type: {type(result)}")
-        print(f"✅ Result: {json.dumps(result, indent=2)}")
+        print(f"\nOK Result type: {type(result)}")
+        print(f"OK Result: {json.dumps(result, indent=2)}")
     except Exception as e:
-        print(f"\n❌ Error: {type(e).__name__}: {e}")
+        print(f"\nFAIL Error: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
 

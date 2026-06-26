@@ -67,7 +67,7 @@ class OpenRouterModel:
             or "https://openrouter.ai/api/v1"
         ).rstrip("/")
         self._api_url = f"{api_base}/chat/completions"
-        self._api_key = os.getenv("OPENROUTER_API_KEY", "")
+        self._api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("MINIMAX_API_KEY", "")
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
         headers = {

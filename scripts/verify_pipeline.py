@@ -5,7 +5,7 @@ Verify the decomposition and memory building pipeline is working correctly.
 Checks:
 1. Decompose script has no debugger breakpoints
 2. Incremental saving is enabled
-3. Data structure compatibility (decomposition → L2 → L3)
+3. Data structure compatibility (decomposition -> L2 -> L3)
 4. Required fields are present
 """
 
@@ -28,21 +28,21 @@ def check_decompose_script():
 
     # Check for debugger breakpoints
     if "pdb.set_trace" in content or "import pdb" in content:
-        issues.append("❌ Found debugger breakpoints (pdb.set_trace)")
+        issues.append("FAIL Found debugger breakpoints (pdb.set_trace)")
     else:
-        print("✅ No debugger breakpoints")
+        print("OK No debugger breakpoints")
 
     # Check for incremental saving
     if "# Incremental save after each issue" in content:
-        print("✅ Incremental saving enabled")
+        print("OK Incremental saving enabled")
     else:
-        issues.append("❌ Incremental saving not found")
+        issues.append("FAIL Incremental saving not found")
 
     # Check for resume capability
     if "processed_ids" in content:
-        print("✅ Resume capability enabled")
+        print("OK Resume capability enabled")
     else:
-        issues.append("❌ Resume capability not found")
+        issues.append("FAIL Resume capability not found")
 
     return issues
 
@@ -60,21 +60,21 @@ def check_l2_builder():
 
     # Check for LLM calls
     if "llm.invoke" in content and "# Not used" not in content:
-        issues.append("⚠️  L2 builder still makes LLM calls (should be transform-only)")
+        issues.append("WARNING  L2 builder still makes LLM calls (should be transform-only)")
     else:
-        print("✅ L2 builder is transform-only (no LLM calls)")
+        print("OK L2 builder is transform-only (no LLM calls)")
 
     # Check for issue_type field (needed for L3)
     if '"issue_type"' in content or "'issue_type'" in content:
-        print("✅ issue_type field included (L3 compatibility)")
+        print("OK issue_type field included (L3 compatibility)")
     else:
-        issues.append("❌ issue_type field missing (needed for L3)")
+        issues.append("FAIL issue_type field missing (needed for L3)")
 
     # Check for clean output structure
     if '"problem":' in content and '"fixes":' in content:
-        print("✅ Clean output structure (problem + fixes)")
+        print("OK Clean output structure (problem + fixes)")
     else:
-        issues.append("❌ Output structure incomplete")
+        issues.append("FAIL Output structure incomplete")
 
     return issues
 
@@ -95,15 +95,15 @@ def check_data_files():
             decomposed = json.load(f)
 
         if isinstance(decomposed, list):
-            print(f"✅ decomposed_issues.json exists ({len(decomposed)} entries)")
+            print(f"OK decomposed_issues.json exists ({len(decomposed)} entries)")
 
             if len(decomposed) == 0:
-                issues.append("⚠️  decomposed_issues.json is empty (need to run decomposition)")
+                issues.append("WARNING  decomposed_issues.json is empty (need to run decomposition)")
             else:
                 # Check first entry structure
                 first = decomposed[0]
                 if "error" in first:
-                    issues.append(f"❌ First entry has error: {first.get('error_type')}")
+                    issues.append(f"FAIL First entry has error: {first.get('error_type')}")
                 elif "problems" in first or "atomic_problems" in first:
                     problems = first.get("problems") or first.get("atomic_problems", [])
                     print(f"   First entry has {len(problems)} problems")
@@ -115,9 +115,9 @@ def check_data_files():
                         missing = [f for f in required_fields if f not in p]
 
                         if missing:
-                            issues.append(f"⚠️  Problem missing fields: {missing}")
+                            issues.append(f"WARNING  Problem missing fields: {missing}")
                         else:
-                            print(f"   ✅ Problems have required fields")
+                            print(f"   OK Problems have required fields")
 
                         # Check for file_changes
                         if "file_changes" in p:
@@ -125,31 +125,31 @@ def check_data_files():
                             if fc and isinstance(fc, list) and len(fc) > 0:
                                 change = fc[0]
                                 if "from" in change and "to" in change:
-                                    print(f"   ✅ file_changes have from/to")
+                                    print(f"   OK file_changes have from/to")
                                 else:
-                                    issues.append("⚠️  file_changes missing from/to")
+                                    issues.append("WARNING  file_changes missing from/to")
                 else:
-                    issues.append("❌ Entry missing 'problems' or 'atomic_problems'")
+                    issues.append("FAIL Entry missing 'problems' or 'atomic_problems'")
         else:
-            issues.append("❌ decomposed_issues.json is not a list")
+            issues.append("FAIL decomposed_issues.json is not a list")
     else:
-        issues.append("❌ decomposed_issues.json not found")
+        issues.append("FAIL decomposed_issues.json not found")
 
     # Check L1
     l1_path = data_dir / "failure_memory.json"
     if l1_path.exists():
         with open(l1_path) as f:
             l1 = json.load(f)
-        print(f"✅ L1 (failure_memory.json) exists ({len(l1)} entries)")
+        print(f"OK L1 (failure_memory.json) exists ({len(l1)} entries)")
     else:
-        issues.append("⚠️  L1 (failure_memory.json) not found (expected after build)")
+        issues.append("WARNING  L1 (failure_memory.json) not found (expected after build)")
 
     # Check L2
     l2_path = data_dir / "repo_memory.json"
     if l2_path.exists():
         with open(l2_path) as f:
             l2 = json.load(f)
-        print(f"✅ L2 (repo_memory.json) exists ({len(l2)} entries)")
+        print(f"OK L2 (repo_memory.json) exists ({len(l2)} entries)")
 
         if l2 and len(l2) > 0:
             # Check L2 structure
@@ -159,15 +159,15 @@ def check_data_files():
                 if problems and len(problems) > 0:
                     p = problems[0]
                     if "problem" in p and isinstance(p["problem"], dict):
-                        print("   ✅ L2 has new clean structure (problem dict)")
+                        print("   OK L2 has new clean structure (problem dict)")
                     if "fixes" in p:
-                        print("   ✅ L2 has fixes array")
+                        print("   OK L2 has fixes array")
                     if "issue_type" in p:
-                        print("   ✅ L2 has issue_type (for L3)")
+                        print("   OK L2 has issue_type (for L3)")
                     else:
-                        issues.append("⚠️  L2 missing issue_type (needed for L3)")
+                        issues.append("WARNING  L2 missing issue_type (needed for L3)")
     else:
-        issues.append("⚠️  L2 (repo_memory.json) not found (expected after build)")
+        issues.append("WARNING  L2 (repo_memory.json) not found (expected after build)")
 
     # Check L3
     l3_path = data_dir / "cross_memory.json"
@@ -177,17 +177,17 @@ def check_data_files():
 
         if isinstance(l3, list):
             if len(l3) == 0:
-                issues.append("⚠️  L3 (cross_memory.json) is empty (should have patterns)")
+                issues.append("WARNING  L3 (cross_memory.json) is empty (should have patterns)")
             else:
-                print(f"✅ L3 (cross_memory.json) exists ({len(l3)} patterns)")
+                print(f"OK L3 (cross_memory.json) exists ({len(l3)} patterns)")
                 # Check L3 structure
                 first_l3 = l3[0]
                 if "pattern_id" in first_l3 and "universal_fix_strategy" in first_l3:
-                    print("   ✅ L3 has universal patterns")
+                    print("   OK L3 has universal patterns")
         else:
-            issues.append("❌ L3 (cross_memory.json) is not a list")
+            issues.append("FAIL L3 (cross_memory.json) is not a list")
     else:
-        issues.append("⚠️  L3 (cross_memory.json) not found (expected after build)")
+        issues.append("WARNING  L3 (cross_memory.json) not found (expected after build)")
 
     return issues
 
@@ -211,7 +211,7 @@ def main():
     print("=" * 80)
 
     if not all_issues:
-        print("✅ All checks passed!")
+        print("OK All checks passed!")
         print("\nReady to run:")
         print("  1. python scripts/decompose_ci_failure.py --batch")
         print("  2. python scripts/build_memory_from_decomposed.py")
@@ -222,9 +222,9 @@ def main():
 
         print("\nAction items:")
         if any("decomposed_issues.json is empty" in i for i in all_issues):
-            print("  → Run: python scripts/decompose_ci_failure.py --batch")
+            print("  -> Run: python scripts/decompose_ci_failure.py --batch")
         if any("L1" in i or "L2" in i or "L3" in i for i in all_issues):
-            print("  → Run: python scripts/build_memory_from_decomposed.py")
+            print("  -> Run: python scripts/build_memory_from_decomposed.py")
 
     print()
     return 0 if not all_issues else 1

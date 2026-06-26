@@ -25,6 +25,12 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Import LLM analysis functions
+from minisweagent.run.benchmarks.utils.ci_memory_llm_analysis import (
+  llm_analyze_l1_for_problem_1,
+  llm_analyze_l2_for_consecutive,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Universal LLM caller
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,9 +134,20 @@ class CIMemorySystem:
   """
   Three-level memory store (L1 / L2 / L3) for CI repair.
 
-  L1: Per-file failure records (repo + workflow scoped)
-  L2: Repo-scoped recurring patterns (repo + workflow scoped)
-  L3: Cross-repo generalized principles (no filtering)
+  L1: File-level problems
+      - What is the issue IN THE FILE
+      - Dependent changes (dependent_files that need fixing together)
+      - File-specific fixes
+
+  L2: Repo-level repair strategies
+      - Combining entire repair at repo level
+      - Multiple problems as sequences (what comes after what)
+      - Workflow-level patterns
+
+  L3: Universal/generalized fixes
+      - When L1, L2 don't have it, check L3
+      - Cross-repo universal fix patterns
+      - Dependent problems that may arise (dependent_problems)
   """
 
   def __init__(self, plugin: Any, *, memory_enabled: bool) -> None:
@@ -474,6 +491,9 @@ def _organize_memories_by_validation_stage(
   }
   """
   by_stage = {}
+  filtered_count = {"skipped_earlier": 0, "skipped_current": 0, "kept_next": 0, "unknown": 0}
+
+  logger.info(f"    Organizing with current_failed_order={current_failed_order}, validation_sequence has {len(validation_sequence)} stages")
 
   # Note: memories are already cleaned in build_and_retrieve() before reaching here
   for mem in memories[:30]:
@@ -481,12 +501,25 @@ def _organize_memories_by_validation_stage(
     stage_name = stage_info["validates"]
     stage_order = stage_info["order"]
 
+    # Debug: log first few mappings
+    if len(by_stage) < 3:
+      logger.info(f"    Memory: validation_cmd='{mem.get('validation_cmd', '')[:50]}' -> stage='{stage_name}' order={stage_order}")
+
     # FILTER: ONLY include NEXT stages (after current failed stage)
     # - Skip earlier stages (they passed!)
     # - Skip current stage (CI already shows ALL errors)
     # - Only keep next stages (for Problem #N+ predictions)
-    if stage_order <= current_failed_order:
+    if stage_order < current_failed_order:
+      filtered_count["skipped_earlier"] += 1
       continue
+    elif stage_order == current_failed_order:
+      filtered_count["skipped_current"] += 1
+      continue
+    elif stage_order == 999:  # Unknown stage
+      filtered_count["unknown"] += 1
+      # Still include unknown stages - they might be relevant
+    else:
+      filtered_count["kept_next"] += 1
 
     if stage_name not in by_stage:
       by_stage[stage_name] = {
@@ -514,6 +547,10 @@ def _organize_memories_by_validation_stage(
   organized = sorted(by_stage.values(), key=lambda x: x["order"])
 
   total_problems = sum(len(s["problems"]) for s in organized)
+
+  logger.info(f"    Filter results: skipped_earlier={filtered_count['skipped_earlier']}, skipped_current={filtered_count['skipped_current']}, kept_next={filtered_count['kept_next']}, unknown={filtered_count['unknown']}")
+  logger.info(f"    Organized into {len(organized)} validation stages with {total_problems} total problems")
+
   return {
     "organized_by_stage": organized,
     "summary": f"Organized {total_problems} problems across {len(organized)} validation stages (ONLY next stages, current stage errors already from CI)"
@@ -527,7 +564,7 @@ def _extract_current_failure_as_problem_1(memory_result: Dict[str, Any], validat
   IMPORTANT:
   - Problem #1 = the ENTIRE current CI failure (one validation, multiple errors)
   - All errors from the failed validation are grouped together
-  - Example: Ruff failed with F632, F401, F841 → ONE problem with 3 file-level errors
+  - Example: Ruff failed with F632, F401, F841 -> ONE problem with 3 file-level errors
   - Memory is ONLY used for predicting Problem #2+ (NEXT validation stages)
 
   Returns: Single problem dict with all CI context
@@ -603,25 +640,22 @@ def _extract_current_failure_as_problem_1(memory_result: Dict[str, Any], validat
     fix_strategy += "Each file has specific issues listed below. Address them one by one. "
   fix_strategy += f"After fixing, run: `{current_stage['validation_cmd']}` to verify all issues are resolved."
 
+  # CONSISTENT FIELD NAMES (matches formatter expectations)
   return {
-    "problem_number": 1,
+    "problem_id": 1,  # <- Changed from problem_number
+    "is_primary": True,  # <- Added (required by formatter)
     "status": "confirmed",
+    "source": "CI",  # <- Added (where it came from)
     "validation_order": current_stage["order"],
     "validation_stage": current_stage["validates"],
     "validation_cmd": current_stage["validation_cmd"],
-    "error_type": error_summary,  # Unique error types (e.g., "F632, F401, F841")
-    "error_description": error_description,  # Detailed description with count
-    "root_cause": q.get("overall_failure_reason", ""),
+    "description": error_description,  # <- Changed from error_description (formatter looks for this)
+    "root_cause": q.get("overall_failure_reason", "") or f"CI validation '{current_stage['validates']}' failed with {len(files)} error(s)",
     "files": files,  # All affected files with full details
     "fix_strategy": fix_strategy,
-    "verification_cmd": current_stage["validation_cmd"],
     "check_first": False,
-    "reasoning": f"CONFIRMED from CI logs: {current_stage['validates']} validation failed with {len(files)} error(s). This is the current blocking issue - must fix ALL errors in this stage before CI will proceed to next validation stage.",
-    "identification_criteria": [],
-    "interdependency": f"Current validation failure at stage {current_stage['order']} ({current_stage['validates']}). All {len(files)} error(s) must be fixed before CI runs the next validation stage. This is blocking further progress.",
-    "from_memory": "",
-    "confidence": "confirmed",
-    "total_errors": len(files),  # How many individual errors in this validation
+    "error_type": error_summary,  # Keep for reference
+    "total_errors": len(files),
     "error_details": [
       {
         "file": f.get("path", ""),
@@ -631,7 +665,7 @@ def _extract_current_failure_as_problem_1(memory_result: Dict[str, Any], validat
         "fix": f.get("required_fix", "")
       }
       for f in files
-    ]  # Structured list for easy parsing
+    ]
   }
 
 
@@ -1075,16 +1109,16 @@ Step 2: Check organized_problems for those stages
 Step 3: Analyze interdependencies
 - How does Problem #1 relate to Problem #2?
 - Examples:
-  * "Lint blocks type-check → fixing lint exposes type errors"
-  * "Type errors prevent test imports → fixing types allows tests to run"
+  * "Lint blocks type-check -> fixing lint exposes type errors"
+  * "Type errors prevent test imports -> fixing types allows tests to run"
 
 Step 4: Filter by relevance
 - Does THIS repo likely have this problem?
 - Is the error pattern applicable to THIS codebase?
 
 INTERDEPENDENCY EXAMPLES:
-- "Problem #1 is ruff lint (order 11). After fixing, mypy runs (order 12). Memory shows Union errors → Problem #2 = mypy Union errors."
-- "Problem #1 is mypy type error (order 12). After fixing, pytest runs (order 14). Type errors prevent imports → Problem #2 = pytest ImportError."
+- "Problem #1 is ruff lint (order 11). After fixing, mypy runs (order 12). Memory shows Union errors -> Problem #2 = mypy Union errors."
+- "Problem #1 is mypy type error (order 12). After fixing, pytest runs (order 14). Type errors prevent imports -> Problem #2 = pytest ImportError."
 
 OUTPUT STRICT JSON - DYNAMIC TEMPLATE:
 
@@ -1236,7 +1270,7 @@ It should be structured as:
 
 **Fix Strategy**: <fix_strategy text>
 
-**Verification**: Run `<validation_cmd>` → must return exit code 0
+**Verification**: Run `<validation_cmd>` -> must return exit code 0
 
 **Status**: This problem is CONFIRMED (already failing in CI). Fix it immediately.
 
@@ -1253,7 +1287,7 @@ It should be structured as:
 
 **Fix Strategy**: <fix_strategy text>
 
-**Verification**: Run `<validation_cmd>` → must return exit code 0
+**Verification**: Run `<validation_cmd>` -> must return exit code 0
 
 **Status**: This problem is PREDICTED. Check if it exists first by running the verification command.
 
@@ -1261,9 +1295,9 @@ It should be structured as:
 
 ## Execution Instructions
 
-1. **Fix Problem #1**: Apply fix → run verification
+1. **Fix Problem #1**: Apply fix -> run verification
 2. **Check Problem #2**: Run verification to see if it exists
-3. **If exists**: Apply fix → run verification
+3. **If exists**: Apply fix -> run verification
 4. **Repeat for all N problems**
 5. **Final verification**: Run full CI
 
@@ -1396,36 +1430,734 @@ def _run_single_llm_synthesis(memory_result: Dict[str, Any], llm: Any, validatio
 # Single synthesis entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM VERIFICATION AND PLAN GENERATION (STAIR Section 3.3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _llm_verify_problems(
+  candidates: List[Dict[str, Any]],
+  memory_result: Dict[str, Any],
+  llm: Any
+) -> List[Dict[str, Any]]:
+  """
+  LLM Step 4: Verify which candidate problems are actually relevant.
+
+  STAIR approach: "an LLM-based verifier evaluates the top candidates to
+  assess their procedural relevance to the target issue"
+  """
+
+  if not candidates:
+    return []
+
+  # Build prompt
+  prompt = f"""Analyze which of the following candidate problems are relevant for the current CI failure.
+
+**Current CI Failure Context:**
+(Information about the current failure would be here - we'll use what's in memory_result)
+
+**Candidate Problems from Memory:**
+
+"""
+
+  for idx, candidate in enumerate(candidates, 1):
+    source = candidate.get('source', 'L1')
+
+    # Extract problem description
+    if isinstance(candidate.get('problem'), dict):
+      desc = candidate['problem'].get('category', '') or str(candidate.get('problem'))
+    else:
+      desc = candidate.get('problem') or candidate.get('issue_type') or candidate.get('error_type', '')
+
+    prompt += f"{idx}. [{source}] {desc}\n"
+
+  prompt += """
+**Task**: Select which problems are RELEVANT to fix for this CI failure.
+
+Return a JSON array of problem indices (1-based) that are relevant.
+Example: [1, 3, 5]
+
+Only include problems that are:
+- Directly related to the failure
+- Not redundant with other selected problems
+- Fixable based on the available information
+
+JSON Response:"""
+
+  try:
+    response = _call_llm(llm, prompt)
+
+    # Parse JSON response
+    import json
+    import re
+
+    # Extract JSON array from response
+    match = re.search(r'\[[\d,\s]+\]', response)
+    if match:
+      indices = json.loads(match.group())
+      verified = [candidates[i-1] for i in indices if 1 <= i <= len(candidates)]
+      return verified
+    else:
+      logger.warning("LLM verification failed to return valid JSON, using all candidates")
+      return candidates
+
+  except Exception as e:
+    logger.warning(f"LLM verification failed: {e}, using all candidates")
+    return candidates
+
+
+def _llm_generate_problem_statement(
+  memory: Dict[str, Any],
+  memory_result: Dict[str, Any],
+  problem_id: int,
+  is_primary: bool,
+  llm: Any,
+  validation_sequence: List[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+  """
+  LLM Step 5: Generate problem statement + repair plan from memory.
+
+  STAIR approach: "STAIR provides the LLM with the issue report u and the
+  corresponding guidance G_s(u) and asks it to generate a structured plan P_s(u)"
+  """
+
+  source = memory.get('source', 'L1')
+
+  # Extract raw memory data
+  if source == 'L1':
+    raw_problem = memory.get('problem') or memory.get('issue_type') or memory.get('error_type', '')
+    raw_fix = memory.get('fixes') or memory.get('change', '')
+    raw_why = memory.get('why_fix') or memory.get('link_to', '')
+    raw_file = memory.get('file', '')
+    raw_deps = memory.get('dependent_files', [])
+  elif source == 'L2':
+    raw_problem = memory.get('problem', '')
+    raw_fix = memory.get('fix_strategy', '')
+    raw_why = ''
+    raw_file = ''
+    raw_deps = memory.get('actual_files', [])
+  else:  # L3
+    raw_problem = memory.get('problem', '')
+    raw_fix = memory.get('universal_fix', {}).get('approach', '')
+    raw_why = ''
+    raw_file = ''
+    raw_deps = []
+
+  # Build LLM prompt
+  prompt = f"""Generate a structured problem statement and repair plan based on this memory.
+
+**Memory Data (Source: {source}):**
+Problem: {raw_problem}
+Fix Strategy: {raw_fix}
+Why: {raw_why}
+File: {raw_file}
+Related Files: {raw_deps}
+
+**Task**: Generate a structured repair problem in JSON format:
+
+{{
+  "description": "Clear description of what's wrong",
+  "root_cause": "Why this problem occurs",
+  "files": ["list", "of", "affected", "files"],
+  "validation_cmd": "command to verify fix",
+  "fix_strategy": "How to fix it (2-3 sentences)"
+}}
+
+Be specific and actionable. Extract filenames from the memory data.
+
+JSON Response:"""
+
+  try:
+    response = _call_llm(llm, prompt)
+
+    # Parse JSON
+    import json
+    import re
+
+    # Extract JSON from response
+    match = re.search(r'\{[^}]+\}', response, re.DOTALL)
+    if match:
+      data = json.loads(match.group())
+
+      return {
+        "problem_id": problem_id,
+        "is_primary": is_primary,
+        "status": "confirmed" if is_primary else "predicted",
+        "source": source,
+        "description": data.get("description", raw_problem),
+        "root_cause": data.get("root_cause", raw_why or "See problem description"),
+        "files": data.get("files", [raw_file] if raw_file else []),
+        "validation_cmd": data.get("validation_cmd", "pytest"),
+        "fix_strategy": data.get("fix_strategy", raw_fix),
+        "check_first": not is_primary,
+      }
+    else:
+      logger.warning("LLM generation failed to return valid JSON, using fallback")
+      raise ValueError("No JSON in response")
+
+  except Exception as e:
+    logger.warning(f"LLM generation failed: {e}, using fallback extraction")
+    # Fallback to direct extraction
+    return _create_problem_from_memory(memory, problem_id, is_primary, validation_sequence)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAIR-INSPIRED HIERARCHICAL PROBLEM PIPELINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _hierarchical_problem_pipeline(
+  all_memories: List[Dict[str, Any]],
+  memory_result: Dict[str, Any],
+  llm: Any,
+  validation_sequence: List[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+  """
+  STAIR-inspired hierarchical problem selection pipeline.
+
+  Steps:
+  1. Top-15 cosine similarity retrieval
+  2. Find PRIMARY (L1 > L2 > L3):
+     - L1: File-level issue with specific fixes (most specific)
+     - L2: Repo-level repair strategy combining entire repair
+     - L3: Universal generalized fix (when L1, L2 don't have it)
+  3. Find CONSECUTIVE (L2 > L1 > L3):
+     - L2: Repair sequences (what problems occur together in repo)
+     - L1: Dependent files (files that need fixing together for this issue)
+     - L3: Dependent problems (universal patterns that may arise)
+  4. LLM verification (future enhancement)
+  5. Generate separate problem statements (one per problem)
+
+  Returns: List of separate problems for sequential repair
+  """
+
+  # Step 1: Top-15 retrieval
+  logger.info("[Pipeline Step 1] Top-15 cosine similarity retrieval")
+  top_15 = sorted(all_memories, key=lambda x: x.get("similarity_score", 0.0), reverse=True)[:15]
+
+  # Organize by source
+  by_source = {"L1": [], "L2": [], "L3": []}
+  for mem in top_15:
+    source = mem.get("source", "L1")
+    if source in by_source:
+      by_source[source].append(mem)
+
+  logger.info(f"  Top-15 by source: L1={len(by_source['L1'])}, L2={len(by_source['L2'])}, L3={len(by_source['L3'])}")
+
+  # Step 2: Find PRIMARY (L1 > L2 > L3)
+  logger.info("[Pipeline Step 2] Find PRIMARY (L1 > L2 > L3)")
+  primary = None
+
+  if by_source["L1"]:
+    primary = by_source["L1"][0]
+    logger.info(f"  Found PRIMARY in L1: {primary.get('problem', '')[:60]}")
+  elif by_source["L2"]:
+    primary = by_source["L2"][0]
+    logger.info(f"  Found PRIMARY in L2: {primary.get('problem', '')[:60]}")
+  elif by_source["L3"]:
+    primary = by_source["L3"][0]
+    logger.info(f"  Found PRIMARY in L3: {primary.get('problem', '')[:60]}")
+
+  if not primary:
+    logger.warning("  No PRIMARY found")
+    return []
+
+  # Step 3: Find CONSECUTIVE (L2 > L1 > L3)
+  logger.info("[Pipeline Step 3] Find CONSECUTIVE (L2 > L1 > L3)")
+  consecutive = []
+
+  # L2: Sequences
+  if by_source["L2"]:
+    l2_consecutive = _find_consecutive_from_l2(primary, by_source["L2"])
+    consecutive.extend(l2_consecutive)
+    logger.info(f"  L2 sequences: {len(l2_consecutive)}")
+
+  # L1: Dependent files
+  if by_source["L1"]:
+    l1_consecutive = _find_consecutive_from_l1(primary, by_source["L1"], top_15)
+    consecutive.extend(l1_consecutive)
+    logger.info(f"  L1 dependent files: {len(l1_consecutive)}")
+
+  # L3: Dependent problems
+  if by_source["L3"]:
+    l3_consecutive = _find_consecutive_from_l3(primary, by_source["L3"])
+    consecutive.extend(l3_consecutive)
+    logger.info(f"  L3 dependent problems: {len(l3_consecutive)}")
+
+  # NOT NEEDED - We'll use LLM to analyze, not code-based consecutive finding
+  # consecutive = _deduplicate_memories(consecutive, primary)
+
+  # ═════════════════════════════════════════════════════════════════
+  # NEW APPROACH: LLM-Based Analysis (User Requested)
+  # ═════════════════════════════════════════════════════════════════
+
+  # Step 4: Extract CI Failure
+  logger.info("[Pipeline Step 4] Extract CI failure")
+
+  problem_1_base = _extract_current_failure_as_problem_1(memory_result, validation_sequence)
+
+  if not problem_1_base:
+    logger.warning("  No current CI failure detected!")
+    return []
+
+  logger.info(f"  CI Failure: {problem_1_base.get('description', 'Unknown')[:80]}")
+
+  # Step 5: LLM PROMPT 1 - Enrich Problem #1 (Priority: L1 > L2 > L3)
+  # ABLATION-AWARE: Use only enabled levels, respect priority order
+  logger.info("[Pipeline Step 5] LLM PROMPT 1 - Enrich Problem #1 (respecting ablation)")
+
+  # Collect memories from enabled levels in PRIORITY ORDER: L1 > L2 > L3
+  primary_memories = []
+  primary_source = None
+
+  if by_source["L1"]:
+    primary_memories = by_source["L1"][:10]
+    primary_source = "L1"
+    logger.info(f"  Using L1 for PRIMARY (priority 1, {len(primary_memories)} memories)")
+  elif by_source["L2"]:
+    primary_memories = by_source["L2"][:10]
+    primary_source = "L2"
+    logger.info(f"  Using L2 for PRIMARY (L1 not available, {len(primary_memories)} memories)")
+  elif by_source["L3"]:
+    primary_memories = by_source["L3"][:10]
+    primary_source = "L3"
+    logger.info(f"  Using L3 for PRIMARY (L1/L2 not available, {len(primary_memories)} memories)")
+
+  if llm and primary_memories:
+    problem_1 = llm_analyze_l1_for_problem_1(problem_1_base, primary_memories, llm)
+    logger.info(f"  OK Problem #1 enriched with {primary_source} (files: {len(problem_1.get('files', []))}, fix: {bool(problem_1.get('fix_strategy'))})")
+  else:
+    problem_1 = problem_1_base
+    if not llm:
+      logger.info(f"  FAIL No LLM available for enrichment")
+    else:
+      logger.info(f"  FAIL No memories available for enrichment")
+
+  problems = [problem_1]
+
+  # Step 6: LLM PROMPT 2 - Select Consecutive (Priority: L2 > L1 > L3)
+  # ABLATION-AWARE: Use only enabled levels, respect priority order
+  logger.info("[Pipeline Step 6] LLM PROMPT 2 - Select consecutive problems (respecting ablation)")
+
+  # Collect memories from enabled levels in PRIORITY ORDER: L2 > L1 > L3
+  consecutive_l2 = by_source["L2"][:10] if by_source["L2"] else []
+  consecutive_l1 = by_source["L1"][:10] if by_source["L1"] else []
+  consecutive_l3 = by_source["L3"][:10] if by_source["L3"] else []
+
+  enabled_levels = []
+  if consecutive_l2: enabled_levels.append(f"L2({len(consecutive_l2)})")
+  if consecutive_l1: enabled_levels.append(f"L1({len(consecutive_l1)})")
+  if consecutive_l3: enabled_levels.append(f"L3({len(consecutive_l3)})")
+
+  logger.info(f"  Using for CONSECUTIVE: {', '.join(enabled_levels) if enabled_levels else 'None'}")
+
+  if llm and (consecutive_l2 or consecutive_l1 or consecutive_l3):
+    consecutive_problems = llm_analyze_l2_for_consecutive(
+      problem_1,
+      consecutive_l2,      # L2 first (priority)
+      consecutive_l1,      # L1 second
+      validation_sequence or [],
+      llm,
+      consecutive_l3       # L3 third (if available)
+    )
+
+    if consecutive_problems:
+      # Renumber consecutive problems starting from 2
+      for idx, prob in enumerate(consecutive_problems, start=2):
+        prob['problem_id'] = idx
+      problems.extend(consecutive_problems)
+      logger.info(f"  OK Found {len(consecutive_problems)} consecutive problems")
+    else:
+      logger.info(f"  FAIL No consecutive problems found by LLM")
+  else:
+    if not llm:
+      logger.info(f"  FAIL No LLM available for consecutive analysis")
+    else:
+      logger.info(f"  FAIL No memories available for consecutive analysis")
+
+  # Summary
+  logger.info(f"")
+  logger.info(f"  ╔════════════════════════════════════════════════════════════╗")
+  logger.info(f"  ║ Generated {len(problems)} Total Problems:                              ║")
+  logger.info(f"  ║  - Problem #1: From CI (enriched with L1)                 ║")
+  logger.info(f"  ║  - Problems #2-{len(problems)}: From L2/L1 analysis (consecutive)      ║")
+  logger.info(f"  ╚════════════════════════════════════════════════════════════╝")
+  logger.info(f"")
+
+  return problems
+
+
+def _find_consecutive_from_l2(primary: Dict, l2_memories: List[Dict]) -> List[Dict]:
+  """
+  Find consecutive problems from L2 repair sequences.
+
+  L2 contains repo-level repair strategies showing what problems occur together.
+  Analyze sequences to find what comes AFTER the primary problem.
+  """
+  consecutive = []
+  primary_prob = primary.get("problem", "")[:40].lower()
+  primary_validation = primary.get("validation_cmd", "")
+
+  for l2_mem in l2_memories[:5]:
+    # 1. Check if L2 has explicit sequence of problems
+    if "problems" in l2_mem and isinstance(l2_mem["problems"], list):
+      problems = l2_mem["problems"]
+
+      # Find primary in sequence by matching problem description
+      primary_idx = None
+      for i, prob in enumerate(problems):
+        prob_desc = prob.get("problem", "")[:40].lower()
+        if prob_desc and primary_prob:
+          # Match by substring
+          if prob_desc in primary_prob or primary_prob in prob_desc:
+            primary_idx = i
+            logger.info(f"    L2: Found primary in sequence at position {i+1}/{len(problems)}")
+            break
+
+      # Add ALL following problems from sequence
+      if primary_idx is not None and primary_idx < len(problems) - 1:
+        following = problems[primary_idx + 1:]
+        consecutive.extend(following)
+        logger.info(f"    L2: Adding {len(following)} consecutive problems from sequence")
+        continue
+
+    # 2. If L2 is single problem (not sequence), check if related by validation_cmd
+    if primary.get("source") != "L2":  # Don't duplicate primary
+      l2_validation = l2_mem.get("verification_cmd", "")
+      if l2_validation and primary_validation and l2_validation == primary_validation:
+        consecutive.append(l2_mem)
+        logger.info(f"    L2: Found related problem by validation_cmd: {l2_mem.get('problem', '')[:40]}")
+
+  return consecutive[:5]  # Return up to 5 consecutive problems from L2
+
+
+def _find_consecutive_from_l1(primary: Dict, l1_memories: List[Dict], top_15: List[Dict]) -> List[Dict]:
+  """
+  Find consecutive problems from L1 based on problem understanding.
+
+  Not just dependent_files, but analyze:
+  - Similar failure types
+  - Related validation commands
+  - Common file patterns
+  - Error type similarities
+  """
+  consecutive = []
+  primary_id = primary.get("id")
+
+  # Extract primary problem characteristics
+  primary_validation_cmd = primary.get("validation_cmd", "")
+  primary_failure_type = primary.get("failure_type", "")
+  primary_problem = primary.get("problem", "")[:50].lower()
+
+  # 1. Check explicit dependent_files first (if exists)
+  dependent_files_raw = primary.get("dependent_files", [])
+
+  # Extract file paths from dependent_files (can be list of strings OR list of dicts)
+  dependent_file_paths = []
+  if isinstance(dependent_files_raw, list):
+    for dep in dependent_files_raw:
+      if isinstance(dep, str):
+        dependent_file_paths.append(dep)
+      elif isinstance(dep, dict):
+        # Extract 'file' field from dict
+        file_path = dep.get('file', '')
+        if file_path:
+          dependent_file_paths.append(file_path)
+  elif isinstance(dependent_files_raw, str):
+    # Sometimes it's a pipe-separated string
+    dependent_file_paths = [f.strip() for f in dependent_files_raw.split('|') if f.strip()]
+
+  if dependent_file_paths:
+    logger.info(f"    L1: Checking {len(dependent_file_paths)} dependent files from primary")
+    for mem in l1_memories:
+      if mem.get("id") == primary_id:
+        continue
+      mem_file = mem.get("file", "")
+      if mem_file in dependent_file_paths:
+        consecutive.append(mem)
+        logger.info(f"    L1: Found dependent file problem: {mem_file}")
+
+  # 2. Find problems with same validation_cmd (common in CI workflows)
+  for mem in l1_memories[:10]:
+    if mem.get("id") == primary_id:
+      continue
+    if mem in consecutive:
+      continue
+
+    mem_validation = mem.get("validation_cmd", "")
+    if mem_validation and primary_validation_cmd and mem_validation == primary_validation_cmd:
+      consecutive.append(mem)
+      logger.info(f"    L1: Found same validation_cmd problem: {mem.get('problem', '')[:40]}")
+
+  # 3. Find problems with similar error patterns
+  for mem in l1_memories[:10]:
+    if mem.get("id") == primary_id:
+      continue
+    if mem in consecutive:
+      continue
+
+    mem_problem = mem.get("problem", "")[:50].lower()
+
+    # Check for common error keywords
+    common_errors = ["type", "import", "syntax", "attribute", "index", "key"]
+    for error_type in common_errors:
+      if error_type in primary_problem and error_type in mem_problem:
+        consecutive.append(mem)
+        logger.info(f"    L1: Found similar error type '{error_type}': {mem.get('problem', '')[:40]}")
+        break
+
+  # 4. Limit to top 3 most relevant
+  return consecutive[:3]
+
+
+def _find_consecutive_from_l3(primary: Dict, l3_memories: List[Dict]) -> List[Dict]:
+  """
+  Find consecutive problems from L3 based on problem understanding.
+
+  Not just dependent_problems field, but analyze:
+  - Universal fix patterns that match
+  - Common failure types
+  - Related problem patterns
+  """
+  consecutive = []
+  primary_id = primary.get("id")
+  primary_problem = primary.get("problem", "")[:50].lower()
+
+  # 1. Check explicit dependent_problems first (if exists)
+  if primary.get("source") == "L3":
+    dep_probs = primary.get("dependent_problems", [])
+    for dep in dep_probs:
+      consecutive.append({
+        "source": "L3",
+        "problem": dep,
+        "from_dependent": True
+      })
+      logger.info(f"    L3: Found dependent problem: {dep[:40]}")
+
+  # 2. Check other L3 memories for dependent_problems
+  for l3 in l3_memories[:3]:
+    if l3.get("id") == primary_id:
+      continue
+
+    dep_probs = l3.get("dependent_problems", [])
+    for dep in dep_probs:
+      consecutive.append({
+        "source": "L3",
+        "problem": dep,
+        "from_dependent": True
+      })
+      logger.info(f"    L3: Found dependent problem from other L3: {dep[:40]}")
+
+  # 3. Find L3 patterns with similar universal_fix approach
+  for l3 in l3_memories[:3]:
+    if l3.get("id") == primary_id:
+      continue
+
+    # Check if problem patterns are similar
+    l3_problem = l3.get("problem", "")[:50].lower()
+    l3_pattern = l3.get("failure_pattern", "")[:50].lower()
+
+    # Check for pattern similarity
+    if primary_problem and (l3_problem in primary_problem or primary_problem in l3_problem):
+      consecutive.append(l3)
+      logger.info(f"    L3: Found similar pattern: {l3.get('problem', '')[:40]}")
+      continue
+
+    # Check universal_fix similarity
+    primary_fix = primary.get("universal_fix", {}).get("approach", "")[:30].lower()
+    l3_fix = l3.get("universal_fix", {}).get("approach", "")[:30].lower()
+    if primary_fix and l3_fix and (primary_fix in l3_fix or l3_fix in primary_fix):
+      consecutive.append(l3)
+      logger.info(f"    L3: Found similar fix approach: {l3.get('problem', '')[:40]}")
+
+  # Remove duplicates
+  seen = set()
+  unique = []
+  for item in consecutive:
+    prob = item.get("problem", "")[:30]
+    if prob not in seen:
+      seen.add(prob)
+      unique.append(item)
+
+  return unique[:3]
+
+
+def _deduplicate_memories(consecutive: List[Dict], primary: Dict) -> List[Dict]:
+  """Deduplicate consecutive problems."""
+  seen = {primary.get("id")}
+  unique = []
+
+  for mem in consecutive:
+    mem_id = mem.get("id")
+    if mem_id and mem_id not in seen:
+      seen.add(mem_id)
+      unique.append(mem)
+
+  return unique
+
+
+def _create_problem_from_memory(
+  memory: Dict,
+  problem_id: int,
+  is_primary: bool,
+  validation_sequence: List[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+  """Create a separate problem statement from memory."""
+
+  source = memory.get("source", "L1")
+
+  # Extract info based on source
+  if source == "L1":
+    # L1 memory structure: issue_type, file, change, dependent_files, search_document
+    description = (
+      memory.get("problem") or
+      memory.get("issue_type") or
+      memory.get("error_type") or
+      "Unknown L1 problem"
+    )
+
+    # Get validation command (check multiple fields)
+    validation_cmd = (
+      memory.get("validation_cmd") or
+      memory.get("tool") or
+      "pytest"
+    )
+
+    # Get files: main file + dependent files
+    main_file = memory.get("file", "")
+    dependent_files_raw = memory.get("dependent_files", [])
+
+    # Parse dependent_files (could be list of strings, list of dicts, or pipe-separated string)
+    dependent_file_paths = []
+    if isinstance(dependent_files_raw, list):
+      for dep in dependent_files_raw:
+        if isinstance(dep, str):
+          dependent_file_paths.append(dep)
+        elif isinstance(dep, dict):
+          # Extract 'file' field from dict
+          file_path = dep.get('file', '')
+          if file_path:
+            dependent_file_paths.append(file_path)
+    elif isinstance(dependent_files_raw, str):
+      # Pipe-separated string
+      dependent_file_paths = [f.strip() for f in dependent_files_raw.split('|') if f.strip()]
+
+    files = []
+    if main_file:
+      files.append(main_file)
+    files.extend(dependent_file_paths[:5])  # Add up to 5 dependent files
+
+    # Get fix info
+    fix_info = (
+      memory.get("fixes") or
+      memory.get("change") or
+      ""
+    )
+
+    # Get why fix
+    why_fix = (
+      memory.get("why_fix") or
+      memory.get("link_to") or
+      ""
+    )
+
+  elif source == "L2":
+    description = memory.get("problem", "Unknown problem")
+    validation_cmd = memory.get("verification_cmd", "pytest")
+    files = memory.get("actual_files", [])[:5]
+    fix_info = memory.get("fix_strategy", "")
+    why_fix = ""
+
+  else:  # L3
+    description = memory.get("problem", "Unknown problem")
+    validation_cmd = memory.get("verification_cmd", "pytest")
+    files = []
+    fix_info = memory.get("universal_fix", {}).get("approach", "")
+    why_fix = ""
+
+  # Create problem
+  return {
+    "problem_id": problem_id,
+    "is_primary": is_primary,
+    "status": "confirmed" if is_primary else "predicted",
+    "source": source,
+    "description": description,
+    "root_cause": why_fix or "See problem description",
+    "files": files,
+    "validation_cmd": validation_cmd,
+    "fix_strategy": fix_info,
+    "check_first": not is_primary,
+  }
+
+
 def _run_two_llm_gate(
   memory_result: Dict[str, Any],
   llm: Any,
   validation_sequence: List[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
   """
-  Build the memory guidance used by the repair agent.
+  STAIR-INSPIRED APPROACH: Hierarchical problem selection with separate problems.
 
-  ALWAYS synthesizes repair plan (even with 0 memories).
-  Generates detailed repair plan with problems mapped to validation sequence.
+  Pipeline:
+  1. Top-15 cosine similarity retrieval
+  2. Find PRIMARY (L1 > L2 > L3):
+     - L1 first: File-level issue with specific fixes
+     - L2 second: Repo-level repair strategy
+     - L3 last: Universal generalized fix (when L1, L2 don't have it)
+  3. Find CONSECUTIVE (L2 > L1 > L3):
+     - L2 first: Repair sequences (what problems occur together)
+     - L1 second: Dependent files (files that need fixing together)
+     - L3 last: Dependent problems (universal patterns that may arise)
+  4. LLM verification (TODO)
+  5. LLM plan generation (TODO)
+  6. Return SEPARATE problems (not bundled)
   """
   result = _empty_selection()
 
-  # ALWAYS synthesize (even if matches=0)
-  # With 0 memories: still predict consecutive problems from validation sequence
-  if llm is None:
-    # No LLM: deterministic fallback
+  # Get all retrieved memories
+  all_memories = memory_result.get("matches", [])
+
+  if not all_memories:
+    logger.info("[CIMemorySystem] No memories - using fallback")
     guidance_document = _build_simple_fallback(memory_result, validation_sequence)
-  else:
-    # With LLM: full synthesis (works with or without memories)
+    result["use_memory"] = False
+    result["guidance_document"] = guidance_document
+    return result
+
+  # NEW APPROACH: STAIR-inspired hierarchical selection
+  logger.info(f"[CIMemorySystem] Running STAIR-inspired pipeline on {len(all_memories)} memories")
+
+  try:
+    # Step 1-5: Run hierarchical pipeline
+    separate_problems = _hierarchical_problem_pipeline(
+      all_memories,
+      memory_result,
+      llm,
+      validation_sequence
+    )
+
+    # Return separate problems
+    result["use_memory"] = True
+    result["separate_problems"] = separate_problems  # NEW: List of separate problems
+    result["relevant_candidates"] = all_memories[:15]  # Top-15
+    result["selected_items"] = separate_problems
+    result["guidance_document"] = {
+      "problems": separate_problems,
+      "num_problems": len(separate_problems),
+      "approach": "hierarchical_stair_inspired"
+    }
+
+    logger.info(f"[CIMemorySystem] Pipeline complete: {len(separate_problems)} separate problems")
+    return result
+
+  except Exception as e:
+    logger.error(f"[CIMemorySystem] Hierarchical pipeline failed: {e}")
+    import traceback
+    logger.error(traceback.format_exc())
+
+    # Fallback to old approach
     guidance_document = _run_single_llm_synthesis(memory_result, llm, validation_sequence)
-
-  relevant_candidates = guidance_document.get("relevant_candidates", [])
-
-  result["use_memory"] = True  # Mark as usable (even if 0 memories, we have synthesis)
-  result["relevant_candidates"] = relevant_candidates
-  result["selected_items"] = relevant_candidates
-  result["guidance_document"] = guidance_document
-  result["analysis_summary"] = guidance_document.get("summary", "")
-  return result
+    result["use_memory"] = True
+    result["guidance_document"] = guidance_document
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1436,8 +2168,8 @@ def format_memory_context(memory: Dict[str, Any]) -> str:
   """
   Convert Phase C output into a Markdown block for the agent's problem statement.
 
-  If LLM synthesis produced structured problems, format them into sequential repair instructions.
-  Otherwise return the agent_problem_statement markdown as-is.
+  NEW: Handles separate_problems from STAIR-inspired pipeline.
+  OLD: Falls back to bundled agent_problem_statement.
   """
   if not memory or not memory.get("enabled", False):
     return ""
@@ -1446,6 +2178,13 @@ def format_memory_context(memory: Dict[str, Any]) -> str:
   if not llm_sel.get("use_memory", False):
     return ""
 
+  # NEW: Check for separate_problems (STAIR-inspired approach)
+  separate_problems = llm_sel.get("separate_problems", [])
+  if separate_problems:
+    logger.info(f"[format_memory_context] Formatting {len(separate_problems)} separate problems")
+    return _format_separate_problems_as_markdown(separate_problems)
+
+  # OLD: Fallback to bundled format
   doc: Dict[str, Any] = llm_sel.get("guidance_document") or {}
   if not doc:
     return ""
@@ -1462,6 +2201,104 @@ def format_memory_context(memory: Dict[str, Any]) -> str:
 
   # Fallback: empty
   return ""
+
+
+def _format_separate_problems_as_markdown(problems: List[Dict[str, Any]]) -> str:
+  """
+  Format separate problems from STAIR-inspired pipeline into markdown.
+
+  Each problem is SEPARATE and will be fixed ONE AT A TIME sequentially.
+  """
+  if not problems:
+    return ""
+
+  lines = [
+    "# CI Repair Plan - Sequential Problem Solving",
+    "",
+    f"**IMPORTANT**: {len(problems)} separate problems identified. Fix them ONE AT A TIME in sequence:",
+    "",
+    "**Execution Strategy:**",
+    "1. Problem #1 (PRIMARY): Currently failing - fix immediately",
+    f"2. Problems #2-{len(problems)} (CONSECUTIVE): May appear after fixing previous - check and fix sequentially",
+    "3. Run verification after EACH fix",
+    "4. Stop if primary fails; continue if consecutive fails",
+    "",
+    "---",
+    "",
+  ]
+
+  for prob in problems:
+    prob_id = prob.get("problem_id", "?")
+    is_primary = prob.get("is_primary", False)
+    status = prob.get("status", "confirmed")
+    source = prob.get("source", "L1")
+    description = prob.get("description", "Unknown problem")
+    root_cause = prob.get("root_cause", "")
+    files = prob.get("files", [])
+    validation_cmd = prob.get("validation_cmd", "pytest")
+    fix_strategy = prob.get("fix_strategy", "")
+    check_first = prob.get("check_first", False)
+
+    status_label = "CONFIRMED - Currently Failing" if is_primary else "CONSECUTIVE - May Appear After Previous Fixes"
+
+    lines.extend([
+      f"## Problem #{prob_id} ({status_label})",
+      "",
+      f"**Source**: {source} memory",
+      f"**Validation**: `{validation_cmd}`",
+      "",
+      f"**Description**: {description}",
+      "",
+    ])
+
+    if root_cause:
+      lines.extend([
+        f"**Root Cause**: {root_cause}",
+        "",
+      ])
+
+    if files:
+      lines.extend([
+        "**Files to Check/Fix**:",
+        "",
+      ])
+      for f in files[:5]:
+        lines.append(f"- `{f}`")
+      lines.append("")
+
+    if fix_strategy:
+      lines.extend([
+        "**Fix Strategy (from memory)**:",
+        "",
+        fix_strategy,
+        "",
+      ])
+
+    lines.extend([
+      f"**Verification**: Run `{validation_cmd}` -> must return exit code 0",
+      "",
+      f"**Check First**: {'Yes - run verification to see if problem exists' if check_first else 'No - this is the current CI failure'}",
+      "",
+      "---",
+      "",
+    ])
+
+  lines.extend([
+    "## Execution Instructions",
+    "",
+    "1. **Start with Problem #1** (PRIMARY): This is the current CI failure",
+    "2. **For each problem**:",
+    "   - Read the description and fix strategy",
+    "   - Apply the fix based on memory guidance",
+    "   - Run the verification command",
+    "   - Verify it passes (exit code 0)",
+    "3. **If Problem #1 fails**: STOP - cannot proceed",
+    "4. **If Problem #2+ fails**: CONTINUE - it may not exist yet",
+    "5. **Final step**: Run full CI to ensure all problems are resolved",
+    "",
+  ])
+
+  return "\n".join(lines)
 
 
 def _format_problems_as_markdown(problems: List[Dict[str, Any]], total: int) -> str:

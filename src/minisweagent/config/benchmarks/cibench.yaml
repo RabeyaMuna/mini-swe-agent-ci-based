@@ -154,11 +154,12 @@ environment:
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model:
-  model_name: "anthropic/claude-sonnet-4-5-20250929"
+  model_name: "openrouter/minimax/minimax-m2.5"
   model_kwargs:
     drop_params: true
     temperature: 0.0
-    parallel_tool_calls: true
+    max_tokens: 32000
+    parallel_tool_calls: false
 
   observation_template: |
     {% if output.exception_info -%}

@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import logger
 import json
 import os
 import re
@@ -527,6 +527,9 @@ class MemoryPlugin:
         self.failure_memory = _load_json_list(self.failure_memory_path)
         self.repo_memory    = _load_json_list(self.repo_memory_path)
         self.cross_memory   = _load_json_list(self.cross_memory_path)
+
+        # DEBUG: Log memory loading
+        logger.info(f"[Memory] Loaded memory banks: L1={len(self.failure_memory)}, L2={len(self.repo_memory)}, L3={len(self.cross_memory)}")
 
         # Pre-load stored embeddings into the _EmbeddingProvider cache so
         # retrieval never has to re-embed the same record twice, even across restarts.
@@ -1188,14 +1191,17 @@ IMPORTANT: Return exactly {len(candidates)} scores in the same order as candidat
 
     def retrieve(self, query: Dict[str, Any]) -> Dict[str, Any]:
         """
-        STAIR-style retrieval: Get all, sort by similarity, select top 30.
+        Balanced retrieval: Top-10 from EACH level (L1, L2, L3).
 
-        Approach (like STAIR paper):
-        - Stage 1: Retrieve ALL candidates from each level (based on similarity)
-        - Stage 2: Sort by similarity score (high → low)
-        - Stage 3: Select top 30 across all levels
+        NEW Approach (User-requested):
+        - Stage 1: Retrieve candidates from each level (sorted by similarity)
+        - Stage 2: Take top-10 from L1 (if available)
+        - Stage 3: Take top-10 from L2 (if available)
+        - Stage 4: Take top-10 from L3 (if available)
+        - Stage 5: Combine (max 30 total)
 
-        This ensures the highest similarity matches rise to top regardless of level.
+        This ensures balanced representation from each level and prevents
+        one level from dominating (e.g., all 30 from L1, none from L2/L3).
         """
         if not self.enabled:
             return self._empty_result(query, "memory_disabled")
@@ -1211,22 +1217,16 @@ IMPORTANT: Return exactly {len(candidates)} scores in the same order as candidat
             l2_candidates = self._retrieve_l2(query) if "L2" in self.active_levels else []
             l3_candidates = self._retrieve_l3(query) if "L3" in self.active_levels else []
 
-        # Stage 2: Combine all candidates from all levels
-        all_candidates = []
-        all_candidates.extend(l1_candidates)
-        all_candidates.extend(l2_candidates)
-        all_candidates.extend(l3_candidates)
+        # Stage 2-4: Take top-10 from EACH level (balanced representation)
+        l1 = l1_candidates[:10]  # Top 10 from L1
+        l2 = l2_candidates[:10]  # Top 10 from L2
+        l3 = l3_candidates[:10]  # Top 10 from L3
 
-        # Stage 3: Sort by similarity score (highest first)
-        all_candidates.sort(key=lambda x: float(x.get("similarity_score", 0.0)), reverse=True)
-
-        # Stage 4: Select top 30 by similarity across all levels
-        top_30 = all_candidates[:30]
-
-        # Stage 5: Separate by level FIRST (before cleaning, need memory_level field!)
-        l1 = [m for m in top_30 if m.get("memory_level") == "L1"]
-        l2 = [m for m in top_30 if m.get("memory_level") == "L2"]
-        l3 = [m for m in top_30 if m.get("memory_level") == "L3"]
+        # Stage 5: Combine all selected memories
+        top_30 = []
+        top_30.extend(l1)
+        top_30.extend(l2)
+        top_30.extend(l3)
 
         # Calculate scores before cleaning (need similarity_score field!)
         best_scores = {
@@ -1432,6 +1432,7 @@ Return STRICT JSON (no markdown, no extra text):
 
         try:
             result = self.llm.invoke(prompt)
+            import pdb; pdb.set_trace()
             response = getattr(result, "content", str(result)).strip()
 
             # Extract JSON
@@ -1643,6 +1644,9 @@ Return STRICT JSON (no markdown, no extra text):
         query_reason = str(query.get("failure_reason") or query.get("error_context_summary") or "")
         query_issue_type = _to_descriptive_issue_type(failure_pattern, error_type).lower()
 
+        # DEBUG: Log L2 retrieval start
+        logger.info(f"[L2 Retrieval] Starting: total_records={len(self.repo_memory)} query_repo={repo} query_workflow={workflow}")
+
         # Build per-file structured block from relevant_files_details.
         # For each file: file_path + issue_type + per-file tools + per-file cmds.
         # This is the "PER FILE INFO" part of the L2 query:
@@ -1674,16 +1678,25 @@ Return STRICT JSON (no markdown, no extra text):
         ] if x)
 
         scored: List[Dict[str, Any]] = []
+        filtered_repo = 0
+        filtered_workflow = 0
+
         for row in self.repo_memory:
             # L2: Filter by repo AND workflow to keep searches within the same repo+workflow context
             # Use fuzzy repo matching to handle "owner/repo" vs "repo" format inconsistencies
             if repo:
                 row_repo = str(row.get("repo") or "")
                 if not _repo_matches(repo, row_repo):
+                    filtered_repo += 1
                     continue
             if workflow:
-                row_workflow = str(row.get("workflow_path") or row.get("workflow_name") or "")
+                # Check multiple field names: workflow_path, workflow_name, or workflow
+                row_workflow = str(row.get("workflow_path") or row.get("workflow_name") or row.get("workflow") or "")
+                # DEBUG: Log workflow comparison
+                if len(self.repo_memory) <= 5:  # Only log if few records
+                    logger.info(f"[L2 Retrieval] Comparing: query_workflow='{workflow}' vs row_workflow='{row_workflow}'")
                 if row_workflow and row_workflow != workflow:
+                    filtered_workflow += 1
                     continue
 
             row_error = str(row.get("error_type") or "").lower()
@@ -1741,6 +1754,9 @@ Return STRICT JSON (no markdown, no extra text):
                     },
                 }
             )
+
+        # DEBUG: Log filtering results
+        logger.info(f"[L2 Retrieval] Filtering: total={len(self.repo_memory)} filtered_repo={filtered_repo} filtered_workflow={filtered_workflow} scored={len(scored)}")
 
         return self._similar_matches(scored)
 
