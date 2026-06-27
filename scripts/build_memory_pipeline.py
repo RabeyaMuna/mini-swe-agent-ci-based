@@ -22,6 +22,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Dict, List
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 # Import simple LLM for decomposition (NOT the mini-swe-agent one with tool parsing)
 from decompose_ci_failure import LitellmModel
+from build_clean_memory import build_clean_l1, build_clean_l2
+
 try:
     # Try to use enhanced decomposition
     from integrate_ci_enhancements import decompose_issue_enhanced as decompose_issue
@@ -144,6 +147,216 @@ def decompose_issues(raw_issues: list, llm, decomposed_output: Path, reuse_decom
     print(f"Successful: {len(results) - len(errors)}")
     print(f"Errors: {len(errors)}")
     return results
+
+
+def build_simple_l2(issues: List[Dict]) -> List[Dict]:
+    """Build SIMPLE L2 repair trajectory - not complicated!"""
+    from collections import defaultdict
+
+    l2_entries = []
+
+    for issue in issues:
+        if "error" in issue:
+            continue
+
+        problems = issue.get("problems", [])
+        if not problems:
+            continue
+
+        # Sort by validation_order to get sequence
+        sorted_problems = sorted(problems, key=lambda p: p.get("validation_order", 999))
+
+        # Group by validation command
+        groups = defaultdict(list)
+        for p in sorted_problems:
+            key = (p.get("validation_order", 999), p.get("validation_cmd", ""))
+            groups[key].append(p)
+
+        # Build simple steps
+        trajectory = []
+        for step_num, (key, group) in enumerate(sorted(groups.items()), 1):
+            val_order, val_cmd = key
+
+            # Get all files
+            all_files = []
+            for p in group:
+                all_files.extend(p.get("affected_files", []))
+            all_files = list(dict.fromkeys(all_files))
+
+            # Simple problem description
+            rep = group[0]
+            problem = rep.get("problem", "")[:200]
+            fix = rep.get("how_fixed", "")[:200]
+
+            if len(group) > 1:
+                problem += f" ({len(group)} related issues)"
+
+            trajectory.append({
+                "step": step_num,
+                "type": "primary" if step_num == 1 else "hidden",
+                "validation": val_cmd,
+                "files": len(all_files),
+                "problem": problem,
+                "fix": fix,
+                "revealed_by": None if step_num == 1 else sorted(groups.items())[step_num-2][1][0].get("validation_cmd", "")
+            })
+
+        l2_entries.append({
+            "issue_id": issue.get("original_issue_id", ""),
+            "repo": issue.get("repo", ""),
+            "total_problems": len(problems),
+            "repair_steps": len(trajectory),
+            "repair_trajectory": trajectory
+        })
+
+    return l2_entries
+
+
+def build_l3_patterns(issues: List[Dict], llm) -> List[Dict]:
+    """Build L3 universal patterns from problems using LLM analysis."""
+    import re
+    from collections import defaultdict
+
+    print("\n  Extracting universal patterns from problems...")
+
+    # Collect all problems
+    all_problems = []
+    for issue in issues:
+        if "error" not in issue:
+            all_problems.extend(issue.get("problems", []))
+
+    if not all_problems:
+        return []
+
+    # Group by validation_cmd + failure_type
+    groups = defaultdict(list)
+    for p in all_problems:
+        key = (p.get("validation_cmd", "unknown"), p.get("failure_type", "unknown"))
+        groups[key].append(p)
+
+    print(f"  Analyzing {len(all_problems)} problems across {len(groups)} validation groups...")
+
+    patterns = []
+    idx = 1
+
+    for (val_cmd, failure_type), group_problems in groups.items():
+        if len(group_problems) == 0:
+            continue
+
+        # Prepare summaries (remove file-specific details)
+        summaries = []
+        for p in group_problems[:50]:
+            def remove_specifics(text):
+                if not text:
+                    return ""
+                text = re.sub(r'\b[\w/-]+\.(rst|py|toml|md|txt|json|yaml|yml)\b', '[FILE]', text)
+                text = re.sub(r'\bline\s+\d+\b', 'line [N]', text)
+                return text.strip()
+
+            summaries.append({
+                "issue_type": p.get("issue_type", ""),
+                "problem": remove_specifics(p.get("problem", ""))[:200],
+                "root_cause": remove_specifics(p.get("root_cause", ""))[:200],
+                "how_fixed": remove_specifics(p.get("how_fixed", ""))[:200]
+            })
+
+        prompt = f"""Analyze {len(group_problems)} similar CI failures and create ONE UNIVERSAL pattern.
+
+VALIDATION: {val_cmd}
+FAILURE CATEGORY: {failure_type}
+
+EXAMPLES:
+{json.dumps(summaries, indent=2)[:3000]}
+
+Create a UNIVERSAL pattern applicable to ANY repository.
+
+RULES:
+1. MERGE ALL VARIANTS into one pattern
+2. REMOVE ALL SPECIFICS (no file paths, directory names)
+3. GENERALIZE TOOLS ("mypy" → "type checker")
+4. FOCUS ON PATTERN (what is the underlying problem?)
+5. LIST ALL VARIANTS in failure_patterns
+
+Return JSON:
+{{
+  "pattern_name": "Title Case Name",
+  "failure_type": "{failure_type}",
+  "issue_type": "Category",
+  "validation_cmd": "Tool category",
+  "problem": "Universal description",
+  "failure_patterns": ["Pattern 1", "Pattern 2"],
+  "fix_approach": ["Fix step 1", "Fix step 2"],
+  "dependent_issues": ["Related issue 1"]
+}}
+
+Keep CONCISE (max 1500 tokens)."""
+
+        try:
+            import litellm
+            response = litellm.completion(
+                model=llm.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=2000,
+            )
+            content = response.choices[0].message.content or ""
+
+            if not content or len(content.strip()) < 50:
+                raise ValueError("Empty LLM response")
+
+            # Parse JSON
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+
+            content = re.sub(r'//.*?\n', '\n', content)
+            content = re.sub(r',(\s*[}\]])', r'\1', content)
+
+            pattern_data = json.loads(content)
+
+            patterns.append({
+                "pattern_id": f"P{idx:03d}",
+                "pattern_name": pattern_data.get("pattern_name", "Unknown"),
+                "failure_type": pattern_data.get("failure_type", failure_type),
+                "issue_type": pattern_data.get("issue_type", ""),
+                "validation_cmd": pattern_data.get("validation_cmd", val_cmd),
+                "problem": pattern_data.get("problem", ""),
+                "failure_patterns": pattern_data.get("failure_patterns", []),
+                "fix_approach": pattern_data.get("fix_approach", []),
+                "dependent_issues": pattern_data.get("dependent_issues", []),
+                "occurrences": len(group_problems)
+            })
+            print(f"    ✓ P{idx:03d}: {pattern_data.get('pattern_name', 'Unknown')} ({len(group_problems)} cases)")
+            idx += 1
+
+        except Exception as e:
+            print(f"    ⚠ Failed to create pattern for {failure_type}: {str(e)[:50]}")
+            # Fallback: create basic pattern
+            rep = group_problems[0]
+            def remove_specifics(text):
+                if not text:
+                    return ""
+                text = re.sub(r'\b[\w/-]+\.(rst|py|toml|md|txt|json|yaml|yml)\b', '[FILE]', text)
+                return text.strip()
+
+            patterns.append({
+                "pattern_id": f"P{idx:03d}",
+                "pattern_name": f"{failure_type} Validation Failure",
+                "failure_type": failure_type,
+                "issue_type": rep.get("issue_type", ""),
+                "validation_cmd": val_cmd,
+                "problem": remove_specifics(rep.get("problem", ""))[:300],
+                "failure_patterns": [remove_specifics(rep.get("problem", ""))[:200]],
+                "fix_approach": [remove_specifics(rep.get("how_fixed", ""))[:200]],
+                "dependent_issues": [],
+                "occurrences": len(group_problems)
+            })
+            print(f"    ✓ P{idx:03d}: {failure_type} ({len(group_problems)} cases) [FALLBACK]")
+            idx += 1
+
+    print(f"  OK Created {len(patterns)} universal patterns")
+    return patterns
 
 
 def main():
@@ -265,18 +478,17 @@ def main():
     print("="*80)
 
     from integrate_dependencies import (
-        phase1_extract_code_changes,
+        phase1_verify_code_changes,
         phase2_analyze_dependencies
     )
 
-    # Phase 1: Extract code changes (deterministic, always run)
-    print("Phase 1: Extracting detailed code changes from validation groups...")
-    decomposed_issues = phase1_extract_code_changes(decomposed_issues)
+    # Phase 1: Verify code changes (deterministic, always run)
+    print("Phase 1: Verifying detailed code changes from validation groups...")
+    decomposed_issues = phase1_verify_code_changes(decomposed_issues)
 
     # Phase 2: Analyze cross-problem dependencies (LLM-based)
     print("\nPhase 2: Analyzing cross-problem dependencies...")
-    from build_memory_from_decomposed import SimpleLLM
-    llm_for_deps = SimpleLLM(args.model)
+    llm_for_deps = LitellmModel(args.model)
     decomposed_issues = phase2_analyze_dependencies(decomposed_issues, llm_for_deps)
 
     # Save enhanced decomposed issues (overwrites with dependency info)
@@ -296,21 +508,18 @@ def main():
     print("  - What this file enables/depends on")
     print("  - Repair order")
 
-    from integrate_dependencies import phase3_enhance_l1
-    l1_memories = phase3_enhance_l1(decomposed_issues)
-
-    # STEP 3: Build ENHANCED L2 memory (with problem groups and repair sequence)
+    # STEP 3: Build CLEAN L1/L2 with NO DATA LOSS
     print("\n" + "="*80)
-    print("STEP 3: BUILD L2 (per-issue memory with problem groups)")
+    print("BUILDING CLEAN L1/L2")
     print("="*80)
-    print("Enhanced format:")
-    print("  - Atomic problems with code_changes")
-    print("  - Problem groups (foundational, dependent)")
-    print("  - Dependency graph")
-    print("  - Repair sequence")
+    print("Preserves ALL information from decomposition:")
+    print("  - problem, root_cause, how_fixed, why_fix_works")
+    print("  - Serial order by validation_order")
+    print("  - ALL problems per step (not just first!)")
+    print("  - Dependency chains (enables/enabled_by)")
 
-    from integrate_dependencies import phase4_enhance_l2
-    l2_memories = phase4_enhance_l2(decomposed_issues)
+    l1_memories = build_clean_l1(decomposed_issues)
+    l2_memories = build_clean_l2(decomposed_issues)
 
     # STEP 4: Build ENHANCED L3 memory (with dependency patterns)
     print("\n" + "="*80)
@@ -321,8 +530,8 @@ def main():
     print("  - Cross-issue dependency patterns")
     print("  - Repair strategies")
 
-    from integrate_dependencies import phase5_enhance_l3
-    l3_principles = phase5_enhance_l3(decomposed_issues, llm)
+    # Build L3 universal patterns from problems (not just cross-issue deps)
+    l3_principles = build_l3_patterns(decomposed_issues, llm)
 
     # STEP 5: Save output
     print("\n" + "="*80)
