@@ -31,6 +31,11 @@ from minisweagent.run.benchmarks.utils.ci_memory_llm_analysis import (
   llm_analyze_l2_for_consecutive,
 )
 
+# Import new staged analysis pipeline
+from minisweagent.run.benchmarks.utils.ci_memory_staged_analysis import (
+  staged_memory_analysis,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Universal LLM caller
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1604,6 +1609,71 @@ JSON Response:"""
 # STAIR-INSPIRED HIERARCHICAL PROBLEM PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _with_source(memory: Dict[str, Any], source: str) -> Dict[str, Any]:
+  row = dict(memory)
+  row["source"] = source
+  row.setdefault("memory_level", source)
+  return row
+
+
+def _sort_by_similarity(memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+  return sorted(memories, key=lambda row: float(row.get("similarity_score", 0.0) or 0.0), reverse=True)
+
+
+def _balanced_memories_by_source(
+  memory_result: Dict[str, Any],
+  all_memories: List[Dict[str, Any]],
+  *,
+  per_level: int = 10,
+) -> Dict[str, List[Dict[str, Any]]]:
+  by_source = {
+    "L1": [_with_source(row, "L1") for row in memory_result.get("l1_matches", [])],
+    "L2": [_with_source(row, "L2") for row in memory_result.get("l2_matches", [])],
+    "L3": [_with_source(row, "L3") for row in memory_result.get("l3_matches", [])],
+  }
+
+  if not any(by_source.values()):
+    for row in all_memories:
+      source = str(row.get("source") or row.get("memory_level") or "").upper()
+      if source in by_source:
+        by_source[source].append(_with_source(row, source))
+
+  return {
+    source: _sort_by_similarity(rows)[:per_level]
+    for source, rows in by_source.items()
+  }
+
+
+def _normalize_separate_problem(problem: Dict[str, Any], validation_sequence: List[Dict[str, Any]]) -> Dict[str, Any]:
+  normalized = dict(problem)
+  validation_cmd = str(
+    normalized.get("validation_cmd")
+    or normalized.get("verification_cmd")
+    or ""
+  ).strip()
+
+  if not validation_cmd and normalized.get("validation_stage"):
+    validation_cmd = _get_validation_cmd(str(normalized.get("validation_stage")), validation_sequence)
+
+  if not validation_cmd:
+    failed_stage = _get_current_failure_stage(
+      [str(normalized.get("validation_stage") or normalized.get("description") or "")],
+      validation_sequence,
+    )
+    if failed_stage:
+      validation_cmd = str(failed_stage.get("validation_cmd") or "")
+      normalized.setdefault("validation_stage", failed_stage.get("validates", ""))
+      normalized.setdefault("validation_order", failed_stage.get("order", 999))
+
+  normalized["validation_cmd"] = validation_cmd
+  normalized["verification_cmd"] = validation_cmd
+  normalized["check_first"] = bool(normalized.get("check_first", not normalized.get("is_primary", False)))
+  normalized.setdefault("is_primary", normalized.get("problem_id") == 1)
+  normalized.setdefault("status", "confirmed" if normalized.get("is_primary") else "predicted")
+  normalized.setdefault("source", normalized.get("memory_level") or "CI")
+  return normalized
+
+
 def _hierarchical_problem_pipeline(
   all_memories: List[Dict[str, Any]],
   memory_result: Dict[str, Any],
@@ -1629,18 +1699,21 @@ def _hierarchical_problem_pipeline(
   Returns: List of separate problems for sequential repair
   """
 
-  # Step 1: Top-15 retrieval
-  logger.info("[Pipeline Step 1] Top-15 cosine similarity retrieval")
-  top_15 = sorted(all_memories, key=lambda x: x.get("similarity_score", 0.0), reverse=True)[:15]
+  # Step 1: balanced per-level retrieval.
+  # The memory plugin already returns top matches per level. Do not re-sort all
+  # levels into one global top-N list here, because L1 commonly dominates by
+  # similarity and prevents L2/L3 trajectory/pattern evidence from reaching the
+  # LLM.
+  logger.info("[Pipeline Step 1] Balanced top-10 retrieval per memory level")
+  by_source = _balanced_memories_by_source(memory_result, all_memories, per_level=10)
+  balanced_memories = by_source["L1"] + by_source["L2"] + by_source["L3"]
 
-  # Organize by source
-  by_source = {"L1": [], "L2": [], "L3": []}
-  for mem in top_15:
-    source = mem.get("source", "L1")
-    if source in by_source:
-      by_source[source].append(mem)
-
-  logger.info(f"  Top-15 by source: L1={len(by_source['L1'])}, L2={len(by_source['L2'])}, L3={len(by_source['L3'])}")
+  logger.info(
+    "  Balanced by source: L1=%d, L2=%d, L3=%d",
+    len(by_source["L1"]),
+    len(by_source["L2"]),
+    len(by_source["L3"]),
+  )
 
   # Step 2: Find PRIMARY (L1 > L2 > L3)
   logger.info("[Pipeline Step 2] Find PRIMARY (L1 > L2 > L3)")
@@ -1672,7 +1745,7 @@ def _hierarchical_problem_pipeline(
 
   # L1: Dependent files
   if by_source["L1"]:
-    l1_consecutive = _find_consecutive_from_l1(primary, by_source["L1"], top_15)
+    l1_consecutive = _find_consecutive_from_l1(primary, by_source["L1"], balanced_memories)
     consecutive.extend(l1_consecutive)
     logger.info(f"  L1 dependent files: {len(l1_consecutive)}")
 
@@ -1782,7 +1855,10 @@ def _hierarchical_problem_pipeline(
   logger.info(f"  ╚════════════════════════════════════════════════════════════╝")
   logger.info(f"")
 
-  return problems
+  return [
+    _normalize_separate_problem(problem, validation_sequence or [])
+    for problem in problems
+  ]
 
 
 def _find_consecutive_from_l2(primary: Dict, l2_memories: List[Dict]) -> List[Dict]:
@@ -2122,22 +2198,54 @@ def _run_two_llm_gate(
     result["guidance_document"] = guidance_document
     return result
 
-  # NEW APPROACH: STAIR-inspired hierarchical selection
-  logger.info(f"[CIMemorySystem] Running STAIR-inspired pipeline on {len(all_memories)} memories")
+  # NEW APPROACH: Staged memory analysis with smart filtering
+  logger.info(f"[CIMemorySystem] Running staged memory analysis on {len(all_memories)} memories")
 
   try:
-    # Step 1-5: Run hierarchical pipeline
-    separate_problems = _hierarchical_problem_pipeline(
-      all_memories,
-      memory_result,
-      llm,
-      validation_sequence
+    # Get balanced memories per level
+    by_source = _balanced_memories_by_source(memory_result, all_memories, per_level=10)
+
+    # Step 1: Extract Problem #1 from CI failure (PRIMARY - always from CI)
+    logger.info("[Stage 0] Extracting Problem #1 from CI failure (PRIMARY)")
+    problem_1_base = _extract_current_failure_as_problem_1(memory_result, validation_sequence)
+
+    if not problem_1_base:
+      logger.warning("  No CI failure detected - cannot proceed")
+      result["use_memory"] = False
+      result["separate_problems"] = []
+      return result
+
+    # Enrich Problem #1 with memory (L1 > L2 > L3 priority)
+    primary_memories = by_source.get("L1", []) or by_source.get("L2", []) or by_source.get("L3", [])
+    if llm and primary_memories:
+      problem_1 = llm_analyze_l1_for_problem_1(problem_1_base, primary_memories[:10], llm)
+      logger.info(f"  Problem #1 enriched with memory")
+    else:
+      problem_1 = problem_1_base
+
+    # Step 2: Run staged analysis to find consecutive problems (Problems #2-N)
+    logger.info("[Staged Pipeline] Finding consecutive problems based on Problem #1")
+    consecutive_problems = staged_memory_analysis(
+      problem_1_primary=problem_1,
+      l1_memories=by_source.get("L1", []),
+      l2_memories=by_source.get("L2", []),
+      l3_memories=by_source.get("L3", []),
+      llm=llm,
+      current_workflow_sequence=validation_sequence  # Pass current workflow
     )
+
+    # Combine: Problem #1 (PRIMARY) + Problems #2-N (CONSECUTIVE)
+    separate_problems = [problem_1] + consecutive_problems
+    logger.info(f"  Total: 1 primary + {len(consecutive_problems)} consecutive = {len(separate_problems)} problems")
 
     # Return separate problems
     result["use_memory"] = True
     result["separate_problems"] = separate_problems  # NEW: List of separate problems
-    result["relevant_candidates"] = all_memories[:15]  # Top-15
+    result["relevant_candidates"] = (
+      (memory_result.get("l1_matches", [])[:10])
+      + (memory_result.get("l2_matches", [])[:10])
+      + (memory_result.get("l3_matches", [])[:10])
+    )
     result["selected_items"] = separate_problems
     result["guidance_document"] = {
       "problems": separate_problems,
@@ -2205,7 +2313,7 @@ def format_memory_context(memory: Dict[str, Any]) -> str:
 
 def _format_separate_problems_as_markdown(problems: List[Dict[str, Any]]) -> str:
   """
-  Format separate problems from STAIR-inspired pipeline into markdown.
+  Format separate problems.
 
   Each problem is SEPARATE and will be fixed ONE AT A TIME sequentially.
   """

@@ -947,15 +947,54 @@ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat <testbed_path>/patch.txt
     return task
 
 
-def _verify_validation_passes(testbed_path: Path, validation_cmd: str, timeout: int = 300) -> bool:
+def _verify_validation_passes(
+    testbed_path: Path,
+    validation_cmd: str,
+    installation_cmd: Optional[List[str]] = None,
+    timeout: int = 300,
+    _install_cache: Optional[set] = None
+) -> bool:
     """
     Run validation command and check if it passes.
+
+    Optionally runs installation commands first (once per testbed).
+
+    Args:
+        testbed_path: Path to testbed directory
+        validation_cmd: Validation command to run
+        installation_cmd: Optional list of installation commands to run first
+        timeout: Timeout in seconds
+        _install_cache: Set to track installed testbeds (internal)
 
     Returns:
         True if validation passes (exit code 0), False otherwise
     """
     import subprocess
 
+    # Run installation commands if provided and not yet done for this testbed
+    if installation_cmd and _install_cache is not None:
+        testbed_key = str(testbed_path)
+        if testbed_key not in _install_cache:
+            logger.info(f"[CIBench] Running {len(installation_cmd)} installation command(s)...")
+            for i, install_cmd in enumerate(installation_cmd, 1):
+                try:
+                    logger.debug(f"[CIBench] Install {i}/{len(installation_cmd)}: {install_cmd[:80]}")
+                    install_result = subprocess.run(
+                        install_cmd,
+                        shell=True,
+                        cwd=str(testbed_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout * 2  # More time for installation
+                    )
+                    if install_result.returncode != 0:
+                        logger.warning(f"[CIBench] Installation command {i} failed (exit {install_result.returncode})")
+                        logger.debug(f"[CIBench] Install error: {install_result.stderr[:500]}")
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"[CIBench] Installation command {i} timed out")
+            _install_cache.add(testbed_key)
+
+    # Run validation
     try:
         result = subprocess.run(
             validation_cmd,
@@ -991,14 +1030,13 @@ def _combine_partial_fixes(partial_fixes: List[Dict[str, Any]]) -> str:
 
     unified = []
     for fix in partial_fixes:
-        problem_id = fix.get('problem_id', '?')
         patch = fix.get('patch', '')
         if patch:
-            unified.append(f"# Problem {problem_id} fix")
+            # Don't add comments - just append patch directly for valid unified diff
             unified.append(patch)
-            unified.append("")  # Blank line
 
-    return "\n".join(unified)
+    # Join with double newline to separate patches cleanly
+    return "\n\n".join(unified)
 
 
 def _run_sequential_repair(
@@ -1006,7 +1044,8 @@ def _run_sequential_repair(
     problems: List[Dict[str, Any]],
     testbed_path: Path,
     progress_manager: Any,
-    instance_id: str
+    instance_id: str,
+    installation_cmd: Optional[List[str]] = None
 ) -> Tuple[Dict[str, Any], str]:
     """
     Fix problems sequentially, one at a time.
@@ -1021,11 +1060,15 @@ def _run_sequential_repair(
     - Old format: {status, verification_cmd, validation_stage, check_first, ...}
     - New format: {problem_id, is_primary, problem_statement, repair_plan, verification}
 
+    Args:
+        installation_cmd: Optional list of installation commands to run before validation
+
     Returns:
         (info_dict, unified_diff)
     """
     partial_fixes = []
     total_problems = len(problems)
+    install_cache = set()  # Track which testbeds have been installed
 
     logger.info(f"[CIBench] Starting sequential repair: {total_problems} problems")
 
@@ -1063,7 +1106,7 @@ def _run_sequential_repair(
         # For PROBABLE problems, check if they exist first
         if check_first and validation_cmd:
             logger.info(f"[CIBench] Checking if problem exists...")
-            if _verify_validation_passes(testbed_path, validation_cmd):
+            if _verify_validation_passes(testbed_path, validation_cmd, installation_cmd, _install_cache=install_cache):
                 logger.info(f"[CIBench] OK Problem {i} does not exist (validation passes). Skipping.")
                 continue
             else:
@@ -1100,7 +1143,7 @@ def _run_sequential_repair(
             # Verify validation passes
             if validation_cmd:
                 logger.info(f"[CIBench] Verifying problem {i} fix...")
-                if _verify_validation_passes(testbed_path, validation_cmd):
+                if _verify_validation_passes(testbed_path, validation_cmd, installation_cmd, _install_cache=install_cache):
                     logger.info(f"[CIBench] OK Problem {i} FIXED! Validation passes.")
                     partial_fixes.append({
                         'problem_id': i,
@@ -1111,14 +1154,24 @@ def _run_sequential_repair(
                         'verified': True
                     })
                 else:
-                    logger.warning(f"[CIBench] FAIL Problem {i} FAILED! Validation still fails.")
+                    logger.warning(f"[CIBench] FAIL Problem {i} validation failed, but KEEPING patch")
+
+                    # KEEP the patch even if validation fails
+                    partial_fixes.append({
+                        'problem_id': i,
+                        'problem_number': problem.get('problem_number', i),
+                        'status': status,
+                        'validation_stage': stage,
+                        'patch': patch,
+                        'verified': False  # Mark as unverified
+                    })
+
                     if is_primary:
                         logger.info(f"[CIBench] PRIMARY problem failed - STOPPING sequential repair")
                         break
                     else:
-                        logger.info(f"[CIBench] Non-primary problem failed - CONTINUING to next problem")
-                        # Revert changes for failed non-primary
-                        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=testbed_path, check=False)
+                        logger.info(f"[CIBench] Non-primary problem - CONTINUING to next problem")
+                        # DO NOT revert - keep the changes!
             else:
                 logger.warning(f"[CIBench] Problem {i}: No verification command, assuming success")
                 partial_fixes.append({
@@ -1278,12 +1331,19 @@ def process_instance(
         if problems and len(problems) > 1:
             # SEQUENTIAL REPAIR MODE: Fix problems one at a time
             logger.info(f"[CIBench] Sequential repair mode: {len(problems)} problems to fix")
+
+            # Extract installation commands from CI context
+            installation_cmd = ci_ctx.get("validation_profile", {}).get("installation_cmd", [])
+            if installation_cmd:
+                logger.info(f"[CIBench] Found {len(installation_cmd)} installation command(s) from CI context")
+
             info, diff = _run_sequential_repair(
                 agent=agent,
                 problems=problems,
                 testbed_path=testbed_path,
                 progress_manager=progress_manager,
-                instance_id=instance_id
+                instance_id=instance_id,
+                installation_cmd=installation_cmd
             )
             exit_status = info.get("exit_status")
 

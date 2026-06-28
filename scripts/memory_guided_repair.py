@@ -1,575 +1,683 @@
+#!/usr/bin/env python3
 """
-Memory-Guided Sequential Repair
-Integrates with existing mini-swe-agent setup
+Memory-Guided Sequential Repair with TF-IDF Cosine Similarity
+
+ARCHITECTURE:
+1. Fetch CI failure for new issue
+2. TF-IDF cosine similarity search (top-10 from L1, L2, L3)
+3. Expand with dependency chains (enables/enabled_by)
+4. Analyze memories (similar fixes, hidden problems, patterns)
+5. Create problem list (primary + anticipated + patterns)
+6. Sequential repair (one problem at a time to mini-swe-agent)
+7. Merge patches into final diff
 
 USAGE:
     python scripts/memory_guided_repair.py <instance_id>
 
-INTEGRATION:
-    This script works with your existing setup:
-    1. Uses data/trs/ memory files (L1, L2, L3)
-    2. Generates problem statements one at a time
-    3. Saves results to results/preds.json
-
-    To integrate with your agent:
-    - Update call_mini_swe_agent() function with your agent calling logic
-    - Or use the generated prompts in data/prompts/ directory
+EXAMPLE:
+    python scripts/memory_guided_repair.py 110
 """
 
 import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
+import numpy as np
 
+# Try to import sklearn, provide helpful error if missing
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+except ImportError:
+    print("ERROR: scikit-learn not installed!")
+    print("Install with: pip install scikit-learn")
+    sys.exit(1)
 
-def load_issue(issue_id: str, data_dir: Path = Path("data")) -> Dict:
-    """Load issue from SWE-bench dataset or issue file"""
-    issue_file = data_dir / f"{issue_id}.json"
-    if issue_file.exists():
-        with open(issue_file) as f:
-            return json.load(f)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MEMORY_DIR = PROJECT_ROOT / "data/trs"
 
-    # Try loading from SWE-bench Lite dataset
-    try:
-        from datasets import load_dataset
-        ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
-        for item in ds:
-            if item["instance_id"] == issue_id:
-                return dict(item)
-    except:
-        pass
 
-    raise FileNotFoundError(f"Could not find issue {issue_id}")
+# ============================================================================
+# PHASE 1: Load Issue and Memories
+# ============================================================================
 
+def load_issue_from_cibench(instance_id: str) -> Dict:
+    """Load issue from CIBench eval_issues.json dataset"""
+    # Try eval_issues.json first (main dataset)
+    eval_issues_file = PROJECT_ROOT / "data/trs/eval_issues.json"
 
-def identify_primary_problem(issue_data: Dict, l1_problems: List[Dict]) -> Dict:
-    """
-    Identify primary CI failure from issue data.
-    Returns problem with highest similarity from L1 memory.
-    """
+    if eval_issues_file.exists():
+        with open(eval_issues_file) as f:
+            dataset = json.load(f)
 
-    repo = issue_data.get("repo", "")
-    # Extract validation commands from issue logs
-    logs = issue_data.get("test_patch", "") + issue_data.get("problem_statement", "")
+        for issue in dataset:
+            if str(issue.get("id")) == str(instance_id):
+                return issue
 
-    best_match = None
-    best_score = 0.0
+    # Try memory_seed_issues.json as fallback
+    seed_issues_file = PROJECT_ROOT / "data/trs/memory_seed_issues.json"
+    if seed_issues_file.exists():
+        with open(seed_issues_file) as f:
+            dataset = json.load(f)
 
-    for problem in l1_problems:
-        if problem.get("repo") != repo:
-            continue
+        for issue in dataset:
+            if str(issue.get("id")) == str(instance_id):
+                return issue
 
-        score = 0.0
+    raise ValueError(f"Issue {instance_id} not found in eval_issues.json or memory_seed_issues.json")
 
-        # Check if validation_cmd appears in logs
-        val_cmd = problem.get("validation_cmd", "")
-        if val_cmd and val_cmd in logs:
-            score += 0.6
 
-        # Check failure_type
-        failure_type = problem.get("failure_type", "")
-        if failure_type and failure_type in logs.lower():
-            score += 0.4
+def load_memories() -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    """Load L1, L2, L3 memories"""
+    l1_path = MEMORY_DIR / "failure_memory.json"
+    l2_path = MEMORY_DIR / "repo_memory.json"
+    l3_path = MEMORY_DIR / "cross_memory.json"
 
-        if score > best_score:
-            best_score = score
-            best_match = problem
-
-    if best_match:
-        return {
-            "problem": best_match,
-            "score": best_score,
-            "source": "L1",
-            "is_primary": True
-        }
-
-    # If no match, create from issue
-    return {
-        "problem": {
-            "repo": repo,
-            "problem": issue_data.get("problem_statement", ""),
-            "validation_cmd": "python -m pytest",
-            "files": []
-        },
-        "score": 1.0,
-        "source": "ISSUE",
-        "is_primary": True
-    }
-
-
-def calculate_similarity_score(primary_problem: Dict,
-                                candidate: Dict,
-                                l1_all: List[Dict],
-                                l2_all: List[Dict]) -> float:
-    """
-    Calculate similarity based on:
-    - Relevance: validation_cmd, failure_type match
-    - Commonality: how often pattern appears in repo history
-    - Consecutiveness: appears in same L2 sequence
-    """
-
-    primary_data = primary_problem["problem"]
-    repo = primary_data.get("repo")
-
-    # Relevance
-    relevance = 0.0
-    if candidate.get("validation_cmd") == primary_data.get("validation_cmd"):
-        relevance += 0.5
-    if candidate.get("failure_type") == primary_data.get("failure_type"):
-        relevance += 0.5
-
-    # Commonality (count in repo history)
-    commonality = 0.0
-    pattern = f"{candidate.get('validation_cmd')}:{candidate.get('failure_type')}"
-
-    l1_count = sum(1 for p in l1_all
-                   if p.get("repo") == repo and
-                   f"{p.get('validation_cmd')}:{p.get('failure_type')}" == pattern)
-
-    l2_count = 0
-    for seq in l2_all:
-        if seq.get("repo") == repo:
-            for prob in seq.get("problems", []):
-                if f"{prob.get('verification_cmd')}:{prob.get('failure_type')}" == pattern:
-                    l2_count += 1
-
-    commonality = min(l1_count / 10.0, 1.0) * 0.5 + min(l2_count / 5.0, 1.0) * 0.5
-
-    # Consecutiveness (in same L2 sequence)
-    consecutiveness = 0.0
-    for seq in l2_all:
-        if seq.get("repo") == repo:
-            problems = seq.get("problems", [])
-            has_primary = any(
-                p.get("verification_cmd") == primary_data.get("validation_cmd")
-                for p in problems
-            )
-            has_candidate = any(
-                p.get("verification_cmd") == candidate.get("validation_cmd")
-                for p in problems
-            )
-            if has_primary and has_candidate:
-                consecutiveness = 1.0
-                break
-
-    # Final score
-    return 0.3 * relevance + 0.3 * commonality + 0.4 * consecutiveness
-
-
-def select_consecutive_problems(primary: Dict,
-                                 l1: List[Dict],
-                                 l2: List[Dict],
-                                 l3: List[Dict],
-                                 threshold: float = 0.5) -> List[Dict]:
-    """Select consecutive problems based on similarity"""
-
-    candidates = []
-    repo = primary["problem"].get("repo")
-
-    # From L1
-    for problem in l1:
-        if problem.get("repo") != repo:
-            continue
-
-        score = calculate_similarity_score(primary, problem, l1, l2)
-        if score >= threshold:
-            candidates.append({
-                "problem": problem,
-                "score": score,
-                "source": "L1",
-                "is_primary": False
-            })
-
-    # From L2
-    for seq in l2:
-        if seq.get("repo") == repo:
-            for prob in seq.get("problems", []):
-                score = calculate_similarity_score(primary, prob, l1, l2)
-                if score >= threshold:
-                    candidates.append({
-                        "problem": prob,
-                        "score": score,
-                        "source": "L2",
-                        "is_primary": False
-                    })
-
-    # From L3
-    for pattern in l3:
-        score = calculate_similarity_score(primary, pattern, l1, l2)
-        if score >= threshold:
-            candidates.append({
-                "problem": pattern,
-                "score": score,
-                "source": "L3",
-                "is_primary": False
-            })
-
-    # Deduplicate by validation_cmd + failure_type
-    seen = set()
-    unique = []
-    for c in sorted(candidates, key=lambda x: x["score"], reverse=True):
-        key = f"{c['problem'].get('validation_cmd')}:{c['problem'].get('failure_type')}"
-        if key not in seen:
-            seen.add(key)
-            unique.append(c)
-
-    return unique
-
-
-def order_problems(primary: Dict, consecutive: List[Dict]) -> List[Dict]:
-    """Order problems: primary first, then by score"""
-    return [primary] + sorted(consecutive, key=lambda x: x["score"], reverse=True)
-
-
-def create_problem_statement(problem_data: Dict, issue_data: Dict, problem_id: int) -> str:
-    """Create problem statement for mini-swe-agent"""
-
-    prob = problem_data["problem"]
-
-    statement = f"""# PROBLEM {problem_id}
-
-## Issue Context
-Repository: {issue_data.get('repo', '')}
-Instance: {issue_data.get('instance_id', '')}
-
-## Original Issue
-{issue_data.get('problem_statement', '')[:500]}
-
-## Specific Problem to Fix
-{prob.get('problem', '')}
-
-## Files
-"""
-
-    files = []
-    if 'file' in prob:
-        files.append(prob['file'])
-    elif 'actual_files' in prob:
-        files = prob['actual_files'][:10]
-    elif 'files' in prob:
-        files = prob['files'][:10]
-
-    for f in files:
-        statement += f"- {f}\n"
-
-    statement += f"""
-## Repair Guidance
-"""
-
-    # Add repair guidance based on source
-    if problem_data["source"] == "L1":
-        statement += f"Fix: {prob.get('fixes', '')[:300]}\n"
-        statement += f"Why: {prob.get('why_fix', '')[:300]}\n"
-    elif problem_data["source"] == "L2":
-        statement += f"Strategy: {prob.get('fix_strategy', '')}\n"
-    elif problem_data["source"] == "L3":
-        fix = prob.get('universal_fix', {})
-        statement += f"Approach: {fix.get('approach', '')}\n"
-        statement += "\nSteps:\n"
-        for step in fix.get('steps', [])[:5]:
-            statement += f"  {step}\n"
-
-    statement += f"""
-## Verification
-Command: {prob.get('validation_cmd') or prob.get('verification_cmd', 'pytest')}
-
-This command must PASS after your fix.
-
-## Instructions
-Fix ONLY this specific problem. Do not modify unrelated code.
-"""
-
-    return statement
-
-
-def call_mini_swe_agent(problem_statement: str,
-                        instance_id: str,
-                        problem_id: int,
-                        repo_path: Optional[Path] = None) -> Dict:
-    """
-    Save problem statement for mini-swe-agent.
-    This creates the prompt that will be used by your agent.
-
-    NOTE: You should replace this function with your actual
-    mini-swe-agent calling logic if you have it.
-    """
-
-    # Save problem statement to directory where agent can read it
-    prompts_dir = Path("data/prompts")
-    prompts_dir.mkdir(parents=True, exist_ok=True)
-
-    problem_file = prompts_dir / f"{instance_id}_problem_{problem_id}.txt"
-    with open(problem_file, "w") as f:
-        f.write(problem_statement)
-
-    print(f"  Problem statement saved to: {problem_file}")
-    print(f"  You can now run your agent with this prompt")
-
-    # Placeholder - replace with your actual agent call
-    # For now, just return success so the flow continues
-    return {
-        "success": True,
-        "stdout": "Problem statement created",
-        "stderr": ""
-    }
-
-
-def get_git_diff(repo_path: Path) -> str:
-    """Get current git diff"""
-    result = subprocess.run(
-        ["git", "diff", "HEAD"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True
-    )
-    return result.stdout
-
-
-def run_validation(cmd: str, repo_path: Path) -> Dict:
-    """Run validation command"""
-    result = subprocess.run(
-        cmd.split(),
-        cwd=repo_path,
-        capture_output=True,
-        text=True
-    )
-    return {
-        "passed": result.returncode == 0,
-        "stdout": result.stdout,
-        "stderr": result.stderr
-    }
-
-
-def commit_changes(repo_path: Path, message: str):
-    """Commit changes"""
-    subprocess.run(["git", "add", "-A"], cwd=repo_path, check=True)
-    subprocess.run(["git", "commit", "-m", message], cwd=repo_path, check=True)
-
-
-def sequential_repair(issue_data: Dict,
-                      ordered_problems: List[Dict],
-                      repo_path: Path) -> Dict:
-    """Execute sequential repair, one problem at a time"""
-
-    print("\n" + "="*60)
-    print("SEQUENTIAL REPAIR")
-    print("="*60)
-
-    instance_id = issue_data["instance_id"]
-    results = []
-
-    # Save initial state
-    initial_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True
-    ).stdout.strip()
-
-    for idx, problem_data in enumerate(ordered_problems, 1):
-        print(f"\n{'='*60}")
-        print(f"PROBLEM {idx}/{len(ordered_problems)}")
-        if problem_data["is_primary"]:
-            print("[PRIMARY CI FAILURE]")
-        else:
-            print(f"[{problem_data['source']}] Score: {problem_data['score']:.2f}")
-        print("="*60)
-
-        prob = problem_data["problem"]
-        print(f"Description: {prob.get('problem', '')[:100]}")
-
-        # Create problem statement
-        statement = create_problem_statement(problem_data, issue_data, idx)
-
-        # Call mini-swe-agent
-        print("\nCalling mini-swe-agent...")
-        agent_result = call_mini_swe_agent(statement, instance_id, idx, repo_path)
-
-        if not agent_result["success"]:
-            print(f"Agent failed: {agent_result.get('error', 'Unknown')}")
-            results.append({
-                "problem_id": idx,
-                "status": "AGENT_FAILED"
-            })
-
-            if problem_data["is_primary"]:
-                print("\nPRIMARY PROBLEM FAILED - STOPPING")
-                break
-            continue
-
-        # Get diff
-        print("Collecting diff...")
-        diff = get_git_diff(repo_path)
-
-        if not diff.strip():
-            print("No changes made")
-            results.append({
-                "problem_id": idx,
-                "status": "NO_CHANGES"
-            })
-            continue
-
-        # Verify
-        val_cmd = prob.get("validation_cmd") or prob.get("verification_cmd", "pytest")
-        print(f"Verifying: {val_cmd}")
-
-        validation = run_validation(val_cmd, repo_path)
-        status = "PASS" if validation["passed"] else "FAIL"
-
-        print(f"Status: {status}")
-
-        results.append({
-            "problem_id": idx,
-            "is_primary": problem_data["is_primary"],
-            "status": status
-        })
-
-        if status == "PASS":
-            commit_changes(repo_path, f"Fix problem {idx}")
-            print("Changes committed")
-        else:
-            if problem_data["is_primary"]:
-                print("\nPRIMARY PROBLEM FAILED - STOPPING")
-                break
-            else:
-                print("Reverting, continuing...")
-                subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo_path)
-
-    # Get unified diff
-    print(f"\n{'='*60}")
-    print("GENERATING UNIFIED DIFF")
-    print("="*60)
-
-    final_diff = subprocess.run(
-        ["git", "diff", initial_commit, "HEAD"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True
-    ).stdout
-
-    print(f"Unified diff: {len(final_diff)} chars")
-
-    return {
-        "model_patch": final_diff,
-        "results": results,
-        "problems_fixed": len([r for r in results if r["status"] == "PASS"]),
-        "total_problems": len(results),
-        "primary_status": next((r["status"] for r in results if r.get("is_primary")), "NOT_FOUND")
-    }
-
-
-def save_to_preds(issue_data: Dict, repair_result: Dict, output_path: Path):
-    """Save to results/preds.json"""
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Load existing
-    if output_path.exists():
-        with open(output_path) as f:
-            try:
-                existing = json.load(f)
-                if not isinstance(existing, list):
-                    existing = [existing]
-            except:
-                existing = []
-    else:
-        existing = []
-
-    # Create entry
-    entry = {
-        "instance_id": issue_data["instance_id"],
-        "model_patch": repair_result["model_patch"],
-        "model_name_or_path": "memory-guided-repair"
-    }
-
-    # Update or append
-    found = False
-    for i, e in enumerate(existing):
-        if e.get("instance_id") == entry["instance_id"]:
-            existing[i] = entry
-            found = True
-            break
-
-    if not found:
-        existing.append(entry)
-
-    # Save
-    with open(output_path, "w") as f:
-        json.dump(existing, f, indent=2)
-
-    print(f"\nSaved to: {output_path}")
-
-
-def main(issue_id: str):
-    """Main entry point"""
-
-    # Use default paths
-    memory_dir = Path("data/trs")
-    output_path = Path("results/preds.json")
-
-    print("="*60)
-    print("MEMORY-GUIDED SEQUENTIAL REPAIR")
-    print("="*60)
-    print(f"Issue: {issue_id}")
-
-    # Load issue
-    issue_data = load_issue(issue_id)
-    repo_path = Path(issue_data.get("repo_path", f"repos/{issue_data['repo']}"))
-
-    print(f"Repo: {issue_data.get('repo')}")
-
-    # Load memory
-    print("\nLoading memory...")
-    with open(memory_dir / "failure_memory.json") as f:
+    with open(l1_path) as f:
         l1 = json.load(f)
-    with open(memory_dir / "repo_memory.json") as f:
+
+    with open(l2_path) as f:
         l2 = json.load(f)
-    with open(memory_dir / "cross_memory.json") as f:
+
+    with open(l3_path) as f:
         l3 = json.load(f)
 
-    print(f"  L1: {len(l1)} problems")
-    print(f"  L2: {len(l2)} sequences")
-    print(f"  L3: {len(l3)} patterns")
+    return l1, l2, l3
 
-    # Identify primary
-    print("\n[1/4] Identifying PRIMARY problem...")
-    primary = identify_primary_problem(issue_data, l1)
-    print(f"  Source: {primary['source']}")
-    print(f"  Score: {primary['score']:.2f}")
 
-    # Select consecutive
-    print("\n[2/4] Selecting consecutive problems...")
-    consecutive = select_consecutive_problems(primary, l1, l2, l3)
-    print(f"  Found: {len(consecutive)} problems")
+def extract_ci_features(issue: Dict) -> Dict:
+    """Extract features from CI failure"""
+    problem_statement = issue.get("problem_statement", "")
+    test_patch = issue.get("test_patch", "")
 
-    # Order
-    print("\n[3/4] Ordering problems...")
-    ordered = order_problems(primary, consecutive)
+    # Combine all text for analysis
+    full_text = f"{problem_statement} {test_patch}"
 
-    print("\n  Repair sequence:")
-    for i, p in enumerate(ordered, 1):
-        marker = "PRIMARY" if p["is_primary"] else p["source"]
-        print(f"    {i}. [{marker:8}] Score: {p['score']:.2f}")
+    return {
+        'instance_id': issue.get('id'),
+        'repo': issue.get('repo', ''),
+        'problem_description': problem_statement,
+        'test_patch': test_patch,
+        'full_text': full_text
+    }
 
-    # Sequential repair
-    print("\n[4/4] Executing repair...")
-    result = sequential_repair(issue_data, ordered, repo_path)
 
-    # Save
-    save_to_preds(issue_data, result, output_path)
+# ============================================================================
+# PHASE 2: TF-IDF Cosine Similarity Search
+# ============================================================================
 
-    print("\n" + "="*60)
-    print("REPAIR COMPLETE")
-    print("="*60)
-    print(f"Primary: {result['primary_status']}")
-    print(f"Fixed: {result['problems_fixed']}/{result['total_problems']}")
+def build_search_corpus(l1: List[Dict], l2: List[Dict], l3: List[Dict]) -> Tuple[List[str], List[Dict]]:
+    """
+    Build search corpus from L1, L2, L3 memories.
+
+    Returns:
+        corpus_texts: List of text strings for TF-IDF
+        corpus_metadata: List of dicts with {source, level, data, index}
+    """
+    corpus_texts = []
+    corpus_metadata = []
+
+    # L1: Per-file problems
+    for i, entry in enumerate(l1):
+        text = f"{entry.get('problem', '')} {entry.get('root_cause', '')} {entry.get('how_fixed', '')} {entry.get('failure_type', '')} {entry.get('issue_type', '')} {entry.get('validation_cmd', '')}"
+        corpus_texts.append(text)
+        corpus_metadata.append({
+            'level': 'L1',
+            'source': 'per_file',
+            'data': entry,
+            'index': i
+        })
+
+    # L2: Repair trajectories (each step's problems)
+    for i, trajectory in enumerate(l2):
+        for step in trajectory.get('repair_trajectory', []):
+            for prob in step.get('problems', []):
+                text = f"{prob.get('problem', '')} {prob.get('root_cause', '')} {prob.get('how_fixed', '')} {step.get('failure_type', '')} {prob.get('issue_type', '')} {step.get('validation_cmd', '')}"
+                corpus_texts.append(text)
+                corpus_metadata.append({
+                    'level': 'L2',
+                    'source': 'trajectory',
+                    'data': {
+                        'trajectory': trajectory,
+                        'step': step,
+                        'problem': prob
+                    },
+                    'index': i
+                })
+
+    # L3: Universal patterns
+    for i, pattern in enumerate(l3):
+        failure_patterns_text = ' '.join(pattern.get('failure_patterns', []))
+        fix_approach = pattern.get('fix_approach', [])
+        # fix_approach can be list of strings or list of dicts
+        if fix_approach and isinstance(fix_approach[0], dict):
+            fix_approach_text = ' '.join([item.get('approach', '') for item in fix_approach])
+        else:
+            fix_approach_text = ' '.join(fix_approach) if isinstance(fix_approach, list) else str(fix_approach)
+
+        text = f"{pattern.get('pattern_name', '')} {failure_patterns_text} {fix_approach_text}"
+        corpus_texts.append(text)
+        corpus_metadata.append({
+            'level': 'L3',
+            'source': 'pattern',
+            'data': pattern,
+            'index': i
+        })
+
+    return corpus_texts, corpus_metadata
+
+
+def cosine_similarity_search(query: str, l1: List[Dict], l2: List[Dict], l3: List[Dict], top_k: int = 10) -> Dict:
+    """
+    Search using TF-IDF + Cosine Similarity.
+
+    Returns top-k most similar from each level.
+    """
+    print(f"\n{'='*80}")
+    print("PHASE 2: TF-IDF COSINE SIMILARITY SEARCH")
+    print(f"{'='*80}")
+
+    # Build corpus
+    corpus_texts, corpus_metadata = build_search_corpus(l1, l2, l3)
+
+    print(f"Corpus size: {len(corpus_texts)} entries")
+    print(f"  L1: {len(l1)}")
+    print(f"  L2: {sum(len(t['repair_trajectory']) for t in l2)} steps")
+    print(f"  L3: {len(l3)}")
+
+    # TF-IDF vectorization
+    all_texts = [query] + corpus_texts
+    vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
+
+    try:
+        vectors = vectorizer.fit_transform(all_texts)
+    except ValueError as e:
+        print(f"WARNING: TF-IDF failed: {e}")
+        print("Falling back to empty results")
+        return {'top_l1': [], 'top_l2': [], 'top_l3': []}
+
+    query_vector = vectors[0:1]
+    corpus_vectors = vectors[1:]
+
+    # Calculate similarities
+    similarities = cosine_similarity(query_vector, corpus_vectors)[0]
+
+    # Separate by level
+    l1_results = []
+    l2_results = []
+    l3_results = []
+
+    for i, (score, meta) in enumerate(zip(similarities, corpus_metadata)):
+        result = {'score': float(score), **meta}
+
+        if meta['level'] == 'L1':
+            l1_results.append(result)
+        elif meta['level'] == 'L2':
+            l2_results.append(result)
+        elif meta['level'] == 'L3':
+            l3_results.append(result)
+
+    # Sort and get top-k
+    l1_results.sort(key=lambda x: x['score'], reverse=True)
+    l2_results.sort(key=lambda x: x['score'], reverse=True)
+    l3_results.sort(key=lambda x: x['score'], reverse=True)
+
+    top_l1 = l1_results[:top_k]
+    top_l2 = l2_results[:top_k]
+    top_l3 = l3_results[:top_k]
+
+    print(f"\nTop-{top_k} retrieval:")
+    print(f"  L1: {len(top_l1)} entries (avg score: {np.mean([r['score'] for r in top_l1]):.3f})")
+    print(f"  L2: {len(top_l2)} entries (avg score: {np.mean([r['score'] for r in top_l2]):.3f})")
+    print(f"  L3: {len(top_l3)} entries (avg score: {np.mean([r['score'] for r in top_l3]):.3f})")
+
+    return {
+        'top_l1': top_l1,
+        'top_l2': top_l2,
+        'top_l3': top_l3
+    }
+
+
+# ============================================================================
+# PHASE 3: Expand with Dependencies
+# ============================================================================
+
+def expand_with_dependencies(top_l1: List[Dict], l1_memory: List[Dict]) -> List[Dict]:
+    """
+    Expand L1 results by following enables/enabled_by chains.
+    """
+    print(f"\n{'='*80}")
+    print("PHASE 3: EXPAND WITH DEPENDENCIES")
+    print(f"{'='*80}")
+
+    expanded = []
+    seen_ids = set()
+
+    # Create lookup by problem_id
+    l1_by_problem_id = {}
+    for entry in l1_memory:
+        problem_id = entry.get('problem_id')
+        if problem_id:
+            l1_by_problem_id[problem_id] = entry
+
+    def add_with_deps(result: Dict):
+        entry = result['data']
+        problem_id = entry.get('problem_id')
+
+        if problem_id in seen_ids:
+            return
+
+        seen_ids.add(problem_id)
+        expanded.append(result)
+
+        # Add enabled problems
+        for enabled_ref in entry.get('enables', []):
+            # enabled_ref format: "problem_1", "problem_2", etc.
+            enabled_id = int(enabled_ref.split('_')[1]) if '_' in enabled_ref else None
+            if enabled_id and enabled_id in l1_by_problem_id:
+                enabled_entry = l1_by_problem_id[enabled_id]
+                add_with_deps({
+                    'score': result['score'] * 0.9,  # Slightly lower score
+                    'level': 'L1',
+                    'source': 'dependency_enabled',
+                    'data': enabled_entry,
+                    'index': enabled_id
+                })
+
+        # Add enabling problems
+        for enabling_ref in entry.get('enabled_by', []):
+            enabling_id = int(enabling_ref.split('_')[1]) if '_' in enabling_ref else None
+            if enabling_id and enabling_id in l1_by_problem_id:
+                enabling_entry = l1_by_problem_id[enabling_id]
+                add_with_deps({
+                    'score': result['score'] * 0.9,
+                    'level': 'L1',
+                    'source': 'dependency_enabler',
+                    'data': enabling_entry,
+                    'index': enabling_id
+                })
+
+    # Add each top result with its dependencies
+    for result in top_l1:
+        add_with_deps(result)
+
+    print(f"Expanded from {len(top_l1)} to {len(expanded)} L1 entries")
+    print(f"  Direct matches: {len(top_l1)}")
+    print(f"  Dependencies: {len(expanded) - len(top_l1)}")
+
+    return expanded
+
+
+# ============================================================================
+# PHASE 4: Analyze Memories
+# ============================================================================
+
+def analyze_memories(expanded_l1: List[Dict], top_l2: List[Dict], top_l3: List[Dict]) -> Dict:
+    """
+    Analyze retrieved memories to extract actionable insights.
+    """
+    print(f"\n{'='*80}")
+    print("PHASE 4: ANALYZE MEMORIES")
+    print(f"{'='*80}")
+
+    analysis = {
+        'l1_similar_problems': [],
+        'l1_common_files': set(),
+        'l1_common_fixes': [],
+        'l2_repair_sequences': [],
+        'l2_hidden_problems': [],
+        'l3_patterns': [],
+        'l3_dependent_issues': set()
+    }
+
+    # L1 Analysis
+    print("\nL1 Analysis:")
+    for result in expanded_l1[:10]:  # Top 10 + dependencies
+        entry = result['data']
+        analysis['l1_similar_problems'].append({
+            'problem': entry.get('problem', ''),
+            'root_cause': entry.get('root_cause', ''),
+            'how_fixed': entry.get('how_fixed', ''),
+            'why_fix_works': entry.get('why_fix_works', ''),
+            'score': result['score']
+        })
+
+        file_path = entry.get('file', '')
+        if file_path and file_path != '<no specific file>':
+            analysis['l1_common_files'].add(file_path)
+
+        how_fixed = entry.get('how_fixed', '')
+        if how_fixed:
+            analysis['l1_common_fixes'].append(how_fixed)
+
+    print(f"  Similar problems: {len(analysis['l1_similar_problems'])}")
+    print(f"  Common files: {len(analysis['l1_common_files'])}")
+    print(f"  Fix strategies: {len(analysis['l1_common_fixes'])}")
+
+    # L2 Analysis
+    print("\nL2 Analysis:")
+    seen_trajectories = set()
+
+    for result in top_l2[:10]:
+        trajectory = result['data']['trajectory']
+        trajectory_id = trajectory.get('issue_id')
+
+        if trajectory_id in seen_trajectories:
+            continue
+        seen_trajectories.add(trajectory_id)
+
+        repair_trajectory = trajectory.get('repair_trajectory', [])
+
+        if repair_trajectory:
+            analysis['l2_repair_sequences'].append({
+                'issue_id': trajectory_id,
+                'primary_problem': repair_trajectory[0],
+                'hidden_problems': repair_trajectory[1:],
+                'total_steps': len(repair_trajectory),
+                'score': result['score']
+            })
+
+            # Extract hidden problems
+            for hidden_step in repair_trajectory[1:]:
+                for prob in hidden_step.get('problems', []):
+                    analysis['l2_hidden_problems'].append({
+                        'problem': prob.get('problem', ''),
+                        'root_cause': prob.get('root_cause', ''),
+                        'how_fixed': prob.get('how_fixed', ''),
+                        'revealed_by': hidden_step.get('revealed_by', ''),
+                        'validation_cmd': hidden_step.get('validation_cmd', '')
+                    })
+
+    print(f"  Repair sequences: {len(analysis['l2_repair_sequences'])}")
+    print(f"  Anticipated hidden problems: {len(analysis['l2_hidden_problems'])}")
+
+    # L3 Analysis
+    print("\nL3 Analysis:")
+    for result in top_l3[:10]:
+        pattern = result['data']
+        analysis['l3_patterns'].append({
+            'pattern_name': pattern.get('pattern_name', ''),
+            'failure_patterns': pattern.get('failure_patterns', []),
+            'fix_approach': pattern.get('fix_approach', []),
+            'score': result['score']
+        })
+
+    print(f"  Universal patterns: {len(analysis['l3_patterns'])}")
+
+    return analysis
+
+
+# ============================================================================
+# PHASE 5: Create Problem List
+# ============================================================================
+
+def create_problem_list(ci_features: Dict, analysis: Dict) -> List[Dict]:
+    """
+    Create prioritized problem list from CI failure and memory analysis.
+    """
+    print(f"\n{'='*80}")
+    print("PHASE 5: CREATE PROBLEM LIST")
+    print(f"{'='*80}")
+
+    problems = []
+
+    # 1. Primary problem from CI failure
+    problems.append({
+        'id': 'P0',
+        'type': 'primary',
+        'priority': 1,
+        'problem': ci_features['problem_description'],
+        'context': {
+            'similar_problems': analysis['l1_similar_problems'][:3],
+            'similar_fixes': analysis['l1_common_fixes'][:3],
+            'common_files': list(analysis['l1_common_files'])[:10]
+        }
+    })
+
+    print(f"\n1. Primary problem: P0")
+    print(f"   {ci_features['problem_description'][:100]}...")
+
+    # 2. Anticipated hidden problems from L2 trajectories
+    print(f"\n2. Anticipated hidden problems from L2:")
+    for i, hidden in enumerate(analysis['l2_hidden_problems'][:5], 1):
+        problems.append({
+            'id': f'H{i}',
+            'type': 'hidden_anticipated',
+            'priority': 2,
+            'problem': hidden['problem'],
+            'root_cause': hidden['root_cause'],
+            'how_fixed': hidden['how_fixed'],
+            'revealed_by': hidden['revealed_by'],
+            'validation_cmd': hidden['validation_cmd'],
+            'context': {
+                'repair_sequences': analysis['l2_repair_sequences'][:2]
+            }
+        })
+        print(f"   H{i}: {hidden['problem'][:80]}...")
+
+    # 3. Pattern-based problems from L3
+    print(f"\n3. Pattern-based problems from L3:")
+    for i, pattern in enumerate(analysis['l3_patterns'][:3], 1):
+        # Extract first failure pattern and fix approach
+        failure_pattern = pattern['failure_patterns'][0] if pattern['failure_patterns'] else ''
+        fix_approach_list = pattern.get('fix_approach', [])
+
+        # fix_approach can be list of strings or list of dicts
+        if fix_approach_list:
+            if isinstance(fix_approach_list[0], dict):
+                fix_approach_text = fix_approach_list[0].get('approach', '')
+            else:
+                fix_approach_text = fix_approach_list[0]
+        else:
+            fix_approach_text = ''
+
+        problems.append({
+            'id': f'D{i}',
+            'type': 'pattern_based',
+            'priority': 3,
+            'problem': f"{pattern['pattern_name']}: {failure_pattern}",
+            'fix_approach': fix_approach_text,
+            'context': {
+                'pattern': pattern
+            }
+        })
+        print(f"   D{i}: {pattern['pattern_name']}")
+
+    print(f"\nTotal problems to solve: {len(problems)}")
+    return problems
+
+
+# ============================================================================
+# PHASE 6: Sequential Repair (Placeholder for mini-swe-agent integration)
+# ============================================================================
+
+def call_mini_swe_agent(instance_id: str, problem: Dict) -> Optional[str]:
+    """
+    Call mini-swe-agent to solve one problem.
+
+    TODO: Integrate with your actual mini-swe-agent implementation.
+    """
+    print(f"\n  Calling mini-swe-agent for {problem['id']}...")
+
+    # Create problem statement with memory context
+    problem_statement = f"""
+Problem ID: {problem['id']} ({problem['type']})
+Priority: {problem['priority']}
+
+PROBLEM:
+{problem.get('problem', '')}
+
+"""
+
+    if 'root_cause' in problem:
+        problem_statement += f"""
+ROOT CAUSE:
+{problem['root_cause']}
+
+"""
+
+    if 'context' in problem:
+        problem_statement += f"""
+CONTEXT FROM MEMORY:
+{json.dumps(problem['context'], indent=2)}
+
+"""
+
+    problem_statement += """
+TASK: Fix this specific problem and generate a patch.
+"""
+
+    # TODO: Replace with actual mini-swe-agent call
+    # For now, just save the prompt
+    prompt_dir = PROJECT_ROOT / "data/prompts"
+    prompt_dir.mkdir(exist_ok=True)
+
+    prompt_file = prompt_dir / f"problem_{problem['id']}.txt"
+    with open(prompt_file, 'w') as f:
+        f.write(problem_statement)
+
+    print(f"  Saved prompt to: {prompt_file}")
+
+    # Placeholder: return None (no patch generated yet)
+    return None
+
+
+def sequential_repair(instance_id: str, problems: List[Dict]) -> List[Dict]:
+    """
+    Solve problems sequentially, one at a time.
+    """
+    print(f"\n{'='*80}")
+    print("PHASE 6: SEQUENTIAL REPAIR")
+    print(f"{'='*80}")
+
+    patches = []
+
+    for problem in problems:
+        print(f"\n--- Problem {problem['id']} ({problem['type']}) ---")
+
+        patch = call_mini_swe_agent(instance_id, problem)
+
+        if patch:
+            patches.append({
+                'problem_id': problem['id'],
+                'patch': patch
+            })
+            print(f"  ✓ Patch generated")
+        else:
+            print(f"  ⚠ No patch generated (placeholder)")
+
+    print(f"\nTotal patches: {len(patches)}")
+    return patches
+
+
+# ============================================================================
+# PHASE 7: Merge Patches
+# ============================================================================
+
+def merge_patches(patches: List[Dict]) -> str:
+    """
+    Merge all patches into final unified diff.
+
+    TODO: Implement smart merge logic handling conflicts.
+    """
+    print(f"\n{'='*80}")
+    print("PHASE 7: MERGE PATCHES")
+    print(f"{'='*80}")
+
+    if not patches:
+        print("No patches to merge")
+        return ""
+
+    # Simple concatenation for now
+    # TODO: Implement conflict resolution
+    merged = "\n\n".join([p['patch'] for p in patches if p['patch']])
+
+    print(f"Merged {len(patches)} patches")
+    return merged
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python scripts/memory_guided_repair.py <instance_id>")
+        print("Example: python scripts/memory_guided_repair.py 110")
+        return 1
+
+    instance_id = sys.argv[1]
+
+    print(f"{'='*80}")
+    print(f"MEMORY-GUIDED REPAIR: Issue #{instance_id}")
+    print(f"{'='*80}")
+
+    # PHASE 1: Load issue and memories
+    print(f"\n{'='*80}")
+    print("PHASE 1: LOAD ISSUE AND MEMORIES")
+    print(f"{'='*80}")
+
+    issue = load_issue_from_cibench(instance_id)
+    print(f"Loaded issue: {issue.get('repo', '')} #{instance_id}")
+
+    l1, l2, l3 = load_memories()
+    print(f"Loaded memories: L1={len(l1)}, L2={len(l2)}, L3={len(l3)}")
+
+    ci_features = extract_ci_features(issue)
+    print(f"Extracted CI features from issue")
+
+    # PHASE 2: Cosine similarity search
+    search_query = ci_features['full_text']
+    search_results = cosine_similarity_search(search_query, l1, l2, l3, top_k=10)
+
+    # PHASE 3: Expand with dependencies
+    expanded_l1 = expand_with_dependencies(search_results['top_l1'], l1)
+
+    # PHASE 4: Analyze memories
+    analysis = analyze_memories(expanded_l1, search_results['top_l2'], search_results['top_l3'])
+
+    # PHASE 5: Create problem list
+    problems = create_problem_list(ci_features, analysis)
+
+    # PHASE 6: Sequential repair
+    patches = sequential_repair(instance_id, problems)
+
+    # PHASE 7: Merge patches
+    final_diff = merge_patches(patches)
+
+    # Save result
+    print(f"\n{'='*80}")
+    print("SAVING RESULTS")
+    print(f"{'='*80}")
+
+    result = {
+        'instance_id': instance_id,
+        'model_patch': final_diff,
+        'problems_identified': [p['id'] for p in problems],
+        'patches_generated': len(patches),
+        'memory_used': {
+            'l1_entries': len(expanded_l1),
+            'l2_trajectories': len(search_results['top_l2']),
+            'l3_patterns': len(search_results['top_l3'])
+        }
+    }
+
+    results_dir = PROJECT_ROOT / "results"
+    results_dir.mkdir(exist_ok=True)
+
+    result_file = results_dir / f"memory_guided_{instance_id}.json"
+    with open(result_file, 'w') as f:
+        json.dump(result, f, indent=2)
+
+    print(f"✓ Saved result to: {result_file}")
+    print(f"\n{'='*80}")
+    print("COMPLETE")
+    print(f"{'='*80}")
+
+    return 0
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python scripts/memory_guided_repair.py <instance_id>")
-        sys.exit(1)
-
-    main(sys.argv[1])
+    sys.exit(main())

@@ -1197,8 +1197,9 @@ def build_problem_statement(
     "## Affected Files",
     _fmt_effected_files(context.get("effected_files") or []),
     "",
-    "## Validation Hints",
-    "These are candidate commands the agent may run, adapt, or ignore depending on local feasibility.",
+    "## Validation Commands",
+    "Run these commands AFTER installation to verify your fix works correctly.",
+    "These are the actual CI validation commands that must pass:",
     _fmt_validation_cmds(profile),
   ]
 
@@ -1206,8 +1207,10 @@ def build_problem_statement(
   if install_block:
     lines += [
       "",
-      "## Installation Hints",
-      "These are candidate setup commands the agent may extend with extra local preparation if needed.",
+      "## Installation Commands (REQUIRED)",
+      "**IMPORTANT**: Run these installation commands BEFORE attempting any validation or testing.",
+      "These commands set up dependencies required for the validation commands to work correctly.",
+      "Run them in the repository root directory:",
       install_block,
     ]
 
@@ -1412,11 +1415,10 @@ def build_ci_context(
   # Single production direction:
   #   Phase C two-prompt memory synthesis -> agent_problem_statement -> repair agent.
   # If memory/LLM synthesis is unavailable, fall back to the standard CI report.
-  import pdb; pdb.set_trace()
   agent_problem_statement = format_memory_context(memory).strip()
-  import pdb; pdb.set_trace()
+
   problem_statement = agent_problem_statement or build_problem_statement(context, memory)
-  import pdb; pdb.set_trace()
+
   logger.info(
     "[CIContext] DONE sha=%s problem_statement=%d chars",
     str(context.get("sha_fail") or "")[:12],

@@ -50,10 +50,11 @@ agent:
          - The "Affected Files" section (which files are implicated)
          - The "Memory Context" section (how similar failures were fixed before)
 
-    2. **Decide whether local execution is worthwhile** — use the installation
-       and validation hints from the report when they seem relevant. If the
-       local environment needs extra setup first, infer and run the additional
-       commands you need before attempting reproduction.
+    2. **Set up the environment** — if "Installation Commands (REQUIRED)" section
+       exists in the report, run those commands FIRST in {{testbed_path}} before
+       any analysis or validation. These install project dependencies needed for
+       validation commands to work. Skip only if you're certain local execution
+       won't help or if installation clearly won't work in this environment.
 
     3. **Explore the codebase** — read the affected files and any files they
        import to understand the root cause.
@@ -65,10 +66,10 @@ agent:
        Do NOT modify files under `.github/` unless the workflow/action file
        itself is proven to be the root cause.
 
-    5. **Reproduce or sanity-check when feasible** — if the project appears
-       runnable locally, you may execute validation commands from the report or
-       closely related commands you derive yourself. You may also run extra
-       setup commands first if they are needed.
+    5. **Reproduce or sanity-check when feasible** — if installation commands
+       were provided and completed successfully, run the validation commands from
+       the report to verify your fix works. This helps confirm the fix before
+       submission. Use the exact validation commands shown in the report.
 
     6. **Prefer static debugging when setup is incompatible** — use the CI log,
        failed commands, affected files, imports, and surrounding code to infer

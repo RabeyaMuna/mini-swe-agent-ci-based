@@ -1,9 +1,11 @@
 from __future__ import annotations
-import logger
 import json
+import logging
 import os
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 try:
     import numpy as np
