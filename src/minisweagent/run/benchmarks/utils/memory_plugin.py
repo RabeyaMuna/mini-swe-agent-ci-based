@@ -165,6 +165,18 @@ def _normalize_path(path: str) -> str:
     return (path or "").strip().lstrip("/").replace("\\", "/")
 
 
+def _path_matches(query_path: str, row_path: str) -> bool:
+    query_path = _normalize_path(query_path)
+    row_path = _normalize_path(row_path)
+    if not query_path or not row_path:
+        return False
+    return (
+        query_path == row_path
+        or query_path.endswith(row_path)
+        or row_path.endswith(query_path)
+    )
+
+
 def _strip_identity_from_search_document(text: str) -> str:
     """Remove issue identity metadata from text used for similarity matching."""
     if not text:
@@ -1434,7 +1446,6 @@ Return STRICT JSON (no markdown, no extra text):
 
         try:
             result = self.llm.invoke(prompt)
-            import pdb; pdb.set_trace()
             response = getattr(result, "content", str(result)).strip()
 
             # Extract JSON
@@ -1507,22 +1518,30 @@ Return STRICT JSON (no markdown, no extra text):
         # Per-file detail map: file path -> {issue_type, failed_cmd, failed_tool, reason}
         # from the log analyzer's per-file output. Used to enrich the query doc when
         # scoring L1 rows that match a specific file.
-        file_details_map: Dict[str, Dict[str, Any]] = {
-            d["file"]: d
-            for d in (query.get("relevant_files_details") or [])
+        relevant_file_details = [
+            d for d in (query.get("relevant_files_details") or [])
             if d.get("file")
+        ]
+        file_details_map: Dict[str, Dict[str, Any]] = {
+            _normalize_path(str(d["file"])): d
+            for d in relevant_file_details
         }
+        subproblem_reasons = " ".join(
+            str(d.get("reason") or d.get("issue_type") or "")
+            for d in relevant_file_details
+        )
 
-        # L1 query document — structured per-file features ONLY.
-        # No narrative failure_reason — just the measurable signals:
-        #   file_path | error_type | failure_pattern | issue_type | failed_tool | failed_cmd
-        # Overall error_context is NOT included at L1 — L1 is file-precision level.
-        # fix_direction/fix_pattern excluded — unknown at query time.
+        # L1 query document. Problem/root-cause/fix evidence is primary; file
+        # paths are secondary boosts. A current CI failure can contain multiple
+        # sub-problems, so include the per-file reasons in the semantic query
+        # instead of relying on exact file matches.
         query_issue_type = _to_descriptive_issue_type(failure_pattern, error_type).lower()
         base_query_doc = " | ".join(x for x in [
             error_type,
             failure_pattern,
             query_issue_type,
+            query_reason,
+            subproblem_reasons,
             " ".join(query_tools),
             " ".join(query_cmds),
         ] if x)
@@ -1555,14 +1574,27 @@ Return STRICT JSON (no markdown, no extra text):
             row_tools = [str(x).lower() for x in _safe_list(row.get("failed_tool", []))]
             row_cmds = [str(x).lower() for x in _safe_list(row.get("failed_cmd", []))]
 
-            # Exact normalized path match — highest weight in L1.
+            # Path match is a secondary boost. Problem/root-cause/fix
+            # semantics drive the main ranking.
             row_file_norm = _normalize_path(str(row.get("file") or ""))
-            file_score = 1.0 if row_file_norm and row_file_norm in query_file_norms else 0.0
+            file_score = 1.0 if row_file_norm and any(
+                _path_matches(query_file, row_file_norm)
+                for query_file in query_file_norms
+            ) else 0.0
 
-            # L1 row document: use stored search_document if present (richer, and
-            # ensures the cache key matches _persist_new_embeddings lookup).
-            # Fall back to compact inline doc for records that pre-date storage.
-            row_doc = _strip_identity_from_search_document(row.get("search_document") or "") or " | ".join(x for x in [
+            row_problem_doc = " | ".join(x for x in [
+                str(row.get("problem") or ""),
+                str(row.get("root_cause") or ""),
+                str(row.get("how_fixed") or ""),
+                str(row.get("why_fix_works") or ""),
+                str(row.get("fix_strategy") or ""),
+            ] if x)
+
+            # L1 row document: prioritize repair semantics, then append stored
+            # search_document/structured metadata for context.
+            row_doc = " | ".join(x for x in [
+                row_problem_doc,
+                _strip_identity_from_search_document(row.get("search_document") or ""),
                 row_file_norm,
                 row_error,
                 row_pattern,
@@ -1575,16 +1607,25 @@ Return STRICT JSON (no markdown, no extra text):
             # analyzer, build a file-specific query_doc using that file's exact values
             # (issue_type, failed_tool, failed_cmd) for a more precise embedding match.
             file_detail = file_details_map.get(row_file_norm, {}) if row_file_norm else {}
+            if not file_detail and row_file_norm:
+                for query_file, detail in file_details_map.items():
+                    if _path_matches(query_file, row_file_norm):
+                        file_detail = detail
+                        break
             if file_detail:
                 effective_tools = [str(x).lower() for x in _safe_list(file_detail.get("failed_tool") or [])] or query_tools
                 effective_cmds = [str(x).lower() for x in _safe_list(file_detail.get("failed_cmd") or [])] or query_cmds
                 effective_issue_type = str(file_detail.get("issue_type") or "").lower() or query_issue_type
-                # Per-file query_doc: file_path | error | pattern | issue_type | tools | cmds
+                effective_reason = str(file_detail.get("reason") or "")
+                # Per-file query_doc: row path plus the matching CI sub-problem
+                # reason. This helps same-file memories without making file
+                # identity dominate ranking.
                 query_doc = " | ".join(x for x in [
                     row_file_norm,
                     error_type,
                     failure_pattern,
                     effective_issue_type,
+                    effective_reason,
                     " ".join(effective_tools),
                     " ".join(effective_cmds),
                 ] if x)
@@ -1604,9 +1645,9 @@ Return STRICT JSON (no markdown, no extra text):
             tool_cmd_score = max(tool_score, cmd_score)
 
             similarity = round(
-                0.45 * file_score
-                + 0.50 * semantic_score
-                + 0.05 * tool_cmd_score,
+                0.15 * file_score
+                + 0.75 * semantic_score
+                + 0.10 * tool_cmd_score,
                 4,
             )
             scored.append(

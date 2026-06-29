@@ -15,6 +15,9 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
+# Import optimal L2 analysis pipeline
+from minisweagent.run.benchmarks.utils.ci_memory_l2_analysis import staged_l2_analysis
+
 logger = logging.getLogger(__name__)
 
 
@@ -456,7 +459,8 @@ def stage2_analyze_l3(
     """
     STAGE 2: Analyze L3 universal patterns.
 
-    Only called if L1+L2 don't have sufficient matches.
+    Always called if L3 memories are available.
+    Deduplication happens later in Stage 3.
     """
 
     if not l3_memories:
@@ -610,32 +614,35 @@ Return ONLY the JSON array:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def stage4_structure_problems(
-    problems: List[Dict[str, Any]],
-    llm: Any,
-    current_workflow_sequence: List[Dict[str, Any]] = None
+    problems: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """
-    STAGE 4: Convert problems to structured format for agent.
+    STAGE 4: Structure problems for mini-swe-agent.
 
-    Output format:
+    Mini-swe-agent has its own agentic loop (up to 250 steps):
+    - Checks if problem exists by reading files
+    - Applies fix based on guidance
+    - Validates itself
+    - Self-corrects if needed
+
+    So we only need to provide:
+    - problem description
+    - root_cause
+    - how_fixed guidance
+    - why_fix_works reasoning
+    - files to change
+
+    Output format (simplified):
     {
       "problem_id": int,
       "is_primary": bool,
-      "status": str,
       "source": str,
-      "problem_statement": {
-        "description": str,
-        "root_cause": str,
-        "affected_files": [str],
-        "validation_cmd": str,
-        "failure_type": str,
-        "issue_type": str
-      },
-      "repair_plan": {
-        "approach": str,
-        "steps": [str],
-        "examples_from_memory": str
-      },
+      "problem": str,
+      "root_cause": str,
+      "how_fixed": str,
+      "why_fix_works": str,
+      "files": [str]
+    }
       "verification": {
         "validation_cmd": str,
         "check_first": bool,
@@ -649,132 +656,39 @@ def stage4_structure_problems(
 
     logger.info(f"[Stage 4] Structuring {len(problems)} problems for agent")
 
-    prompt = f"""Convert problems to structured format for agent consumption.
+    # Direct structuring - no LLM needed
+    # Don't add problem_id here - let caller number them serially after combining CI + memory
+    structured = []
+    for prob in problems:
+        # Map to cibench expected field names
+        problem_text = prob.get("problem") or prob.get("description", "")
+        root_cause = prob.get("root_cause", "")
+        how_fixed = prob.get("how_fixed", "")
+        why_fix_works = prob.get("why_fix_works", "")
 
-**PROBLEMS TO STRUCTURE:**
-```json
-{json.dumps(problems, indent=2)}
-```
+        # Combine how_fixed + why_fix_works into fix_strategy
+        fix_strategy_parts = []
+        if how_fixed:
+            fix_strategy_parts.append(how_fixed)
+        if why_fix_works:
+            fix_strategy_parts.append(f"Why this works: {why_fix_works}")
+        fix_strategy = "\n\n".join(fix_strategy_parts) if fix_strategy_parts else ""
 
-**YOUR TASK:**
+        structured.append({
+            "problem_statement": problem_text,  # cibench expects this field name
+            "root_cause": root_cause,
+            "fix_strategy": fix_strategy,  # Combined how_fixed + why_fix_works
+            "files": prob.get("files", []),
+            # Context fields:
+            "verification_cmd": prob.get("validation_cmd", ""),  # cibench expects this field name
+            "error_type": prob.get("failure_type", ""),
+            "issue_type": prob.get("issue_type", "")
+        })
 
-For each problem, create a structured format:
+    logger.info(f"[Stage 4] Structured {len(structured)} problems")
+    return structured
 
-**OUTPUT FORMAT:**
-
-Return JSON array:
-
-[
-  {{
-    "problem_id": 2,
-    "is_primary": false,
-    "status": "predicted",
-    "source": "source field from input",
-    "problem_statement": {{
-      "description": "Clear one-sentence description from input",
-      "root_cause": "root_cause from input",
-      "affected_files": ["files from input"],
-      "validation_cmd": "validation_cmd from input",
-      "failure_type": "failure_type from input",
-      "issue_type": "issue_type from input"
-    }},
-    "repair_plan": {{
-      "approach": "One-sentence how to fix (from fix_strategy)",
-      "steps": [
-        "Step 1: Specific action",
-        "Step 2: Specific action",
-        "Step 3: Verify"
-      ],
-      "examples_from_memory": "Exact fix_strategy text from input"
-    }},
-    "verification": {{
-      "validation_cmd": "same as problem_statement.validation_cmd",
-      "check_first": true,
-      "expected_result": "exit code 0"
-    }}
-  }}
-]
-
-**RULES:**
-- problem_id starts from 2 (1 is reserved for primary CI failure)
-- Use exact text from input fields
-- Convert fix_strategy into actionable steps
-- All consecutive problems have check_first: true
-
-Return ONLY the JSON array:
-"""
-
-    try:
-        response = _call_llm(llm, prompt)
-        structured = _parse_json_array(response, "Stage4-Structure")
-
-        # ENFORCE correct values (LLM often ignores instructions)
-        for i, prob in enumerate(structured, 2):
-            prob["problem_id"] = i  # Force correct numbering
-            prob["is_primary"] = False  # MUST be false for consecutive
-            prob["status"] = "predicted"  # MUST be predicted
-
-            # Ensure check_first is true
-            if "verification" in prob:
-                prob["verification"]["check_first"] = True
-
-            # FIX validation_cmd: Use SOURCE from current workflow, not memory validation_cmd
-            if current_workflow_sequence and "problem_statement" in prob:
-                memory_val_cmd = prob["problem_statement"].get("validation_cmd", "")
-                correct_val_cmd = _match_validation_cmd_from_workflow(memory_val_cmd, current_workflow_sequence)
-
-                # Update both places
-                prob["problem_statement"]["validation_cmd"] = correct_val_cmd
-                if "verification" in prob:
-                    prob["verification"]["validation_cmd"] = correct_val_cmd
-
-        logger.info(f"[Stage 4] Structured {len(structured)} problems (enforced is_primary=False, matched validation_cmds)")
-
-        return structured
-
-    except Exception as e:
-        logger.warning(f"[Stage 4] Structuring failed: {e}")
-        # Fallback: basic structure
-        structured = []
-        for i, prob in enumerate(problems, 2):
-            # Match validation_cmd from current workflow
-            memory_val_cmd = prob.get("validation_cmd", "")
-            if current_workflow_sequence:
-                correct_val_cmd = _match_validation_cmd_from_workflow(memory_val_cmd, current_workflow_sequence)
-            else:
-                correct_val_cmd = memory_val_cmd
-
-            structured.append({
-                "problem_id": i,
-                "is_primary": False,
-                "status": "predicted",
-                "source": prob.get("source", "unknown"),
-                "problem_statement": {
-                    "description": prob.get("description", ""),
-                    "root_cause": prob.get("root_cause", ""),
-                    "affected_files": prob.get("files", []),
-                    "validation_cmd": correct_val_cmd,  # Use matched command
-                    "failure_type": prob.get("failure_type", ""),
-                    "issue_type": prob.get("issue_type", "")
-                },
-                "repair_plan": {
-                    "approach": prob.get("fix_strategy", "")[:100],
-                    "steps": ["Fix the issue", "Run validation"],
-                    "examples_from_memory": prob.get("fix_strategy", "")
-                },
-                "verification": {
-                    "validation_cmd": correct_val_cmd,  # Use matched command
-                    "check_first": True,
-                    "expected_result": "exit code 0"
-                }
-            })
-        return structured
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN PIPELINE
-# ══════════════════════════════════════════════════════════════════════════════
-
+# OLD COMPLEX LLM CODE BELOW - REMOVED
 def _match_validation_cmd_from_workflow(
     memory_validation_cmd: str,
     current_workflow_sequence: List[Dict[str, Any]]
@@ -822,9 +736,9 @@ def _match_validation_cmd_from_workflow(
                         # No source, use workflow validation_cmd
                         return workflow_cmd
 
-    # No match found, return memory command as-is
-    logger.warning(f"[Validation Match] No match for '{memory_validation_cmd}' in current workflow")
-    return memory_validation_cmd
+    # No match found, return empty (don't validate)
+    logger.warning(f"[Validation Match] No match for '{memory_validation_cmd}' in current workflow - skipping validation")
+    return ""  # Empty means don't validate
 
 
 def staged_memory_analysis(
@@ -846,8 +760,8 @@ def staged_memory_analysis(
     Pipeline Stages:
     - Stage 0: L1 analysis (find dependent problems from L1)
     - Stage 1: L2 analysis (common patterns + consecutive failures from trajectories)
-    - Stage 2: L3 analysis (only if L1+L2 insufficient)
-    - Stage 3: Deduplication (remove duplicates, keep top 10)
+    - Stage 2: L3 analysis (universal patterns - always if L3 available)
+    - Stage 3: Deduplication (remove duplicates from L1+L2+L3)
     - Stage 4: Structuring (format for agent)
 
     Args:
@@ -888,21 +802,20 @@ def staged_memory_analysis(
     all_consecutive.extend(l1_problems)
     logger.info(f"[STAGE 0] Found {len(l1_problems)} L1 dependent problems")
 
-    # ── STAGE 1: L2 Analysis - Common Patterns + Consecutive Failures ──
-    logger.info("\n[STAGE 1] Analyzing L2 trajectories...")
-    l2_common, l2_consecutive = stage1_analyze_l2(ci_failure_context, l2_memories, llm, current_workflow_sequence)
-    all_consecutive.extend(l2_common)
+    # ── STAGE 1: L2 Analysis - OPTIMAL PIPELINE (Common + Consecutive) ──
+    logger.info("\n[STAGE 1] Analyzing L2 trajectories with OPTIMAL pipeline...")
+    l2_consecutive = staged_l2_analysis(ci_failure_context, l2_memories, llm)
     all_consecutive.extend(l2_consecutive)
-    logger.info(f"[STAGE 1] Found {len(l2_common)} common patterns + {len(l2_consecutive)} consecutive failures")
+    logger.info(f"[STAGE 1] Found {len(l2_consecutive)} L2 consecutive problems (prioritized by commonality)")
 
-    # ── STAGE 2: L3 Analysis (only if insufficient) ──
-    if len(all_consecutive) < 5:
-        logger.info(f"\n[STAGE 2] L1+L2 provided {len(all_consecutive)} problems, analyzing L3...")
+    # ── STAGE 2: L3 Analysis (universal patterns) ──
+    if l3_memories and llm:
+        logger.info(f"\n[STAGE 2] Analyzing {len(l3_memories)} L3 universal patterns...")
         l3_problems = stage2_analyze_l3(ci_failure_context, l3_memories, llm)
         all_consecutive.extend(l3_problems)
         logger.info(f"[STAGE 2] Found {len(l3_problems)} L3 pattern problems")
     else:
-        logger.info(f"\n[STAGE 2] SKIPPED - L1+L2 provided {len(all_consecutive)} problems (sufficient)")
+        logger.info(f"\n[STAGE 2] SKIPPED - No L3 memories or LLM available")
 
     if not all_consecutive:
         logger.info("\n[PIPELINE] No consecutive problems found in memory")
@@ -916,7 +829,7 @@ def staged_memory_analysis(
 
     # ── STAGE 4: Structuring ──
     logger.info(f"\n[STAGE 4] Structuring {len(unique_problems)} problems for agent...")
-    structured_problems = stage4_structure_problems(unique_problems, llm, current_workflow_sequence)
+    structured_problems = stage4_structure_problems(unique_problems)
     logger.info(f"[STAGE 4] Structured {len(structured_problems)} consecutive problems")
 
     logger.info("="*80)

@@ -711,238 +711,114 @@ def setup_local_environment(
 # Sequential Repair: Fix problems one at a time
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_new_format_task(problem: Dict[str, Any], problem_num: int, total_problems: int) -> str:
-    """
-    Build task from new intelligent selection format.
-
-    New format has:
-    - problem_statement: {description, root_cause, affected_files, validation_cmd}
-    - repair_plan: {approach, steps, code_changes, examples}
-    - verification: {validation_cmd, check_first}
-    """
-
-    is_primary = problem.get("is_primary", False)
-    problem_stmt = problem.get("problem_statement", {})
-    repair_plan = problem.get("repair_plan", {})
-    verification = problem.get("verification", {})
-
-    status_label = "PRIMARY - Confirmed CI Failure" if is_primary else "CONSECUTIVE - Predicted Problem"
-
-    task = f"""# CI Repair - Problem {problem_num}/{total_problems}
-
-## Problem {problem_num}: {status_label}
-
-**Verification Command**: `{verification.get('validation_cmd', 'unknown')}`
-
-### Problem Description
-
-{problem_stmt.get('description', 'No description')}
-
-### Root Cause
-
-{problem_stmt.get('root_cause', 'See problem description')}
-
-### Affected Files
-
-"""
-
-    affected_files = problem_stmt.get('affected_files', [])
-    if affected_files:
-        for f in affected_files[:10]:
-            task += f"- `{f}`\n"
-    else:
-        task += "- (No specific files identified)\n"
-
-    task += f"""
-### Repair Plan
-
-**Approach**: {repair_plan.get('approach', 'Fix the issue')}
-
-**Steps to Follow**:
-"""
-
-    steps = repair_plan.get('steps', [])
-    if steps:
-        for step in steps:
-            task += f"{step}\n"
-    else:
-        task += "1. Analyze the problem\n2. Apply fix\n3. Verify\n"
-
-    # Add code changes if available
-    code_changes = repair_plan.get('code_changes', [])
-    if code_changes:
-        task += "\n**Code Changes**:\n"
-        for change in code_changes:
-            task += f"""
-- File: `{change.get('file', 'unknown')}`
-  Type: {change.get('change_type', 'modify')}
-  Change: {change.get('description', 'See above')}
-"""
-
-    # Add examples if available
-    examples = repair_plan.get('examples', [])
-    if examples:
-        task += "\n**Examples from Memory**:\n"
-        for ex in examples[:3]:
-            task += f"""
-File: `{ex.get('file', 'example.py')}`
-```python
-# Before
-{ex.get('before', 'old code')}
-
-# After
-{ex.get('after', 'new code')}
-```
-"""
-
-    # Add check first instruction if needed
-    if verification.get('check_first', False):
-        task += f"""
-### Important: Check First!
-
-This is a PREDICTED problem (not confirmed). Before fixing:
-1. Run: `{verification.get('validation_cmd', 'unknown')}`
-2. If it PASSES (exit 0) -> problem doesn't exist, SKIP this fix
-3. If it FAILS -> proceed with the fix
-"""
-
-    task += """
-### Instructions
-
-1. Read the affected files carefully
-2. Follow the repair plan steps above
-3. Make minimal, targeted changes
-4. Do NOT modify unrelated files
-5. Submit your patch when complete
-"""
-
-    return task
-
-
 def _build_single_problem_task(problem: Dict[str, Any], problem_num: int, total_problems: int) -> str:
     """
     Build a focused task for ONE specific problem.
 
-    Agent receives ONLY this problem's information, not all problems.
+    Mini-swe-agent will:
+    1. Read problem description and root cause
+    2. Explore repo to locate the issue
+    3. Apply fix based on guidance
+    4. Validate itself
 
-    Supports both old and new problem formats.
+    We just provide essential info - agent decides how to proceed.
     """
 
-    # Check if new format (from intelligent selection)
-    if "problem_statement" in problem and isinstance(problem["problem_statement"], dict):
-        return _build_new_format_task(problem, problem_num, total_problems)
-
-    # Old format
-    status = problem.get("status", "unknown")
-    stage = problem.get("validation_stage", "")
-    validation_cmd = problem.get("verification_cmd", "")
-    validation_order = problem.get("validation_order", "?")
-
-    # Get detailed problem info
+    # Extract essential fields
     problem_statement = problem.get("problem_statement", "")
     root_cause = problem.get("root_cause", "")
     fix_strategy = problem.get("fix_strategy", "")
-    error_type = problem.get("error_type", "")
-    error_desc = problem.get("error_description", "")
-
     files = problem.get("files", [])
-    check_first = problem.get("check_first", False)
-    reasoning = problem.get("reasoning", "")
-    interdep = problem.get("interdependency", "")
+    source = problem.get("source", "")
+    error_details = problem.get("error_details", [])
 
-    status_label = "CONFIRMED - Currently Failing" if status == "confirmed" else "PROBABLE - Check First"
+    # Context fields (optional - help agent understand problem type)
+    verification_cmd = problem.get("verification_cmd", "")
+    error_type = problem.get("error_type", "")
+    issue_type = problem.get("issue_type", "")
+    failure_type = problem.get("failure_type", "")
 
-    # Build focused task
+    # Build simple, focused task
     task = f"""# CI Repair - Problem {problem_num}/{total_problems}
 
-## Problem {problem_num}: {status_label}
+## Source
 
-**Validation Stage**: {stage}
-**Validation Order**: {validation_order}
-**Verification Command**: `{validation_cmd}`
+{source or "unknown"}
 
-### Problem Statement
+## Problem Description
 
 {problem_statement}
 
 """
 
     if root_cause:
-        task += f"""### Root Cause
+        task += f"""## Root Cause
 
 {root_cause}
 
 """
 
     if fix_strategy:
-        task += f"""### Fix Strategy
+        task += f"""## How to Fix
 
 {fix_strategy}
 
 """
 
+    # Files hint (if provided) - agent can explore repo if not provided
     if files:
-        task += """### Files to Fix
+        task += """## Affected Files
 
 """
-        for idx, f in enumerate(files, 1):
-            path = f.get("path", "")
-            line = f.get("line", "")
-            current = f.get("current_code", "")
-            required = f.get("required_fix", "")
-            context = f.get("context", "")
+        if isinstance(files, list):
+            for f in files:
+                if isinstance(f, dict):
+                    path = f.get("path", "")
+                    if path:
+                        task += f"- `{path}`\n"
+                elif isinstance(f, str):
+                    task += f"- `{f}`\n"
+        task += "\n"
 
-            task += f"""**File {idx}**: `{path}`"""
-            if line:
-                task += f" (line {line})"
-            task += "\n"
-
-            if current:
-                task += f"- **Current Code**: `{current}`\n"
-            if required:
-                task += f"- **Required Fix**: {required}\n"
-            if context:
-                task += f"- **Context**: {context}\n"
-            task += "\n"
-
-    if check_first:
-        task += f"""### Important: Check First!
-
-This problem is PREDICTED (not confirmed). Before fixing:
-1. Run the verification command: `{validation_cmd}`
-2. If it PASSES (exit code 0), this problem doesn't exist - SKIP it
-3. If it FAILS, proceed with the fix
+    if isinstance(error_details, list) and error_details:
+        task += """## Error Details
 
 """
+        for detail in error_details:
+            if not isinstance(detail, dict):
+                continue
+            file_path = detail.get("file", "")
+            line = detail.get("line", "")
+            error = detail.get("error", "")
+            message = detail.get("message", "")
+            fix = detail.get("fix", "")
+            location = f"{file_path}:{line}" if file_path and line else file_path
+            if location or error:
+                task += f"- {location} {f'({error})' if error else ''}\n"
+            if message:
+                task += f"  Message: {message}\n"
+            if fix:
+                task += f"  Fix hint: {fix}\n"
+        task += "\n"
 
-    if reasoning:
-        task += f"""### Reasoning
+    # Context info (helps agent understand problem type)
+    context_parts = []
+    if error_type:
+        context_parts.append(f"**Error Type**: {error_type}")
+    if issue_type:
+        context_parts.append(f"**Issue Type**: {issue_type}")
+    if failure_type:
+        context_parts.append(f"**Failure Type**: {failure_type}")
+    if verification_cmd:
+        context_parts.append(f"**Validation Command**: `{verification_cmd}`")
 
-{reasoning}
+    if context_parts:
+        task += "## Context\n\n"
+        task += " | ".join(context_parts)
+        task += "\n\n"
 
-"""
-
-    if interdep:
-        task += f"""### Interdependency
-
-{interdep}
-
-"""
-
-    task += f"""### Your Task
-
-1. {"Check if this problem exists first by running the verification command" if check_first else "Fix this problem"}
-2. Make MINIMAL changes (only what's needed for THIS problem)
-3. After your fix, run: `{validation_cmd}`
-4. Expected result: EXIT CODE 0 (success)
-
-### Submission
-
-When done, submit your fix using:
-```
-echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat <testbed_path>/patch.txt
-```
-"""
+    # No "Check First" instructions - agent will explore and validate itself
+    # No prescriptive steps - agent has its own workflow
 
     return task
 
@@ -1076,20 +952,28 @@ def _run_sequential_repair(
         logger.info(f"[CIBench] {'='*60}")
         logger.info(f"[CIBench] Problem {i}/{total_problems}")
         logger.info(f"[CIBench] {'='*60}")
-
         # Support both old and new problem formats
         if "problem_statement" in problem:
-            # New format from intelligent selection
+            # New simplified format
             problem_id = problem.get("problem_id", i)
-            is_primary = problem.get("is_primary", False)
-            validation_cmd = problem.get("verification", {}).get("validation_cmd", "")
-            check_first = problem.get("verification", {}).get("check_first", False)
-            status = "PRIMARY" if is_primary else "CONSECUTIVE"
+            source = str(problem.get("source", "")).strip()
+            is_primary = source == "ci failure" or problem.get("is_primary", False)
+            # No more nested verification dict - fields are flat
+            validation_cmd = problem.get("verification_cmd", "")
+            # No check_first - agent decides on its own
+            check_first = False
+            status = "CI FAILURE" if source == "ci failure" else "PREVIOUS EXPERIENCE"
             stage = ""
 
             logger.info(f"[CIBench] Problem ID: {problem_id}")
-            logger.info(f"[CIBench] Is Primary: {is_primary}")
-            logger.info(f"[CIBench] Description: {problem['problem_statement'].get('description', '')[:100]}")
+            logger.info(f"[CIBench] Source: {source or 'unknown'}")
+            # problem_statement is now a string, not a dict
+            problem_desc = problem.get('problem_statement', '')
+            if isinstance(problem_desc, str):
+                logger.info(f"[CIBench] Description: {problem_desc[:100]}")
+            else:
+                # Very old format (dict) - shouldn't happen with our new code
+                logger.info(f"[CIBench] Description: {problem_desc.get('description', '')[:100]}")
         else:
             # Old format
             status = problem.get("status", "unknown")
@@ -1103,15 +987,6 @@ def _run_sequential_repair(
         logger.info(f"[CIBench] Validation: {validation_cmd}")
         logger.info(f"[CIBench] Check first: {check_first}")
 
-        # For PROBABLE problems, check if they exist first
-        if check_first and validation_cmd:
-            logger.info(f"[CIBench] Checking if problem exists...")
-            if _verify_validation_passes(testbed_path, validation_cmd, installation_cmd, _install_cache=install_cache):
-                logger.info(f"[CIBench] OK Problem {i} does not exist (validation passes). Skipping.")
-                continue
-            else:
-                logger.info(f"[CIBench] FAIL Problem {i} exists (validation fails). Proceeding to fix.")
-
         # Build focused task for THIS problem only
         single_task = _build_single_problem_task(problem, i, total_problems)
 
@@ -1124,10 +999,31 @@ def _run_sequential_repair(
             f"Fixing problem {i}/{total_problems}"
         )
 
-        # Agent fixes THIS problem
+        # Agent fixes THIS problem (with timeout to avoid getting stuck)
         logger.info(f"[CIBench] Running agent for problem {i}...")
+
+        import time as time_module
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+        PER_PROBLEM_TIMEOUT = 600  # 10 minutes per problem
+
         try:
-            info = agent.run(single_task)
+            start_time = time_module.time()
+
+            # Run agent with timeout using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(agent.run, single_task)
+                try:
+                    info = future.result(timeout=PER_PROBLEM_TIMEOUT)
+                    elapsed = time_module.time() - start_time
+                    logger.info(f"[CIBench] Problem {i} completed in {elapsed:.1f}s")
+
+                except FuturesTimeoutError:
+                    logger.warning(f"[CIBench] TIMEOUT Problem {i}: Exceeded {PER_PROBLEM_TIMEOUT}s - SKIPPING to next problem")
+                    # Don't break - continue to next problem
+                    continue
+
             exit_status = info.get("exit_status")
 
             # Extract patch
@@ -1135,57 +1031,33 @@ def _run_sequential_repair(
             patch = _extract_diff(raw_submission)
 
             if not patch or not patch.strip():
-                logger.warning(f"[CIBench] FAIL Problem {i}: Agent returned no patch")
-                break
+                logger.warning(f"[CIBench] SKIP Problem {i}: Agent returned no patch (continuing to next problem)")
+                # Don't break - continue to next problem
+                continue
 
             logger.info(f"[CIBench] OK Problem {i}: Agent generated patch ({len(patch)} chars)")
 
-            # Verify validation passes
-            if validation_cmd:
-                logger.info(f"[CIBench] Verifying problem {i} fix...")
-                if _verify_validation_passes(testbed_path, validation_cmd, installation_cmd, _install_cache=install_cache):
-                    logger.info(f"[CIBench] OK Problem {i} FIXED! Validation passes.")
-                    partial_fixes.append({
-                        'problem_id': i,
-                        'problem_number': problem.get('problem_number', i),
-                        'status': status,
-                        'validation_stage': stage,
-                        'patch': patch,
-                        'verified': True
-                    })
-                else:
-                    logger.warning(f"[CIBench] FAIL Problem {i} validation failed, but KEEPING patch")
-
-                    # KEEP the patch even if validation fails
-                    partial_fixes.append({
-                        'problem_id': i,
-                        'problem_number': problem.get('problem_number', i),
-                        'status': status,
-                        'validation_stage': stage,
-                        'patch': patch,
-                        'verified': False  # Mark as unverified
-                    })
-
-                    if is_primary:
-                        logger.info(f"[CIBench] PRIMARY problem failed - STOPPING sequential repair")
-                        break
-                    else:
-                        logger.info(f"[CIBench] Non-primary problem - CONTINUING to next problem")
-                        # DO NOT revert - keep the changes!
-            else:
-                logger.warning(f"[CIBench] Problem {i}: No verification command, assuming success")
-                partial_fixes.append({
-                    'problem_id': i,
-                    'problem_number': problem.get('problem_number', i),
-                    'status': status,
-                    'validation_stage': stage,
-                    'patch': patch,
-                    'verified': False
-                })
+            # Save patch (no validation - agent's loop handles self-correction)
+            logger.info(f"[CIBench] Saving patch for problem {i} (agent self-corrects in loop)")
+            partial_fixes.append({
+                'problem_id': i,
+                'problem_number': problem.get('problem_number', i),
+                'status': status,
+                'validation_stage': stage,
+                'patch': patch,
+                'exit_status': exit_status
+            })
 
         except Exception as e:
-            logger.error(f"[CIBench] FAIL Problem {i}: Agent error: {e}")
-            break
+            logger.error(f"[CIBench] ERROR Problem {i}: {e} - SKIPPING to next problem")
+            # Don't break - continue to next problem
+            continue
+
+        finally:
+            # Small delay between problems to allow cleanup and prevent timeout cascading
+            if i < total_problems:
+                logger.info(f"[CIBench] Waiting 5 seconds before next problem...")
+                time_module.sleep(5)
 
     # Combine all successful partial fixes
     unified_diff = _combine_partial_fixes(partial_fixes)
@@ -1293,7 +1165,6 @@ def process_instance(
 
     try:
         env, testbed_path = setup_local_environment(config, instance, instance_dir)
-
         model_ = get_model(config=config.get("model", {}))
         agent = ProgressTrackingAgent(
             model_,
@@ -1319,9 +1190,22 @@ def process_instance(
             # Separate problems are generated in build_ci_context()
             llm_sel = ci_memory.get("llm_selection", {})
             separate_problems = llm_sel.get("separate_problems", [])
-
             if separate_problems:
-                logger.info(f"[CIBench] Using {len(separate_problems)} separate problems from STAIR-inspired pipeline")
+                ci_failure_count = sum(
+                    1 for problem in separate_problems
+                    if str(problem.get("source", "")).strip() == "ci failure"
+                )
+                previous_experience_count = sum(
+                    1 for problem in separate_problems
+                    if str(problem.get("source", "")).strip() == "previous experience"
+                )
+                logger.info(
+                    "[CIBench] Problem summary before agent: total=%d, ci failure=%d, previous experience=%d",
+                    len(separate_problems),
+                    ci_failure_count,
+                    previous_experience_count,
+                )
+                logger.info(f"[CIBench] Using {len(separate_problems)} separate problems from memory-guided repair")
                 problems = separate_problems
             else:
                 logger.info("[CIBench] No separate problems - using standard single problem mode")
@@ -1336,7 +1220,6 @@ def process_instance(
             installation_cmd = ci_ctx.get("validation_profile", {}).get("installation_cmd", [])
             if installation_cmd:
                 logger.info(f"[CIBench] Found {len(installation_cmd)} installation command(s) from CI context")
-
             info, diff = _run_sequential_repair(
                 agent=agent,
                 problems=problems,
@@ -1771,7 +1654,8 @@ def main(
     # Create subdirectory based on memory ablation level
     if memory_enabled:
         ablation_folder = memory_ablation_levels.replace("+", "_")
-        output_path = output_path / ablation_folder
+        if output_path.name != ablation_folder and output_path.parent.name != ablation_folder:
+            output_path = output_path / ablation_folder
 
     output_path.mkdir(parents=True, exist_ok=True)
     logger.info("[CIBench] Results will be saved to %s", output_path)

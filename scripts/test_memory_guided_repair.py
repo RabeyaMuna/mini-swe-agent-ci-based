@@ -33,9 +33,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SEED_DATASET = PROJECT_ROOT / "data" / "trs" / "memory_seed_issues.json"
 DEFAULT_EVAL_DATASET = PROJECT_ROOT / "data" / "trs" / "eval_issues.json"
 DEFAULT_LOG_DETAILS = PROJECT_ROOT / "data" / "trs" / "log_details.json"
+DEFAULT_HF_DATASET = "ci-benchmark-user/ci-repair-bench"
 DEFAULT_DATASET = DEFAULT_SEED_DATASET if DEFAULT_SEED_DATASET.exists() else DEFAULT_EVAL_DATASET
 DEFAULT_MEMORY_ROOT = PROJECT_ROOT / "data" / "trs"
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "results" / "memory_guided_ablation"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "results"
 DEFAULT_SUCCESS_PATCHES = PROJECT_ROOT / "data" / "generated_patches_success_only.json"
 
 
@@ -85,8 +86,22 @@ def issue_id(issue: dict[str, Any]) -> str:
     return str(issue.get("id") or issue.get("instance_id") or "").strip()
 
 
-def load_eval_issues(dataset_path: Path) -> list[dict[str, Any]]:
-    data = read_json(dataset_path, default=[])
+def load_eval_issues(dataset_path: Path | str) -> list[dict[str, Any]]:
+    dataset_str = str(dataset_path)
+    path = Path(dataset_str)
+
+    if not path.exists() and "/" in dataset_str:
+        try:
+            from datasets import load_dataset  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "Loading a HuggingFace dataset requires the `datasets` package. "
+                "Install it or pass a local JSON dataset."
+            ) from exc
+        data = list(load_dataset(dataset_str, split="train"))
+        return [item for item in data if isinstance(item, dict)]
+
+    data = read_json(path, default=[])
     if not isinstance(data, list):
         raise ValueError(f"Expected JSON array in {dataset_path}")
     return [item for item in data if isinstance(item, dict)]
@@ -200,7 +215,10 @@ def select_issues(
 
 
 def ablation_output_dir(output_root: Path, ablation: str) -> Path:
-    return output_root / ablation.replace("+", "_")
+    ablation_folder = ablation.replace("+", "_")
+    if output_root.name == ablation_folder or output_root.parent.name == ablation_folder:
+        return output_root
+    return output_root / ablation_folder
 
 
 def ablation_levels(ablation: str) -> list[str]:
@@ -388,7 +406,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run memory-guided repair ablations for remaining Camel and Flower issues."
     )
-    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    parser.add_argument(
+        "--dataset",
+        default=str(DEFAULT_DATASET),
+        help=f"Local JSON dataset path or HuggingFace dataset name. Use {DEFAULT_HF_DATASET} for full benchmark selection.",
+    )
     parser.add_argument("--memory-root", type=Path, default=DEFAULT_MEMORY_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--repos", default="camel,flower")
@@ -416,6 +438,11 @@ def parse_args() -> argparse.Namespace:
         dest="include_known",
         action="store_false",
         help="Exclude issues already present in memory or generated successful patches. This is the default evaluation behavior.",
+    )
+    parser.add_argument(
+        "--exclude-success-only",
+        action="store_true",
+        help="Exclude only IDs in generated_patches_success_only.json; do not exclude memory seed IDs.",
     )
     parser.add_argument("--redo-existing", action="store_true")
     parser.add_argument("--workers", type=int, default=1)
@@ -451,7 +478,7 @@ def main() -> int:
     )
     memory_issue_ids = load_memory_issue_ids(args.memory_root)
     success_patch_issue_ids = load_success_patch_issue_ids(args.success_patches)
-    known_issue_ids = memory_issue_ids | success_patch_issue_ids
+    known_issue_ids = success_patch_issue_ids if args.exclude_success_only else memory_issue_ids | success_patch_issue_ids
     selected, excluded = select_issues(
         issues,
         repos=repos,
@@ -473,6 +500,7 @@ def main() -> int:
     print(f"Exclude known issues: {not args.include_known}")
     print(f"Known memory issue IDs: {len(memory_issue_ids)}")
     print(f"Known success patch issue IDs: {len(success_patch_issue_ids)}")
+    print(f"Exclude success only: {args.exclude_success_only}")
     print(f"Known issue IDs excluded: {len(known_issue_ids) if not args.include_known else 0}")
     print(f"Excluded matching candidates: {len(excluded)}")
     print(f"Selected issues: {len(selected)}")
@@ -497,8 +525,8 @@ def main() -> int:
 
     print_issue_plan(selected)
 
-    run_root = args.output_root / time.strftime("%Y%m%d_%H%M%S")
-    dataset_path = run_root / "selected_issues.json"
+    issue_label = issue_id(selected[0]) if len(selected) == 1 else f"multi_{time.strftime('%Y%m%d_%H%M%S')}"
+    dataset_path = args.output_root / "_selected_datasets" / f"{issue_label}.json"
     write_json(dataset_path, selected)
     print(f"\nWrote selected dataset: {dataset_path}")
 
@@ -506,9 +534,10 @@ def main() -> int:
     interrupted = False
     try:
         for ablation in ablations:
+            ablation_run_root = args.output_root / ablation.replace("+", "_") / issue_label
             result = run_ablation(
                 dataset_path=dataset_path,
-                output_root=run_root,
+                output_root=ablation_run_root,
                 memory_root=args.memory_root,
                 ablation=ablation,
                 workers=args.workers,
@@ -530,13 +559,14 @@ def main() -> int:
         "selected_dataset": str(dataset_path),
         "memory_root": str(args.memory_root),
         "success_patches": str(args.success_patches),
-        "output_root": str(run_root),
+        "output_root": str(args.output_root),
         "repos": sorted(repos),
         "issue_ids": [issue_id(issue) for issue in selected],
         "excluded_issue_ids": [issue_id(issue) for issue in excluded],
         "known_memory_issue_ids_count": len(memory_issue_ids),
         "known_success_patch_issue_ids_count": len(success_patch_issue_ids),
         "include_known": args.include_known,
+        "exclude_success_only": args.exclude_success_only,
         "interrupted": interrupted,
         "dry_run": args.dry_run,
         "ablations": [
@@ -554,7 +584,7 @@ def main() -> int:
             for result in results
         ],
     }
-    summary_path = run_root / "ablation_summary.json"
+    summary_path = args.output_root / "_summaries" / f"{issue_label}_ablation_summary.json"
     write_json(summary_path, summary)
 
     print("\n" + "=" * 80)
