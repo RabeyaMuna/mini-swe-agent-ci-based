@@ -945,6 +945,7 @@ def _run_sequential_repair(
     partial_fixes = []
     total_problems = len(problems)
     install_cache = set()  # Track which testbeds have been installed
+    per_problem_timeout = 600  # 10 minutes per problem
 
     logger.info(f"[CIBench] Starting sequential repair: {total_problems} problems")
 
@@ -1002,27 +1003,22 @@ def _run_sequential_repair(
         # Agent fixes THIS problem (with timeout to avoid getting stuck)
         logger.info(f"[CIBench] Running agent for problem {i}...")
 
-        import time as time_module
-        import threading
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-
-        PER_PROBLEM_TIMEOUT = 600  # 10 minutes per problem
-
         try:
-            start_time = time_module.time()
+            start_time = time.time()
+            previous_start_time = getattr(agent, "_start_time", start_time)
+            previous_wall_limit = getattr(agent.config, "wall_time_limit_seconds", 0)
+            if previous_wall_limit <= 0 or previous_wall_limit > per_problem_timeout:
+                agent.config.wall_time_limit_seconds = per_problem_timeout
+            agent._start_time = start_time
 
-            # Run agent with timeout using ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(agent.run, single_task)
-                try:
-                    info = future.result(timeout=PER_PROBLEM_TIMEOUT)
-                    elapsed = time_module.time() - start_time
-                    logger.info(f"[CIBench] Problem {i} completed in {elapsed:.1f}s")
+            try:
+                info = agent.run(single_task)
+            finally:
+                agent.config.wall_time_limit_seconds = previous_wall_limit
+                agent._start_time = previous_start_time
 
-                except FuturesTimeoutError:
-                    logger.warning(f"[CIBench] TIMEOUT Problem {i}: Exceeded {PER_PROBLEM_TIMEOUT}s - SKIPPING to next problem")
-                    # Don't break - continue to next problem
-                    continue
+            elapsed = time.time() - start_time
+            logger.info(f"[CIBench] Problem {i} completed in {elapsed:.1f}s")
 
             exit_status = info.get("exit_status")
 
@@ -1057,7 +1053,7 @@ def _run_sequential_repair(
             # Small delay between problems to allow cleanup and prevent timeout cascading
             if i < total_problems:
                 logger.info(f"[CIBench] Waiting 5 seconds before next problem...")
-                time_module.sleep(5)
+                time.sleep(5)
 
     # Combine all successful partial fixes
     unified_diff = _combine_partial_fixes(partial_fixes)
@@ -1733,19 +1729,30 @@ def main(
                 progress_manager.on_uncaught_exception(iid, exc)
 
     with Live(progress_manager.render_group, refresh_per_second=4):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(_process, instance): str(instance.get("instance_id", ""))
-                for instance in instances
-            }
-            try:
-                _process_futures(futures)
-            except KeyboardInterrupt:
-                logger.info("[CIBench] Cancelling pending jobs. Press ^C again to exit immediately.")
-                for f in futures:
-                    if not f.running() and not f.done():
-                        f.cancel()
-                _process_futures(futures)
+        if workers <= 1:
+            for instance in instances:
+                iid = str(instance.get("instance_id", ""))
+                try:
+                    _process(instance)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    logger.error("[CIBench] Uncaught exception for %s: %s", iid, exc, exc_info=True)
+                    progress_manager.on_uncaught_exception(iid, exc)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(_process, instance): str(instance.get("instance_id", ""))
+                    for instance in instances
+                }
+                try:
+                    _process_futures(futures)
+                except KeyboardInterrupt:
+                    logger.info("[CIBench] Cancelling pending jobs. Press ^C again to exit immediately.")
+                    for f in futures:
+                        if not f.running() and not f.done():
+                            f.cancel()
+                    _process_futures(futures)
 
     # ── Final summary ─────────────────────────────────────────────────────────
     preds = _read_preds(output_path / "preds.json")
