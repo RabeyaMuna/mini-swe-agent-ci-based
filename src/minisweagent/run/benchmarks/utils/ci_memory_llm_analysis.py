@@ -514,23 +514,8 @@ def llm_analyze_l1_for_problem_1(
       "why_fix_works": "Why this fixes it",
       "validation_cmd": "./framework/dev/test.sh"
     }},
-    {{
-      "problem_id": 2,
-      "relevant_to_primary": true,
-      "file": "another/file.py",
-      "problem": "...",
-      "root_cause": "...",
-      "how_fixed": "...",
-      "why_fix_works": "...",
-      "validation_cmd": "..."
-    }}
+    // more problems...
   ]
-
-  WRONG - DO NOT return single object:
-  {{
-    "problem_id": 1,
-    ...
-  }}
 
   Return ONLY the JSON array. No markdown fences. No explanatory text.
   Start with [ and end with ].

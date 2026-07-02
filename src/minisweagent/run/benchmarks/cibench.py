@@ -62,6 +62,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -92,6 +93,66 @@ _OUTPUT_FILE_LOCK   = threading.Lock()
 app = typer.Typer(rich_markup_mode="rich", add_completion=False)
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 REPO_CACHE_ROOT = Path(os.getenv("MSWEA_REPO_CACHE_ROOT") or (PROJECT_ROOT / "repo")).resolve()
+
+# Automated fix tools for mechanical/static problems (formatting, linting, style)
+AUTOMATED_TOOLS = [
+    {
+        "tool": "ruff",
+        "purpose": "Unified Python linter and formatter",
+        "install_command": "pip install ruff",
+        "fix_command": "ruff check --fix {{file_or_dir}}",
+        "file_pattern": "*.py",
+    },
+    {
+        "tool": "black",
+        "purpose": "Python code formatter",
+        "install_command": "pip install black",
+        "fix_command": "black {{file_or_dir}}",
+        "file_pattern": "*.py",
+    },
+    {
+        "tool": "isort",
+        "purpose": "Python import sorter",
+        "install_command": "pip install isort",
+        "fix_command": "isort {{file_or_dir}}",
+        "file_pattern": "*.py",
+    },
+    {
+        "tool": "docstrfmt",
+        "purpose": "RST documentation and docstring formatter",
+        "install_command": "pip install docstrfmt",
+        "fix_command": "docstrfmt {{file_or_dir}}",
+        "file_pattern": ["*.rst", "*.py"],
+    },
+    {
+        "tool": "docformatter",
+        "purpose": "Python docstring formatter (PEP 257)",
+        "install_command": "pip install docformatter",
+        "fix_command": "docformatter --in-place --recursive {{file_or_dir}}",
+        "file_pattern": "*.py",
+    },
+    {
+        "tool": "mdformat",
+        "purpose": "Markdown formatter",
+        "install_command": "pip install mdformat",
+        "fix_command": "python -m mdformat {{file_or_dir}}",
+        "file_pattern": "*.md",
+    },
+    {
+        "tool": "codespell",
+        "purpose": "Spell checker for code",
+        "install_command": "pip install codespell",
+        "fix_command": "codespell -w {{file_or_dir}}",
+        "file_pattern": ["*.py", "*.md", "*.rst"],
+    },
+    {
+        "tool": "taplo",
+        "purpose": "TOML formatter",
+        "install_command": "cargo install taplo-cli",
+        "fix_command": "taplo fmt {{file_or_dir}}",
+        "file_pattern": "*.toml",
+    },
+]
 
 def _make_context_llm(config: Dict[str, Any], context_model: Optional[str] = None) -> Any:
     """
@@ -711,191 +772,249 @@ def setup_local_environment(
 # Sequential Repair: Fix problems one at a time
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_single_problem_task(problem: Dict[str, Any], problem_num: int, total_problems: int) -> str:
-    """
-    Build a focused task for ONE specific problem.
 
-    Mini-swe-agent will:
-    1. Read problem description and root cause
-    2. Explore repo to locate the issue
-    3. Apply fix based on guidance
-    4. Validate itself
+def _analyze_repair_with_llm(problem: Dict[str, Any], context_llm: Any) -> Dict[str, Any]:
+    """Analyze problem to determine if automated tool can fix it, or needs manual repair."""
 
-    We just provide essential info - agent decides how to proceed.
-    """
+    problem_statement = problem.get('problem_statement', '')
+    verification_cmd = problem.get('verification_cmd', '')
+    root_cause = problem.get('root_cause', '')
+    fix_strategy = problem.get('fix_strategy', '')
+    files = problem.get('files', [])
+    error_type = problem.get('error_type', '')
+    issue_type = problem.get('issue_type', '')
 
-    # Extract essential fields
+    # Format affected files (limit to first 10). If all affected files are in
+    # the same directory, use the directory as the repair target.
+    listed_files = files[:10] if isinstance(files, list) else []
+    file_paths = []
+    for file_entry in listed_files:
+        if isinstance(file_entry, str):
+            file_paths.append(file_entry)
+        elif isinstance(file_entry, dict):
+            path = file_entry.get("path") or file_entry.get("file")
+            if path:
+                file_paths.append(path)
+
+    validation_tool_targets = []
+    if verification_cmd:
+        tool_names = {tool["tool"] for tool in AUTOMATED_TOOLS}
+        try:
+            cmd_parts = shlex.split(verification_cmd)
+        except ValueError:
+            cmd_parts = verification_cmd.split()
+        validation_uses_tool = any(part in tool_names for part in cmd_parts)
+        if validation_uses_tool:
+            ignored_parts = tool_names | {"python", "python3", "-m", "check", "fmt", "format"}
+            for part in cmd_parts:
+                if part in ignored_parts or part.startswith("-") or part == ".":
+                    continue
+                if "/" in part or re.search(r"\.(py|pyi|toml|cfg|ini|yaml|yml|md|rst|txt|sh|json)$", part):
+                    path = part.rstrip(".,);]")
+                    if path not in validation_tool_targets:
+                        validation_tool_targets.append(path)
+
+    if not file_paths:
+        path_pattern = re.compile(
+            r'(?<![\w.-])(?:[\w.-]+/)*[\w.-]+(?:/|/[\w./-]+\.(?:py|pyi|toml|cfg|ini|yaml|yml|md|rst|txt|sh|json)(?::\d+)?)'
+        )
+        for text in (problem_statement, root_cause, fix_strategy):
+            for match in path_pattern.findall(text or ""):
+                path = re.sub(r":\d+$", "", match).rstrip(".,);]")
+                if path not in file_paths:
+                    file_paths.append(path)
+
+    if file_paths and validation_tool_targets:
+        qualified_paths = []
+        validation_dirs = [
+            target if not os.path.splitext(target)[1] else os.path.dirname(target)
+            for target in validation_tool_targets
+        ]
+        for path in file_paths:
+            stripped_path = path.strip("/")
+            if (
+                path.endswith("/")
+                and validation_dirs
+                and not path.startswith(("/", "./", "../"))
+                and not any(stripped_path == target.strip("/") or stripped_path.startswith(f"{target.strip('/')}/") for target in validation_dirs)
+            ):
+                qualified_path = f"{validation_dirs[0].rstrip('/')}/{stripped_path}"
+            else:
+                qualified_path = path
+            if qualified_path not in qualified_paths:
+                qualified_paths.append(qualified_path)
+        file_paths = qualified_paths
+
+    if not file_paths:
+        file_paths = validation_tool_targets
+
+    affected_paths = file_paths or [str(f) for f in listed_files]
+    if len(file_paths) > 1:
+        validation_dirs = [
+            (target if not os.path.splitext(target)[1] else os.path.dirname(target)).rstrip("/")
+            for target in validation_tool_targets
+        ]
+        path_dirs = []
+        for path in file_paths:
+            clean_path = path.rstrip("/")
+            if os.path.splitext(clean_path)[1]:
+                path_dirs.append(os.path.dirname(clean_path) or ".")
+            else:
+                path_dirs.append(clean_path or ".")
+
+        try:
+            common_dir = os.path.commonpath(path_dirs).rstrip("/")
+        except ValueError:
+            common_dir = ""
+
+        if common_dir and common_dir != ".":
+            affected_paths = [common_dir]
+        else:
+            for validation_dir in validation_dirs:
+                if validation_dir and all(
+                    path.rstrip("/") == validation_dir
+                    or path.rstrip("/").startswith(f"{validation_dir}/")
+                    for path in file_paths
+                ):
+                    affected_paths = [validation_dir]
+                    break
+
+    files_str = '\n'.join(f'  - {path}' for path in affected_paths) or "  - <no concrete target path found>"
+
+    # Build prompt sections dynamically (only include non-empty sections)
+    prompt_parts = [f"PROBLEM:\n{problem_statement}"]
+
+    if root_cause:
+        prompt_parts.append(f"ROOT CAUSE:\n{root_cause}")
+
+    if fix_strategy:
+        prompt_parts.append(f"KNOWN FIX STRATEGY:\n{fix_strategy}")
+
+    prompt_parts.append(f"FILES:\n{files_str}")
+    prompt_parts.append(f"AUTOMATED TOOLS:\n{json.dumps(AUTOMATED_TOOLS, indent=2)}")
+
+    prompt = f"""Analyze this CI problem, then return the shortest correct repair plan.
+
+{chr(10).join(prompt_parts)}
+
+INSTRUCTIONS:
+1. Work with whatever information is provided (some sections may be missing - that's OK)
+2. First decide whether this failure can be fixed by one AUTOMATED TOOLS entry
+3. Use automated_tool when the problem is a deterministic tool-fixable issue, such as formatting, doc formatting, docstring formatting, import sorting, lint auto-fix, spelling, or style
+4. For automated_tool, select the tool whose purpose/file_pattern matches the problem and affected files
+5. For automated_tool, choose the Run target from FILES:
+   - If FILES lists a directory, use that directory
+   - FILES is already normalized to the best relative repair target when multiple files share a directory; use it exactly
+   - If multiple affected files are in the same directory for the same issue, use that directory
+   - If FILES was inferred from a formatter/linter check command, use that inferred directory/file as the automated repair target
+   - If PROBLEM names a relative subdirectory under a formatter/linter check target, use the full joined path shown in FILES
+   - If only one concrete file is affected, use that file
+   - Never use "." unless FILES explicitly contains "."
+6. For automated_tool, output only Install and Run lines using the exact install_command and fix_command template from AUTOMATED TOOLS with the chosen target substituted
+7. If no automated tool applies, return manual_fix with concise exact edits based on available information (PROBLEM, ROOT CAUSE if provided, KNOWN FIX STRATEGY if provided)
+8. When KNOWN FIX STRATEGY names exact versions, files, or from/to changes, preserve them exactly; do not invent alternatives
+9. Do not include validation commands, project test commands, markdown headings, or explanatory background
+
+OUTPUT (JSON only):
+
+Automated tool (formatting/linting):
+{{
+  "type": "automated_tool",
+  "repair_plan": "Install: pip install tool\\nRun: tool command path"
+}}
+
+Manual fix:
+{{
+  "type": "manual_fix",
+  "repair_plan": "Edit: file:line change X to Y for issue 1\\nEdit: file:line change X to Y for issue 2 if present"
+}}"""
+
+    try:
+        response = context_llm(prompt)
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group(0))
+    except Exception as e:
+        logger.warning(f"LLM analysis failed: {e}")
+
+    # Fallback to manual fix
+    return {
+        "type": "manual_fix",
+        "repair_plan": fix_strategy or "Analyze error and apply fix"
+    }
+
+
+def _extract_target_path(files: List[Any], verification_cmd: str) -> str:
+    """Extract target file/directory path from files list or validation command."""
+    # Try files first
+    if files and len(files) > 0:
+        first_file = files[0] if isinstance(files, list) else files
+        if isinstance(first_file, str):
+            # Return directory if file path contains /
+            return first_file.rsplit('/', 1)[0] if '/' in first_file else '.'
+
+    # Fallback: extract from validation command
+    if verification_cmd:
+        parts = verification_cmd.split()
+        for part in parts:
+            if '/' in part or part.endswith(('.py', '.rst', '.md', '.toml')):
+                return part
+
+    return '.'
+
+
+def _build_single_problem_task(
+    problem: Dict[str, Any],
+    problem_num: int,
+    total_problems: int,
+    context_llm: Any = None
+) -> str:
+    """Build focused repair task with automated tool detection or manual repair instructions."""
+
+    # Extract problem fields
     problem_statement = problem.get("problem_statement", "")
+    error_details = problem.get("error_details", [])
     root_cause = problem.get("root_cause", "")
     fix_strategy = problem.get("fix_strategy", "")
     files = problem.get("files", [])
-    source = problem.get("source", "")
-    error_details = problem.get("error_details", [])
-
-    # Context fields (optional - help agent understand problem type)
-    verification_cmd = problem.get("verification_cmd", "")
-    error_type = problem.get("error_type", "")
     issue_type = problem.get("issue_type", "")
-    failure_type = problem.get("failure_type", "")
+    failure_type = problem.get("failure_type") or problem.get("error_type") or ""
 
-    # Build simple, focused task
-    task = f"""# CI Repair - Problem {problem_num}/{total_problems}
-
-## Source
-
-{source or "unknown"}
-
-## Problem Description
-
-{problem_statement}
-
-"""
-
-    if root_cause:
-        task += f"""## Root Cause
-
-{root_cause}
-
-"""
-
-    if fix_strategy:
-        task += f"""## How to Fix
-
-{fix_strategy}
-
-"""
-
-    # Files hint (if provided) - agent can explore repo if not provided
-    if files:
-        task += """## Affected Files
-
-"""
-        if isinstance(files, list):
-            for f in files:
-                if isinstance(f, dict):
-                    path = f.get("path", "")
-                    if path:
-                        task += f"- `{path}`\n"
-                elif isinstance(f, str):
-                    task += f"- `{f}`\n"
-        task += "\n"
-
-    if isinstance(error_details, list) and error_details:
-        task += """## Error Details
-
-"""
+    # Combine problem_statement and error_details if both exist
+    full_problem = problem_statement
+    if error_details and isinstance(error_details, list):
         for detail in error_details:
-            if not isinstance(detail, dict):
-                continue
-            file_path = detail.get("file", "")
-            line = detail.get("line", "")
-            error = detail.get("error", "")
-            message = detail.get("message", "")
-            fix = detail.get("fix", "")
-            location = f"{file_path}:{line}" if file_path and line else file_path
-            if location or error:
-                task += f"- {location} {f'({error})' if error else ''}\n"
-            if message:
-                task += f"  Message: {message}\n"
-            if fix:
-                task += f"  Fix hint: {fix}\n"
-        task += "\n"
+            if isinstance(detail, dict):
+                msg = detail.get("message", "")
+                if msg and msg not in full_problem:
+                    full_problem += f"\n{msg}"
 
-    # Context info (helps agent understand problem type)
-    context_parts = []
-    if error_type:
-        context_parts.append(f"**Error Type**: {error_type}")
-    if issue_type:
-        context_parts.append(f"**Issue Type**: {issue_type}")
-    if failure_type:
-        context_parts.append(f"**Failure Type**: {failure_type}")
-    if verification_cmd:
-        context_parts.append(f"**Validation Command**: `{verification_cmd}`")
+    # Analyze repair approach with LLM
+    if context_llm:
+        logger.info(f"[CIBench] Analyzing repair approach for problem {problem_num}...")
+        analysis = _analyze_repair_with_llm(problem, context_llm)
+        repair_plan = analysis.get('repair_plan', '')
+    else:
+        # No LLM available - use fix_strategy
+        repair_plan = fix_strategy or "Analyze error and apply fix"
+        logger.info(f"[CIBench] → Manual repair (no LLM)")
 
-    if context_parts:
-        task += "## Context\n\n"
-        task += " | ".join(context_parts)
-        task += "\n\n"
+    # Format files list
+    files_str = '\n'.join(f"- {f}" for f in (files if isinstance(files, list) else [files])) if files else "N/A"
 
-    # No "Check First" instructions - agent will explore and validate itself
-    # No prescriptive steps - agent has its own workflow
+    return f"""Problem {problem_num}/{total_problems}
 
-    return task
+{failure_type} | {issue_type}
+{full_problem}
 
+Root Cause: {root_cause}
 
-def _verify_validation_passes(
-    testbed_path: Path,
-    validation_cmd: str,
-    installation_cmd: Optional[List[str]] = None,
-    timeout: int = 300,
-    _install_cache: Optional[set] = None
-) -> bool:
-    """
-    Run validation command and check if it passes.
+Affected Files:
+{files_str}
 
-    Optionally runs installation commands first (once per testbed).
-
-    Args:
-        testbed_path: Path to testbed directory
-        validation_cmd: Validation command to run
-        installation_cmd: Optional list of installation commands to run first
-        timeout: Timeout in seconds
-        _install_cache: Set to track installed testbeds (internal)
-
-    Returns:
-        True if validation passes (exit code 0), False otherwise
-    """
-    import subprocess
-
-    # Run installation commands if provided and not yet done for this testbed
-    if installation_cmd and _install_cache is not None:
-        testbed_key = str(testbed_path)
-        if testbed_key not in _install_cache:
-            logger.info(f"[CIBench] Running {len(installation_cmd)} installation command(s)...")
-            for i, install_cmd in enumerate(installation_cmd, 1):
-                try:
-                    logger.debug(f"[CIBench] Install {i}/{len(installation_cmd)}: {install_cmd[:80]}")
-                    install_result = subprocess.run(
-                        install_cmd,
-                        shell=True,
-                        cwd=str(testbed_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout * 2  # More time for installation
-                    )
-                    if install_result.returncode != 0:
-                        logger.warning(f"[CIBench] Installation command {i} failed (exit {install_result.returncode})")
-                        logger.debug(f"[CIBench] Install error: {install_result.stderr[:500]}")
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"[CIBench] Installation command {i} timed out")
-            _install_cache.add(testbed_key)
-
-    # Run validation
-    try:
-        result = subprocess.run(
-            validation_cmd,
-            shell=True,
-            cwd=str(testbed_path),
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-
-        passed = result.returncode == 0
-        logger.info(f"[CIBench] Validation '{validation_cmd}' -> exit code {result.returncode}")
-
-        if not passed and result.stderr:
-            logger.debug(f"[CIBench] Validation error: {result.stderr[:500]}")
-
-        return passed
-
-    except subprocess.TimeoutExpired:
-        logger.warning(f"[CIBench] Validation '{validation_cmd}' timed out (>{timeout}s)")
-        return False
-    except Exception as e:
-        logger.error(f"[CIBench] Validation '{validation_cmd}' error: {e}")
-        return False
-
+Repair Plan:
+{repair_plan}
+"""
 
 def _combine_partial_fixes(partial_fixes: List[Dict[str, Any]]) -> str:
     """
@@ -921,7 +1040,7 @@ def _run_sequential_repair(
     testbed_path: Path,
     progress_manager: Any,
     instance_id: str,
-    installation_cmd: Optional[List[str]] = None
+    context_llm: Any = None
 ) -> Tuple[Dict[str, Any], str]:
     """
     Fix problems sequentially, one at a time.
@@ -944,7 +1063,6 @@ def _run_sequential_repair(
     """
     partial_fixes = []
     total_problems = len(problems)
-    install_cache = set()  # Track which testbeds have been installed
     per_problem_timeout = 600  # 10 minutes per problem
 
     logger.info(f"[CIBench] Starting sequential repair: {total_problems} problems")
@@ -954,42 +1072,32 @@ def _run_sequential_repair(
         logger.info(f"[CIBench] Problem {i}/{total_problems}")
         logger.info(f"[CIBench] {'='*60}")
         # Support both old and new problem formats
-        if "problem_statement" in problem:
-            # New simplified format
-            problem_id = problem.get("problem_id", i)
-            source = str(problem.get("source", "")).strip()
-            is_primary = source == "ci failure" or problem.get("is_primary", False)
-            # No more nested verification dict - fields are flat
-            validation_cmd = problem.get("verification_cmd", "")
-            # No check_first - agent decides on its own
-            check_first = False
-            status = "CI FAILURE" if source == "ci failure" else "PREVIOUS EXPERIENCE"
-            stage = ""
 
-            logger.info(f"[CIBench] Problem ID: {problem_id}")
-            logger.info(f"[CIBench] Source: {source or 'unknown'}")
-            # problem_statement is now a string, not a dict
-            problem_desc = problem.get('problem_statement', '')
-            if isinstance(problem_desc, str):
-                logger.info(f"[CIBench] Description: {problem_desc[:100]}")
-            else:
-                # Very old format (dict) - shouldn't happen with our new code
-                logger.info(f"[CIBench] Description: {problem_desc.get('description', '')[:100]}")
+        # New simplified format
+        problem_id = problem.get("problem_id", i)
+        source = str(problem.get("source", "")).strip()
+        # No more nested verification dict - fields are flat
+        validation_cmd = problem.get("verification_cmd", "")
+        # No check_first - agent decides on its own
+        status = "CI FAILURE" if source == "ci failure" else "PREVIOUS EXPERIENCE"
+        stage = ""
+
+        logger.info(f"[CIBench] Problem ID: {problem_id}")
+        logger.info(f"[CIBench] Source: {source or 'unknown'}")
+        # problem_statement is now a string, not a dict
+        problem_desc = problem.get('problem_statement', '')
+        if isinstance(problem_desc, str):
+            logger.info(f"[CIBench] Description: {problem_desc[:100]}")
         else:
-            # Old format
-            status = problem.get("status", "unknown")
-            validation_cmd = problem.get("verification_cmd", "")
-            stage = problem.get("validation_stage", "")
-            check_first = problem.get("check_first", False)
-            is_primary = (status == "PRIMARY")
+            # Very old format (dict) - shouldn't happen with our new code
+            logger.info(f"[CIBench] Description: {problem_desc.get('description', '')[:100]}")
 
         logger.info(f"[CIBench] Status: {status}")
         logger.info(f"[CIBench] Stage: {stage}")
         logger.info(f"[CIBench] Validation: {validation_cmd}")
-        logger.info(f"[CIBench] Check first: {check_first}")
 
         # Build focused task for THIS problem only
-        single_task = _build_single_problem_task(problem, i, total_problems)
+        single_task = _build_single_problem_task(problem, i, total_problems, context_llm)
 
         logger.info(f"[CIBench] Task preview (first 300 chars):")
         logger.info(single_task[:300] + "...")
@@ -1212,17 +1320,13 @@ def process_instance(
             # SEQUENTIAL REPAIR MODE: Fix problems one at a time
             logger.info(f"[CIBench] Sequential repair mode: {len(problems)} problems to fix")
 
-            # Extract installation commands from CI context
-            installation_cmd = ci_ctx.get("validation_profile", {}).get("installation_cmd", [])
-            if installation_cmd:
-                logger.info(f"[CIBench] Found {len(installation_cmd)} installation command(s) from CI context")
             info, diff = _run_sequential_repair(
                 agent=agent,
                 problems=problems,
                 testbed_path=testbed_path,
                 progress_manager=progress_manager,
                 instance_id=instance_id,
-                installation_cmd=installation_cmd
+                context_llm=context_llm
             )
             exit_status = info.get("exit_status")
 
