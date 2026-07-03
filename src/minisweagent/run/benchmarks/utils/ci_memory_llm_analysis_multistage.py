@@ -212,6 +212,7 @@ Return ONLY the JSON array:
 
     try:
         response = _call_llm(llm, prompt)
+
         problems = _parse_json_array(response, "L1-Analysis")
         logger.info(f"[L1-Analysis] Extracted {len(problems)} dependent problems from {len(l1_memories)} entries")
         return problems

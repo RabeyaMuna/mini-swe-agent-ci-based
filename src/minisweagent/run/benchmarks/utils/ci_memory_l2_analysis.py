@@ -14,6 +14,20 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+try:
+    import numpy as np
+    _NUMPY_AVAILABLE = True
+except ImportError:
+    np = None  # type: ignore
+    _NUMPY_AVAILABLE = False
+
+try:
+    from .memory_plugin import _EmbeddingProvider
+    _EMBEDDING_AVAILABLE = True
+except ImportError:
+    _EmbeddingProvider = None  # type: ignore
+    _EMBEDDING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,6 +122,215 @@ def _step_problems(step: Dict[str, Any]) -> List[Dict[str, Any]]:
     if any(step.get(key) for key in ("problem", "root_cause", "how_fixed", "why_fix_works", "issue_type")):
         return [step]
     return []
+
+
+def _cluster_problems_by_embedding(
+    rows: List[Dict[str, Any]],
+    total_trajectories: int,
+    similarity_threshold: float = 0.5,
+    frequency_threshold: float = 0.3,
+) -> List[Dict[str, Any]]:
+    """
+    Cluster problems using embeddings (problem_statement + root_cause).
+
+    Steps:
+    1. Extract all problems and create signatures (problem + root_cause)
+    2. Embed each signature
+    3. Cluster by cosine similarity >= similarity_threshold
+    4. Count frequency based on unique L2 records (not total problems)
+    5. Filter by frequency_ratio >= frequency_threshold
+    6. Merge problems in each cluster
+
+    Args:
+        rows: Flattened problem rows from L2 trajectories
+        total_trajectories: Total number of L2 records fetched
+        similarity_threshold: Cosine similarity threshold (default: 0.5)
+        frequency_threshold: Frequency ratio based on L2 records (default: 0.3, i.e., 30%)
+
+    Returns:
+        List of clustered common problems with high frequency
+    """
+    if not _EMBEDDING_AVAILABLE or not _NUMPY_AVAILABLE:
+        logger.warning("[L2 Clustering] Embedding not available, falling back to exact grouping")
+        return []
+
+    # Type guard: at this point we know these are available
+    assert _EmbeddingProvider is not None
+    assert np is not None
+
+    if not rows:
+        return []
+
+    # Step 1: Create signatures for all problems
+    problems_with_signatures = []
+    for row in rows:
+        problem_text = row.get("problem", "")
+        root_cause = row.get("root_cause", "")
+        # Combine problem + root_cause for better matching
+        signature = f"{problem_text} | {root_cause}".strip()
+
+        if signature and signature != "|":
+            problems_with_signatures.append({
+                "signature": signature,
+                "row": row
+            })
+
+    if not problems_with_signatures:
+        logger.warning("[L2 Clustering] No valid problem signatures found")
+        return []
+
+    logger.info(f"[L2 Clustering] Processing {len(problems_with_signatures)} problems")
+
+    # Step 2: Embed all signatures
+    embedder = _EmbeddingProvider.get()
+    embeddings = []
+    valid_problems = []
+
+    for item in problems_with_signatures:
+        emb = embedder.embed(item["signature"])
+        if emb is not None:
+            embeddings.append(emb)
+            valid_problems.append(item)
+
+    if not embeddings:
+        logger.warning("[L2 Clustering] No valid embeddings generated")
+        return []
+
+    logger.info(f"[L2 Clustering] Generated {len(embeddings)} embeddings")
+
+    # Step 3: Cluster by cosine similarity
+    clusters = []
+    assigned = [False] * len(embeddings)
+
+    for i in range(len(embeddings)):
+        if assigned[i]:
+            continue
+
+        # Start new cluster with problem i
+        cluster = [valid_problems[i]]
+        assigned[i] = True
+
+        # Find all similar problems
+        for j in range(i + 1, len(embeddings)):
+            if assigned[j]:
+                continue
+
+            # Compute cosine similarity (dot product since embeddings are normalized)
+            similarity = float(np.dot(embeddings[i], embeddings[j]))
+
+            if similarity >= similarity_threshold:
+                cluster.append(valid_problems[j])
+                assigned[j] = True
+
+        clusters.append(cluster)
+
+    logger.info(f"[L2 Clustering] Created {len(clusters)} clusters")
+
+    # Step 4: Count frequency based on unique L2 records
+    common_problems = []
+
+    for cluster in clusters:
+        # Count unique L2 records (issue_ids) in this cluster
+        unique_issue_ids = set()
+        for item in cluster:
+            issue_id = item["row"].get("issue_id")
+            if issue_id:
+                unique_issue_ids.add(issue_id)
+
+        # Frequency = how many unique L2 records contain this problem
+        frequency = len(unique_issue_ids)
+        frequency_ratio = frequency / max(total_trajectories, 1)
+
+        if frequency_ratio >= frequency_threshold:
+            # This cluster represents a common problem pattern
+            # Merge all problems in the cluster
+            merged = _merge_cluster_problems(cluster)
+            merged["frequency"] = frequency
+            merged["frequency_ratio"] = round(frequency_ratio, 2)
+            merged["unique_l2_records"] = frequency  # How many L2 records
+            merged["total_instances"] = len(cluster)  # Total occurrences
+            common_problems.append(merged)
+
+    # Sort by frequency (highest first)
+    common_problems.sort(key=lambda x: x["frequency"], reverse=True)
+
+    logger.info(
+        f"[L2 Clustering] Selected {len(common_problems)} common problems "
+        f"(appears in >= {frequency_threshold*100}% of L2 records)"
+    )
+
+    return common_problems
+
+
+def _merge_cluster_problems(cluster: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Merge all problems in a cluster into one representative problem.
+
+    Combines:
+    - problem statements (all unique ones)
+    - root causes (all unique ones)
+    - fixes (all unique ones)
+    - files (all unique ones)
+    - validation commands (first one)
+    - failure types (first one)
+    """
+    if not cluster:
+        return {}
+
+    # Get representative (first) problem
+    representative = cluster[0]["row"]
+
+    # Collect all unique values from cluster
+    all_problems = []
+    all_root_causes = []
+    all_fixes = []
+    all_why_works = []
+    all_files = []
+    all_issue_ids = set()
+
+    for item in cluster:
+        row = item["row"]
+
+        problem = row.get("problem", "").strip()
+        if problem and problem not in all_problems:
+            all_problems.append(problem)
+
+        root_cause = row.get("root_cause", "").strip()
+        if root_cause and root_cause not in all_root_causes:
+            all_root_causes.append(root_cause)
+
+        fix = row.get("how_fixed", "").strip()
+        if fix and fix not in all_fixes:
+            all_fixes.append(fix)
+
+        why = row.get("why_fix_works", "").strip()
+        if why and why not in all_why_works:
+            all_why_works.append(why)
+
+        files = _as_list(row.get("files"))
+        for f in files:
+            if f and f not in all_files:
+                all_files.append(f)
+
+        issue_id = row.get("issue_id")
+        if issue_id:
+            all_issue_ids.add(issue_id)
+
+    # Merge into single problem
+    merged = {
+        "validation_cmd": representative.get("validation_cmd", ""),
+        "failure_type": representative.get("failure_type", ""),
+        "issue_type": representative.get("issue_type", ""),
+        "problem": "\n".join(all_problems) if all_problems else "",
+        "root_cause": "\n".join(all_root_causes) if all_root_causes else "",
+        "how_fixed": "\n".join(all_fixes) if all_fixes else "",
+        "why_fix_works": "\n".join(all_why_works) if all_why_works else "",
+        "files": all_files,  # Include ALL files from cluster (no limit)
+        "appears_in_issues": list(all_issue_ids),
+        "evidence_count": len(cluster),
+    }
+
+    return merged
 
 
 def _flatten_l2(l2_memories: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
@@ -271,7 +494,7 @@ TASK:
 Select problems that appear REPEATEDLY across multiple trajectories (at least 2+ issues).
 
 SELECTION CRITERIA:
-1. Problem appears in multiple trajectories (check "trajectory_count" and "issue_ids")
+1. Problem appears in multiple trajectories (check "frequency", "frequency_ratio", "appears_in_issues")
 2. Same validation/failure family
 3. Same or similar fix strategy
 4. If duplicate problems (same root cause + fix), select ONE
@@ -282,22 +505,83 @@ IGNORE:
 
 OUTPUT:
 Return a JSON array of DISTINCT common problems. Deduplicate if same problem appears multiple times.
+IMPORTANT: Include the "files" field from the candidates - copy the file paths exactly.
 
 [
   {{
     "validation_cmd": "exact command",
     "failure_type": "category",
-    "files": ["paths"],
+    "files": ["copy file paths from candidates"],
     "problem": "description",
     "root_cause": "why",
     "how_fixed": "what to change",
     "why_fix_works": "why it works"
-  }}
+  }},
+  // ... more problems
 ]
 """
 
     response = _call_llm(llm, prompt)
     selected = _parse_json_array(response)
+    
+    # Post-process: Add back missing fields (files, frequency, etc.) from candidates
+    for problem in selected:
+        # Find matching candidate(s) by validation_cmd + failure_type
+        validation_cmd = problem.get("validation_cmd", "").lower()
+        failure_type = problem.get("failure_type", "").lower()
+
+        # Look for ALL matching candidates (LLM might have merged multiple)
+        matching_candidates = [
+            c for c in common_candidates
+            if c.get("validation_cmd", "").lower() == validation_cmd
+            and c.get("failure_type", "").lower() == failure_type
+        ]
+
+        if matching_candidates:
+            # Merge files from ALL matching candidates (LLM might have merged them)
+            all_files = []
+            all_issues = set()
+            total_frequency = 0
+            max_frequency_ratio = 0.0
+
+            for candidate in matching_candidates:
+                # Collect files from all candidates
+                candidate_files = candidate.get("files", [])
+                if isinstance(candidate_files, list):
+                    all_files.extend(candidate_files)
+
+                # Collect issue IDs
+                candidate_issues = candidate.get("appears_in_issues", [])
+                if isinstance(candidate_issues, list):
+                    all_issues.update(candidate_issues)
+
+                # Track highest frequency
+                total_frequency = max(total_frequency, candidate.get("frequency", 0))
+                max_frequency_ratio = max(max_frequency_ratio, candidate.get("frequency_ratio", 0.0))
+
+            # Also include any files the LLM returned (merge with candidate files)
+            llm_files = problem.get("files", [])
+            if isinstance(llm_files, list):
+                all_files.extend(llm_files)
+
+            # Deduplicate files while preserving order
+            seen = set()
+            deduplicated_files = []
+            for f in all_files:
+                if f and f not in seen:
+                    seen.add(f)
+                    deduplicated_files.append(f)
+
+            # ALWAYS set the complete merged files (even if LLM returned some)
+            problem["files"] = deduplicated_files
+
+            # Add frequency info if missing
+            if "frequency" not in problem:
+                problem["frequency"] = total_frequency
+            if "frequency_ratio" not in problem:
+                problem["frequency_ratio"] = max_frequency_ratio
+            if "appears_in_issues" not in problem:
+                problem["appears_in_issues"] = list(all_issues)
 
     if not selected:
         logger.warning("[L2 Common] No common problems selected")
@@ -344,12 +628,13 @@ IGNORE:
 
 OUTPUT:
 Return a JSON array of DISTINCT consecutive problems.
+IMPORTANT: Include the "files" field from the candidates - copy the file paths exactly.
 
 [
   {{
     "validation_cmd": "exact command",
     "failure_type": "category",
-    "files": ["paths"],
+    "files": ["copy file paths from candidates"],
     "problem": "description",
     "root_cause": "why",
     "how_fixed": "what to change",
@@ -360,6 +645,65 @@ Return a JSON array of DISTINCT consecutive problems.
 
     response = _call_llm(llm, prompt)
     selected = _parse_json_array(response)
+
+    # Post-process: Add back missing fields (files, frequency, etc.) from candidates
+    for problem in selected:
+        # Find matching candidate(s) by validation_cmd + failure_type
+        validation_cmd = problem.get("validation_cmd", "").lower()
+        failure_type = problem.get("failure_type", "").lower()
+
+        # Look for ALL matching candidates (LLM might have merged multiple)
+        matching_candidates = [
+            c for c in consecutive_candidates
+            if c.get("validation_cmd", "").lower() == validation_cmd
+            and c.get("failure_type", "").lower() == failure_type
+        ]
+
+        if matching_candidates:
+            # Merge files from ALL matching candidates (LLM might have merged them)
+            all_files = []
+            all_issues = set()
+            total_frequency = 0
+            max_frequency_ratio = 0.0
+
+            for candidate in matching_candidates:
+                # Collect files from all candidates
+                candidate_files = candidate.get("files", [])
+                if isinstance(candidate_files, list):
+                    all_files.extend(candidate_files)
+
+                # Collect issue IDs
+                candidate_issues = candidate.get("appears_in_issues", [])
+                if isinstance(candidate_issues, list):
+                    all_issues.update(candidate_issues)
+
+                # Track highest frequency
+                total_frequency = max(total_frequency, candidate.get("frequency", 0))
+                max_frequency_ratio = max(max_frequency_ratio, candidate.get("frequency_ratio", 0.0))
+
+            # Also include any files the LLM returned (merge with candidate files)
+            llm_files = problem.get("files", [])
+            if isinstance(llm_files, list):
+                all_files.extend(llm_files)
+
+            # Deduplicate files while preserving order
+            seen = set()
+            deduplicated_files = []
+            for f in all_files:
+                if f and f not in seen:
+                    seen.add(f)
+                    deduplicated_files.append(f)
+
+            # ALWAYS set the complete merged files (even if LLM returned some)
+            problem["files"] = deduplicated_files
+
+            # Add frequency info if missing
+            if "frequency" not in problem:
+                problem["frequency"] = total_frequency
+            if "frequency_ratio" not in problem:
+                problem["frequency_ratio"] = max_frequency_ratio
+            if "appears_in_issues" not in problem:
+                problem["appears_in_issues"] = list(all_issues)
 
     if not selected:
         logger.warning("[L2 Consecutive] No consecutive problems selected")
@@ -435,11 +779,17 @@ def staged_l2_analysis(
     llm: Any,
 ) -> List[Dict[str, Any]]:
     """
-    Analyze fetched L2 trajectories.
+    Analyze fetched L2 trajectories using embedding-based clustering.
 
-    Common problems are selected from repeated grouped evidence and do not need
-    direct CI matching. Consecutive problems are selected from later trajectory
-    steps using the current CI failure as the anchor.
+    Steps:
+    1. Flatten all L2 trajectories into problem rows
+    2. Cluster problems by embedding similarity (problem + root_cause)
+    3. Filter by frequency (>= threshold % of L2 records, not total problems)
+    4. Pass high-frequency problems to LLM for final selection
+
+    Frequency is L2-based: counts how many unique L2 records contain the problem,
+    not total problem instances. This identifies problems that appear across
+    multiple different CI issues.
     """
     if not l2_memories:
         logger.info("[L2] No L2 memories provided")
@@ -450,12 +800,27 @@ def staged_l2_analysis(
         logger.info("[L2] No trajectory problems found")
         return []
 
-    common_candidates = _group_candidate_rows(
+    logger.info(f"[L2] Extracted {len(rows)} problems from {total_trajectories} trajectories")
+
+    # Use embedding-based clustering to find common problems
+    common_candidates = _cluster_problems_by_embedding(
         rows,
         total_trajectories=total_trajectories,
-        prefix="C",
-        include_primary=True,
+        similarity_threshold=0.6,
+        frequency_threshold=0.3,
     )
+
+    if not common_candidates:
+        logger.warning("[L2] No common problems found with embedding clustering, falling back to old method")
+        # Fallback to old grouping method if clustering fails
+        common_candidates = _group_candidate_rows(
+            rows,
+            total_trajectories=total_trajectories,
+            prefix="C",
+            include_primary=True,
+        )
+
+    # Also get consecutive candidates (non-primary problems)
     consecutive_candidates = _group_candidate_rows(
         rows,
         total_trajectories=total_trajectories,
@@ -464,11 +829,9 @@ def staged_l2_analysis(
     )
 
     logger.info(
-        "[L2] Prepared candidates: rows=%d common=%d consecutive=%d trajectories=%d",
-        len(rows),
+        "[L2] Prepared candidates: common=%d consecutive=%d",
         len(common_candidates),
         len(consecutive_candidates),
-        total_trajectories,
     )
 
     # Select common and consecutive problems SEPARATELY

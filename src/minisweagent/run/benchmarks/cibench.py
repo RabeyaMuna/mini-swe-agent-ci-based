@@ -26,7 +26,7 @@ Output predictions  (preds.json)
   "<instance_id>": {
     "id":       "<instance_id>",
     "sha_fail": "<sha>",
-    "diff":     "<git diff output — the patch>"
+    "diff":     "<git diff output - the patch>"
   },
   ...
 }
@@ -62,7 +62,7 @@ import concurrent.futures
 import json
 import os
 import re
-import shlex
+import demjson3
 import subprocess
 import threading
 import time
@@ -396,7 +396,7 @@ def _load_hf_index() -> Dict[str, Dict[str, Any]]:
         _prev_level = _hf_logger.level
         _hf_logger.setLevel(_logging.ERROR)
 
-        # Try common split names — dataset uses 'train' as the only split
+        # Try common split names - dataset uses 'train' as the only split
         try:
             for split_name in ("test", "train", "validation", "all"):
                 try:
@@ -425,7 +425,7 @@ def _load_hf_index() -> Dict[str, Dict[str, Any]]:
         logger.info("[CIBench] HuggingFace index built: %d records", len(index))
         return index
     except Exception as exc:
-        logger.warning("[CIBench] Could not load HuggingFace dataset (%s) — using local data only", exc)
+        logger.warning("[CIBench] Could not load HuggingFace dataset (%s) - using local data only", exc)
         _hf_index = {}
         return {}
 
@@ -447,7 +447,7 @@ def _enrich_from_hf(inst: Dict[str, Any]) -> Dict[str, Any]:
 
     hf_row = index.get(sha) or index.get(iid)
     if not hf_row:
-        logger.debug("[CIBench] No HF match for sha=%s id=%s — using local data", sha[:12], iid)
+        logger.debug("[CIBench] No HF match for sha=%s id=%s - using local data", sha[:12], iid)
         return inst
 
     # Merge: HF record is the base (has pre-computed fields like overall_failure_reasons),
@@ -461,10 +461,10 @@ def load_ci_instances(dataset_path: str, split: str = "test") -> List[Dict[str, 
     Load CI benchmark instances.
 
     Supports three sources:
-        .json   — JSON array (eval_issues.json) — IDs are looked up in HuggingFace
+        .json   - JSON array (eval_issues.json) - IDs are looked up in HuggingFace
                   to enrich with pre-computed analysis fields
-        .jsonl  — one JSON object per line (eval_dataset.jsonl)
-        str     — HuggingFace dataset name (loaded directly)
+        .jsonl  - one JSON object per line (eval_dataset.jsonl)
+        str     - HuggingFace dataset name (loaded directly)
 
     For .json files: each instance is enriched by fetching the matching
     full record from HuggingFace by sha_fail/id, so the pipeline always
@@ -475,7 +475,7 @@ def load_ci_instances(dataset_path: str, split: str = "test") -> List[Dict[str, 
     if p.exists():
         raw_text = p.read_text(encoding="utf-8").strip()
 
-        # JSON array — enrich each instance from HuggingFace
+        # JSON array - enrich each instance from HuggingFace
         if raw_text.startswith("["):
             try:
                 data = json.loads(raw_text)
@@ -489,7 +489,7 @@ def load_ci_instances(dataset_path: str, split: str = "test") -> List[Dict[str, 
             logger.info("Loaded %d instances from %s (enriched from HuggingFace)", len(instances), dataset_path)
             return instances
 
-        # JSONL — one object per line.  Filtered eval files may contain only
+        # JSONL - one object per line.  Filtered eval files may contain only
         # the compact local issue rows, so normalize, enrich, and inject the
         # same precomputed analysis used for JSON arrays.
         instances_: List[Dict[str, Any]] = []
@@ -774,166 +774,111 @@ def setup_local_environment(
 
 
 def _analyze_repair_with_llm(problem: Dict[str, Any], context_llm: Any) -> Dict[str, Any]:
-    """Analyze problem to determine if automated tool can fix it, or needs manual repair."""
+    """Analyze problem and generate repair plan (automated tool or manual fix)."""
 
     problem_statement = problem.get('problem_statement', '')
-    verification_cmd = problem.get('verification_cmd', '')
+    error_details = problem.get('error_details', [])
     root_cause = problem.get('root_cause', '')
     fix_strategy = problem.get('fix_strategy', '')
     files = problem.get('files', [])
-    error_type = problem.get('error_type', '')
-    issue_type = problem.get('issue_type', '')
 
-    # Format affected files (limit to first 10). If all affected files are in
-    # the same directory, use the directory as the repair target.
-    listed_files = files[:10] if isinstance(files, list) else []
-    file_paths = []
-    for file_entry in listed_files:
-        if isinstance(file_entry, str):
-            file_paths.append(file_entry)
-        elif isinstance(file_entry, dict):
+    file_items = files if isinstance(files, list) else [files]
+    file_lines = []
+    for file_entry in file_items:
+        if isinstance(file_entry, dict):
             path = file_entry.get("path") or file_entry.get("file")
             if path:
-                file_paths.append(path)
+                file_lines.append(f"  - {path}")
+        elif file_entry:
+            file_lines.append(f"  - {file_entry}")
+    files_str = "\n".join(file_lines) if file_lines else "  (not specified)"
 
-    validation_tool_targets = []
-    if verification_cmd:
-        tool_names = {tool["tool"] for tool in AUTOMATED_TOOLS}
-        try:
-            cmd_parts = shlex.split(verification_cmd)
-        except ValueError:
-            cmd_parts = verification_cmd.split()
-        validation_uses_tool = any(part in tool_names for part in cmd_parts)
-        if validation_uses_tool:
-            ignored_parts = tool_names | {"python", "python3", "-m", "check", "fmt", "format"}
-            for part in cmd_parts:
-                if part in ignored_parts or part.startswith("-") or part == ".":
-                    continue
-                if "/" in part or re.search(r"\.(py|pyi|toml|cfg|ini|yaml|yml|md|rst|txt|sh|json)$", part):
-                    path = part.rstrip(".,);]")
-                    if path not in validation_tool_targets:
-                        validation_tool_targets.append(path)
+    detail_lines = []
+    for detail in error_details if isinstance(error_details, list) else [error_details]:
+        if isinstance(detail, dict):
+            detail_text = "; ".join(f"{key}: {value}" for key, value in detail.items() if value)
+            if detail_text:
+                detail_lines.append(f"  - {detail_text}")
+        elif detail:
+            detail_lines.append(f"  - {detail}")
+    error_details_str = "\n".join(detail_lines)
 
-    if not file_paths:
-        path_pattern = re.compile(
-            r'(?<![\w.-])(?:[\w.-]+/)*[\w.-]+(?:/|/[\w./-]+\.(?:py|pyi|toml|cfg|ini|yaml|yml|md|rst|txt|sh|json)(?::\d+)?)'
-        )
-        for text in (problem_statement, root_cause, fix_strategy):
-            for match in path_pattern.findall(text or ""):
-                path = re.sub(r":\d+$", "", match).rstrip(".,);]")
-                if path not in file_paths:
-                    file_paths.append(path)
-
-    if file_paths and validation_tool_targets:
-        qualified_paths = []
-        validation_dirs = [
-            target if not os.path.splitext(target)[1] else os.path.dirname(target)
-            for target in validation_tool_targets
-        ]
-        for path in file_paths:
-            stripped_path = path.strip("/")
-            if (
-                path.endswith("/")
-                and validation_dirs
-                and not path.startswith(("/", "./", "../"))
-                and not any(stripped_path == target.strip("/") or stripped_path.startswith(f"{target.strip('/')}/") for target in validation_dirs)
-            ):
-                qualified_path = f"{validation_dirs[0].rstrip('/')}/{stripped_path}"
-            else:
-                qualified_path = path
-            if qualified_path not in qualified_paths:
-                qualified_paths.append(qualified_path)
-        file_paths = qualified_paths
-
-    if not file_paths:
-        file_paths = validation_tool_targets
-
-    affected_paths = file_paths or [str(f) for f in listed_files]
-    if len(file_paths) > 1:
-        validation_dirs = [
-            (target if not os.path.splitext(target)[1] else os.path.dirname(target)).rstrip("/")
-            for target in validation_tool_targets
-        ]
-        path_dirs = []
-        for path in file_paths:
-            clean_path = path.rstrip("/")
-            if os.path.splitext(clean_path)[1]:
-                path_dirs.append(os.path.dirname(clean_path) or ".")
-            else:
-                path_dirs.append(clean_path or ".")
-
-        try:
-            common_dir = os.path.commonpath(path_dirs).rstrip("/")
-        except ValueError:
-            common_dir = ""
-
-        if common_dir and common_dir != ".":
-            affected_paths = [common_dir]
-        else:
-            for validation_dir in validation_dirs:
-                if validation_dir and all(
-                    path.rstrip("/") == validation_dir
-                    or path.rstrip("/").startswith(f"{validation_dir}/")
-                    for path in file_paths
-                ):
-                    affected_paths = [validation_dir]
-                    break
-
-    files_str = '\n'.join(f'  - {path}' for path in affected_paths) or "  - <no concrete target path found>"
-
-    # Build prompt sections dynamically (only include non-empty sections)
+    # Build prompt
     prompt_parts = [f"PROBLEM:\n{problem_statement}"]
-
+    if error_details_str:
+        prompt_parts.append(f"ERROR DETAILS:\n{error_details_str}")
     if root_cause:
         prompt_parts.append(f"ROOT CAUSE:\n{root_cause}")
-
     if fix_strategy:
-        prompt_parts.append(f"KNOWN FIX STRATEGY:\n{fix_strategy}")
-
+        prompt_parts.append(f"PREVIOUS EXPERIENCE:\n{fix_strategy}")
     prompt_parts.append(f"FILES:\n{files_str}")
     prompt_parts.append(f"AUTOMATED TOOLS:\n{json.dumps(AUTOMATED_TOOLS, indent=2)}")
 
-    prompt = f"""Analyze this CI problem, then return the shortest correct repair plan.
+    prompt = f"""Analyze this CI problem and root cause, then return the shortest complete repair plan.
 
 {chr(10).join(prompt_parts)}
 
 INSTRUCTIONS:
-1. Work with whatever information is provided (some sections may be missing - that's OK)
-2. First decide whether this failure can be fixed by one AUTOMATED TOOLS entry
-3. Use automated_tool when the problem is a deterministic tool-fixable issue, such as formatting, doc formatting, docstring formatting, import sorting, lint auto-fix, spelling, or style
-4. For automated_tool, select the tool whose purpose/file_pattern matches the problem and affected files
-5. For automated_tool, choose the Run target from FILES:
-   - If FILES lists a directory, use that directory
-   - FILES is already normalized to the best relative repair target when multiple files share a directory; use it exactly
-   - If multiple affected files are in the same directory for the same issue, use that directory
-   - If FILES was inferred from a formatter/linter check command, use that inferred directory/file as the automated repair target
-   - If PROBLEM names a relative subdirectory under a formatter/linter check target, use the full joined path shown in FILES
-   - If only one concrete file is affected, use that file
-   - Never use "." unless FILES explicitly contains "."
-6. For automated_tool, output only Install and Run lines using the exact install_command and fix_command template from AUTOMATED TOOLS with the chosen target substituted
-7. If no automated tool applies, return manual_fix with concise exact edits based on available information (PROBLEM, ROOT CAUSE if provided, KNOWN FIX STRATEGY if provided)
-8. When KNOWN FIX STRATEGY names exact versions, files, or from/to changes, preserve them exactly; do not invent alternatives
-9. Do not include validation commands, project test commands, markdown headings, or explanatory background
+1. Work with the provided sections; some may be missing
+2. Analyze PROBLEM, ERROR DETAILS, ROOT CAUSE, PREVIOUS EXPERIENCE, FILES, and AUTOMATED TOOLS before choosing a repair type
+3. Choose repair type: automated_tool (purely mechanical fixes), manual_fix (code/logic changes), or hybrid (both needed)
+4. Use automated_tool when the ENTIRE problem is mechanical: formatting, linting, style, import sorting, spelling, doc formatting, or docstring formatting
+5. Use hybrid when the problem needs BOTH automated tool AND manual code changes (e.g., RST formatting + test code updates)
+6. For automated_tool or hybrid, select the tool whose purpose and file_pattern match the problem (e.g., docstrfmt for .rst files, ruff for Python, taplo for TOML)
+7. RST title underline issues, RST heading formatting, docstring formatting → use docstrfmt
+8. Python linting, formatting, import sorting → use ruff or black
+9. TOML formatting → use taplo
+10. Choose the tool that can REPAIR the issue, not merely the tool that REPORTED it
+11. For automated_tool, choose the Run target from FILES first; if FILES is missing, use paths from PROBLEM/ERROR DETAILS/ROOT CAUSE
+12. For automated_tool, if one file is affected use that file; if multiple files in same directory use that directory
+13. For automated_tool, output Install and Run lines using exact install_command and fix_command from AUTOMATED TOOLS, replacing {{file_or_dir}} with concrete target
+14. NEVER output placeholders like <tool>, <path>, {{file_or_dir}} - always use concrete values
+15. For manual_fix, include: Locate, Analyze, Change, Impact, Edit lines based on PREVIOUS EXPERIENCE
+16. Locate must say how to find all occurrences using symbols/error text/config keys/file paths from evidence
+17. Edit must list each required file:line or directory pattern change
+18. If manual_fix edits Python files, add: "Install: pip install ruff" and "Cleanup: ruff check --fix <target>"
+19. For hybrid, include BOTH automated and manual sections
+20. Do not include validation commands, test commands, markdown headings, or explanatory background
 
-OUTPUT (JSON only):
+OUTPUT FORMAT:
+Return ONLY the raw JSON object. Do NOT wrap in markdown code fences (```json). Do NOT add explanations.
 
-Automated tool (formatting/linting):
+Automated tool only:
 {{
   "type": "automated_tool",
-  "repair_plan": "Install: pip install tool\\nRun: tool command path"
+  "repair_plan": "Install: exact install_command\\nRun: exact fix_command with concrete target"
 }}
 
-Manual fix:
+Manual fix only:
 {{
   "type": "manual_fix",
-  "repair_plan": "Edit: file:line change X to Y for issue 1\\nEdit: file:line change X to Y for issue 2 if present"
+  "repair_plan": "Locate: ...\\nAnalyze: ...\\nChange: ...\\nImpact: ...\\nEdit: ...\\nInstall: pip install ruff (if Python)\\nCleanup: ruff check --fix <target> (if Python)"
+}}
+
+Hybrid (both automated + manual):
+{{
+  "type": "hybrid",
+  "repair_plan": "AUTOMATED:\\nInstall: exact install_command\\nRun: exact fix_command with concrete target\\n\\nMANUAL:\\nLocate: ...\\nAnalyze: ...\\nChange: ...\\nEdit: ...\\nInstall: pip install ruff (if Python)\\nCleanup: ruff check --fix <target> (if Python)"
 }}"""
 
     try:
-        response = context_llm(prompt)
-        json_match = re.search(r'\{.*\}', response, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group(0))
+        response = context_llm(prompt).strip()
+
+        # Try direct JSON parsing first
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            # Fallback 1: Try demjson3 for more lenient parsing
+            try:
+                return demjson3.decode(response)
+            except Exception:
+                pass
+
+            # Fallback 2: Extract JSON from markdown fences if present
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
+
     except Exception as e:
         logger.warning(f"LLM analysis failed: {e}")
 
@@ -942,25 +887,6 @@ Manual fix:
         "type": "manual_fix",
         "repair_plan": fix_strategy or "Analyze error and apply fix"
     }
-
-
-def _extract_target_path(files: List[Any], verification_cmd: str) -> str:
-    """Extract target file/directory path from files list or validation command."""
-    # Try files first
-    if files and len(files) > 0:
-        first_file = files[0] if isinstance(files, list) else files
-        if isinstance(first_file, str):
-            # Return directory if file path contains /
-            return first_file.rsplit('/', 1)[0] if '/' in first_file else '.'
-
-    # Fallback: extract from validation command
-    if verification_cmd:
-        parts = verification_cmd.split()
-        for part in parts:
-            if '/' in part or part.endswith(('.py', '.rst', '.md', '.toml')):
-                return part
-
-    return '.'
 
 
 def _build_single_problem_task(
@@ -997,7 +923,7 @@ def _build_single_problem_task(
     else:
         # No LLM available - use fix_strategy
         repair_plan = fix_strategy or "Analyze error and apply fix"
-        logger.info(f"[CIBench] → Manual repair (no LLM)")
+        logger.info("[CIBench] → Manual repair (no LLM)")
 
     # Format files list
     files_str = '\n'.join(f"- {f}" for f in (files if isinstance(files, list) else [files])) if files else "N/A"
@@ -1032,6 +958,157 @@ def _combine_partial_fixes(partial_fixes: List[Dict[str, Any]]) -> str:
 
     # Join with double newline to separate patches cleanly
     return "\n\n".join(unified)
+
+
+def _analyze_and_group_problems(problems: List[Dict[str, Any]], context_llm: Any) -> List[Dict[str, Any]]:
+    """
+    Two-step grouping:
+    1. Pre-group by validation_cmd + failure_type
+    2. LLM decides if each group can merge
+    """
+    if not problems or len(problems) <= 1:
+        return problems
+
+    logger.info(f"[CIBench] Analyzing {len(problems)} problems for grouping...")
+
+    # Step 1: Pre-group by validation_cmd + failure_type
+    groups = {}
+    for problem in problems:
+        validation_cmd = problem.get('verification_cmd', '')
+        failure_type = problem.get('failure_type') or problem.get('error_type', '')
+        group_key = f"{validation_cmd}|{failure_type}"
+
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(problem)
+
+    logger.info(f"[CIBench] Pre-grouped into {len(groups)} groups by type")
+
+    # Step 2: For each group, ask LLM if they can merge
+    final_problems = []
+    for group_key, group_problems in groups.items():
+        if len(group_problems) == 1:
+            # Single problem, no merge needed
+            final_problems.append(group_problems[0])
+        else:
+            # Multiple problems, ask LLM if they can merge
+            logger.info(f"[CIBench] Analyzing group with {len(group_problems)} problems...")
+            merged = _analyze_group_for_merge(group_problems, context_llm)
+            final_problems.extend(merged)
+
+    logger.info(f"[CIBench] After grouping: {len(problems)} → {len(final_problems)} problems")
+    return final_problems
+
+
+def _analyze_group_for_merge(group_problems: List[Dict[str, Any]], context_llm: Any) -> List[Dict[str, Any]]:
+    """
+    LLM analyzes if problems in group are similar/related and can be merged.
+    Returns: list of problems (merged or separate)
+    """
+    if not context_llm:
+        return group_problems
+
+    # Build analysis prompt
+    problems_summary = []
+    for i, p in enumerate(group_problems, 1):
+        problems_summary.append({
+            "id": i,
+            "problem_statement": p.get('problem_statement', '')[:200],
+            "root_cause": p.get('root_cause', '')[:200],
+            "files": p.get('files', [])
+        })
+
+    prompt = f"""Analyze if these {len(group_problems)} problems can be merged into one.
+
+PROBLEMS (same validation type and failure type):
+{json.dumps(problems_summary, indent=2)}
+
+TASK: Decide if these problems are similar and related enough to fix together.
+
+Merge if:
+- Same root cause (e.g., all IndexError, all type errors)
+- Related files (same file or related files)
+- Can be fixed with one unified approach
+
+Keep separate if:
+- Different root causes
+- Unrelated files
+- Require different fix approaches
+
+OUTPUT (JSON only):
+{{
+  "can_merge": true/false,
+  "reason": "why they can/cannot merge"
+}}"""
+
+    try:
+        response = context_llm(prompt)
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            analysis = json.loads(json_match.group(0))
+            if analysis.get('can_merge'):
+                logger.info(f"[CIBench] ✓ Merging {len(group_problems)} problems: {analysis.get('reason')}")
+                return [_merge_problems(group_problems)]
+            else:
+                logger.info(f"[CIBench] ✗ Keeping separate: {analysis.get('reason')}")
+                return group_problems
+    except Exception as e:
+        logger.warning(f"[CIBench] LLM merge analysis failed: {e}")
+
+    # Fallback: keep separate
+    return group_problems
+
+
+def _merge_problems(problems: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Merge multiple problems into one combined problem.
+    Combines: problem_statement, root_cause, files, fixes
+    """
+    merged = {
+        'problem_id': f"merged_{problems[0].get('problem_id', 1)}",
+        'source': problems[0].get('source', ''),
+        'verification_cmd': problems[0].get('verification_cmd', ''),
+        'error_type': problems[0].get('error_type', ''),
+        'failure_type': problems[0].get('failure_type', ''),
+        'issue_type': problems[0].get('issue_type', ''),
+    }
+
+    # Combine problem statements
+    statements = [p.get('problem_statement', '') for p in problems if p.get('problem_statement')]
+    merged['problem_statement'] = "Multiple related issues:\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(statements))
+
+    # Combine root causes
+    causes = [p.get('root_cause', '') for p in problems if p.get('root_cause')]
+    if causes:
+        merged['root_cause'] = "\n".join(set(causes))  # Deduplicate
+    else:
+        merged['root_cause'] = ''
+
+    # Combine fix strategies
+    fixes = [p.get('fix_strategy', '') for p in problems if p.get('fix_strategy')]
+    if fixes:
+        merged['fix_strategy'] = "\n".join(set(fixes))
+    else:
+        merged['fix_strategy'] = ''
+
+    # Combine files (deduplicate)
+    all_files = []
+    for p in problems:
+        files = p.get('files', [])
+        if isinstance(files, list):
+            all_files.extend(files)
+    merged['files'] = list(set(all_files))
+
+    # Combine error details
+    all_errors = []
+    for p in problems:
+        errors = p.get('error_details', [])
+        if isinstance(errors, list):
+            all_errors.extend(errors)
+    merged['error_details'] = all_errors
+
+    logger.info(f"[CIBench] Merged {len(problems)} problems into 1")
+    return merged
 
 
 def _run_sequential_repair(
@@ -1099,7 +1176,7 @@ def _run_sequential_repair(
         # Build focused task for THIS problem only
         single_task = _build_single_problem_task(problem, i, total_problems, context_llm)
 
-        logger.info(f"[CIBench] Task preview (first 300 chars):")
+        logger.info("[CIBench] Task preview (first 300 chars):")
         logger.info(single_task[:300] + "...")
 
         # Update progress
@@ -1160,13 +1237,13 @@ def _run_sequential_repair(
         finally:
             # Small delay between problems to allow cleanup and prevent timeout cascading
             if i < total_problems:
-                logger.info(f"[CIBench] Waiting 5 seconds before next problem...")
+                logger.info("[CIBench] Waiting 5 seconds before next problem...")
                 time.sleep(5)
 
     # Combine all successful partial fixes
     unified_diff = _combine_partial_fixes(partial_fixes)
 
-    logger.info(f"[CIBench] Sequential repair complete:")
+    logger.info("[CIBench] Sequential repair complete:")
     logger.info(f"[CIBench]   Total problems: {total_problems}")
     logger.info(f"[CIBench]   Fixed problems: {len(partial_fixes)}")
     logger.info(f"[CIBench]   Success rate: {len(partial_fixes)}/{total_problems} = {100*len(partial_fixes)/total_problems:.1f}%")
@@ -1225,7 +1302,7 @@ def process_instance(
     exit_status: Optional[str] = None
     diff         = ""
     ci_ctx       = {}
-    ci_memory: Dict[str, Any] = {}   # full memory retrieval result — saved to trajectory
+    ci_memory: Dict[str, Any] = {}   # full memory retrieval result - saved to trajectory
     extra_info: Dict[str, Any] = {}
 
     # ── Phase 1: build enriched CI problem statement ──────────────────────────
@@ -1315,6 +1392,12 @@ def process_instance(
                 logger.info("[CIBench] No separate problems - using standard single problem mode")
 
         # ══════════════════════════════════════════════════════════════════
+        # ANALYZE AND GROUP PROBLEMS
+        # ══════════════════════════════════════════════════════════════════
+        if problems and len(problems) > 1:
+            problems = _analyze_and_group_problems(problems, context_llm)
+
+        # ══════════════════════════════════════════════════════════════════
 
         if problems and len(problems) > 1:
             # SEQUENTIAL REPAIR MODE: Fix problems one at a time
@@ -1339,7 +1422,7 @@ def process_instance(
             )
         else:
             # STANDARD MODE: Fix all problems together (old behavior)
-            logger.info(f"[CIBench] Standard repair mode: single agent call")
+            logger.info("[CIBench] Standard repair mode: single agent call")
             info = agent.run(task)
             exit_status = info.get("exit_status")
 
@@ -1408,10 +1491,10 @@ def _build_memory_traj(ci_memory: Dict[str, Any], task: str) -> Dict[str, Any]:
     Captures the full two-LLM pipeline result so every run can be
     analyzed without re-running:
 
-      cosine_search   — what L1/L2/L3 returned (scores, files, patterns)
-      llm1_filter     — which candidates LLM 1 selected as relevant + why
-      llm2_guidance   — the full repair document LLM 2 synthesized
-      injected        — exact text injected into the agent's problem statement
+      cosine_search   - what L1/L2/L3 returned (scores, files, patterns)
+      llm1_filter     - which candidates LLM 1 selected as relevant + why
+      llm2_guidance   - the full repair document LLM 2 synthesized
+      injected        - exact text injected into the agent's problem statement
     """
     if not ci_memory:
         return {}
@@ -1437,14 +1520,14 @@ def _build_memory_traj(ci_memory: Dict[str, Any], task: str) -> Dict[str, Any]:
         },
 
         # ── Step 3-4: Raw cosine search results ───────────────────────────
-        # All matches stored in full — no truncation — for manual analysis
+        # All matches stored in full - no truncation - for manual analysis
         "cosine_search": {
             "L1": _slim_matches(ci_memory.get("l1_matches") or []),
             "L2": _slim_matches(ci_memory.get("l2_matches") or []),
             "L3": _slim_matches(ci_memory.get("l3_matches") or []),
         },
 
-        # ── Step 5a: LLM 1 — Relevance Filter output ─────────────────────
+        # ── Step 5a: LLM 1 - Relevance Filter output ─────────────────────
         # Which candidates did LLM 1 select as relevant and why
         "llm1_filter": {
             "use_memory":          bool(llm_sel.get("use_memory", False)),
@@ -1453,7 +1536,7 @@ def _build_memory_traj(ci_memory: Dict[str, Any], task: str) -> Dict[str, Any]:
             # easy to check: did LLM 1 fire? how many candidates passed?
         },
 
-        # ── Step 5b: LLM 2 — Experience Synthesizer output ───────────────
+        # ── Step 5b: LLM 2 - Experience Synthesizer output ───────────────
         # The full repair guidance document produced from relevant candidates
         "llm2_guidance": llm_sel.get("guidance_document") or {},
 
@@ -1467,7 +1550,7 @@ def _build_memory_traj(ci_memory: Dict[str, Any], task: str) -> Dict[str, Any]:
 
 
 def _slim_matches(matches: List[Dict[str, Any]], n: int = 3) -> List[Dict[str, Any]]:
-    """Keep only the fields needed for analysis — avoids bloating the trajectory."""
+    """Keep only the fields needed for analysis - avoids bloating the trajectory."""
     out = []
     for row in matches[:n]:
         out.append({
@@ -1511,7 +1594,7 @@ def _save_retrieval_diagnostic(
       counts per level (how many matches found)
       above_threshold (was weighted_sim >= threshold?)
       llm_used_memory, llm_analysis_summary
-      selected_items  (what the LLM gate kept — key_insight + fix_direction)
+      selected_items  (what the LLM gate kept - key_insight + fix_direction)
       top_matches     (raw top-3 records per level for manual similarity check)
     """
     try:
@@ -1528,7 +1611,7 @@ def _save_retrieval_diagnostic(
             "L3": len(memory.get("l3_matches") or []),
         }
 
-        # Top-3 raw matches per level — enough to manually judge similarity
+        # Top-3 raw matches per level - enough to manually judge similarity
         def _top_matches(level_key: str, n: int = 3) -> List[Dict[str, Any]]:
             out = []
             for row in (memory.get(level_key) or [])[:n]:
@@ -1550,10 +1633,10 @@ def _save_retrieval_diagnostic(
             + _top_matches("l3_matches")
         )
 
-        # LLM 1 — relevance filter result
+        # LLM 1 - relevance filter result
         relevant_candidates = llm_sel.get("relevant_candidates") or []
 
-        # LLM 2 — guidance document (summarised for the debug log)
+        # LLM 2 - guidance document (summarised for the debug log)
         guidance = llm_sel.get("guidance_document") or {}
 
         record = {
