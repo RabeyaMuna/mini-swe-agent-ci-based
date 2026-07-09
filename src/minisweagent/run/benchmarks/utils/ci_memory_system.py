@@ -2133,13 +2133,36 @@ def _normalize_text_for_key(value: Any) -> str:
 
 
 def _final_problem_key(problem: Dict[str, Any]) -> tuple:
+  """
+  Generate key for grouping similar problems.
+
+  Groups problems by:
+  - Same validation command
+  - Same issue type
+  - Same root cause pattern (NOT specific files)
+
+  This allows merging problems like:
+  - "47 .rst files with title underline issues" → 1 problem with 47 files
+  - "2 pyproject.toml files need version update" → 1 problem with 2 files
+  """
+  # Get root cause pattern (strip specific file names to find pattern)
+  root_cause = str(problem.get("root_cause") or "").strip()
+  problem_text = _problem_text(problem)
+
+  # Extract file extension pattern instead of specific files
   files = _problem_files(problem)
-  file_hint = "|".join(files[:5])
+  extensions = set()
+  for f in files:
+    if "." in f:
+      ext = f.split(".")[-1]
+      extensions.add(ext)
+  extension_pattern = "|".join(sorted(extensions)) if extensions else "noext"
+
   return (
     _normalize_text_for_key(problem.get("validation_cmd") or problem.get("verification_cmd")),
     _normalize_text_for_key(problem.get("issue_type") or problem.get("error_type") or problem.get("failure_type")),
-    _normalize_text_for_key(file_hint),
-    _normalize_text_for_key(_problem_text(problem)),
+    _normalize_text_for_key(extension_pattern),  # Group by file type, not specific files
+    _normalize_text_for_key(root_cause),  # Group by root cause pattern
   )
 
 
@@ -2156,13 +2179,37 @@ def _normalize_problem_for_agent(problem: Dict[str, Any], problem_id: int, sourc
   if "fix_strategy" in problem and problem.get("fix_strategy"):
     fix_strategy = str(problem.get("fix_strategy"))
   else:
+    # Build structured PREVIOUS EXPERIENCE with clear sections
     fix_parts = []
     how_fixed = str(problem.get("how_fixed") or problem.get("fixes") or "").strip()
     why_fix_works = str(problem.get("why_fix_works") or "").strip()
+
+    # Format as structured experience: what changed and why it works
     if how_fixed:
-      fix_parts.append(how_fixed)
+      # Check if multiple fixes are concatenated (separated by \n\n from clustering)
+      if "\n\n" in how_fixed:
+        # Multiple fixes merged - format each clearly
+        fixes = [f.strip() for f in how_fixed.split("\n\n") if f.strip()]
+        for i, fix in enumerate(fixes, 1):
+          if len(fixes) > 1:
+            fix_parts.append(f"Fix approach #{i}:\n{fix}")
+          else:
+            fix_parts.append(f"How it was fixed:\n{fix}")
+      else:
+        fix_parts.append(f"How it was fixed:\n{how_fixed}")
+
     if why_fix_works:
-      fix_parts.append(f"Why this works: {why_fix_works}")
+      # Check if multiple explanations are concatenated
+      if "\n\n" in why_fix_works:
+        explanations = [e.strip() for e in why_fix_works.split("\n\n") if e.strip()]
+        for i, explanation in enumerate(explanations, 1):
+          if len(explanations) > 1:
+            fix_parts.append(f"Why fix approach #{i} works:\n{explanation}")
+          else:
+            fix_parts.append(f"Why this works:\n{explanation}")
+      else:
+        fix_parts.append(f"Why this works:\n{why_fix_works}")
+
     fix_strategy = "\n\n".join(fix_parts)
 
   validation_cmd = str(
@@ -2187,18 +2234,54 @@ def _normalize_problem_for_agent(problem: Dict[str, Any], problem_id: int, sourc
 
 
 def _merge_problem_details(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
-  """Merge duplicate problem details without keeping memory-level metadata."""
+  """
+  Merge duplicate problem details without keeping memory-level metadata.
+
+  When multiple problems with the same pattern are merged (e.g., 47 .rst files
+  with title underline issues), this consolidates them into a single problem.
+  """
   merged = dict(existing)
 
+  # Merge text fields (root_cause, fix_strategy)
   for field in ("root_cause", "fix_strategy"):
     incoming_value = str(incoming.get(field) or "").strip()
     existing_value = str(merged.get(field) or "").strip()
     if incoming_value and incoming_value not in existing_value:
       merged[field] = f"{existing_value}\n\n{incoming_value}".strip() if existing_value else incoming_value
 
+  # Merge files from both problems
   files = list(dict.fromkeys(_problem_files(merged) + _problem_files(incoming)))
   merged["files"] = files
 
+  # Update problem statement to reflect merged scope
+  if len(files) > 1:
+    # Group files by extension
+    by_extension = {}
+    for f in files:
+      if "." in f:
+        ext = f.split(".")[-1]
+      else:
+        ext = "other"
+      by_extension.setdefault(ext, []).append(f)
+
+    # Format: "N .ext files have [issue]"
+    file_summary_parts = []
+    for ext, file_list in sorted(by_extension.items()):
+      if len(file_list) > 1:
+        file_summary_parts.append(f"{len(file_list)} .{ext} files")
+      else:
+        file_summary_parts.append(f"1 .{ext} file")
+
+    file_summary = " + ".join(file_summary_parts)
+
+    # Enhance problem statement to show scope
+    problem_text = _problem_text(merged)
+    # Only update if not already mentioning multiple files
+    if not re.search(r'\d+\s+(files|\.rst|\.py|\.toml)', problem_text, re.IGNORECASE):
+      issue_type = merged.get("issue_type", "issue")
+      merged["problem_statement"] = f"{file_summary} have {issue_type}: {problem_text}"
+
+  # Merge other optional fields
   if not merged.get("verification_cmd") and incoming.get("verification_cmd"):
     merged["verification_cmd"] = incoming["verification_cmd"]
   if not merged.get("error_type") and incoming.get("error_type"):

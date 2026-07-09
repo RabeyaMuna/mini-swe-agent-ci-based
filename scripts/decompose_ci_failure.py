@@ -1440,16 +1440,91 @@ CHUNK-LEVEL PROBLEMS:
 {_compact_json(summaries, VALIDATION_MERGE_MAX_PROMPT_CHARS - 8000)}
 
 TASK:
-Return the clean validation-level atomic problems.
+Analyze the problems above and merge those that represent the same underlying issue and same general repair strategy..
+Return clean atomic problems that are distinct and actionable.
 
-MERGE RULES:
-1. Merge problems when they share the same validation failure family and same general repair strategy.
-2. Preserve variants inside the merged problem, root_cause, how_fixed, and why_fix_works fields.
-3. Keep separate problems when the root cause or repair strategy differs.
-4. Combine affected_files from merged problems.
-5. Be concise but keep technical reasoning.
-6. Do not mention chunk boundaries.
-7. Keep problem, root_cause, how_fixed, and why_fix_works to 1-2 sentences each.
+CONTEXT-AWARE MERGE ANALYSIS:
+
+Step 1: UNDERSTAND what each problem is actually about
+- Read the root_cause to understand WHY it failed
+- Read the how_fixed to understand WHAT was changed
+- Read the why_fix_works to understand the MECHANISM
+
+Step 2: COMPARE problems semantically (not just by keywords)
+Ask: "Are these the SAME issue appearing in multiple places, or DIFFERENT issues?"
+
+Consider:
+a) ROOT CAUSE Equivalence:
+   - Do they fail for the same underlying reason?
+   - Would explaining one root cause cover both problems?
+   - Are they consequences of the same missing/wrong pattern?
+
+   MERGE if: The "why it failed" is fundamentally the same
+   SEPARATE if: They fail for different reasons, even if symptoms look similar
+
+b) REPAIR Strategy Equivalence:
+   - Do they get fixed the same way?
+   - Would the same change pattern apply to all affected files?
+   - Does one fix require different reasoning/approach than the other?
+
+   MERGE if: The "how to fix" follows the same logic/approach
+   SEPARATE if: They require different types of changes (even if touching similar files)
+
+c) PATTERN Recognition:
+   - Is this an issue that repeats across multiple locations?
+   - Would fixing all instances require the same understanding?
+   - Are these independent issues that happen to coexist?
+
+   MERGE if: It's the same pattern manifesting in multiple places
+   SEPARATE if: They're coincidentally similar but independently occurring
+
+Step 3: DECIDE based on semantic analysis
+
+MERGE when:
+→ All three (root cause + repair + pattern) indicate the SAME underlying issue
+→ Combining them into one problem makes conceptual sense
+→ A developer would think of these as "the same problem in multiple places"
+
+KEEP SEPARATE when:
+→ ANY of the three indicates DIFFERENT issues
+→ Merging would confuse two distinct problems
+→ A developer would need different mental models to understand each
+
+Step 4: QUALITY CHECK your decision
+
+Test: "If I explain problem A to a developer, does that explanation cover problem B?"
+- If YES → they're likely the same issue → MERGE
+- If NO → they're different issues → KEEP SEPARATE
+
+IMPORTANT PRINCIPLES:
+
+1. Analyze SEMANTICS, not syntax
+   - Don't merge just because keywords match
+   - Don't separate just because files differ
+   - Focus on: "Is this fundamentally the same issue?"
+
+2. Think like a developer
+   - Would they group these mentally?
+   - Would fixing one give insight to fix the other?
+   - Are these the same bug/requirement manifesting differently?
+
+3. Handle ANY failure/fix type
+   - These principles work for linting, typing, logic, config, dependencies, etc.
+   - No hardcoded patterns - analyze what's actually there
+   - Trust the content of root_cause, how_fixed, why_fix_works
+
+4. Preserve information when merging
+   - Combine all variants in the merged fields
+   - Keep all affected_files from merged problems
+   - Don't lose detail - synthesize it
+
+OUTPUT RULES:
+1. Return distinct atomic problems (merged or separate based on analysis above)
+2. Each problem should be conceptually atomic (one root cause → one fix approach)
+3. Keep problem, root_cause, how_fixed, why_fix_works to 1-2 sentences each
+4. Combine affected_files from merged problems
+5. Be concise but preserve technical reasoning
+6. Do not mention chunks, merging process, or meta-commentary
 
 OUTPUT FORMAT:
 {{
@@ -2036,37 +2111,61 @@ def generate_l1_l2_l3_pipeline(decomposed_result: Dict, llm) -> Dict:
 
 def _stage1_deduplicate_problems(decomposed_result: Dict) -> List[Dict]:
     """
-    Stage 1: Deduplicate similar problems (mechanical).
+    Stage 1: Deduplicate similar problems (semantic grouping).
 
-    DON'T over-deduplicate! Keep sub_problems for file-level details.
-    Group by validation command, but preserve all sub-problems.
+    Groups problems by:
+    1. Same validation_cmd AND
+    2. Same issue_type (e.g., F401, E501) OR same root cause pattern
+
+    This prevents merging DISTINCT problems that happen to be from same validation.
+    Example: F401 (unused import) and E501 (line too long) both from ruff
+    → Should stay separate because solutions are completely different!
     """
     problems = decomposed_result.get("problems", [])
 
-    # Group by validation command only
-    problem_groups = {}
+    # First group by validation command
+    validation_groups = {}
     for prob in problems:
         validation = prob.get("validation_cmd", "unknown")
-        if validation not in problem_groups:
-            problem_groups[validation] = []
-        problem_groups[validation].append(prob)
+        if validation not in validation_groups:
+            validation_groups[validation] = []
+        validation_groups[validation].append(prob)
 
-    # For each validation group, keep ALL sub-problems
+    # Then within each validation, group by issue_type or root cause pattern
     deduplicated = []
-    for validation, group_problems in problem_groups.items():
-        # Collect all unique files
-        all_files = []
-        for p in group_problems:
-            all_files.extend(p.get("affected_files", []))
-        all_files = list(dict.fromkeys(all_files))  # Deduplicate
+    for validation, val_problems in validation_groups.items():
+        # Sub-group by issue_type (e.g., F401, E501, etc.)
+        issue_groups = {}
+        for prob in val_problems:
+            # Use issue_type if available, otherwise use root cause pattern
+            issue_types = prob.get("issue_type", [])
+            if isinstance(issue_types, list) and issue_types:
+                issue_key = issue_types[0]  # Primary issue type
+            else:
+                # Fallback: use first 50 chars of root cause as grouping key
+                root_cause = prob.get("root_cause", "unknown")[:50]
+                issue_key = root_cause
 
-        # Use first as template but keep ALL sub_problems for L1
-        template = group_problems[0]
-        merged = {
-            "validation_cmd": validation,
-            "validation_order": template.get("validation_order"),
-            "problem_type": template.get("problem_type", "unknown"),
-            "what_broke": template.get("what_broke", "Validation failed"),
+            key = (validation, issue_key)
+            if key not in issue_groups:
+                issue_groups[key] = []
+            issue_groups[key].append(prob)
+
+        # For each issue group, merge similar problems
+        for (val, issue), group_problems in issue_groups.items():
+            # Collect all unique files
+            all_files = []
+            for p in group_problems:
+                all_files.extend(p.get("affected_files", []))
+            all_files = list(dict.fromkeys(all_files))  # Deduplicate
+
+            # Use first as template but keep ALL sub_problems for L1
+            template = group_problems[0]
+            merged = {
+                "validation_cmd": val,
+                "validation_order": template.get("validation_order"),
+                "problem_type": template.get("problem_type", "unknown"),
+                "what_broke": template.get("what_broke", "Validation failed"),
             "root_cause": template.get("root_cause", "Unknown"),
             "how_fixed": template.get("how_fixed", ""),
             "why_fixed_works": template.get("why_fixed_works", ""),
@@ -2090,39 +2189,149 @@ def _stage2_detect_dependencies_llm(problems: List[Dict], llm) -> Dict:
     - What is optimal repair order?
     """
 
-    # Prepare summary for LLM
+    # Prepare FULL context for LLM (not just summary)
     problems_summary = []
     for idx, prob in enumerate(problems, 1):
         problems_summary.append({
             "id": idx,
-            "validation": prob.get("validation_cmd", "unknown"),
-            "type": prob.get("problem_type", "unknown"),
-            "what_broke": prob.get("what_broke", "")[:200],
+            "validation_order": prob.get("validation_order", "unknown"),
+            "validation_cmd": prob.get("validation_cmd", "unknown"),
+            "problem_type": prob.get("problem_type", "unknown"),
+            "failure_type": prob.get("failure_type", "unknown"),
+            "problem": prob.get("problem", "")[:300],
+            "root_cause": prob.get("root_cause", "")[:300],
+            "how_fixed": prob.get("how_fixed", "")[:300],
+            "why_fix_works": prob.get("why_fix_works", "")[:300],
+            "affected_files": prob.get("affected_files", [])[:10],
             "files_count": len(prob.get("affected_files", []))
         })
 
-    prompt = f"""Analyze dependencies between these CI failure problems:
+    prompt = f"""Deep analysis of problem interdependencies and relationships.
 
+PROBLEMS:
 {json.dumps(problems_summary, indent=2)}
 
-Determine:
-1. Which problems are PRIMARY (must fix first)?
-2. Which problems ENABLE others (e.g., installing tool enables validation)?
-3. Which problems REVEAL others (consecutive failures)?
-4. What is the OPTIMAL REPAIR ORDER?
+TASK: Analyze how these problems relate to each other.
 
-Output JSON:
+CONTEXT-AWARE DEPENDENCY ANALYSIS:
+
+For EACH pair of problems, ask:
+
+1. BLOCKING Dependencies ("A must be fixed before B can be addressed"):
+   - Does problem A block problem B?
+   - Would fixing A allow B to be detected/fixed?
+   - Are they in a validation sequence where A runs before B?
+
+   Examples:
+   - Config problem blocks validation (must install tool before it can validate)
+   - Import error blocks type checking (must fix imports before types can be checked)
+   - Formatting blocks parsing (must format before parser can read it)
+
+2. CAUSALITY ("Fixing A causes/reveals B"):
+   - Does fixing A reveal new problems?
+   - Would A's fix change what B looks like?
+   - Does A's root cause create the conditions for B?
+
+   Examples:
+   - Enabling a linter reveals new linting issues
+   - Fixing imports reveals type errors that were hidden
+   - Adding dependencies reveals compatibility issues
+
+3. SHARED Context ("A and B affect each other"):
+   - Do they modify the same files?
+   - Do they fix different aspects of the same root issue?
+   - Would fixing A require considering B?
+
+   Examples:
+   - Two problems in same file that interact
+   - Config change + code change that must align
+   - Test + implementation that must stay in sync
+
+4. SIDE Effects ("Fixing A might affect B"):
+   - Could A's fix break or change B?
+   - Do they share assumptions?
+   - Would fixing A first make B easier/harder?
+
+5. INDEPENDENT ("A and B are unrelated"):
+   - Can be fixed in any order
+   - Don't interact or depend on each other
+   - Separate validation stages, files, concerns
+
+RELATIONSHIP TYPES:
+
+Based on analysis above, identify these relationship types:
+
+- "blocks": A must be fixed before B (strict dependency)
+- "enables": Fixing A allows B to be detected (enablement)
+- "reveals": Fixing A uncovers B (causality)
+- "requires": A and B must be fixed together (shared context)
+- "affects": Fixing A changes B (side effect)
+- "independent": No relationship (can fix in any order)
+
+For EACH relationship, provide:
+- Type (one of above)
+- Direction (from → to)
+- Reason (WHY this relationship exists, based on root_cause/how_fixed)
+- Strength (strong/medium/weak based on how critical the relationship is)
+
+REPAIR ORDER ANALYSIS:
+
+Based on dependencies, determine:
+1. Which problems MUST be fixed first (blocked by nothing, block others)
+2. Which are INTERMEDIATE (depend on some, enable others)
+3. Which are FINAL (depend on others being fixed first)
+4. Which are INDEPENDENT (can be fixed anytime)
+
+Consider validation_order as a hint but not absolute - semantic dependencies matter more.
+
+OUTPUT FORMAT:
 {{
   "dependency_edges": [
-    {{"from": 1, "to": 3, "type": "enables", "reason": "Installing taplo enables TOML validation"}},
-    {{"from": 2, "to": 4, "type": "reveals", "reason": "Fixing mdformat reveals formatting issues"}}
+    {{
+      "from": 1,
+      "to": 3,
+      "type": "blocks",
+      "reason": "Config file must declare tool before validation can run it",
+      "strength": "strong"
+    }},
+    {{
+      "from": 2,
+      "to": 4,
+      "type": "reveals",
+      "reason": "Fixing formatter config reveals formatting issues in code",
+      "strength": "medium"
+    }},
+    {{
+      "from": 5,
+      "to": 6,
+      "type": "affects",
+      "reason": "Both modify same file - changes may interact",
+      "strength": "weak"
+    }}
   ],
-  "repair_order": [1, 2, 3, 4],
-  "primary_problems": [1, 2],
-  "enablement_problems": [3],
-  "consecutive_problems": [4],
-  "reasoning": "Fix primary failures first, then enable tools, then handle revealed issues"
+  "repair_order": [1, 2, 3, 4, 5, 6],
+  "repair_stages": {{
+    "stage_1_foundational": [1],
+    "stage_2_intermediate": [2, 3],
+    "stage_3_dependent": [4],
+    "stage_4_independent": [5, 6]
+  }},
+  "problem_groups": [
+    {{
+      "problems": [5, 6],
+      "relationship": "shared file context",
+      "recommendation": "Consider fixing together to avoid conflicts"
+    }}
+  ],
+  "reasoning": "Detailed explanation of the dependency structure and repair strategy"
 }}
+
+IMPORTANT:
+- Analyze based on actual content (root_cause, how_fixed), not just keywords
+- Think about what a developer would need to know about problem interactions
+- Identify both obvious (validation order) and subtle (semantic) dependencies
+- Be specific in reasons - explain WHY the relationship exists
+- Consider the real-world implications of fix order
 
 {STRICT_JSON_RULES}"""
 
@@ -2211,18 +2420,31 @@ def _stage3_generate_l1_with_llm(deduplicated: List[Dict], dependencies: Dict, d
 
             # Create L1 entry for EACH file
             for file_path in files:
-                # Build dependent files with detailed info
-                dependent_files = []
+                # Build dependent files - GROUP BY SAME CHANGE to avoid redundancy
+                # Instead of: [{"file": "a", "change": "X"}, {"file": "b", "change": "X"}]
+                # Use: [{"files": ["a", "b"], "change": "X"}]
                 other_files = [f for f in files if f != file_path]
 
+                # Group files by their specific change
+                change_groups = {}
                 for dep_file in other_files:
-                    # Find the sub-problem that contains this dependent file to get its specific changes
                     dep_changes = _find_file_changes(dep_file, sub_problems)
+                    change_text = dep_changes if dep_changes else f"Part of same validation fix: {sub_prob.get('how_fixed', '')[:200]}"
+                    link_text = f"Both files needed for same validation ({validation_cmd}). Changes are interdependent to fix the validation failure."
 
+                    # Use (change_text, link_text) as grouping key
+                    key = (change_text, link_text)
+                    if key not in change_groups:
+                        change_groups[key] = []
+                    change_groups[key].append(dep_file)
+
+                # Build dependent_files array with grouped entries
+                dependent_files = []
+                for (change_text, link_text), file_list in change_groups.items():
                     dependent_files.append({
-                        "file": dep_file,
-                        "change": dep_changes if dep_changes else f"Part of same validation fix: {sub_prob.get('how_fixed', '')[:200]}",
-                        "link_to": f"Both files needed for same validation ({validation_cmd}). Changes are interdependent to fix the validation failure."
+                        "files": file_list,  # Array of files with same change
+                        "change": change_text,
+                        "link_to": link_text
                     })
 
                 # Clean up why_fix (avoid "?" or "Unknown")
@@ -2565,8 +2787,7 @@ def _stage4_generate_l2_llm(deduplicated: List[Dict], dependencies: Dict, llm, i
             "what_broke": prob.get("what_broke", ""),
             "root_cause": prob.get("root_cause", "")[:300],
             "how_fixed": prob.get("how_fixed", "")[:300],
-            "files_count": len(actual_files),
-            "actual_files": actual_files[:20],  # Show first 20 files to LLM
+            "files": actual_files[:20],  # Show first 20 files to LLM
             "issue_types": prob.get("issue_types", [])
         })
 
@@ -2595,9 +2816,7 @@ Create optimal repair sequence in this EXACT format:
         "rule": "Pattern description",
         "scope": "X files"
       }},
-      "files": ["path/to/file-*.ext (5 files)", "other/specific/file.py"],
-      "file_count": 5,
-      "actual_files": ["path/to/file-1.ext", "path/to/file-2.ext", ...],
+      "files": ["path/to/file-1.ext", "path/to/file-2.ext", ...],
       "fix_strategy": "Approach: direct_fix | What: What to fix | How: Step-by-step | Why: Why it works | Time: Xmin"
     }}
   ],
@@ -2606,9 +2825,7 @@ Create optimal repair sequence in this EXACT format:
 }}
 
 CRITICAL Rules:
-- "files": Use patterns for clarity (e.g., "contributor-*.rst (6 files)")
-- "file_count": MUST include explicit count
-- "actual_files": List ACTUAL files from diff (max 50), NO speculation
+- "files": Array of ACTUAL file paths from diff (max 50), NO speculation or patterns
 - Order by repair sequence (use dependency_edges)
 - Detect patterns for bulk operations (>10 files)
 - Be specific and actionable
@@ -2684,9 +2901,7 @@ def _fallback_l2(deduplicated: List[Dict], dependencies: Dict, issue_id: str, re
         # Deduplicate while preserving order
         files = list(dict.fromkeys(all_files))
 
-        # Generate clear file patterns
-        file_patterns = _generate_file_patterns(files) if len(files) > 10 else files
-
+        # Pattern detection for bulk changes
         pattern = None
         if len(files) > 10:
             pattern = {
@@ -2705,9 +2920,7 @@ def _fallback_l2(deduplicated: List[Dict], dependencies: Dict, issue_id: str, re
             "problem": f"{prob.get('what_broke', 'Unknown')} [{prob.get('issue_types', ['unknown'])[0] if prob.get('issue_types') else 'unknown'}]",
             "root_cause": f"{prob.get('root_cause', 'Unknown')[:200]} Scope: {len(files)} files",
             "pattern_detected": pattern,
-            "files": file_patterns,  # Clear patterns instead of raw paths
-            "file_count": len(files),  # Explicit count
-            "actual_files": files[:50] if len(files) > 50 else files,  # First 50 actual files
+            "files": files[:50] if len(files) > 50 else files,  # Actual file paths (max 50)
             "fix_strategy": f"Approach: direct_fix | How: {prob.get('how_fixed', '')[:150]} | Time: {time_est}min"
         }
         problems.append(l2_prob)
@@ -3066,10 +3279,12 @@ def _save_to_memory_files(results: List[Dict], output_dir: str):
             prob['failure_type'] = prob.get('failure_type', '').replace('_', ' ')
             l2_problems.append(prob)
 
-        # Get workflow path
+        # Get workflow path and issue ID
         workflow_path = result.get("workflow_path", "unknown")
+        issue_id = result.get("original_issue_id") or result.get("issue_id", "unknown")
 
         l2_sequences.append({
+            "issue_id": issue_id,  # Identify which issue this repair sequence is for
             "repo": result.get("repo"),
             "workflow": workflow_path,
             "problems": l2_problems
@@ -3175,6 +3390,7 @@ def main():
         help="LLM model. Use openrouter/minimax/minimax-m2.5 for MiniMax M2.5 via OpenRouter.",
     )
     parser.add_argument("--limit", type=int, help="Limit number of issues to process")
+    parser.add_argument("--skip-memory", action="store_true", help="Skip building memory files (L1/L2/L3) - only save decomposed_issues.json. Use this when you plan to do similarity-based split later.")
     args = parser.parse_args()
 
     # Determine loading mode
@@ -3300,19 +3516,31 @@ def main():
             errors.append(decomposed_result)
             results.append(decomposed_result)
         else:
-            # Run full L1/L2/L3 pipeline
-            result = generate_l1_l2_l3_pipeline(decomposed_result, llm)
-            results.append(result)
+            # Run full L1/L2/L3 pipeline (unless --skip-memory)
+            if not args.skip_memory:
+                result = generate_l1_l2_l3_pipeline(decomposed_result, llm)
+                results.append(result)
+            else:
+                # Just save decomposed result without L1/L2/L3
+                results.append(decomposed_result)
 
-        # Incremental save after each issue - save to 3 memory files
-        try:
-            _save_to_memory_files(results, args.output_dir)
-            print(f"  OK Saved progress ({len(results)} issues total)")
-        except Exception as e:
-            print(f"  WARNING: Could not save progress: {e}")
+        # Incremental save after each issue - save to 3 memory files (unless --skip-memory)
+        if not args.skip_memory:
+            try:
+                _save_to_memory_files(results, args.output_dir)
+                print(f"  OK Saved progress ({len(results)} issues total)")
+            except Exception as e:
+                print(f"  WARNING: Could not save progress: {e}")
 
-    # Final save - save to 3 memory files
-    _save_to_memory_files(results, args.output_dir)
+    # Final save - save to 3 memory files (unless --skip-memory)
+    if not args.skip_memory:
+        _save_to_memory_files(results, args.output_dir)
+    else:
+        print(f"\n{'='*80}")
+        print("Skipping memory file generation (--skip-memory flag)")
+        print(f"{'='*80}")
+        print("Only decomposed_issues.json was saved.")
+        print("Use this file with prepare_memory_train_test_split.py for similarity-based split.")
 
     # Summary statistics
     print(f"\n{'='*80}")

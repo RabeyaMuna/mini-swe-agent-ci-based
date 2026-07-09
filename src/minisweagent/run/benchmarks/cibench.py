@@ -820,25 +820,47 @@ def _analyze_repair_with_llm(problem: Dict[str, Any], context_llm: Any) -> Dict[
 
 INSTRUCTIONS:
 1. Work with the provided sections; some may be missing
-2. Analyze PROBLEM, ERROR DETAILS, ROOT CAUSE, PREVIOUS EXPERIENCE, FILES, and AUTOMATED TOOLS before choosing a repair type
-3. Choose repair type: automated_tool (purely mechanical fixes), manual_fix (code/logic changes), or hybrid (both needed)
-4. Use automated_tool when the ENTIRE problem is mechanical: formatting, linting, style, import sorting, spelling, doc formatting, or docstring formatting
-5. Use hybrid when the problem needs BOTH automated tool AND manual code changes (e.g., RST formatting + test code updates)
-6. For automated_tool or hybrid, select the tool whose purpose and file_pattern match the problem (e.g., docstrfmt for .rst files, ruff for Python, taplo for TOML)
-7. RST title underline issues, RST heading formatting, docstring formatting → use docstrfmt
-8. Python linting, formatting, import sorting → use ruff or black
-9. TOML formatting → use taplo
-10. Choose the tool that can REPAIR the issue, not merely the tool that REPORTED it
-11. For automated_tool, choose the Run target from FILES first; if FILES is missing, use paths from PROBLEM/ERROR DETAILS/ROOT CAUSE
-12. For automated_tool, if one file is affected use that file; if multiple files in same directory use that directory
-13. For automated_tool, output Install and Run lines using exact install_command and fix_command from AUTOMATED TOOLS, replacing {{file_or_dir}} with concrete target
-14. NEVER output placeholders like <tool>, <path>, {{file_or_dir}} - always use concrete values
-15. For manual_fix, include: Locate, Analyze, Change, Impact, Edit lines based on PREVIOUS EXPERIENCE
-16. Locate must say how to find all occurrences using symbols/error text/config keys/file paths from evidence
-17. Edit must list each required file:line or directory pattern change
-18. If manual_fix edits Python files, add: "Install: pip install ruff" and "Cleanup: ruff check --fix <target>"
-19. For hybrid, include BOTH automated and manual sections
-20. Do not include validation commands, test commands, markdown headings, or explanatory background
+2. **CRITICAL - PREVIOUS EXPERIENCE MUST BE USED**:
+   - PREVIOUS EXPERIENCE contains actual successful repairs for similar problems
+   - Check if any files in FILES are mentioned in PREVIOUS EXPERIENCE's "How it was fixed" section
+   - If a file is mentioned with specific changes (e.g., "exit_code_test.py: Refactored title extraction logic to split file content into lines"), you MUST use that EXACT approach
+   - Your Edit instruction must describe the same changes, not a different fix
+   - Example: PREVIOUS EXPERIENCE says "Refactored title extraction: split entire file content into lines, access second line as title with fallback to first line" → Your Edit line MUST say "Refactor title extraction logic: split file content into lines, access lines[1] as title with fallback to lines[0]"
+   - DO NOT ignore PREVIOUS EXPERIENCE - it shows proven solutions
+3. First infer the actual root-cause change from PROBLEM, ERROR DETAILS, ROOT CAUSE, and PREVIOUS EXPERIENCE; use FILES only as supporting evidence or tool targets
+4. Distinguish root-cause files from affected validation files:
+   - Root-cause files are explicitly named as needing a value, dependency, API, logic, or content change
+   - Affected validation files are files that failed or would be reformatted after the root-cause fix
+   - Do not create manual edits for affected validation files unless the evidence says what content or logic must change there
+4. Treat file extensions as hints for possible tools, not proof that a tool can fix the issue
+5. For each affected file or path, classify the required work as:
+   - automated: a listed tool can safely make the required edit without knowing project intent
+   - manual: the fix requires intent, API knowledge, dependency/config decisions, content changes, or code semantics
+   - cleanup: an automated tool should run only after manual edits to format or sort the result
+6. Choose the repair type from those classifications:
+   - automated_tool: every required change is automated; no manual edit or semantic decision is needed
+   - manual_fix: every core change is manual; automated tools, if any, are only cleanup after edits
+   - hybrid: at least one core change is manual and at least one separate core change is automated
+7. Use automated_tool only when the evidence says the issue is purely mechanical, such as formatting, import sorting, whitespace, markdown/RST heading formatting, or another listed tool fix
+8. Do NOT use automated_tool for syntax errors, parser failures, runtime exceptions, missing names/imports, wrong values, broken links/refs requiring target selection, version/config changes, or failed assertions unless the evidence explicitly says a listed tool can repair that exact issue
+9. Choose the tool that can repair the issue, not merely the tool that reported it; if the reporter cannot parse the file or cannot infer intent, the core fix is manual
+10. When using automated tools, select only from AUTOMATED TOOLS and match by both purpose and file_pattern
+11. If the root cause is a formatter/tool version in config files, manually edit only the config files with the version change, then run the relevant formatter on the affected files it controls
+12. If .py files are listed but the evidence is about doc formatting or generated formatting output, prefer an automated formatter that matches the evidence; choose a manual Python edit only when the evidence names a Python logic/content change
+13. If manual Python edits are required, run ruff cleanup afterward; if Python files only need formatting/docstring cleanup, treat that as automated rather than manual
+14. For automated_tool, choose the Run target from FILES first; if FILES is missing, use paths from PROBLEM/ERROR DETAILS/ROOT CAUSE
+15. For automated_tool, if one file is affected use that file; if multiple files share a narrow directory use that directory; otherwise list concrete paths
+16. For automated_tool, output Install and Run lines using exact install_command and fix_command from AUTOMATED TOOLS, replacing {{file_or_dir}} with concrete targets
+17. NEVER output placeholders like <tool>, <path>, {{file_or_dir}}; always use concrete values from the evidence
+18. For manual_fix, include Locate, Analyze, Change, Impact, and Edit lines
+19. Locate must say how to find all occurrences using symbols, error text, config keys, file paths, or line numbers from the evidence
+20. Edit must list each required file:line when available; otherwise list the concrete file or directory pattern
+21. Add automated cleanup only when it is appropriate for files touched by the manual edit:
+    - Python cleanup: "Install: pip install ruff" and "Cleanup: ruff check --fix <concrete targets>"
+    - RST cleanup: use docstrfmt only when the manual RST edit can benefit from formatting
+    - TOML/Markdown cleanup: use taplo/mdformat only for formatting cleanup, not value/content decisions
+22. For hybrid, put manual core edits first, then automated core fixes or cleanup grouped by tool and target
+23. Keep the plan short and actionable; do not include validation commands, test commands, markdown headings, or explanatory background
 
 OUTPUT FORMAT:
 Return ONLY the raw JSON object. Do NOT wrap in markdown code fences (```json). Do NOT add explanations.
@@ -852,18 +874,18 @@ Automated tool only:
 Manual fix only:
 {{
   "type": "manual_fix",
-  "repair_plan": "Locate: ...\\nAnalyze: ...\\nChange: ...\\nImpact: ...\\nEdit: ...\\nInstall: pip install ruff (if Python)\\nCleanup: ruff check --fix <target> (if Python)"
+  "repair_plan": "Locate: ...\\nAnalyze: ...\\nChange: ...\\nImpact: ...\\nEdit: concrete file:line or path\\nInstall: cleanup install command if needed\\nCleanup: cleanup command if needed"
 }}
 
-Hybrid (both automated + manual):
+Hybrid:
 {{
   "type": "hybrid",
-  "repair_plan": "AUTOMATED:\\nInstall: exact install_command\\nRun: exact fix_command with concrete target\\n\\nMANUAL:\\nLocate: ...\\nAnalyze: ...\\nChange: ...\\nEdit: ...\\nInstall: pip install ruff (if Python)\\nCleanup: ruff check --fix <target> (if Python)"
+  "repair_plan": "MANUAL:\\nLocate: ...\\nAnalyze: ...\\nEdit: concrete file:line or path\\n\\nAUTOMATED:\\nInstall: exact install_command(s)\\nRun: exact fix_command(s) with concrete targets"
 }}"""
 
     try:
         response = context_llm(prompt).strip()
-
+        import pdb; pdb.set_trace()
         # Try direct JSON parsing first
         try:
             return json.loads(response)
@@ -916,14 +938,37 @@ def _build_single_problem_task(
                     full_problem += f"\n{msg}"
 
     # Analyze repair approach with LLM
+    repair_type = "manual"
     if context_llm:
         logger.info(f"[CIBench] Analyzing repair approach for problem {problem_num}...")
         analysis = _analyze_repair_with_llm(problem, context_llm)
         repair_plan = analysis.get('repair_plan', '')
+        repair_type = analysis.get('type', 'manual_fix')
     else:
         # No LLM available - use fix_strategy
         repair_plan = fix_strategy or "Analyze error and apply fix"
         logger.info("[CIBench] → Manual repair (no LLM)")
+
+    # Format repair plan based on type
+    if repair_type == "automated_tool":
+        # Add strong directives for automated tool repairs
+        repair_plan_formatted = f"""**AUTOMATED FIX - DO NOT EDIT FILES MANUALLY**
+
+This problem can be solved completely by running these commands:
+
+{repair_plan}
+
+⚠️  CRITICAL INSTRUCTIONS:
+1. Execute the Install command EXACTLY as shown above
+2. Execute the Run/Fix command EXACTLY as shown above
+3. DO NOT manually edit any files - the automated tool will fix them
+4. DO NOT explore or analyze files - just run the commands
+5. After running both commands, the problem will be fixed
+
+The automated tool handles all file changes. Your job is to execute the commands, not edit files."""
+    else:
+        # Manual fix or hybrid - use plan as-is
+        repair_plan_formatted = repair_plan
 
     # Format files list
     files_str = '\n'.join(f"- {f}" for f in (files if isinstance(files, list) else [files])) if files else "N/A"
@@ -939,7 +984,7 @@ Affected Files:
 {files_str}
 
 Repair Plan:
-{repair_plan}
+{repair_plan_formatted}
 """
 
 def _combine_partial_fixes(partial_fixes: List[Dict[str, Any]]) -> str:

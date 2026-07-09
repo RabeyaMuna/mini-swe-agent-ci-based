@@ -538,9 +538,11 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
         ]
 
         if matching_candidates:
-            # Merge files from ALL matching candidates (LLM might have merged them)
+            # Merge data from ALL matching candidates (LLM might have merged them)
             all_files = []
             all_issues = set()
+            all_how_fixed = []
+            all_why_works = []
             total_frequency = 0
             max_frequency_ratio = 0.0
 
@@ -549,6 +551,15 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
                 candidate_files = candidate.get("files", [])
                 if isinstance(candidate_files, list):
                     all_files.extend(candidate_files)
+
+                # Collect fix strategies from all candidates
+                how_fixed = candidate.get("how_fixed", "").strip()
+                if how_fixed and how_fixed not in all_how_fixed:
+                    all_how_fixed.append(how_fixed)
+
+                why_works = candidate.get("why_fix_works", "").strip()
+                if why_works and why_works not in all_why_works:
+                    all_why_works.append(why_works)
 
                 # Collect issue IDs
                 candidate_issues = candidate.get("appears_in_issues", [])
@@ -574,6 +585,25 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
 
             # ALWAYS set the complete merged files (even if LLM returned some)
             problem["files"] = deduplicated_files
+
+            # Merge fix strategies if LLM didn't provide them or to enhance what LLM provided
+            if not problem.get("how_fixed") and all_how_fixed:
+                problem["how_fixed"] = "\n\n".join(all_how_fixed)
+            elif problem.get("how_fixed") and all_how_fixed:
+                # LLM provided some, but ensure all candidate fixes are included
+                llm_how_fixed = problem.get("how_fixed", "").strip()
+                if llm_how_fixed not in all_how_fixed:
+                    all_how_fixed.insert(0, llm_how_fixed)
+                problem["how_fixed"] = "\n\n".join(all_how_fixed)
+
+            if not problem.get("why_fix_works") and all_why_works:
+                problem["why_fix_works"] = "\n\n".join(all_why_works)
+            elif problem.get("why_fix_works") and all_why_works:
+                # LLM provided some, but ensure all candidate reasons are included
+                llm_why_works = problem.get("why_fix_works", "").strip()
+                if llm_why_works not in all_why_works:
+                    all_why_works.insert(0, llm_why_works)
+                problem["why_fix_works"] = "\n\n".join(all_why_works)
 
             # Add frequency info if missing
             if "frequency" not in problem:
@@ -660,9 +690,11 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
         ]
 
         if matching_candidates:
-            # Merge files from ALL matching candidates (LLM might have merged them)
+            # Merge data from ALL matching candidates (LLM might have merged them)
             all_files = []
             all_issues = set()
+            all_how_fixed = []
+            all_why_works = []
             total_frequency = 0
             max_frequency_ratio = 0.0
 
@@ -671,6 +703,15 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
                 candidate_files = candidate.get("files", [])
                 if isinstance(candidate_files, list):
                     all_files.extend(candidate_files)
+
+                # Collect fix strategies from all candidates
+                how_fixed = candidate.get("how_fixed", "").strip()
+                if how_fixed and how_fixed not in all_how_fixed:
+                    all_how_fixed.append(how_fixed)
+
+                why_works = candidate.get("why_fix_works", "").strip()
+                if why_works and why_works not in all_why_works:
+                    all_why_works.append(why_works)
 
                 # Collect issue IDs
                 candidate_issues = candidate.get("appears_in_issues", [])
@@ -696,6 +737,25 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
 
             # ALWAYS set the complete merged files (even if LLM returned some)
             problem["files"] = deduplicated_files
+
+            # Merge fix strategies if LLM didn't provide them or to enhance what LLM provided
+            if not problem.get("how_fixed") and all_how_fixed:
+                problem["how_fixed"] = "\n\n".join(all_how_fixed)
+            elif problem.get("how_fixed") and all_how_fixed:
+                # LLM provided some, but ensure all candidate fixes are included
+                llm_how_fixed = problem.get("how_fixed", "").strip()
+                if llm_how_fixed not in all_how_fixed:
+                    all_how_fixed.insert(0, llm_how_fixed)
+                problem["how_fixed"] = "\n\n".join(all_how_fixed)
+
+            if not problem.get("why_fix_works") and all_why_works:
+                problem["why_fix_works"] = "\n\n".join(all_why_works)
+            elif problem.get("why_fix_works") and all_why_works:
+                # LLM provided some, but ensure all candidate reasons are included
+                llm_why_works = problem.get("why_fix_works", "").strip()
+                if llm_why_works not in all_why_works:
+                    all_why_works.insert(0, llm_why_works)
+                problem["why_fix_works"] = "\n\n".join(all_why_works)
 
             # Add frequency info if missing
             if "frequency" not in problem:
