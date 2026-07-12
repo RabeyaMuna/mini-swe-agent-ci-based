@@ -409,22 +409,36 @@ def _save_split_datasets(
     eval_indices: List[int],
     output_dir: Path
 ):
-    """Save memory and evaluation datasets."""
+    """Save memory and evaluation datasets (both full issues and ID lists)."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Memory set
+    # Memory set - full issues
     memory_path = output_dir / "memory_set.jsonl"
     with open(memory_path, "w") as f:
         for idx in memory_indices:
             f.write(json.dumps(issues[idx]) + "\n")
     logger.info(f"Saved {len(memory_indices)} issues to {memory_path}")
 
-    # Evaluation set
+    # Memory set - IDs only (for building memory later)
+    memory_ids = [issues[idx].get("instance_id") or issues[idx].get("id") for idx in memory_indices]
+    memory_ids_path = output_dir / "memory_issue_ids.json"
+    with open(memory_ids_path, "w") as f:
+        json.dump(memory_ids, f, indent=2)
+    logger.info(f"Saved {len(memory_ids)} memory IDs to {memory_ids_path}")
+
+    # Evaluation set - full issues
     eval_path = output_dir / "eval_set.jsonl"
     with open(eval_path, "w") as f:
         for idx in eval_indices:
             f.write(json.dumps(issues[idx]) + "\n")
     logger.info(f"Saved {len(eval_indices)} issues to {eval_path}")
+
+    # Evaluation set - IDs only
+    eval_ids = [issues[idx].get("instance_id") or issues[idx].get("id") for idx in eval_indices]
+    eval_ids_path = output_dir / "eval_issue_ids.json"
+    with open(eval_ids_path, "w") as f:
+        json.dump(eval_ids, f, indent=2)
+    logger.info(f"Saved {len(eval_ids)} eval IDs to {eval_ids_path}")
 
     # Metadata
     metadata = {
