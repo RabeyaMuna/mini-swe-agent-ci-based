@@ -28,6 +28,8 @@ dependencies = [
   "prompt_toolkit",
   "datasets",
   "openai!=1.100.0,!=1.100.1",
+  "fastapi",
+  "uvicorn",
   "sentence-transformers",
   "accelerate",  # Required by sentence-transformers for model loading
   "scikit-learn",
