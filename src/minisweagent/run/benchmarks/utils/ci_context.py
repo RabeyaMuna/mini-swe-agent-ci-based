@@ -130,6 +130,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[5]
 # Cache paths - check BOTH locations (user's data/ and internal data/trs/)
 WORKFLOW_VALIDATION_CACHE_PATHS = [
     PROJECT_ROOT / "data" / "workflow_validation_cache.json",  # User location (priority)
+    PROJECT_ROOT / "data" / "trs" / "workflow_validation_cache.json",  # Generated location
 ]
 LOG_ANALYSIS_CACHE_PATHS = [
     PROJECT_ROOT / "data" / "log_details.json",  # User location (priority)
