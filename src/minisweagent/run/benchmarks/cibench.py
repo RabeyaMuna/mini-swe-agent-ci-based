@@ -855,10 +855,9 @@ INSTRUCTIONS:
 18. For manual_fix, include Locate, Analyze, Change, Impact, and Edit lines
 19. Locate must say how to find all occurrences using symbols, error text, config keys, file paths, or line numbers from the evidence
 20. Edit must list each required file:line when available; otherwise list the concrete file or directory pattern
-21. Add automated cleanup only when it is appropriate for files touched by the manual edit:
-    - Python cleanup: "Install: pip install ruff" and "Cleanup: ruff check --fix <concrete targets>"
-    - RST cleanup: use docstrfmt only when the manual RST edit can benefit from formatting
-    - TOML/Markdown cleanup: use taplo/mdformat only for formatting cleanup, not value/content decisions
+21. DO NOT add cleanup commands (ruff, docstrfmt, taplo, mdformat) - the agent will handle formatting
+    - Focus only on the core fix, not formatting/cleanup
+    - Cleanup tools may fail if dependencies aren't installed yet
 22. For hybrid, put manual core edits first, then automated core fixes or cleanup grouped by tool and target
 23. Keep the plan short and actionable; do not include validation commands, test commands, markdown headings, or explanatory background
 
