@@ -496,6 +496,12 @@ def _organize_memories_by_validation_stage(
 
   # Note: memories are already cleaned in build_and_retrieve() before reaching here
   for mem in memories:
+    # CRITICAL: Validate mem is a dict
+    if not isinstance(mem, dict):
+      logger.warning(f"[organize_by_stage] Skipping invalid memory item (type={type(mem).__name__})")
+      filtered_count["unknown"] += 1
+      continue
+
     stage_info = _map_memory_to_validation_stage(mem, validation_sequence)
     stage_name = stage_info["validates"]
     stage_order = stage_info["order"]
