@@ -737,7 +737,7 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
             logger.warning(f"[CIBench] {description} error: {e}")
             return False
 
-    # Python projects
+    # Python projects - ROOT level
     if project_files['pyproject.toml'] or project_files['setup.py']:
         if _try_command(['pip', 'install', '-e', '.'], 'pip install -e .'):
             return
@@ -745,6 +745,30 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
     if project_files['requirements.txt']:
         if _try_command(['pip', 'install', '-r', 'requirements.txt'], 'pip install -r requirements.txt'):
             return
+
+    # Python projects - MONOREPO (libs/, packages/, etc.)
+    logger.info("[CIBench] Checking for Python monorepo structure...")
+    monorepo_installed = False
+    for subdir in ['libs', 'packages', 'projects']:
+        subdir_path = testbed_path / subdir
+        if subdir_path.is_dir():
+            # Find Python packages in this subdirectory
+            for item in subdir_path.iterdir():
+                if item.is_dir():
+                    if (item / 'pyproject.toml').exists() or (item / 'setup.py').exists():
+                        logger.info(f"[CIBench] Found Python package: {item.name}")
+                        rel_path = item.relative_to(testbed_path)
+                        # Try installing this package
+                        result = _try_command(
+                            ['sh', '-c', f'cd {rel_path} && pip install -e .'],
+                            f'pip install -e {rel_path}'
+                        )
+                        if result:
+                            monorepo_installed = True
+
+    if monorepo_installed:
+        logger.info("[CIBench] ✓ Installed monorepo Python packages")
+        return
 
     # Node.js projects
     if project_files['package.json']:
