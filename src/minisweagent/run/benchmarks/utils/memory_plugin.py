@@ -2126,26 +2126,25 @@ Return STRICT JSON (no markdown, no extra text):
             if not isinstance(row, dict):
                 continue
 
-            row_error = str(row.get("error_type") or "").lower()
-            row_issue_type = str(row.get("issue_type") or "").lower()
-            # failure_pattern or issue_type — L3 records may use either
-            row_pattern = str(row.get("failure_pattern") or row_issue_type).lower()
-            # all_failure_patterns: accumulated keyword variants across issues
-            row_all_patterns = " | ".join(
-                str(p) for p in _safe_list(row.get("failure_patterns", [])) if str(p).strip()
-            )
-            # failure_reasons: overall + per-file reasons accumulated across issues
-            row_reasons = " | ".join(
-                str(r) for r in _safe_list(row.get("failure_reasons", [])) if str(r).strip()
-            )
-            row_tools = [str(x).lower() for x in _safe_list(row.get("failed_tool", []))]
-            row_cmds = [str(x).lower() for x in _safe_list(row.get("failed_cmd", []))]
+            # L3 uses different field names than L1/L2
+            row_error = str(row.get("failure_type") or row.get("error_type") or "").lower()
+            row_issue_type = str(row.get("problem") or row.get("issue_type") or "").lower()
+            # failure_pattern is consistent across L1/L2/L3
+            row_pattern = str(row.get("failure_pattern") or "").lower()
+            # L3 doesn't have failure_patterns array - skip this
+            row_all_patterns = ""
+            # L3 doesn't have failure_reasons - use problem instead
+            row_reasons = row_issue_type  # problem field contains the reasoning
+            # L3 doesn't have failed_tool - skip
+            row_tools = []
+            # L3 uses verification_cmd instead of failed_cmd
+            row_cmds = [str(row.get("verification_cmd") or "").lower()] if row.get("verification_cmd") else []
 
-            # Build per-file structured block from stored example_files.
-            # example_files: [{file, issue_type, failure_pattern}] — concrete file examples
-            # accumulated from past issues of the same error_type.
+            # Build per-file structured block from stored examples.
+            # L3 uses "examples" instead of "example_files"
+            # examples: [{file, before, after}] — concrete file examples
             row_per_file_parts: List[str] = []
-            for f in _safe_list(row.get("example_files") or []):
+            for f in _safe_list(row.get("examples") or row.get("example_files") or []):
                 if isinstance(f, dict):
                     f_path = _normalize_path(str(f.get("file") or f.get("path") or ""))
                     f_issue = str(f.get("issue_type") or "").strip()
