@@ -2141,7 +2141,7 @@ Return STRICT JSON (no markdown, no extra text):
 
         scored: List[Dict[str, Any]] = []
         # L3: No repo/workflow filtering — searches all cross-memory for generalized patterns
-        import pdb; pdb.set_trace()
+
         for row in self.cross_memory:
             # CRITICAL: Validate row is a dict (not a list)
             if not isinstance(row, dict):

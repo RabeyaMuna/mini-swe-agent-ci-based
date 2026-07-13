@@ -342,7 +342,10 @@ def _flatten_l2(l2_memories: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]]
     for memory_index, memory in enumerate(l2_memories, 1):
         issue_id = str(memory.get("issue_id") or memory.get("id") or f"memory_{memory_index}")
         trajectory_ids.add(issue_id)
-        trajectory = memory.get("repair_trajectory") or memory.get("trajectory") or []
+        # L2 can have either "repair_trajectory", "trajectory", or "problems" (NEW!)
+        trajectory = (memory.get("repair_trajectory") or
+                     memory.get("trajectory") or
+                     memory.get("problems") or [])
         if not isinstance(trajectory, list):
             continue
 

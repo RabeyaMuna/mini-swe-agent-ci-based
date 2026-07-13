@@ -1075,7 +1075,6 @@ Hybrid:
 
     try:
         response = context_llm(prompt).strip()
-        import pdb; pdb.set_trace()
         # Try direct JSON parsing first
         try:
             return json.loads(response)
