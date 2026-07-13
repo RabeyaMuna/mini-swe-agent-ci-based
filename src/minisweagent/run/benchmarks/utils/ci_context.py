@@ -441,12 +441,17 @@ def _run_log_analysis(
 
   cached = _load_log_analysis_cache(sha_fail=sha_fail, task_id=task_id)
   if cached:
+    # Safely get failed_job/failed_jobs (handle both dict and potential list)
+    failed_job_data = cached.get("failed_job") or cached.get("failed_jobs") or []
+    if not isinstance(failed_job_data, list):
+      failed_job_data = [failed_job_data] if failed_job_data else []
+
     logger.info(
       "[Phase A] Loaded cached log analysis for %s — error_types=%d files=%d jobs=%d",
       (sha_fail or task_id)[:12],
       len(cached.get("error_types") or []),
       len(cached.get("relevant_files") or []),
-      len((cached.get("failed_job") or cached.get("failed_jobs")) or []),
+      len(failed_job_data),
     )
     return cached
 
