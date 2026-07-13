@@ -164,6 +164,11 @@ def _log_analysis_to_context(
     id, sha_fail, repo, overall_failure_reasons, overall_error_types,
     effected_files, failed_jobs, workflow_profile
   """
+  # CRITICAL: Validate log_result is a dict, not a list
+  if not isinstance(log_result, dict):
+    logger.error("[_log_analysis_to_context] log_result is not a dict (got %s), using empty dict", type(log_result).__name__)
+    log_result = {}
+
   sha_fail = str(log_result.get("sha_fail") or instance.get("sha_fail") or "")
   task_id  = str(log_result.get("id") or instance.get("instance_id") or instance.get("id") or sha_fail)
   repo_name = str(instance.get("repo_name") or "")
