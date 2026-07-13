@@ -602,58 +602,111 @@ def remove_from_preds_file(output_path: Path, instance_id: str) -> None:
 
 def _try_install_dependencies(testbed_path: Path) -> None:
     """
-    Try to install repository dependencies. Continues on failure.
+    Intelligently detect project type and install dependencies.
 
-    Attempts multiple installation methods in order:
-    1. pip install -e . (editable install from pyproject.toml/setup.py)
-    2. pip install -r requirements.txt (if exists)
-    3. pip install -r requirements-dev.txt (if exists)
+    Detects project structure and uses appropriate package manager:
+    - Python: pip install -e . / pip install -r requirements.txt
+    - Node.js: npm install / yarn install / pnpm install
+    - Ruby: bundle install
+    - Rust: cargo build
+    - Go: go mod download
+    - Java/Maven: mvn dependency:resolve
+    - And more...
 
-    If all fail, logs warning but continues - the agent can still work
-    without dependencies for many fixes.
+    Resilient design: tries all applicable methods, continues on failure.
     """
     import subprocess
 
-    logger.info("[CIBench] Attempting to install repository dependencies...")
+    logger.info("[CIBench] Analyzing project structure for dependency installation...")
 
-    # Try pip install -e . (most common for Python projects)
-    try:
-        if (testbed_path / "pyproject.toml").exists() or (testbed_path / "setup.py").exists():
-            logger.info("[CIBench] Installing with: pip install -e .")
+    # Detect project files
+    project_files = {
+        'pyproject.toml': (testbed_path / 'pyproject.toml').exists(),
+        'setup.py': (testbed_path / 'setup.py').exists(),
+        'requirements.txt': (testbed_path / 'requirements.txt').exists(),
+        'package.json': (testbed_path / 'package.json').exists(),
+        'package-lock.json': (testbed_path / 'package-lock.json').exists(),
+        'yarn.lock': (testbed_path / 'yarn.lock').exists(),
+        'pnpm-lock.yaml': (testbed_path / 'pnpm-lock.yaml').exists(),
+        'Gemfile': (testbed_path / 'Gemfile').exists(),
+        'Cargo.toml': (testbed_path / 'Cargo.toml').exists(),
+        'go.mod': (testbed_path / 'go.mod').exists(),
+        'pom.xml': (testbed_path / 'pom.xml').exists(),
+        'build.gradle': (testbed_path / 'build.gradle').exists(),
+    }
+
+    detected_files = [k for k, v in project_files.items() if v]
+    if detected_files:
+        logger.info(f"[CIBench] Detected project files: {', '.join(detected_files)}")
+    else:
+        logger.info("[CIBench] No standard project files detected - skipping installation")
+        return
+
+    def _try_command(cmd: list, description: str, timeout: int = 180) -> bool:
+        """Try a command, return True if successful"""
+        try:
+            logger.info(f"[CIBench] Trying: {description}")
             result = subprocess.run(
-                ["pip", "install", "-e", "."],
+                cmd,
                 cwd=testbed_path,
                 capture_output=True,
                 text=True,
-                timeout=120
+                timeout=timeout
             )
             if result.returncode == 0:
-                logger.info("[CIBench] ✓ Dependencies installed successfully")
-                return
+                logger.info(f"[CIBench] ✓ {description} succeeded")
+                return True
             else:
-                logger.warning("[CIBench] pip install -e . failed (continuing anyway)")
-    except Exception as e:
-        logger.warning(f"[CIBench] pip install -e . error: {e} (continuing anyway)")
+                logger.warning(f"[CIBench] {description} failed (return code {result.returncode})")
+                return False
+        except Exception as e:
+            logger.warning(f"[CIBench] {description} error: {e}")
+            return False
 
-    # Try requirements.txt
-    try:
-        req_file = testbed_path / "requirements.txt"
-        if req_file.exists():
-            logger.info("[CIBench] Installing with: pip install -r requirements.txt")
-            result = subprocess.run(
-                ["pip", "install", "-r", "requirements.txt"],
-                cwd=testbed_path,
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            if result.returncode == 0:
-                logger.info("[CIBench] ✓ Dependencies installed from requirements.txt")
+    # Python projects
+    if project_files['pyproject.toml'] or project_files['setup.py']:
+        if _try_command(['pip', 'install', '-e', '.'], 'pip install -e .'):
+            return
+
+    if project_files['requirements.txt']:
+        if _try_command(['pip', 'install', '-r', 'requirements.txt'], 'pip install -r requirements.txt'):
+            return
+
+    # Node.js projects
+    if project_files['package.json']:
+        if project_files['pnpm-lock.yaml']:
+            if _try_command(['pnpm', 'install'], 'pnpm install'):
                 return
-            else:
-                logger.warning("[CIBench] requirements.txt install failed (continuing anyway)")
-    except Exception as e:
-        logger.warning(f"[CIBench] requirements.txt error: {e} (continuing anyway)")
+        if project_files['yarn.lock']:
+            if _try_command(['yarn', 'install'], 'yarn install'):
+                return
+        if _try_command(['npm', 'install'], 'npm install'):
+            return
+
+    # Ruby projects
+    if project_files['Gemfile']:
+        if _try_command(['bundle', 'install'], 'bundle install'):
+            return
+
+    # Rust projects
+    if project_files['Cargo.toml']:
+        if _try_command(['cargo', 'build'], 'cargo build', timeout=300):
+            return
+
+    # Go projects
+    if project_files['go.mod']:
+        if _try_command(['go', 'mod', 'download'], 'go mod download'):
+            return
+
+    # Java/Maven projects
+    if project_files['pom.xml']:
+        if _try_command(['mvn', 'dependency:resolve'], 'mvn dependency:resolve', timeout=300):
+            return
+
+    # Gradle projects
+    if project_files['build.gradle']:
+        if _try_command(['./gradlew', 'dependencies'], 'gradle dependencies', timeout=300):
+            return
 
     logger.info("[CIBench] ⚠ Could not install dependencies - agent will work without them")
 
