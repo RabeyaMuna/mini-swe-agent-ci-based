@@ -753,27 +753,70 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
 
     # Python projects - MONOREPO (libs/, packages/, etc.)
     logger.info("[CIBench] Checking for Python monorepo structure...")
-    monorepo_installed = False
-    for subdir in ['libs', 'packages', 'projects']:
+    packages_found = []
+
+    # Search up to 3 levels deep for Python packages
+    for subdir in ['libs', 'packages', 'projects', 'services']:
         subdir_path = testbed_path / subdir
         if subdir_path.is_dir():
-            # Find Python packages in this subdirectory
-            for item in subdir_path.iterdir():
-                if item.is_dir():
-                    if (item / 'pyproject.toml').exists() or (item / 'setup.py').exists():
-                        logger.info(f"[CIBench] Found Python package: {item.name}")
-                        rel_path = item.relative_to(testbed_path)
-                        # Try installing this package
-                        result = _try_command(
-                            ['sh', '-c', f'cd {rel_path} && pip install -e .'],
-                            f'pip install -e {rel_path}'
-                        )
-                        if result:
-                            monorepo_installed = True
+            # Find all Python packages recursively (up to depth 3)
+            for depth1 in subdir_path.iterdir():
+                if not depth1.is_dir():
+                    continue
 
-    if monorepo_installed:
-        logger.info("[CIBench] ✓ Installed monorepo Python packages")
-        return
+                # Check depth 1: libs/agno/
+                if (depth1 / 'pyproject.toml').exists() or (depth1 / 'setup.py').exists():
+                    packages_found.append(depth1)
+
+                # Check depth 2: libs/infra/agno_aws/
+                for depth2 in depth1.iterdir():
+                    if depth2.is_dir() and ((depth2 / 'pyproject.toml').exists() or (depth2 / 'setup.py').exists()):
+                        packages_found.append(depth2)
+
+    if packages_found:
+        logger.info(f"[CIBench] Found {len(packages_found)} Python package(s) in monorepo")
+        installed_count = 0
+
+        # Try installing ALL packages (don't stop on first success!)
+        for pkg_path in packages_found:
+            pkg_name = pkg_path.name
+            has_poetry = (pkg_path / 'poetry.lock').exists()
+
+            # Prefer poetry for poetry projects
+            if has_poetry:
+                logger.info(f"[CIBench] Installing {pkg_name} with poetry...")
+                result = subprocess.run(
+                    ['poetry', 'install'],
+                    cwd=pkg_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=180
+                )
+                if result.returncode == 0:
+                    logger.info(f"[CIBench] ✓ {pkg_name} installed with poetry")
+                    installed_count += 1
+                    continue
+                else:
+                    logger.warning(f"[CIBench] Poetry failed for {pkg_name}, trying pip...")
+
+            # Fallback to pip install -e
+            logger.info(f"[CIBench] Installing {pkg_name} with pip...")
+            result = subprocess.run(
+                ['python', '-m', 'pip', 'install', '-e', '.'],
+                cwd=pkg_path,
+                capture_output=True,
+                text=True,
+                timeout=180
+            )
+            if result.returncode == 0:
+                logger.info(f"[CIBench] ✓ {pkg_name} installed")
+                installed_count += 1
+            else:
+                logger.warning(f"[CIBench] Failed to install {pkg_name} (continuing...)")
+
+        if installed_count > 0:
+            logger.info(f"[CIBench] ✓ Installed {installed_count}/{len(packages_found)} monorepo packages")
+            return
 
     # Node.js projects
     if project_files['package.json']:
