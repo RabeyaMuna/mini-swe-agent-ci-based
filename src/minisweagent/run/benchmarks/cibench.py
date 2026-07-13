@@ -600,23 +600,115 @@ def remove_from_preds_file(output_path: Path, instance_id: str) -> None:
 # Local environment setup  (clone -> checkout -> LocalEnvironment)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _try_install_dependencies(testbed_path: Path) -> None:
+def _extract_install_commands_from_workflow(workflow: str) -> list:
     """
-    Intelligently detect project type and install dependencies.
+    Extract dependency installation commands from CI workflow YAML.
 
-    Detects project structure and uses appropriate package manager:
-    - Python: pip install -e . / pip install -r requirements.txt
-    - Node.js: npm install / yarn install / pnpm install
-    - Ruby: bundle install
-    - Rust: cargo build
-    - Go: go mod download
-    - Java/Maven: mvn dependency:resolve
-    - And more...
+    Looks for common patterns:
+    - pip install -e .
+    - pip install -e ".[dev]"
+    - poetry install
+    - npm install / yarn / pnpm
+    - bundle install
+    - etc.
 
-    Resilient design: tries all applicable methods, continues on failure.
+    Returns list of shell commands to try.
+    """
+    import re
+
+    if not workflow:
+        return []
+
+    commands = []
+
+    # Common installation patterns to look for
+    patterns = [
+        # Python
+        r'pip install -e\s+["\']?\.\[?[^\]]*\]?["\']?',  # pip install -e . or pip install -e ".[dev]"
+        r'pip install -r\s+[\w\-/\.]+',  # pip install -r requirements.txt
+        r'poetry install(?:\s+--[\w\-]+)*',  # poetry install
+        r'pip install\s+(?:-e\s+)?\.(?:\[[\w,]+\])?',  # Various pip install . patterns
+
+        # Node.js
+        r'npm (?:ci|install)(?:\s+--[\w\-]+)*',
+        r'yarn install(?:\s+--[\w\-]+)*',
+        r'pnpm install(?:\s+--[\w\-]+)*',
+
+        # Ruby
+        r'bundle install(?:\s+--[\w\-]+)*',
+
+        # Other
+        r'conda install(?:\s+[\w\-]+)*',
+        r'pip3 install -e\s+\.',
+    ]
+
+    # Search for each pattern
+    for pattern in patterns:
+        matches = re.findall(pattern, workflow, re.IGNORECASE)
+        for match in matches:
+            # Clean up the command
+            cmd = match.strip()
+            # Skip if it's in a comment
+            if not cmd.startswith('#'):
+                commands.append(cmd)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_commands = []
+    for cmd in commands:
+        if cmd not in seen:
+            seen.add(cmd)
+            unique_commands.append(cmd)
+
+    return unique_commands
+
+def _try_install_dependencies(testbed_path: Path, workflow: str = "", workflow_path: str = "") -> None:
+    """
+    Workflow-aware dependency installation for 106+ repos.
+
+    Strategy:
+    1. Parse CI workflow to find installation commands (most reliable!)
+    2. Fallback to smart project detection
+    3. Continues on failure (resilient)
+
+    Why workflow-first?
+    - Workflows already know the correct install method
+    - Works for edge cases (poetry, conda, custom scripts)
+    - Handles extras like [dev], [test]
+    - Tested in production CI
     """
     import subprocess
+    import re
 
+    logger.info("[CIBench] Starting dependency installation...")
+
+    # ── Strategy 1: Extract install commands from workflow (BEST) ─────────────
+    install_commands = _extract_install_commands_from_workflow(workflow)
+
+    if install_commands:
+        logger.info(f"[CIBench] Found {len(install_commands)} install command(s) from workflow")
+        for i, cmd in enumerate(install_commands, 1):
+            logger.info(f"[CIBench] Workflow command {i}: {cmd}")
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=testbed_path,
+                    shell=True,  # Workflow commands may have pipes, &&, etc.
+                    capture_output=True,
+                    text=True,
+                    timeout=180
+                )
+                if result.returncode == 0:
+                    logger.info(f"[CIBench] ✓ Workflow install succeeded")
+                    return
+                else:
+                    logger.warning(f"[CIBench] Workflow command failed (code {result.returncode})")
+            except Exception as e:
+                logger.warning(f"[CIBench] Workflow command error: {e}")
+
+        logger.info("[CIBench] All workflow commands failed, trying smart detection...")
+
+    # ── Strategy 2: Smart project detection (FALLBACK) ───────────────────────
     logger.info("[CIBench] Analyzing project structure for dependency installation...")
 
     # Detect project files
@@ -850,7 +942,9 @@ def setup_local_environment(
     _prepare_worktree(testbed_path, sha_fail)
 
     # ── Try installing repo dependencies (resilient - continues on failure) ────
-    _try_install_dependencies(testbed_path)
+    workflow = instance.get("workflow", "")
+    workflow_path = instance.get("workflow_path", "")
+    _try_install_dependencies(testbed_path, workflow, workflow_path)
 
     # ── Build LocalEnvironment ────────────────────────────────────────────────
     # Strip environment_class from the env config dict (LocalEnvironment doesn't accept it).
