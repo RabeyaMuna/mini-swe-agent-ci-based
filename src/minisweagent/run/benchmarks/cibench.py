@@ -611,8 +611,7 @@ def _load_install_commands_from_cache(sha_fail: str) -> list:
     """
     # Try both cache locations
     cache_paths = [
-        PROJECT_ROOT / "data" / "workflow_validation_cache.json",  # User location (priority)
-        PROJECT_ROOT / "data" / "trs" / "workflow_validation_cache.json",  # Generated location
+        PROJECT_ROOT / "data" / "workflow_validation_cache.json"
     ]
 
     cache_path = None
