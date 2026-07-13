@@ -299,6 +299,54 @@ def _structured_file_refs(value: Any) -> List[Dict[str, str]]:
     return refs
 
 
+def _file_refs_from_fields(row: Dict[str, Any], *fields: str) -> List[Dict[str, str]]:
+    refs: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for field in fields:
+        for ref in _structured_file_refs(row.get(field, [])):
+            path = ref["file"]
+            if path and path not in seen:
+                refs.append(ref)
+                seen.add(path)
+    return refs
+
+
+def _first_file_from_fields(row: Dict[str, Any], *fields: str) -> str:
+    refs = _file_refs_from_fields(row, *fields)
+    return refs[0]["file"] if refs else ""
+
+
+def _canonical_file_entries(value: Any) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in _safe_list(value):
+        if isinstance(item, dict):
+            path = _normalize_path(str(item.get("file") or item.get("path") or ""))
+            if not path or path in seen:
+                continue
+            entry = dict(item)
+            entry.pop("path", None)
+            entry["file"] = path
+            entries.append(entry)
+            seen.add(path)
+        else:
+            path = _normalize_path(str(item or ""))
+            if path and path not in seen:
+                entries.append({"file": path})
+                seen.add(path)
+    return entries
+
+
+def _canonicalize_record_files(record: Dict[str, Any]) -> Dict[str, Any]:
+    files = _canonical_file_entries(record.get("files"))
+    if not files:
+        files = _canonical_file_entries(record.get("file"))
+    if files:
+        record["files"] = files
+    record.pop("file", None)
+    return record
+
+
 def _normalize_error_type_rows(error_types: Any) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     for item in _safe_list(error_types):
@@ -705,8 +753,9 @@ class MemoryPlugin:
 
     def _build_record_id(self, level: str, row: Dict[str, Any]) -> str:
         if level == "L1":
+            files_key = ",".join(ref["file"] for ref in _file_refs_from_fields(row, "files", "file"))
             return (
-                f"l1:{row.get('sha_fail','')}:{_normalize_path(str(row.get('file','')))}:"
+                f"l1:{row.get('sha_fail','')}:{files_key}:"
                 f"{str(row.get('failure_pattern','')).lower()}"
             )
         if level == "L2":
@@ -772,7 +821,7 @@ class MemoryPlugin:
             )
             for ref in dependent_files
         )
-        file_entries = _safe_list(record.get("files", []))
+        file_entries = _canonical_file_entries(record.get("files")) or _canonical_file_entries(record.get("file"))
         file_text = " | ".join(
             " ".join(
                 x for x in [
@@ -834,7 +883,7 @@ class MemoryPlugin:
             f"level: {level}",
             f"repo: {record.get('repo','')}",
             f"workflow: {record.get('workflow_name') or record.get('workflow_path') or ''}",
-            f"file: {record.get('file','')}",
+            f"files: {file_text}",
             f"line: {record.get('line_number','')}",
             f"error_type: {record.get('error_type','')}",
             f"issue_type: {record.get('issue_type','')}",
@@ -866,7 +915,7 @@ class MemoryPlugin:
         log_file_detail: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         detail = log_file_detail or {}
-        record = dict(row)
+        record = _canonicalize_record_files(dict(row))
         record["record_id"] = record.get("record_id") or self._build_record_id("L1", record)
         record["memory_level"] = "L1"
         record["line_number"] = detail.get("line_number", record.get("line_number"))
@@ -884,10 +933,9 @@ class MemoryPlugin:
         return record
 
     def _normalize_l2_record(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        record = dict(row)
+        record = _canonicalize_record_files(dict(row))
         record["record_id"] = record.get("record_id") or self._build_record_id("L2", record)
         record["memory_level"] = "L2"
-        record["file"] = record.get("file", "")
         record["line_number"] = record.get("line_number")
         record["file_failure_reason"] = str(record.get("file_failure_reason") or "").strip()
         record["overall_failure_reason"] = str(
@@ -898,12 +946,11 @@ class MemoryPlugin:
         return record
 
     def _normalize_l3_record(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        record = dict(row)
+        record = _canonicalize_record_files(dict(row))
         record["record_id"] = record.get("record_id") or self._build_record_id("L3", record)
         record["memory_level"] = "L3"
         record["repo"] = record.get("repo", "")
         record["repo_name"] = record.get("repo_name", "")
-        record["file"] = record.get("file", "")
         record["line_number"] = record.get("line_number")
         record["overall_failure_reason"] = str(
             record.get("overall_failure_reason")
@@ -991,8 +1038,8 @@ class MemoryPlugin:
         boost += 0.03 * max(tool_score, cmd_score)
         if level == "L1":
             query_file = _normalize_path(str(query.get("file_path") or ""))
-            row_file = _normalize_path(str(row.get("file") or ""))
-            if query_file and row_file and (query_file == row_file or _basename(query_file) == _basename(row_file)):
+            row_files = [ref["file"] for ref in _file_refs_from_fields(row, "files", "file")]
+            if query_file and any(query_file == row_file or _basename(query_file) == _basename(row_file) for row_file in row_files):
                 boost += 0.05
         return min(boost, 0.15)
 
@@ -1256,12 +1303,13 @@ IMPORTANT: Return exactly {len(candidates)} scores in the same order as candidat
         # Candidate files: prefer LLM's suspected_files, fall back to L1/L2 paths
         candidate_files: List[str] = []
         for row in l1:
-            path = _normalize_path(row.get("file", ""))
-            if path and path not in candidate_files:
-                candidate_files.append(path)
+            for ref in _file_refs_from_fields(row, "files", "file"):
+                path = ref["file"]
+                if path and path not in candidate_files:
+                    candidate_files.append(path)
         for row in l2:
-            for file_row in (row.get("files", []) or row.get("modified_files", [])):
-                path = _normalize_path(file_row.get("file", ""))
+            for ref in _file_refs_from_fields(row, "files", "modified_files"):
+                path = ref["file"]
                 if path and path not in candidate_files:
                     candidate_files.append(path)
 
@@ -1346,7 +1394,7 @@ IMPORTANT: Return exactly {len(candidates)} scores in the same order as candidat
         # Compact memory summary for LLM
         l1_summary = [
             {
-                "file": m.get("file", ""),
+                "files": [ref["file"] for ref in _file_refs_from_fields(m, "files", "file")],
                 "problem": _clip(str(m.get("problem", "")), 150),
                 "fix": _clip(str(m.get("fix_strategy", "")), 150),
             }
@@ -1612,7 +1660,7 @@ Return STRICT JSON (no markdown, no extra text):
                 prob.get("problem", ""),
                 prob.get("root_cause", ""),
                 prob.get("how_fixed", ""),
-                prob.get("file", ""),
+                " ".join(ref["file"] for ref in _file_refs_from_fields(prob, "files", "file")),
                 prob.get("validation_cmd", ""),
             ] if x)
             problem_texts.append(text)
@@ -1764,10 +1812,12 @@ Return STRICT JSON (no markdown, no extra text):
 
             # Path match is a secondary boost. Problem/root-cause/fix
             # semantics drive the main ranking.
-            row_file_norm = _normalize_path(str(row.get("file") or ""))
-            file_score = 1.0 if row_file_norm and any(
-                _path_matches(query_file, row_file_norm)
+            row_file_norms = [ref["file"] for ref in _file_refs_from_fields(row, "files", "file")]
+            row_files_text = " ".join(row_file_norms)
+            file_score = 1.0 if row_file_norms and any(
+                _path_matches(query_file, row_file)
                 for query_file in query_file_norms
+                for row_file in row_file_norms
             ) else 0.0
 
             row_problem_doc = " | ".join(x for x in [
@@ -1783,7 +1833,7 @@ Return STRICT JSON (no markdown, no extra text):
             row_doc = " | ".join(x for x in [
                 row_problem_doc,
                 _strip_identity_from_search_document(row.get("search_document") or ""),
-                row_file_norm,
+                row_files_text,
                 row_error,
                 row_pattern,
                 row_issue_type,
@@ -1794,12 +1844,17 @@ Return STRICT JSON (no markdown, no extra text):
             # Per-file enrichment: if this row's file has its own details from the log
             # analyzer, build a file-specific query_doc using that file's exact values
             # (issue_type, failed_tool, failed_cmd) for a more precise embedding match.
-            file_detail = file_details_map.get(row_file_norm, {}) if row_file_norm else {}
-            if not file_detail and row_file_norm:
+            file_detail = {}
+            for row_file in row_file_norms:
+                file_detail = file_details_map.get(row_file, {})
+                if file_detail:
+                    break
                 for query_file, detail in file_details_map.items():
-                    if _path_matches(query_file, row_file_norm):
+                    if _path_matches(query_file, row_file):
                         file_detail = detail
                         break
+                if file_detail:
+                    break
             if file_detail:
                 effective_tools = [str(x).lower() for x in _safe_list(file_detail.get("failed_tool") or [])] or query_tools
                 effective_cmds = [str(x).lower() for x in _safe_list(file_detail.get("failed_cmd") or [])] or query_cmds
@@ -1809,7 +1864,7 @@ Return STRICT JSON (no markdown, no extra text):
                 # reason. This helps same-file memories without making file
                 # identity dominate ranking.
                 query_doc = " | ".join(x for x in [
-                    row_file_norm,
+                    row_files_text,
                     error_type,
                     failure_pattern,
                     effective_issue_type,
@@ -1957,9 +2012,14 @@ Return STRICT JSON (no markdown, no extra text):
             # Mirrors query_per_file_block: file_path + error + pattern + issue_type per file.
             row_per_file_parts: List[str] = []
             for f in _safe_list(row.get("files") or []):
-                f_path    = f.get("file", "")
-                f_issue   = str(f.get("issue_type") or "").strip()
-                f_pattern = str(f.get("failure_pattern") or "").strip()
+                if isinstance(f, dict):
+                    f_path = _normalize_path(str(f.get("file") or f.get("path") or ""))
+                    f_issue = str(f.get("issue_type") or "").strip()
+                    f_pattern = str(f.get("failure_pattern") or "").strip()
+                else:
+                    f_path = _normalize_path(str(f or ""))
+                    f_issue = ""
+                    f_pattern = ""
                 entry = " ".join(x for x in [f_path, row_error, f_pattern or row_pattern, f_issue] if x)
                 if entry:
                     row_per_file_parts.append(entry)
@@ -2215,12 +2275,13 @@ Return STRICT JSON (no markdown, no extra text):
         # Candidate files from L1 direct matches + L2 modified-file entries
         candidate_files: List[str] = []
         for row in l1:
-            path = _normalize_path(row.get("file", ""))
-            if path and path not in candidate_files:
-                candidate_files.append(path)
+            for ref in _file_refs_from_fields(row, "files", "file"):
+                path = ref["file"]
+                if path and path not in candidate_files:
+                    candidate_files.append(path)
         for row in l2:
-            for file_row in (row.get("modified_files", []) or row.get("files", [])):
-                path = _normalize_path(file_row.get("file", ""))
+            for ref in _file_refs_from_fields(row, "modified_files", "files"):
+                path = ref["file"]
                 if path and path not in candidate_files:
                     candidate_files.append(path)
 
@@ -2302,13 +2363,14 @@ Return STRICT JSON (no markdown, no extra text):
 
         direct_scores: Dict[str, float] = {}
         for row in l1:
-            path = _normalize_path(row.get("file", ""))
-            if path:
-                direct_scores[path] = max(direct_scores.get(path, 0.0), float(row.get("similarity_score", 0.0)))
+            for ref in _file_refs_from_fields(row, "files", "file"):
+                path = ref["file"]
+                if path:
+                    direct_scores[path] = max(direct_scores.get(path, 0.0), float(row.get("similarity_score", 0.0)))
         for row in l2:
             boost = float(row.get("similarity_score", 0.0)) * 0.5
-            for file_row in (row.get("modified_files", []) or row.get("files", []) or []):
-                path = _normalize_path(file_row.get("file", ""))
+            for ref in _file_refs_from_fields(row, "modified_files", "files"):
+                path = ref["file"]
                 if path:
                     direct_scores[path] = max(direct_scores.get(path, 0.0), boost)
 
@@ -2332,12 +2394,12 @@ Return STRICT JSON (no markdown, no extra text):
         base = _basename(normalized)
         l1_rows = [
             row for row in (retrieval_result.get("l1_matches", []) or [])
-            if _normalize_path(row.get("file", "")) == normalized or _basename(row.get("file", "")) == base
+            if any(ref["file"] == normalized or _basename(ref["file"]) == base for ref in _file_refs_from_fields(row, "files", "file"))
         ]
         l2_rows = []
         for row in (retrieval_result.get("l2_matches", []) or []):
-            files = row.get("modified_files", []) or row.get("files", []) or []
-            if any(_normalize_path(item.get("file", "")) == normalized or _basename(item.get("file", "")) == base for item in files):
+            files = _file_refs_from_fields(row, "modified_files", "files")
+            if any(ref["file"] == normalized or _basename(ref["file"]) == base for ref in files):
                 l2_rows.append(row)
         if not l2_rows:
             l2_rows = retrieval_result.get("l2_matches", []) or []
@@ -2369,9 +2431,8 @@ Return STRICT JSON (no markdown, no extra text):
         }
 
         def _summarize_row(level: str, idx: int, row: Dict[str, Any]) -> str:
-            row_file = row.get("file", "")
-            files = row.get("modified_files", []) or row.get("files", []) or []
-            files_text = ", ".join(str(item.get("file", "")) for item in files if isinstance(item, dict))
+            row_file = ", ".join(ref["file"] for ref in _file_refs_from_fields(row, "files", "file"))
+            files_text = ", ".join(ref["file"] for ref in _file_refs_from_fields(row, "modified_files", "files"))
             reason = row.get("failure_reason") or row.get("reason") or row.get("principle") or ""
             fix = row.get("fix_pattern") or row.get("fix_strategies") or row.get("fix_strategy") or ""
 
@@ -2707,8 +2768,10 @@ No markdown, just JSON."""
             # Find L1 entries for this file
             matching_l1 = [
                 row for row in l1_matches
-                if _normalize_path(row.get("file", "")) == normalized_target
-                or _basename(row.get("file", "")) == base_target
+                if any(
+                    ref["file"] == normalized_target or _basename(ref["file"]) == base_target
+                    for ref in _file_refs_from_fields(row, "files", "file")
+                )
             ]
 
             l1_by_file[target_file] = matching_l1
@@ -3003,7 +3066,7 @@ Rules:
                     "memory_level": level_name,
                     "score": round(score, 4),
                     "file": normalized_file,
-                    "matched_memory_file": _normalize_path(str(row.get("file") or "")),
+                    "matched_memory_file": ", ".join(ref["file"] for ref in _file_refs_from_fields(row, "files", "file")),
                     "failure_pattern": row.get("failure_pattern") or row.get("issue_type") or row.get("pattern_name", ""),
                     "fl_guidance": _clip(reason, 220),
                     "fix_strategy": _clip(fix, 220),
@@ -3011,13 +3074,8 @@ Rules:
 
                 for ref in _structured_file_refs(row.get("dependent_files", [])):
                     add_file(ref["file"], ref.get("reason", "related memory file"), dependent_files)
-                for file_row in _safe_list(row.get("files") or row.get("modified_files") or row.get("example_files") or []):
-                    if isinstance(file_row, dict):
-                        add_file(
-                            str(file_row.get("file") or ""),
-                            str(file_row.get("reason") or file_row.get("failure_reason") or "related memory file"),
-                            additional_files,
-                        )
+                for ref in _file_refs_from_fields(row, "files", "file", "modified_files", "example_files"):
+                    add_file(ref["file"], ref.get("reason") or "related memory file", additional_files)
 
         best_score = max((float(item.get("similarity_score", 0.0)) for item in selected_items), default=0.0)
         levels = [level for level in ("L1", "L2", "L3") if candidates[level.lower()]]
@@ -3256,7 +3314,7 @@ Rules:
             self._normalize_l1_record(
                 row,
                 overall_failure_reason=overall_failure_reason,
-                log_file_detail=log_file_details_map.get(_normalize_path(str(row.get("file", ""))), {}),
+                log_file_detail=log_file_details_map.get(_first_file_from_fields(row, "files", "file"), {}),
             )
             for row in l1_rows
         ]
@@ -3264,7 +3322,7 @@ Rules:
             self._upsert_list_record(
                 self.failure_memory,
                 row,
-                keys=("sha_fail", "file", "error_type", "failure_pattern"),
+                keys=("sha_fail", "files", "error_type", "failure_pattern"),
                 # One record per (issue, file, error_type, pattern) — distinct failure types
                 # for the same file are stored separately, not overwritten.
             )
@@ -3422,7 +3480,7 @@ Rules:
                     "repo_name": repo_name,
                     "workflow_path": workflow_path,
                     "workflow_name": workflow_name,
-                    "file": file_path,
+                    "files": [{"file": file_path}],
                     "error_type": file_error_type,
                     "issue_type": issue_type_desc,
                     "failure_pattern": raw_pattern,
@@ -3457,17 +3515,18 @@ Rules:
         # Per-file detail entries — one entry per file with full context
         file_entries: List[Dict[str, Any]] = []
         for row in l1_rows:
-            file_entries.append({
-                # Which file and what specific issue it has
-                "file": row.get("file", ""),
-                "issue_type": row.get("issue_type", ""),         # descriptive: "Dependency on environment"
-                "failure_pattern": row.get("failure_pattern", ""), # keyword: "dependency_or_env"
-                "failure_reason": row.get("failure_reason", ""),   # WHY this file failed
-                # What was changed to fix this file
-                "fix_direction": row.get("fix_direction", ""),
-                # Files that directly or indirectly depend on this file
-                "dependent_files": row.get("dependent_files", []),  # [{file, reason}]
-            })
+            for ref in _file_refs_from_fields(row, "files", "file"):
+                file_entries.append({
+                    # Which file and what specific issue it has
+                    "file": ref["file"],
+                    "issue_type": row.get("issue_type", ""),         # descriptive: "Dependency on environment"
+                    "failure_pattern": row.get("failure_pattern", ""), # keyword: "dependency_or_env"
+                    "failure_reason": row.get("failure_reason", ""),   # WHY this file failed
+                    # What was changed to fix this file
+                    "fix_direction": row.get("fix_direction", ""),
+                    # Files that directly or indirectly depend on this file
+                    "dependent_files": row.get("dependent_files", []),  # [{file, reason}]
+                })
 
         # Overall failure reason connecting all files
         all_reasons = list(dict.fromkeys(
@@ -3583,8 +3642,13 @@ Rules:
         }
 
     def _upsert_list_record(self, rows: List[Dict[str, Any]], record: Dict[str, Any], keys: Tuple[str, ...]) -> None:
+        def _key_value(row: Dict[str, Any], key: str) -> str:
+            if key == "files":
+                return "|".join(ref["file"] for ref in _file_refs_from_fields(row, "files", "file"))
+            return str(row.get(key) or "")
+
         for index, row in enumerate(rows):
-            if all(str(row.get(key) or "") == str(record.get(key) or "") for key in keys):
+            if all(_key_value(row, key) == _key_value(record, key) for key in keys):
                 rows[index] = record
                 return
         rows.append(record)
