@@ -720,6 +720,11 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
         """Try a command, return True if successful"""
         try:
             logger.info(f"[CIBench] Trying: {description}")
+            # CRITICAL: Use python -m pip instead of pip to ensure we use testbed's Python
+            # This ensures dependencies install to the same Python the agent will use
+            if cmd[0] == 'pip':
+                cmd = ['python', '-m', 'pip'] + cmd[1:]
+
             result = subprocess.run(
                 cmd,
                 cwd=testbed_path,
