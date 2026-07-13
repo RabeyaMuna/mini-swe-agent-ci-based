@@ -2133,6 +2133,28 @@ def _problem_files(problem: Dict[str, Any]) -> List[str]:
   return list(dict.fromkeys(result))
 
 
+def _as_file_entries(files: Any) -> List[Dict[str, Any]]:
+  if not isinstance(files, list):
+    files = [files] if files else []
+
+  entries: List[Dict[str, Any]] = []
+  for item in files:
+    if isinstance(item, dict):
+      path = str(item.get("path") or item.get("file") or "").strip()
+      if path:
+        entry = dict(item)
+        entry["path"] = path
+        entries.append(entry)
+    elif isinstance(item, list):
+      for nested in _as_file_entries(item):
+        entries.append(nested)
+    else:
+      path = str(item or "").strip()
+      if path:
+        entries.append({"path": path})
+  return entries
+
+
 def _problem_text(problem: Dict[str, Any]) -> str:
   return str(
     problem.get("problem_statement")
@@ -2562,7 +2584,7 @@ def _format_separate_problems_as_markdown(problems: List[Dict[str, Any]]) -> str
     source = prob.get("source", "previous experience")
     description = prob.get("problem_statement") or prob.get("description") or prob.get("problem") or "Unknown problem"
     root_cause = prob.get("root_cause", "")
-    files = prob.get("files", [])
+    files = _as_file_entries(prob.get("files", []))
     validation_cmd = prob.get("verification_cmd") or prob.get("validation_cmd") or "pytest"
     fix_strategy = prob.get("fix_strategy", "")
 
@@ -2588,7 +2610,7 @@ def _format_separate_problems_as_markdown(problems: List[Dict[str, Any]]) -> str
         "",
       ])
       for f in files[:5]:
-        lines.append(f"- `{f}`")
+        lines.append(f"- `{f.get('path', '')}`")
       lines.append("")
 
     if fix_strategy:
@@ -2650,7 +2672,7 @@ def _format_problems_as_markdown(problems: List[Dict[str, Any]], total: int) -> 
     stage = prob.get("validation_stage", "")
     error_type = prob.get("error_type", "")
     error_desc = prob.get("error_description", "")
-    files = prob.get("files", [])
+    files = _as_file_entries(prob.get("files", []))
     fix_strategy = prob.get("fix_strategy", "")
     verify_cmd = prob.get("verification_cmd", "")
     check_first = prob.get("check_first", False)

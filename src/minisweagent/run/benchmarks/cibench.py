@@ -1380,7 +1380,7 @@ def process_instance(
         # Write per-instance retrieval diagnostics for manual inspection
         _save_retrieval_diagnostic(output_dir / "memory_retrieval_debug.jsonl", instance_id, ci_ctx, ci_memory)
     except Exception as exc:
-        logger.error("[CIBench] CI pre-processing failed for %s: %s", instance_id, exc)
+        logger.exception("[CIBench] CI pre-processing failed for %s: %s", instance_id, exc)
         raw_log = instance.get("logs") or instance.get("log") or ""
         if isinstance(raw_log, list):
             raw_log = "\n".join(str(x) for x in raw_log)

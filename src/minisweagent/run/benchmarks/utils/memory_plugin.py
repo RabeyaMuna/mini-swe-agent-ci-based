@@ -2129,9 +2129,14 @@ Return STRICT JSON (no markdown, no extra text):
             # accumulated from past issues of the same error_type.
             row_per_file_parts: List[str] = []
             for f in _safe_list(row.get("example_files") or []):
-                f_path    = f.get("file", "")
-                f_issue   = str(f.get("issue_type") or "").strip()
-                f_pattern = str(f.get("failure_pattern") or "").strip()
+                if isinstance(f, dict):
+                    f_path = _normalize_path(str(f.get("file") or f.get("path") or ""))
+                    f_issue = str(f.get("issue_type") or "").strip()
+                    f_pattern = str(f.get("failure_pattern") or "").strip()
+                else:
+                    f_path = _normalize_path(str(f or ""))
+                    f_issue = ""
+                    f_pattern = ""
                 entry = " ".join(x for x in [f_path, row_error, f_pattern or row_pattern, f_issue] if x)
                 if entry:
                     row_per_file_parts.append(entry)
