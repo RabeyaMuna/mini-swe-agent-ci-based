@@ -1022,6 +1022,11 @@ def _normalize_path(path: Any) -> str:
 
 def _clean_memory_for_llm(memory: Dict[str, Any]) -> Dict[str, Any]:
   """Remove irrelevant metadata (embeddings, scores, etc.) before sending to LLM."""
+  # CRITICAL: Validate memory is a dict (not a list)
+  if not isinstance(memory, dict):
+    logger.warning(f"[_clean_memory_for_llm] Expected dict but got {type(memory).__name__}, returning empty dict")
+    return {}
+
   # Fields to exclude - these waste tokens and aren't useful for LLM analysis
   exclude_fields = {
     "_embedding"
