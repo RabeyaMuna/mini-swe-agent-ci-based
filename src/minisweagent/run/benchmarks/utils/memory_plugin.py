@@ -688,6 +688,10 @@ class MemoryPlugin:
             (self.cross_memory,   "L3"),
         ):
             for record in level_records:
+                # CRITICAL: Validate record is a dict (not a list)
+                if not isinstance(record, dict):
+                    continue
+
                 if "_embedding" in record:
                     continue   # already stored
                 doc = str(record.get("search_document") or "").strip()
@@ -1578,6 +1582,10 @@ Return STRICT JSON (no markdown, no extra text):
         # Build ID lookup from full L1 memory
         id_to_problem = {}
         for prob in self.failure_memory:
+            # CRITICAL: Validate prob is a dict (not a list)
+            if not isinstance(prob, dict):
+                continue
+
             prob_id = prob.get("id")
             if prob_id:
                 id_to_problem[prob_id] = prob
