@@ -29,7 +29,11 @@ dependencies = [
   "datasets",
   "openai!=1.100.0,!=1.100.1",
   "sentence-transformers",
+  "accelerate",  # Required by sentence-transformers for model loading
   "scikit-learn",
+  "numpy",
+  "chromadb",  # Optional vector DB backend (can use JSON instead)
+  "fastembed",  # Alternative embedding library (fallback)
 ]
 
 [project.optional-dependencies]

@@ -27,11 +27,14 @@ cd ~/Documents/rabeya/mini-swe-agent-ci-based
 # Activate virtual environment (if using one)
 source .venv/bin/activate  # or skip if not using venv
 
-# Install CRITICAL dependencies
+# Install ALL dependencies (recommended)
+pip install -e .
+
+# OR install just the missing critical ones
 pip install sentence-transformers accelerate
 
 # Verify installation
-python3 -c "from sentence_transformers import SentenceTransformer; print('✓ Works!')"
+python3 scripts/verify_installation.py
 ```
 
 ---

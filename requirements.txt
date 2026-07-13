@@ -1,0 +1,39 @@
+# Mini-SWE-Agent Dependencies
+# Install with: pip install -r requirements.txt
+# Or install package: pip install -e .
+
+# Core dependencies
+pyyaml
+requests
+jinja2
+pydantic>=2.0
+litellm>=1.75.5,!=1.82.7,!=1.82.8
+tenacity
+rich
+python-dotenv
+typer
+platformdirs
+textual
+prompt_toolkit
+datasets
+openai!=1.100.0,!=1.100.1
+
+# Memory & Embeddings (CRITICAL for L1+L2+L3)
+sentence-transformers>=2.0.0
+accelerate>=0.20.0  # Required by sentence-transformers
+scikit-learn>=1.0.0
+numpy>=1.20.0
+
+# Optional: Vector DB (can use JSON backend instead)
+chromadb>=0.4.0
+
+# Optional: Alternative embedding library
+fastembed>=0.2.0
+
+# Development dependencies (optional)
+# Uncomment if needed:
+# pytest
+# pytest-cov
+# pytest-asyncio
+# pytest-xdist
+# ruff
