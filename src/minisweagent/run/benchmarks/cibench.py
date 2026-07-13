@@ -600,116 +600,98 @@ def remove_from_preds_file(output_path: Path, instance_id: str) -> None:
 # Local environment setup  (clone -> checkout -> LocalEnvironment)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _extract_install_commands_from_workflow(workflow: str) -> list:
+def _load_install_commands_from_cache(sha_fail: str) -> list:
     """
-    Extract dependency installation commands from CI workflow YAML.
+    Load installation commands from workflow_validation_cache.json.
 
-    Looks for common patterns:
-    - pip install -e .
-    - pip install -e ".[dev]"
-    - poetry install
-    - npm install / yarn / pnpm
-    - bundle install
-    - etc.
-
-    Returns list of shell commands to try.
+    Returns list of installation commands extracted from the validation_sequence.
+    These are the EXACT commands used in CI, ensuring compatibility.
     """
-    import re
+    cache_path = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
 
-    if not workflow:
+    if not cache_path.exists():
         return []
 
-    commands = []
+    try:
+        with open(cache_path) as f:
+            cache = json.load(f)
 
-    # Common installation patterns to look for
-    patterns = [
-        # Python
-        r'pip install -e\s+["\']?\.\[?[^\]]*\]?["\']?',  # pip install -e . or pip install -e ".[dev]"
-        r'pip install -r\s+[\w\-/\.]+',  # pip install -r requirements.txt
-        r'poetry install(?:\s+--[\w\-]+)*',  # poetry install
-        r'pip install\s+(?:-e\s+)?\.(?:\[[\w,]+\])?',  # Various pip install . patterns
+        # Find entry matching this sha_fail
+        for entry in cache:
+            if entry.get("sha_fail") == sha_fail:
+                # Extract installation_cmd from validation_sequence
+                commands = []
+                for step in entry.get("validation_sequence", []):
+                    install_cmd = step.get("installation_cmd", "").strip()
+                    if install_cmd and install_cmd != "":
+                        # Split multiple commands (comma-separated)
+                        for cmd in install_cmd.split(','):
+                            cmd = cmd.strip()
+                            # Skip action references (not shell commands)
+                            if not cmd.startswith('actions/') and not cmd.startswith('astral-sh/'):
+                                commands.append(cmd)
 
-        # Node.js
-        r'npm (?:ci|install)(?:\s+--[\w\-]+)*',
-        r'yarn install(?:\s+--[\w\-]+)*',
-        r'pnpm install(?:\s+--[\w\-]+)*',
+                if commands:
+                    logger.info(f"[CIBench] Loaded {len(commands)} install command(s) from cache for {sha_fail[:8]}")
+                return commands
 
-        # Ruby
-        r'bundle install(?:\s+--[\w\-]+)*',
+        logger.info(f"[CIBench] No cache entry found for {sha_fail[:8]}")
+        return []
 
-        # Other
-        r'conda install(?:\s+[\w\-]+)*',
-        r'pip3 install -e\s+\.',
-    ]
+    except Exception as e:
+        logger.warning(f"[CIBench] Failed to load install commands from cache: {e}")
+        return []
 
-    # Search for each pattern
-    for pattern in patterns:
-        matches = re.findall(pattern, workflow, re.IGNORECASE)
-        for match in matches:
-            # Clean up the command
-            cmd = match.strip()
-            # Skip if it's in a comment
-            if not cmd.startswith('#'):
-                commands.append(cmd)
-
-    # Deduplicate while preserving order
-    seen = set()
-    unique_commands = []
-    for cmd in commands:
-        if cmd not in seen:
-            seen.add(cmd)
-            unique_commands.append(cmd)
-
-    return unique_commands
-
-def _try_install_dependencies(testbed_path: Path, workflow: str = "", workflow_path: str = "") -> None:
+def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
     """
-    Workflow-aware dependency installation for 106+ repos.
+    Cache-aware dependency installation for 106+ repos and 567 issues.
 
     Strategy:
-    1. Parse CI workflow to find installation commands (most reliable!)
+    1. Load install commands from workflow_validation_cache.json (BEST!)
+       - These are the EXACT commands from CI workflows
+       - Already tested and verified to work
     2. Fallback to smart project detection
     3. Continues on failure (resilient)
 
-    Why workflow-first?
-    - Workflows already know the correct install method
-    - Works for edge cases (poetry, conda, custom scripts)
-    - Handles extras like [dev], [test]
-    - Tested in production CI
+    Why cache-first?
+    - Pre-extracted from actual CI workflows
+    - Handles edge cases (poetry, conda, custom scripts, uv, etc.)
+    - Works for all 106 repos automatically
+    - No YAML parsing needed
     """
     import subprocess
-    import re
 
     logger.info("[CIBench] Starting dependency installation...")
 
-    # ── Strategy 1: Extract install commands from workflow (BEST) ─────────────
-    install_commands = _extract_install_commands_from_workflow(workflow)
+    # ── Strategy 1: Load install commands from cache (BEST) ──────────────────
+    install_commands = _load_install_commands_from_cache(sha_fail)
 
     if install_commands:
-        logger.info(f"[CIBench] Found {len(install_commands)} install command(s) from workflow")
         for i, cmd in enumerate(install_commands, 1):
-            logger.info(f"[CIBench] Workflow command {i}: {cmd}")
+            logger.info(f"[CIBench] Cache command {i}/{len(install_commands)}: {cmd}")
             try:
                 result = subprocess.run(
                     cmd,
                     cwd=testbed_path,
-                    shell=True,  # Workflow commands may have pipes, &&, etc.
+                    shell=True,  # Commands may have pipes, &&, etc.
                     capture_output=True,
                     text=True,
                     timeout=180
                 )
                 if result.returncode == 0:
-                    logger.info(f"[CIBench] ✓ Workflow install succeeded")
-                    return
+                    logger.info(f"[CIBench] ✓ Cache install command succeeded")
+                    # Continue to next command (don't return - install all)
                 else:
-                    logger.warning(f"[CIBench] Workflow command failed (code {result.returncode})")
+                    logger.warning(f"[CIBench] Cache command failed (code {result.returncode}), trying next...")
             except Exception as e:
-                logger.warning(f"[CIBench] Workflow command error: {e}")
+                logger.warning(f"[CIBench] Cache command error: {e}, trying next...")
 
-        logger.info("[CIBench] All workflow commands failed, trying smart detection...")
+        # If we executed cache commands, return (don't try fallback)
+        logger.info("[CIBench] ✓ Executed all cache install commands")
+        return
 
     # ── Strategy 2: Smart project detection (FALLBACK) ───────────────────────
-    logger.info("[CIBench] Analyzing project structure for dependency installation...")
+    logger.info("[CIBench] No cache commands found, trying smart detection...")
 
     # Detect project files
     project_files = {
@@ -942,9 +924,8 @@ def setup_local_environment(
     _prepare_worktree(testbed_path, sha_fail)
 
     # ── Try installing repo dependencies (resilient - continues on failure) ────
-    workflow = instance.get("workflow", "")
-    workflow_path = instance.get("workflow_path", "")
-    _try_install_dependencies(testbed_path, workflow, workflow_path)
+    sha_fail = instance.get("sha_fail", "")
+    _try_install_dependencies(testbed_path, sha_fail)
 
     # ── Build LocalEnvironment ────────────────────────────────────────────────
     # Strip environment_class from the env config dict (LocalEnvironment doesn't accept it).
