@@ -1812,11 +1812,14 @@ Return STRICT JSON (no markdown, no extra text):
                     workflow_filtered += 1
                     continue
 
-            row_error = str(row.get("error_type") or "").lower()
+            # L1 uses failure_type (not error_type)
+            row_error = str(row.get("failure_type") or "").lower()
             row_pattern = str(row.get("failure_pattern") or "").lower()
             row_issue_type = str(row.get("issue_type") or "").lower()
-            row_tools = [str(x).lower() for x in _safe_list(row.get("failed_tool", []))]
-            row_cmds = [str(x).lower() for x in _safe_list(row.get("failed_cmd", []))]
+            # L1 doesn't have failed_tool field
+            row_tools = []
+            # L1 uses validation_cmd (not failed_cmd)
+            row_cmds = [str(row.get("validation_cmd") or "").lower()] if row.get("validation_cmd") else []
 
             # Path match is a secondary boost. Problem/root-cause/fix
             # semantics drive the main ranking.
@@ -2012,30 +2015,40 @@ Return STRICT JSON (no markdown, no extra text):
                     filtered_workflow += 1
                     continue
 
-            row_error = str(row.get("error_type") or "").lower()
-            row_pattern = str(row.get("failure_pattern") or row.get("pattern_name") or "").lower()
-            row_issue_type = str(row.get("issue_type") or "").lower()
-            # overall_failure_reason = the stored error_context for this past issue
-            row_overall_reason = str(row.get("overall_failure_reason") or row.get("failure_reason") or "")
-            row_tools = [str(x).lower() for x in _safe_list(row.get("failed_tool", []))]
-            row_cmds = [str(x).lower() for x in _safe_list(row.get("failed_cmd", []))]
+            # L2 structure: each record has a "problems" array
+            # We need to process each problem in the sequence
+            problems = _safe_list(row.get("problems", []))
+            if not problems:
+                continue
 
-            # Build per-file structured block from the stored L2 files list.
-            # Mirrors query_per_file_block: file_path + error + pattern + issue_type per file.
-            row_per_file_parts: List[str] = []
-            for f in _safe_list(row.get("files") or []):
-                if isinstance(f, dict):
-                    f_path = _normalize_path(str(f.get("file") or f.get("path") or ""))
-                    f_issue = str(f.get("issue_type") or "").strip()
-                    f_pattern = str(f.get("failure_pattern") or "").strip()
-                else:
-                    f_path = _normalize_path(str(f or ""))
-                    f_issue = ""
-                    f_pattern = ""
-                entry = " ".join(x for x in [f_path, row_error, f_pattern or row_pattern, f_issue] if x)
-                if entry:
-                    row_per_file_parts.append(entry)
-            row_per_file_block = " | ".join(row_per_file_parts)
+            # For L2, we score the SEQUENCE as a whole, combining all problems
+            all_errors = []
+            all_patterns = []
+            all_cmds = []
+            all_files_parts = []
+
+            for prob in problems:
+                if not isinstance(prob, dict):
+                    continue
+                all_errors.append(str(prob.get("failure_type") or "").lower())
+                all_patterns.append(str(prob.get("failure_pattern") or "").lower())
+                all_cmds.append(str(prob.get("verification_cmd") or "").lower())
+
+                # Extract files from this problem
+                for f in _safe_list(prob.get("files") or []):
+                    if isinstance(f, dict):
+                        f_path = _normalize_path(str(f.get("file") or ""))
+                        all_files_parts.append(f_path)
+
+            row_error = " | ".join(x for x in all_errors if x)
+            row_pattern = " | ".join(x for x in all_patterns if x)
+            row_issue_type = ""  # L2 doesn't have issue_type at top level
+            row_overall_reason = " | ".join(str(prob.get("problem", "")) for prob in problems if isinstance(prob, dict))
+            row_tools = []  # L2 doesn't have tools
+            row_cmds = [x for x in all_cmds if x]
+
+            # Build per-file structured block from files collected above
+            row_per_file_block = " | ".join(all_files_parts)
 
             # L2 row document: use stored search_document if present.
             row_doc = _strip_identity_from_search_document(row.get("search_document") or "") or " | ".join(x for x in [
