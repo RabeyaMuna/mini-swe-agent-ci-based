@@ -1375,6 +1375,11 @@ def build_ci_context(
   # ── Phase A — Log Summarisation (CILogAnalyzer) ───────────────────────────
   log_analysis = _run_log_analysis(instance, llm=llm, model=model)
 
+  # CRITICAL: Validate log_analysis is a dict (not a list)
+  if not isinstance(log_analysis, dict):
+    logger.error("[build_ci_context] log_analysis is not a dict (got %s), using empty dict", type(log_analysis).__name__)
+    log_analysis = {}
+
   # Safely get failed_job/failed_jobs
   failed_job_data = log_analysis.get("failed_job") or log_analysis.get("failed_jobs") or []
   if not isinstance(failed_job_data, list):

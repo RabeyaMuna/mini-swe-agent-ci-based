@@ -241,6 +241,11 @@ class CIMemorySystem:
     try:
       raw = self._plugin.retrieve(query)
 
+      # CRITICAL: Validate raw is a dict (not a list)
+      if not isinstance(raw, dict):
+        logger.error("[CIMemorySystem] retrieve returned non-dict (got %s), using empty result", type(raw).__name__)
+        return _empty
+
       # CLEAN EMBEDDINGS ONCE - right after retrieval, before any downstream processing
       # This ensures all synthesis functions (organize, reason, prompts) get clean data
       if raw.get("matches"):
