@@ -256,7 +256,9 @@ class CIMemorySystem:
         raw["l3_matches"] = [_clean_memory_for_llm(m) for m in raw.get("l3_matches", [])]
 
     except Exception as exc:
+      import traceback
       logger.error("[CIMemorySystem] retrieve failed: %s", exc)
+      logger.error("Full traceback:\n%s", traceback.format_exc())
       return _empty
 
     effective_llm = llm or self._plugin.llm
