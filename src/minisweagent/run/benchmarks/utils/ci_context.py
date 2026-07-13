@@ -126,8 +126,26 @@ from minisweagent.run.benchmarks.utils.ci_workflow_aware_retrieval import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
+
+# Cache paths - check BOTH locations (user's data/ and internal data/trs/)
+WORKFLOW_VALIDATION_CACHE_PATHS = [
+    PROJECT_ROOT / "data" / "workflow_validation_cache.json",  # User
+]
+LOG_ANALYSIS_CACHE_PATHS = [
+    PROJECT_ROOT / "data" / "log_details.json",  # User location (priority)
+]
+
+# Default save locations (use trs/ for generated data)
 WORKFLOW_VALIDATION_CACHE = PROJECT_ROOT / "data" / "trs" / "workflow_validation_cache.json"
 LOG_ANALYSIS_CACHE = PROJECT_ROOT / "data" / "trs" / "log_details.json"
+
+
+def _find_cache_file(paths: list) -> Path | None:
+    """Find first existing cache file from a list of paths."""
+    for path in paths:
+        if path.exists():
+            return path
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -356,10 +374,14 @@ def _build_from_precomputed(instance: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _load_log_analysis_cache(*, sha_fail: str, task_id: str) -> Dict[str, Any]:
-  if not LOG_ANALYSIS_CACHE.exists():
+  # Try loading from BOTH locations (user's data/ and internal data/trs/)
+  cache_file = _find_cache_file(LOG_ANALYSIS_CACHE_PATHS)
+  if not cache_file:
     return {}
+
   try:
-    payload = json.loads(LOG_ANALYSIS_CACHE.read_text(encoding="utf-8"))
+    payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    logger.debug(f"[Phase A] Loaded log analysis cache from {cache_file}")
   except Exception as exc:
     logger.warning("[Phase A] Could not read log analysis cache: %s", exc)
     return {}

@@ -606,15 +606,28 @@ def _load_install_commands_from_cache(sha_fail: str) -> list:
 
     Returns list of installation commands extracted from the validation_sequence.
     These are the EXACT commands used in CI, ensuring compatibility.
-    """
-    cache_path = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
 
-    if not cache_path.exists():
+    Checks BOTH locations: data/ (user) and data/trs/ (generated)
+    """
+    # Try both cache locations
+    cache_paths = [
+        PROJECT_ROOT / "data" / "workflow_validation_cache.json",  # User location (priority)
+        PROJECT_ROOT / "data" / "trs" / "workflow_validation_cache.json",  # Generated location
+    ]
+
+    cache_path = None
+    for path in cache_paths:
+        if path.exists():
+            cache_path = path
+            break
+
+    if not cache_path:
         return []
 
     try:
         with open(cache_path) as f:
             cache = json.load(f)
+        logger.debug(f"[CIBench] Loaded workflow cache from {cache_path}")
 
         # Find entry matching this sha_fail
         for entry in cache:
