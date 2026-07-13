@@ -1366,6 +1366,12 @@ def process_instance(
         ci_ctx    = ci_result["context"]
         task      = ci_result["problem_statement"]
         ci_memory = ci_result["memory"]
+
+        # Validate ci_memory is a dict (not a list)
+        if not isinstance(ci_memory, dict):
+            logger.warning("[CIBench] ci_memory is not a dict (got %s), using empty dict", type(ci_memory).__name__)
+            ci_memory = {}
+
         extra_info["memory_summary"] = {
             "enabled":             memory_enabled,
             "weighted_similarity": ci_memory.get("weighted_similarity", 0.0),
