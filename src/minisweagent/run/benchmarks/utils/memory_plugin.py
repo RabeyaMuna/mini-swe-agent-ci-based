@@ -656,6 +656,10 @@ class MemoryPlugin:
             (self.cross_memory,   "L3"),
         ):
             for record in level_records:
+                # CRITICAL: Validate record is a dict (not a list)
+                if not isinstance(record, dict):
+                    continue
+
                 doc = str(record.get("search_document") or "").strip()
                 vec = record.get("_embedding")
                 if doc and vec and doc not in provider._cache:
