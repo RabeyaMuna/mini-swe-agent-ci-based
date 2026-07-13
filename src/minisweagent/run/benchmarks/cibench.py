@@ -600,6 +600,63 @@ def remove_from_preds_file(output_path: Path, instance_id: str) -> None:
 # Local environment setup  (clone -> checkout -> LocalEnvironment)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _try_install_dependencies(testbed_path: Path) -> None:
+    """
+    Try to install repository dependencies. Continues on failure.
+
+    Attempts multiple installation methods in order:
+    1. pip install -e . (editable install from pyproject.toml/setup.py)
+    2. pip install -r requirements.txt (if exists)
+    3. pip install -r requirements-dev.txt (if exists)
+
+    If all fail, logs warning but continues - the agent can still work
+    without dependencies for many fixes.
+    """
+    import subprocess
+
+    logger.info("[CIBench] Attempting to install repository dependencies...")
+
+    # Try pip install -e . (most common for Python projects)
+    try:
+        if (testbed_path / "pyproject.toml").exists() or (testbed_path / "setup.py").exists():
+            logger.info("[CIBench] Installing with: pip install -e .")
+            result = subprocess.run(
+                ["pip", "install", "-e", "."],
+                cwd=testbed_path,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            if result.returncode == 0:
+                logger.info("[CIBench] ✓ Dependencies installed successfully")
+                return
+            else:
+                logger.warning("[CIBench] pip install -e . failed (continuing anyway)")
+    except Exception as e:
+        logger.warning(f"[CIBench] pip install -e . error: {e} (continuing anyway)")
+
+    # Try requirements.txt
+    try:
+        req_file = testbed_path / "requirements.txt"
+        if req_file.exists():
+            logger.info("[CIBench] Installing with: pip install -r requirements.txt")
+            result = subprocess.run(
+                ["pip", "install", "-r", "requirements.txt"],
+                cwd=testbed_path,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            if result.returncode == 0:
+                logger.info("[CIBench] ✓ Dependencies installed from requirements.txt")
+                return
+            else:
+                logger.warning("[CIBench] requirements.txt install failed (continuing anyway)")
+    except Exception as e:
+        logger.warning(f"[CIBench] requirements.txt error: {e} (continuing anyway)")
+
+    logger.info("[CIBench] ⚠ Could not install dependencies - agent will work without them")
+
 def setup_local_environment(
     config: Dict[str, Any],
     instance: Dict[str, Any],
@@ -738,6 +795,9 @@ def setup_local_environment(
         logger.info("[CIBench] Reusing existing working copy at %s", testbed_path)
     _ensure_commit_available(testbed_path, sha_fail, remote="origin")
     _prepare_worktree(testbed_path, sha_fail)
+
+    # ── Try installing repo dependencies (resilient - continues on failure) ────
+    _try_install_dependencies(testbed_path)
 
     # ── Build LocalEnvironment ────────────────────────────────────────────────
     # Strip environment_class from the env config dict (LocalEnvironment doesn't accept it).
