@@ -1795,6 +1795,10 @@ Return STRICT JSON (no markdown, no extra text):
         workflow_filtered = 0
 
         for row in self.failure_memory:
+            # CRITICAL: Validate row is a dict (not a list)
+            if not isinstance(row, dict):
+                continue
+
             # L1: Filter by repo AND workflow to keep searches within the same repo+workflow context
             # Use fuzzy repo matching to handle "owner/repo" vs "repo" format inconsistencies
             if repo:
@@ -1987,6 +1991,10 @@ Return STRICT JSON (no markdown, no extra text):
         filtered_workflow = 0
 
         for row in self.repo_memory:
+            # CRITICAL: Validate row is a dict (not a list)
+            if not isinstance(row, dict):
+                continue
+
             # L2: Filter by repo AND workflow to keep searches within the same repo+workflow context
             # Use fuzzy repo matching to handle "owner/repo" vs "repo" format inconsistencies
             if repo:
@@ -2112,7 +2120,12 @@ Return STRICT JSON (no markdown, no extra text):
 
         scored: List[Dict[str, Any]] = []
         # L3: No repo/workflow filtering — searches all cross-memory for generalized patterns
+        import pdb; pdb.set_trace()
         for row in self.cross_memory:
+            # CRITICAL: Validate row is a dict (not a list)
+            if not isinstance(row, dict):
+                continue
+
             row_error = str(row.get("error_type") or "").lower()
             row_issue_type = str(row.get("issue_type") or "").lower()
             # failure_pattern or issue_type — L3 records may use either

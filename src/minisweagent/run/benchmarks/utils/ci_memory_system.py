@@ -240,7 +240,7 @@ class CIMemorySystem:
 
     try:
       raw = self._plugin.retrieve(query)
-
+      import pdb; pdb.set_trace()
       # CRITICAL: Validate raw is a dict (not a list)
       if not isinstance(raw, dict):
         logger.error("[CIMemorySystem] retrieve returned non-dict (got %s), using empty result", type(raw).__name__)
@@ -263,7 +263,7 @@ class CIMemorySystem:
 
     effective_llm = llm or self._plugin.llm
     llm_selection = _run_two_llm_gate(raw, effective_llm, validation_sequence)
-
+    import pdb; pdb.set_trace()
     return {**raw, "llm_selection": llm_selection}
 
   def save(
