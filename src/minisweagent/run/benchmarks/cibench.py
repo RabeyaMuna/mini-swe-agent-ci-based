@@ -751,27 +751,50 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
         if _try_command(['pip', 'install', '-r', 'requirements.txt'], 'pip install -r requirements.txt'):
             return
 
-    # Python projects - MONOREPO (libs/, packages/, etc.)
-    logger.info("[CIBench] Checking for Python monorepo structure...")
+    # Python projects - MONOREPO (DYNAMIC - works for ANY repo structure!)
+    # Use 'find' to discover ALL Python packages regardless of directory names
+    logger.info("[CIBench] Searching for Python packages (dynamic discovery)...")
     packages_found = []
 
-    # Search up to 3 levels deep for Python packages
-    for subdir in ['libs', 'packages', 'projects', 'services']:
-        subdir_path = testbed_path / subdir
-        if subdir_path.is_dir():
-            # Find all Python packages recursively (up to depth 3)
-            for depth1 in subdir_path.iterdir():
-                if not depth1.is_dir():
-                    continue
+    try:
+        # Find all pyproject.toml files (excluding root, venv, .git, node_modules)
+        result = subprocess.run(
+            ['find', '.', '-name', 'pyproject.toml', '-not', '-path', './pyproject.toml',
+             '-not', '-path', '*/.venv/*', '-not', '-path', '*/venv/*',
+             '-not', '-path', '*/.git/*', '-not', '-path', '*/node_modules/*',
+             '-maxdepth', '4'],
+            cwd=testbed_path,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
 
-                # Check depth 1: libs/agno/
-                if (depth1 / 'pyproject.toml').exists() or (depth1 / 'setup.py').exists():
-                    packages_found.append(depth1)
+        for line in result.stdout.strip().split('\n'):
+            if line and line.strip():
+                pkg_path = testbed_path / Path(line).parent
+                if pkg_path.is_dir():
+                    packages_found.append(pkg_path)
 
-                # Check depth 2: libs/infra/agno_aws/
-                for depth2 in depth1.iterdir():
-                    if depth2.is_dir() and ((depth2 / 'pyproject.toml').exists() or (depth2 / 'setup.py').exists()):
-                        packages_found.append(depth2)
+        # Also find setup.py files (avoid duplicates)
+        result = subprocess.run(
+            ['find', '.', '-name', 'setup.py', '-not', '-path', './setup.py',
+             '-not', '-path', '*/.venv/*', '-not', '-path', '*/venv/*',
+             '-not', '-path', '*/.git/*', '-not', '-path', '*/node_modules/*',
+             '-maxdepth', '4'],
+            cwd=testbed_path,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        for line in result.stdout.strip().split('\n'):
+            if line and line.strip():
+                pkg_path = testbed_path / Path(line).parent
+                if pkg_path.is_dir() and pkg_path not in packages_found:
+                    packages_found.append(pkg_path)
+
+    except Exception as e:
+        logger.warning(f"[CIBench] Dynamic package search failed: {e}")
 
     if packages_found:
         logger.info(f"[CIBench] Found {len(packages_found)} Python package(s) in monorepo")
