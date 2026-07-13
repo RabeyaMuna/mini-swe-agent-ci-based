@@ -367,6 +367,11 @@ def _map_memory_to_validation_stage(memory: Dict[str, Any], validation_sequence:
   Map memory's failed_cmd to validation stage from sequence.
   Returns: {validates, order, validation_cmd}
   """
+  # Validate memory is a dict
+  if not isinstance(memory, dict):
+    logger.warning("[_map_memory_to_validation_stage] memory is not a dict (got %s), using empty dict", type(memory).__name__)
+    memory = {}
+
   failed_cmds = memory.get("failed_cmd", [])
   if isinstance(failed_cmds, str):
     failed_cmds = [failed_cmds]
