@@ -1369,11 +1369,17 @@ def build_ci_context(
 
   # ── Phase A — Log Summarisation (CILogAnalyzer) ───────────────────────────
   log_analysis = _run_log_analysis(instance, llm=llm, model=model)
+
+  # Safely get failed_job/failed_jobs
+  failed_job_data = log_analysis.get("failed_job") or log_analysis.get("failed_jobs") or []
+  if not isinstance(failed_job_data, list):
+    failed_job_data = [failed_job_data] if failed_job_data else []
+
   logger.info(
     "[Phase A] done — error_types=%d files=%d jobs=%d",
     len(log_analysis.get("error_types") or []),
     len(log_analysis.get("relevant_files") or []),
-    len((log_analysis.get("failed_job") or log_analysis.get("failed_jobs")) or []),
+    len(failed_job_data),
   )
 
   # ── Phase B — Workflow Profile Extraction ─────────────────────────────────
