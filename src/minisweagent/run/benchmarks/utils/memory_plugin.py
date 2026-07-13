@@ -1505,6 +1505,194 @@ Return STRICT JSON (no markdown, no extra text):
             self._append_jsonl(self.retrieval_log_path, result)
         return result
 
+    def _expand_l1_dependencies(
+        self,
+        initial_problems: List[Dict[str, Any]],
+        max_depth: int = 2
+    ) -> List[Dict[str, Any]]:
+        """
+        Expand L1 problems by following enabled_by/enabled dependency graph.
+
+        Args:
+            initial_problems: Top-K from similarity search
+            max_depth: Maximum hops to follow (default: 2)
+
+        Returns:
+            Expanded list including all dependencies (preserves similarity scores)
+        """
+        if not initial_problems:
+            return []
+
+        # Build ID lookup from full L1 memory
+        id_to_problem = {}
+        for prob in self.failure_memory:
+            prob_id = prob.get("id")
+            if prob_id:
+                id_to_problem[prob_id] = prob
+
+        visited = set()
+        result = []
+
+        def traverse(problem_id: str, depth: int = 0, inherited_score: float = 0.0):
+            """Recursively traverse dependency graph"""
+            if depth > max_depth or problem_id in visited:
+                return
+
+            visited.add(problem_id)
+
+            problem = id_to_problem.get(problem_id)
+            if not problem:
+                logger.warning(f"[L1 Expansion] Problem {problem_id} not found in memory")
+                return
+
+            # Preserve original similarity_score if exists, else use inherited score
+            if "similarity_score" not in problem:
+                problem = {**problem, "similarity_score": inherited_score}
+
+            result.append(problem)
+
+            # Get current score for inheritance
+            current_score = problem.get("similarity_score", 0.0)
+
+            # Follow prerequisites (enabled_by) - these are NEEDED before this fix
+            for prereq_id in problem.get("enabled_by", []):
+                traverse(prereq_id, depth + 1, current_score * 0.9)
+
+            # Follow follow-ups (enabled) - these come AFTER this fix
+            for followup_id in problem.get("enabled", []):
+                traverse(followup_id, depth + 1, current_score * 0.9)
+
+        # Start traversal from initial problems
+        for prob in initial_problems:
+            prob_id = prob.get("id")
+            if prob_id:
+                traverse(prob_id)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_result = []
+        for prob in result:
+            prob_id = prob.get("id")
+            if prob_id and prob_id not in seen:
+                seen.add(prob_id)
+                unique_result.append(prob)
+
+        logger.info(
+            f"[L1 Expansion] Expanded {len(initial_problems)} → {len(unique_result)} "
+            f"(+{len(unique_result) - len(initial_problems)} dependencies)"
+        )
+
+        return unique_result
+
+    def _cluster_and_deduplicate_l1(
+        self,
+        problems: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Cluster similar L1 problems and merge duplicates.
+
+        Steps:
+        1. Group by similarity (cosine similarity on problem descriptions)
+        2. Merge similar problems (keep highest similarity score)
+        3. Remove exact duplicates
+
+        Returns:
+            Unique, clustered problems
+        """
+        if not problems:
+            return []
+
+        if len(problems) == 1:
+            return problems
+
+        # Build text representations for clustering
+        problem_texts = []
+        for prob in problems:
+            text = " | ".join(str(x) for x in [
+                prob.get("problem", ""),
+                prob.get("root_cause", ""),
+                prob.get("how_fixed", ""),
+                prob.get("file", ""),
+                prob.get("validation_cmd", ""),
+            ] if x)
+            problem_texts.append(text)
+
+        # Compute pairwise similarities
+        embeddings = []
+        for text in problem_texts:
+            emb = _EmbeddingProvider.get().embed(text)
+            if emb is not None:
+                embeddings.append(emb)
+            else:
+                # Fallback: zero vector
+                embeddings.append([0.0] * 384)  # Default embedding size
+
+        # Simple clustering: Group problems with similarity > 0.85
+        clusters = []
+        used = set()
+
+        for i, prob_i in enumerate(problems):
+            if i in used:
+                continue
+
+            cluster = [prob_i]
+            used.add(i)
+
+            for j in range(i + 1, len(problems)):
+                if j in used:
+                    continue
+
+                # Compute cosine similarity
+                try:
+                    import numpy as np
+                    from sklearn.metrics.pairwise import cosine_similarity
+                    emb_i = np.array(embeddings[i]).reshape(1, -1)
+                    emb_j = np.array(embeddings[j]).reshape(1, -1)
+                    sim = float(cosine_similarity(emb_i, emb_j)[0][0])
+
+                    if sim > 0.85:  # High similarity threshold
+                        cluster.append(problems[j])
+                        used.add(j)
+                except Exception:
+                    pass
+
+            clusters.append(cluster)
+
+        # Merge each cluster into a single representative
+        merged = []
+        for cluster in clusters:
+            if len(cluster) == 1:
+                merged.append(cluster[0])
+            else:
+                # Merge: keep problem with highest similarity score
+                cluster.sort(key=lambda p: p.get("similarity_score", 0.0), reverse=True)
+                best = cluster[0]
+
+                # Combine fixes from similar problems
+                all_fixes = []
+                for prob in cluster:
+                    fix = prob.get("how_fixed", "")
+                    if fix and fix not in all_fixes:
+                        all_fixes.append(fix)
+
+                merged_problem = {
+                    **best,
+                    "how_fixed": " | ".join(all_fixes),
+                    "cluster_size": len(cluster),
+                    "merged_from": [p.get("id") for p in cluster if p.get("id")],
+                }
+                merged.append(merged_problem)
+
+        logger.info(
+            f"[L1 Clustering] Clustered {len(problems)} → {len(merged)} "
+            f"({len(problems) - len(merged)} duplicates merged)"
+        )
+
+        # Sort by similarity score (highest first)
+        merged.sort(key=lambda p: p.get("similarity_score", 0.0), reverse=True)
+
+        return merged
+
     def _retrieve_l1(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         repo = str(query.get("repo") or "")
         workflow = str(query.get("workflow_path") or query.get("workflow_text") or "")
@@ -1674,7 +1862,22 @@ Return STRICT JSON (no markdown, no extra text):
         if scored:
             logger.info(f"[L1 Retrieval] Top similarity: {scored[0].get('similarity_score', 0.0):.4f}")
 
-        return self._similar_matches(scored)
+        # Step 1: Get top-K similar matches (sorted by similarity)
+        top_similar = self._similar_matches(scored)
+
+        # Step 2: Expand with dependencies (enabled_by/enabled)
+        expanded = self._expand_l1_dependencies(top_similar)
+
+        # Step 3: Cluster and deduplicate
+        clustered = self._cluster_and_deduplicate_l1(expanded)
+
+        logger.info(
+            f"[L1 Pipeline] similar={len(top_similar)} → "
+            f"expanded={len(expanded)} → "
+            f"clustered={len(clustered)}"
+        )
+
+        return clustered
 
     def _retrieve_l2(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         repo = str(query.get("repo") or "")

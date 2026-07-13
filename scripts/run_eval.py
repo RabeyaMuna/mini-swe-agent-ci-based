@@ -148,6 +148,11 @@ Examples:
         help="Comma-separated issue IDs (e.g., 111,121,145)"
     )
     parser.add_argument(
+        "--issue-ids-file",
+        type=str,
+        help="Path to JSON file containing issue IDs (e.g., data/trs/eval_issue_ids.json)"
+    )
+    parser.add_argument(
         "--repos",
         type=str,
         help="Comma-separated repo names (e.g., camel,flower)"
@@ -166,8 +171,8 @@ Examples:
         "--ablation",
         type=str,
         default="L1+L2+L3",
-        choices=["L1", "L1+L2", "L1+L2+L3"],
-        help="Memory ablation level (default: L1+L2+L3)"
+        choices=["BASELINE", "L1", "L1+L2", "L1+L2+L3"],
+        help="Memory ablation level: BASELINE=no memory, L1=file-level, L1+L2=+sequences, L1+L2+L3=full (default: L1+L2+L3)"
     )
     parser.add_argument(
         "--workers",
@@ -192,6 +197,20 @@ Examples:
     if args.issue_ids:
         issue_ids = [id.strip() for id in args.issue_ids.split(",")]
         print(f"Issue IDs: {', '.join(issue_ids)}")
+    elif args.issue_ids_file:
+        # Load from file
+        import json
+        from pathlib import Path
+        ids_file = Path(args.issue_ids_file)
+        if not ids_file.exists():
+            print(f"ERROR: Issue IDs file not found: {ids_file}")
+            return
+        with open(ids_file) as f:
+            issue_ids = json.load(f)
+            # Convert to strings
+            issue_ids = [str(id) for id in issue_ids]
+        print(f"Loaded {len(issue_ids)} issue IDs from {ids_file}")
+        print(f"Issue IDs: {', '.join(issue_ids[:10])}{'...' if len(issue_ids) > 10 else ''}")
 
     # Parse repos
     repos = None
@@ -255,12 +274,18 @@ Examples:
         "--split", "train",
         "--output", str(output_dir),
         "--workers", str(args.workers),
-        "--memory-enabled",
-        "--memory-root", str(MEMORY_ROOT),
-        "--memory-ablation", args.ablation,
-        "--memory-top-k", "3",
-        "--no-save-memory",
     ]
+
+    # Add memory flags ONLY if not baseline
+    if args.ablation != "BASELINE":
+        cmd.extend([
+            "--memory-enabled",
+            "--memory-root", str(MEMORY_ROOT),
+            "--memory-ablation", args.ablation,
+            "--memory-top-k", "3",
+        ])
+
+    cmd.append("--no-save-memory")
 
     print()
     print("Command:")
