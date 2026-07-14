@@ -2122,7 +2122,7 @@ def _extract_diff(submission: str) -> str:
 @app.command(help=_HELP_TEXT)
 def main(
     dataset: str = typer.Option(
-        "ci-benchmark-user/ci-repair-bench", "--dataset", "-d",
+        "ci-benchmark-user/ci-repair-bench", "--dataset",
         help="Path to JSONL dataset or HuggingFace dataset name",
         rich_help_panel="Data selection",
     ),
@@ -2152,7 +2152,7 @@ def main(
         rich_help_panel="Advanced",
     ),
     config_spec: List[str] = typer.Option(
-        [str(DEFAULT_CONFIG_FILE)], "-c", "--config",
+        [str(DEFAULT_CONFIG_FILE)], "--config",
         help="Config file(s) or key=value overrides (merged left to right)",
         rich_help_panel="Basic",
     ),
