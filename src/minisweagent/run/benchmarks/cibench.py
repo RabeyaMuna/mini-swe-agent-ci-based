@@ -2135,7 +2135,7 @@ def main(
         rich_help_panel="Basic",
     ),
     workers: int = typer.Option(
-        1, "-w", "--workers",
+        1, "--workers",
         help="Parallel worker threads (each clones to its own instance_dir)",
         rich_help_panel="Basic",
     ),
