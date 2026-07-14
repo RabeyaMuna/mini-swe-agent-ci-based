@@ -1553,13 +1553,15 @@ def _run_sequential_repair(
             start_time = time.time()
             previous_start_time = getattr(agent, "_start_time", start_time)
             previous_wall_limit = getattr(agent.config, "wall_time_limit_seconds", 0)
-            if previous_wall_limit <= 0 or previous_wall_limit > per_problem_timeout:
-                agent.config.wall_time_limit_seconds = per_problem_timeout
+
+            # ALWAYS set timeout for THIS problem (don't rely on previous state)
+            agent.config.wall_time_limit_seconds = per_problem_timeout
             agent._start_time = start_time
 
             try:
                 info = agent.run(single_task)
             finally:
+                # Restore original timeout (for next problem to start fresh)
                 agent.config.wall_time_limit_seconds = previous_wall_limit
                 agent._start_time = previous_start_time
 
