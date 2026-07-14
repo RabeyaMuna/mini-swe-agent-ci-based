@@ -56,8 +56,6 @@ Usage examples
     --filter "^owner-repo" --slice 0:10
 """
 
-from __future__ import annotations
-
 import concurrent.futures
 import json
 import os

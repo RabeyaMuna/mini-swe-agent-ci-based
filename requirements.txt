@@ -10,6 +10,7 @@ pydantic>=2.0
 tenacity
 rich
 python-dotenv
+click<8.2
 typer
 platformdirs
 textual
