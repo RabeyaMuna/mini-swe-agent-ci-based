@@ -74,21 +74,65 @@ class _EmbeddingProvider:
         self._model: Any = None
         self._backend: str = "none"
         self._cache: Dict[str, Any] = {}
+        self._embedding_dim: int = 384  # Track expected dimension
 
         if _ST_AVAILABLE and _NUMPY_AVAILABLE:
             try:
-                self._model = _STModel("all-MiniLM-L6-v2")
+                # CRITICAL FIX: Handle PyTorch meta tensor issue
+                # The error "Cannot copy out of meta tensor" happens with newer PyTorch
+                # We need to ensure model loads directly to CPU device
+                import torch
+                import os
+
+                # Force CPU device (avoid meta tensor issues)
+                os.environ['TRANSFORMERS_OFFLINE'] = '0'
+
+                # Try loading with explicit device_map
+                try:
+                    self._model = _STModel("all-MiniLM-L6-v2", device='cpu')
+                except TypeError:
+                    # Older sentence-transformers doesn't support device parameter
+                    self._model = _STModel("all-MiniLM-L6-v2")
+
                 self._backend = "sentence_transformers"
-                print("[Memory] Embedding provider: sentence-transformers/all-MiniLM-L6-v2")
+                self._embedding_dim = 384  # all-MiniLM-L6-v2 dimension
+                print("[Memory] Embedding provider: sentence-transformers/all-MiniLM-L6-v2 (384-dim)")
                 return
             except Exception as exc:
-                print(f"[Memory] sentence-transformers load failed ({exc}); trying fastembed…")
+                exc_str = str(exc)
+                print(f"[Memory] sentence-transformers load failed ({exc_str[:100]}...); trying fastembed…")
+
+                # CRITICAL: Check if L2 memory exists with 384-dim embeddings
+                # If so, we MUST use 384-dim model (can't use fastembed's 768-dim)
+                try:
+                    import json
+                    from pathlib import Path
+                    memory_root = os.environ.get('MEMORY_ROOT', 'data/trs')
+                    l2_file = Path(memory_root) / 'repo_memory.json'
+                    if l2_file.exists():
+                        with open(l2_file) as f:
+                            l2_data = json.load(f)
+                            if l2_data and '_embedding' in l2_data[0]:
+                                stored_dim = len(l2_data[0]['_embedding'])
+                                if stored_dim == 384:
+                                    print(f"[Memory] ERROR: L2 memory has 384-dim embeddings!")
+                                    print(f"[Memory] Cannot use fastembed (768-dim) - dimension mismatch")
+                                    print(f"[Memory] SOLUTION: Fix sentence-transformers installation:")
+                                    print(f"[Memory]   pip install --upgrade torch torchvision sentence-transformers")
+                                    print(f"[Memory] Running WITHOUT L2/L3 memory (BASELINE mode)")
+                                    self._backend = "none"
+                                    return
+                except Exception:
+                    pass  # If check fails, continue to fastembed
 
         if _FASTEMBED_AVAILABLE and _NUMPY_AVAILABLE:
             try:
                 self._model = _FastEmbedModel("BAAI/bge-base-en-v1.5")
                 self._backend = "fastembed"
-                print("[Memory] Embedding provider: BAAI/bge-base-en-v1.5 (fastembed)")
+                self._embedding_dim = 768  # BAAI/bge-base-en-v1.5 dimension
+                print("[Memory] Embedding provider: BAAI/bge-base-en-v1.5 (fastembed, 768-dim)")
+                print("[Memory] WARNING: This model uses different dimensions than L2 memory!")
+                print("[Memory] L2 retrieval may not work correctly. Fix: install sentence-transformers")
                 return
             except Exception as exc:
                 print(f"[Memory] fastembed model load failed ({exc})")
@@ -105,6 +149,14 @@ class _EmbeddingProvider:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    def get_embedding_dim(self) -> int:
+        """Return the dimension of embeddings produced by the current model."""
+        return self._embedding_dim
+
+    def get_backend(self) -> str:
+        """Return the backend being used (sentence_transformers, fastembed, or none)."""
+        return self._backend
 
     def embed(self, text: str):
         """Return a unit-norm numpy float32 vector for *text*, or None on failure."""
@@ -135,12 +187,36 @@ class _EmbeddingProvider:
         (file path | error_type | failure_pattern | issue_type |
          failure_reason | failed_tool | failed_cmd).
         Returns 0.0 if either embedding fails — NO TF-IDF fallback.
+
+        CRITICAL: Ensures dimension compatibility before computing dot product.
+        If dimensions mismatch (e.g., comparing 384-dim with 768-dim), returns 0.0.
         """
         vec_a = self.embed(text_a)
         vec_b = self.embed(text_b)
+
+        # Check if embeddings exist
         if vec_a is None or vec_b is None:
             return 0.0
-        return float(np.dot(vec_a, vec_b))
+
+        # CRITICAL: Check dimension compatibility
+        # This prevents "shapes not aligned" error when L2 memory uses different model
+        if vec_a.shape != vec_b.shape:
+            # Dimension mismatch - can't compute cosine similarity
+            # This happens when:
+            # - L2 memory built with all-MiniLM-L6-v2 (384-dim)
+            # - Current run using BAAI/bge-base-en-v1.5 (768-dim)
+            return 0.0
+
+        # Compute cosine similarity via dot product
+        # Vectors are already normalized in embed(), so dot product = cosine similarity
+        # Formula: cos(θ) = (A · B) / (||A|| × ||B||)
+        # Since ||A|| = ||B|| = 1 (normalized), cos(θ) = A · B
+        similarity = float(np.dot(vec_a, vec_b))
+
+        # Clamp to [-1, 1] range (handle numerical precision issues)
+        similarity = max(-1.0, min(1.0, similarity))
+
+        return similarity
 
 
 def _semantic_similarity(text_a: str, text_b: str) -> float:
