@@ -2132,7 +2132,7 @@ def main(
         rich_help_panel="Data selection",
     ),
     output: str = typer.Option(
-        "", "-o", "--output",
+        "", "--output",
         help="Output directory for predictions and trajectories",
         rich_help_panel="Basic",
     ),
