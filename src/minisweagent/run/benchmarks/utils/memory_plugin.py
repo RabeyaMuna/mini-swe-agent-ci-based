@@ -1071,10 +1071,21 @@ class MemoryPlugin:
         if query_embedding is None:
             return []
         try:
+            # ═══════════════════════════════════════════════════════════════════════
+            # CRITICAL FIX: Only fetch top-10 most similar results per level
+            # ═══════════════════════════════════════════════════════════════════════
+            # ChromaDB returns results sorted by similarity (most similar first).
+            # We only want top-10 matches - if something doesn't match the current
+            # failure, it's not required to fix!
+            #
+            # OLD (WRONG): n_results = max(int(collection.count()), 1)  # Gets ALL!
+            # NEW (CORRECT): Cap at 10 results per level
             try:
-                n_results = max(int(collection.count()), 1)
+                count = int(collection.count())
+                n_results = min(10, max(count, 1))  # Top-10 or fewer if collection is small
             except Exception:
-                n_results = self.top_k
+                n_results = 10  # Default to top-10
+
             result = collection.query(
                 query_embeddings=[query_embedding.tolist()],
                 n_results=n_results,
@@ -1286,16 +1297,25 @@ IMPORTANT: Return exactly {len(candidates)} scores in the same order as candidat
             l2_candidates = self._retrieve_l2(query) if "L2" in self.active_levels else []
             l3_candidates = self._retrieve_l3(query) if "L3" in self.active_levels else []
 
-        # Stage 2-4: Take top-10 from EACH level (balanced representation)
-        l1 = l1_candidates[:10]  # Top 10 from L1
-        l2 = l2_candidates[:10]  # Top 10 from L2
-        l3 = l3_candidates[:10]  # Top 10 from L3
+        # Stage 2-4: Take top-10 from EACH level (sorted by similarity)
+        # ═══════════════════════════════════════════════════════════════════════
+        # ChromaDB returns results sorted by similarity (best → worst)
+        # Top-10 means: if only 5 similar, return 5; if 20 similar, cap at 10
+        # No threshold needed - agent/LLM decides what's useful based on scores
+        # ═══════════════════════════════════════════════════════════════════════
+        l1 = l1_candidates[:10]  # Top-10 most similar from L1
+        l2 = l2_candidates[:10]  # Top-10 most similar from L2
+        l3 = l3_candidates[:10]  # Top-10 most similar from L3
 
         # Stage 5: Combine all selected memories
         top_30 = []
         top_30.extend(l1)
         top_30.extend(l2)
         top_30.extend(l3)
+
+        # Log retrieval results (0-30 based on actual similarity)
+        logger.info(f"[Memory] Retrieved top-10 from each level: "
+                    f"L1={len(l1)}, L2={len(l2)}, L3={len(l3)}, Total={len(top_30)} memories")
 
         # Calculate scores before cleaning (need similarity_score field!)
         best_scores = {

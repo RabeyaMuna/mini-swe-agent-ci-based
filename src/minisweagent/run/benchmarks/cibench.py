@@ -1369,17 +1369,23 @@ TASK: Decide if these problems are similar and related enough to fix together.
 Merge if:
 - Same root cause (e.g., all IndexError, all type errors)
 - Related files (same file or related files)
-- Can be fixed with one unified approach
+- Can be fixed with ONE unified approach
 
-Keep separate if:
+⚠️  CRITICAL: Do NOT merge if:
 - Different root causes
 - Unrelated files
 - Require different fix approaches
+- **Solutions are MUTUALLY EXCLUSIVE** (e.g., one says "change code", other says "change config")
+- **Solutions CONFLICT** (e.g., "fix by replacing type A with B" vs "fix by adding plugin")
+- One problem says "Alternative fix path" or "Option 1/Option 2"
+
+CONFLICTING SOLUTIONS CAUSE AGENT TO GET STUCK IN INFINITE LOOP!
+If solutions conflict, MUST keep separate.
 
 OUTPUT (JSON only):
 {{
   "can_merge": true/false,
-  "reason": "why they can/cannot merge"
+  "reason": "why they can/cannot merge (mention if solutions conflict)"
 }}"""
 
     try:
@@ -1480,10 +1486,24 @@ def _run_sequential_repair(
         (info_dict, unified_diff)
     """
     partial_fixes = []
-    total_problems = len(problems)
+    total_problems_initial = len(problems)
     per_problem_timeout = 600  # 10 minutes per problem
 
-    logger.info(f"[CIBench] Starting sequential repair: {total_problems} problems")
+    logger.info(f"[CIBench] Starting sequential repair: {total_problems_initial} problems")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # NOTE: Agent handles all validation internally
+    # ═══════════════════════════════════════════════════════════════════════════
+    # The agent will:
+    # - Check if problems exist
+    # - Identify what needs fixing
+    # - Skip or fix based on current state
+    # - Handle validation with proper environment setup
+    #
+    # We only keep immediate exit detection and consecutive failure detection
+    # to prevent cascade failures.
+
+    total_problems = total_problems_initial
 
     for i, problem in enumerate(problems, 1):
         logger.info(f"[CIBench] {'='*60}")
@@ -1546,6 +1566,20 @@ def _run_sequential_repair(
             elapsed = time.time() - start_time
             logger.info(f"[CIBench] Problem {i} completed in {elapsed:.1f}s")
 
+            # ═══════════════════════════════════════════════════════════════
+            # CRITICAL: Detect immediate exit (agent state corruption)
+            # ═══════════════════════════════════════════════════════════════
+            if elapsed < 1.0:
+                logger.error(f"[CIBench] ⚠️  Problem {i} completed in {elapsed:.3f}s - SUSPICIOUS IMMEDIATE EXIT!")
+                logger.error(f"[CIBench]    This indicates agent state corruption or configuration issue")
+                logger.error(f"[CIBench]    Exit status: {info.get('exit_status')}")
+                logger.error(f"[CIBench]    Submission length: {len(info.get('submission', ''))}")
+                logger.error(f"[CIBench]    Agent start_time: {getattr(agent, '_start_time', 'unknown')}")
+                logger.error(f"[CIBench]    Agent timeout: {getattr(agent.config, 'wall_time_limit_seconds', 'unknown')}")
+                logger.error(f"[CIBench] ⚠️  STOPPING sequential repair to prevent cascade failures")
+                # Break the loop - agent is broken, don't try more problems
+                break
+
             exit_status = info.get("exit_status")
 
             # Extract patch
@@ -1553,7 +1587,18 @@ def _run_sequential_repair(
             patch = _extract_diff(raw_submission)
 
             if not patch or not patch.strip():
-                logger.warning(f"[CIBench] SKIP Problem {i}: Agent returned no patch (continuing to next problem)")
+                logger.warning(f"[CIBench] SKIP Problem {i}: Agent returned no patch")
+                logger.warning(f"[CIBench]    Exit status: {exit_status}")
+                logger.warning(f"[CIBench]    Elapsed time: {elapsed:.1f}s")
+                logger.warning(f"[CIBench]    Submission length: {len(raw_submission)}")
+
+                # If we've had multiple consecutive no-patch failures, stop
+                recent_failures = sum(1 for f in partial_fixes[-3:] if f.get('patch', '').strip() == '')
+                if recent_failures >= 3:
+                    logger.error(f"[CIBench] ⚠️  3+ consecutive no-patch failures - agent may be broken")
+                    logger.error(f"[CIBench] ⚠️  STOPPING to prevent wasted time")
+                    break
+
                 # Don't break - continue to next problem
                 continue
 

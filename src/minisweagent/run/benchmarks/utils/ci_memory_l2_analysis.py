@@ -124,6 +124,101 @@ def _step_problems(step: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
+def _calculate_multi_signal_similarity(
+    prob1: Dict[str, Any],
+    prob2: Dict[str, Any],
+    emb1: Any,  # np.ndarray when numpy available
+    emb2: Any   # np.ndarray when numpy available
+) -> float:
+    """
+    Calculate comprehensive similarity using ALL available data fields.
+
+    Combines multiple signals:
+    - File overlap (40%): Same files = highly related
+    - Semantic similarity (30%): Meaning from all text fields
+    - Issue type match (15%): E501 vs merge conflict
+    - Validation command (10%): Same validator
+    - Failure type (5%): Type error vs import error
+
+    Args:
+        prob1, prob2: Problem dictionaries with metadata
+        emb1, emb2: Pre-computed semantic embeddings
+
+    Returns:
+        Combined similarity score (0.0-1.0)
+    """
+    row1 = prob1.get("row", {})
+    row2 = prob2.get("row", {})
+
+    # Signal 1: File Overlap (40% weight) - MOST RELIABLE
+    files1 = set(row1.get("files", []))
+    files2 = set(row2.get("files", []))
+
+    if files1 and files2:
+        intersection = len(files1 & files2)
+        union = len(files1 | files2)
+        file_overlap = intersection / union if union > 0 else 0.0
+
+        # Bonus for exact same file set
+        if files1 == files2 and len(files1) > 0:
+            file_overlap = 1.0
+    else:
+        file_overlap = 0.0
+
+    # Signal 2: Semantic Similarity (30% weight) - Already computed
+    # Embeddings are normalized, so dot product = cosine similarity
+    if np is not None:
+        semantic_sim = float(np.dot(emb1, emb2))
+    else:
+        semantic_sim = 0.0
+
+    # Signal 3: Issue Type Match (15% weight)
+    type1 = str(row1.get("issue_type", "")).lower().strip()
+    type2 = str(row2.get("issue_type", "")).lower().strip()
+
+    if type1 and type2:
+        if type1 == type2:
+            type_match = 1.0  # Exact match
+        elif type1 in type2 or type2 in type1:
+            type_match = 0.7  # Partial match (e.g., "E501" in "E501 line-too-long")
+        else:
+            type_match = 0.0
+    else:
+        type_match = 0.0
+
+    # Signal 4: Validation Command Match (10% weight)
+    cmd1 = str(row1.get("validation_cmd", "")).lower().strip()
+    cmd2 = str(row2.get("validation_cmd", "")).lower().strip()
+
+    if cmd1 and cmd2:
+        if cmd1 == cmd2:
+            cmd_match = 1.0
+        # Same validator family (e.g., "ruff" vs "ruff check")
+        elif any(v in cmd1 and v in cmd2 for v in ['ruff', 'mypy', 'pylint', 'pytest', 'doctest']):
+            cmd_match = 0.5
+        else:
+            cmd_match = 0.0
+    else:
+        cmd_match = 0.0
+
+    # Signal 5: Failure Type Match (5% weight)
+    ftype1 = str(row1.get("failure_type", "")).lower().strip()
+    ftype2 = str(row2.get("failure_type", "")).lower().strip()
+
+    failure_match = 1.0 if (ftype1 and ftype2 and ftype1 == ftype2) else 0.0
+
+    # Combined weighted similarity
+    total_similarity = (
+        file_overlap * 0.40 +      # 40% - file overlap (most reliable)
+        semantic_sim * 0.30 +      # 30% - semantic similarity
+        type_match * 0.15 +        # 15% - issue type
+        cmd_match * 0.10 +         # 10% - validation command
+        failure_match * 0.05       # 5% - failure type
+    )
+
+    return total_similarity
+
+
 def _cluster_problems_by_embedding(
     rows: List[Dict[str, Any]],
     total_trajectories: int,
@@ -131,12 +226,13 @@ def _cluster_problems_by_embedding(
     frequency_threshold: float = 0.3,
 ) -> List[Dict[str, Any]]:
     """
-    Cluster problems using embeddings (problem_statement + root_cause).
+    Cluster problems using MULTI-SIGNAL similarity (not just semantic!).
 
     Steps:
     1. Extract all problems and create signatures (problem + root_cause)
     2. Embed each signature
-    3. Cluster by cosine similarity >= similarity_threshold
+    3. Cluster by MULTI-SIGNAL similarity >= threshold
+       - File overlap (40%), semantic (30%), issue_type (15%), validation_cmd (10%), failure_type (5%)
     4. Count frequency based on unique L2 records (not total problems)
     5. Filter by frequency_ratio >= frequency_threshold
     6. Merge problems in each cluster
@@ -144,7 +240,7 @@ def _cluster_problems_by_embedding(
     Args:
         rows: Flattened problem rows from L2 trajectories
         total_trajectories: Total number of L2 records fetched
-        similarity_threshold: Cosine similarity threshold (default: 0.5)
+        similarity_threshold: Multi-signal similarity threshold (default: 0.5)
         frequency_threshold: Frequency ratio based on L2 records (default: 0.3, i.e., 30%)
 
     Returns:
@@ -198,7 +294,9 @@ def _cluster_problems_by_embedding(
 
     logger.info(f"[L2 Clustering] Generated {len(embeddings)} embeddings")
 
-    # Step 3: Cluster by cosine similarity
+    # Step 3: Cluster by MULTI-SIGNAL similarity (not just semantic!)
+    # Combines: file overlap (40%), semantic (30%), issue type (15%),
+    # validation cmd (10%), failure type (5%)
     clusters = []
     assigned = [False] * len(embeddings)
 
@@ -210,13 +308,18 @@ def _cluster_problems_by_embedding(
         cluster = [valid_problems[i]]
         assigned[i] = True
 
-        # Find all similar problems
+        # Find all similar problems using comprehensive similarity
         for j in range(i + 1, len(embeddings)):
             if assigned[j]:
                 continue
 
-            # Compute cosine similarity (dot product since embeddings are normalized)
-            similarity = float(np.dot(embeddings[i], embeddings[j]))
+            # Calculate multi-signal similarity
+            similarity = _calculate_multi_signal_similarity(
+                valid_problems[i],
+                valid_problems[j],
+                embeddings[i],
+                embeddings[j]
+            )
 
             if similarity >= similarity_threshold:
                 cluster.append(valid_problems[j])
@@ -333,11 +436,70 @@ def _merge_cluster_problems(cluster: List[Dict[str, Any]]) -> Dict[str, Any]:
     return merged
 
 
+def _is_valid_validation_problem(problem: Dict[str, Any]) -> bool:
+    """
+    Check if a problem is a real validation issue (not git artifacts).
+
+    IMPORTANT: Merge conflicts are excluded UNLESS the file changes are related
+    to solving the validation failure. For example:
+    - ❌ Exclude: "merge conflict markers in file.py" (pure git artifact)
+    - ✓ Include: "type error in file.py" even if found during merge conflict resolution
+
+    The deep analysis and classify prompts are already instructed to focus on
+    validation-related changes, so this filter only removes PURE git workflow issues.
+
+    Filters out:
+    - Pure merge conflict markers (git workflow issues, not validation failures)
+    - Git conflict artifacts that don't involve validation logic
+
+    Args:
+        problem: Problem dictionary with issue_type, problem text, how_fixed, root_cause
+
+    Returns:
+        True if valid validation problem, False if should be excluded
+    """
+    issue_type = str(problem.get("issue_type", "")).lower()
+    problem_text = str(problem.get("problem", "")).lower()
+    how_fixed = str(problem.get("how_fixed", "")).lower()
+    root_cause = str(problem.get("root_cause", "")).lower()
+
+    # Check if this is a PURE merge conflict (no validation logic involved)
+    merge_conflict_keywords = ['merge conflict', 'conflict markers', 'git conflict']
+
+    is_merge_conflict = any(keyword in issue_type or keyword in problem_text
+                           for keyword in merge_conflict_keywords)
+
+    if not is_merge_conflict:
+        # Not a merge conflict at all - include
+        return True
+
+    # It's marked as merge conflict - check if it has validation-related changes
+    validation_keywords = [
+        'validation', 'test', 'lint', 'type', 'error', 'failure', 'check',
+        'syntax', 'import', 'undefined', 'missing', 'invalid', 'warning'
+    ]
+
+    has_validation_content = any(
+        keyword in how_fixed or keyword in root_cause or keyword in problem_text
+        for keyword in validation_keywords
+    )
+
+    if has_validation_content:
+        # Merge conflict but involves validation fixes - include
+        logger.debug(f"[L2 Filter] Including merge conflict with validation content: {issue_type}")
+        return True
+    else:
+        # Pure merge conflict with no validation logic - exclude
+        logger.debug(f"[L2 Filter] Excluding pure merge conflict: {issue_type}")
+        return False
+
+
 def _flatten_l2(l2_memories: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
-    """Flatten L2 repair trajectories into problem rows."""
+    """Flatten L2 repair trajectories into problem rows, filtering out non-validation issues."""
     rows: List[Dict[str, Any]] = []
     trajectory_ids = set()
     row_id = 1
+    excluded_count = 0
 
     for memory_index, memory in enumerate(l2_memories, 1):
         issue_id = str(memory.get("issue_id") or memory.get("id") or f"memory_{memory_index}")
@@ -362,6 +524,11 @@ def _flatten_l2(l2_memories: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]]
             failure_type = _clean_text(step.get("failure_type") or memory.get("failure_type"))
 
             for problem in _step_problems(step):
+                # Filter out non-validation problems (merge conflicts, etc.)
+                if not _is_valid_validation_problem(problem):
+                    excluded_count += 1
+                    continue
+
                 problem_text = _clean_text(problem.get("problem") or problem.get("description"), 700)
                 root_cause = _clean_text(problem.get("root_cause"), 700)
                 how_fixed = _clean_text(problem.get("how_fixed") or problem.get("fix"), 700)
@@ -390,6 +557,9 @@ def _flatten_l2(l2_memories: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]]
                     }
                 )
                 row_id += 1
+
+    if excluded_count > 0:
+        logger.info(f"[L2 Filter] Excluded {excluded_count} non-validation problems (merge conflicts, etc.)")
 
     return rows, max(len(trajectory_ids), len(l2_memories))
 
@@ -476,6 +646,204 @@ def _limit_candidates(candidates: List[Dict[str, Any]], limit: int) -> List[Dict
     return candidates[:limit]
 
 
+def _analyze_file_frequency(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Analyze which files appear in multiple problems to identify high-priority targets.
+
+    When a file appears in multiple distinct problems, it suggests:
+    1. A root cause affecting multiple validations
+    2. High ROI - fixing one file resolves multiple problems
+    3. Should be prioritized in selection
+
+    Args:
+        candidates: List of problem candidates from clustering
+
+    Returns:
+        Dictionary containing:
+        - high_frequency_files: Files appearing in 2+ problems with details
+        - consolidation_suggestions: Recommendations for high-priority fixes
+    """
+    file_to_problems = defaultdict(list)
+
+    # Map each file to all problems it appears in
+    for candidate in candidates:
+        candidate_id = candidate.get("candidate_id", candidate.get("id", "unknown"))
+        files = candidate.get("files", [])
+
+        if not isinstance(files, list):
+            files = [files] if files else []
+
+        for file_path in files:
+            if file_path and isinstance(file_path, str):
+                file_to_problems[file_path].append({
+                    "candidate_id": candidate_id,
+                    "issue_type": candidate.get("issue_type", ""),
+                    "failure_type": candidate.get("failure_type", ""),
+                    "problem_summary": candidate.get("problem", "")[:150],
+                    "frequency": candidate.get("frequency", 0),
+                })
+
+    # Identify high-frequency files (2+ occurrences)
+    high_frequency_files = {}
+    consolidation_suggestions = []
+
+    for file_path, problems in file_to_problems.items():
+        if len(problems) >= 2:
+            # Collect unique issue types and failure types
+            issue_types = list(set(p["issue_type"] for p in problems if p.get("issue_type")))
+            failure_types = list(set(p["failure_type"] for p in problems if p.get("failure_type")))
+
+            high_frequency_files[file_path] = {
+                "frequency": len(problems),
+                "problem_ids": [p["candidate_id"] for p in problems],
+                "issue_types": issue_types,
+                "failure_types": failure_types,
+            }
+
+            # Create consolidation suggestion
+            consolidation_suggestions.append({
+                "file": file_path,
+                "frequency": len(problems),
+                "issue_types": issue_types[:3],
+                "priority": "HIGH" if len(problems) >= 3 else "MEDIUM",
+                "recommendation": (
+                    f"File '{file_path}' appears in {len(problems)} distinct problems. "
+                    f"Likely cascading failure - fix this file to resolve multiple issues."
+                ),
+                "candidate_ids": [p["candidate_id"] for p in problems]
+            })
+
+    # Sort by frequency (most frequent first)
+    consolidation_suggestions.sort(key=lambda x: (-x["frequency"], x["file"]))
+
+    if high_frequency_files:
+        logger.info(
+            f"[L2 File Frequency] Found {len(high_frequency_files)} high-frequency files "
+            f"(appearing in 2+ problems)"
+        )
+        for suggestion in consolidation_suggestions[:5]:
+            logger.info(
+                f"  - {suggestion['file']}: {suggestion['frequency']} problems ({suggestion['priority']})"
+            )
+
+    return {
+        "high_frequency_files": high_frequency_files,
+        "consolidation_suggestions": consolidation_suggestions,
+        "high_frequency_count": len(high_frequency_files)
+    }
+
+
+def _format_file_frequency_for_prompt(file_analysis: Dict[str, Any], max_files: int = 10) -> str:
+    """
+    Format file frequency analysis as markdown for LLM prompt.
+
+    Args:
+        file_analysis: Output from _analyze_file_frequency()
+        max_files: Maximum files to include (default: 10)
+
+    Returns:
+        Formatted markdown string
+    """
+    suggestions = file_analysis.get("consolidation_suggestions", [])
+
+    if not suggestions:
+        return ""
+
+    lines = [
+        "FILE FREQUENCY ANALYSIS - HIGH PRIORITY TARGETS:",
+        f"The following {len(suggestions)} file(s) appear in MULTIPLE distinct problems.",
+        "These are HIGH PRIORITY because fixing ONE file resolves MULTIPLE problems:",
+        ""
+    ]
+
+    for i, suggestion in enumerate(suggestions[:max_files], 1):
+        lines.append(
+            f"{i}. {suggestion['file']} ({suggestion['priority']} PRIORITY): "
+            f"{suggestion['frequency']} problems ({', '.join(suggestion['issue_types'])})"
+        )
+
+    if len(suggestions) > max_files:
+        lines.append(f"... and {len(suggestions) - max_files} more files")
+
+    lines.append("")
+    lines.append(
+        "IMPORTANT: When selecting problems, PRIORITIZE files with frequency >= 2 "
+        "as they likely represent root causes affecting multiple validations."
+    )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def _validate_file_frequency_coverage(
+    selected: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
+    min_frequency_threshold: int = 3
+) -> List[Dict[str, Any]]:
+    """
+    Validate that high-frequency files are represented in selection.
+
+    If a file appears in >= min_frequency_threshold problems but is NOT
+    in any selected problem, force-add the best candidate for that file.
+
+    Args:
+        selected: Problems selected by LLM
+        candidates: All candidate problems
+        min_frequency_threshold: Minimum frequency to trigger force-add (default: 3)
+
+    Returns:
+        Updated selection with high-frequency files added if missing
+    """
+    file_analysis = _analyze_file_frequency(candidates)
+
+    # Collect all files in selected problems
+    selected_files = set()
+    for problem in selected:
+        files = problem.get("files", [])
+        if not isinstance(files, list):
+            files = [files] if files else []
+        selected_files.update(files)
+
+    # Check for high-frequency files missing from selection
+    additions = []
+    missed_files = []
+
+    for file_path, info in file_analysis["high_frequency_files"].items():
+        if info["frequency"] >= min_frequency_threshold and file_path not in selected_files:
+            missed_files.append((file_path, info["frequency"]))
+
+            # Find the best candidate for this file (highest frequency)
+            best_candidate = None
+            best_freq = 0
+
+            for candidate in candidates:
+                if file_path in candidate.get("files", []):
+                    freq = candidate.get("frequency", 0)
+                    if freq > best_freq:
+                        best_freq = freq
+                        best_candidate = candidate
+
+            if best_candidate:
+                logger.warning(
+                    f"[L2 File Frequency Safeguard] Adding high-frequency file: "
+                    f"'{file_path}' (appeared in {info['frequency']} problems but not selected by LLM)"
+                )
+                additions.append(best_candidate)
+
+    if missed_files:
+        logger.warning(
+            f"[L2 File Frequency Safeguard] {len(missed_files)} high-frequency files "
+            f"(>={min_frequency_threshold} occurrences) were missed by LLM selection"
+        )
+    else:
+        logger.info(
+            f"[L2 File Frequency Safeguard] All high-frequency files "
+            f"(>={min_frequency_threshold} occurrences) are covered ✓"
+        )
+
+    return selected + additions
+
+
 def _llm_select_common_problems(
     common_candidates: List[Dict[str, Any]],
     llm: Any,
@@ -488,19 +856,28 @@ def _llm_select_common_problems(
     if not common_candidates:
         return []
 
+    # Analyze file frequency to identify high-priority targets
+    file_analysis = _analyze_file_frequency(common_candidates)
+    file_freq_section = _format_file_frequency_for_prompt(file_analysis)
+
     prompt = f"""Select COMMON problems from L2 trajectories.
 
+{file_freq_section}
 COMMON CANDIDATES (grouped by similarity):
 {json.dumps(_limit_candidates(common_candidates, 30), indent=2)}
 
 TASK:
 Select problems that appear REPEATEDLY across multiple trajectories (at least 2+ issues).
 
-SELECTION CRITERIA:
-1. Problem appears in multiple trajectories (check "frequency", "frequency_ratio", "appears_in_issues")
-2. Same validation/failure family
-3. Same or similar fix strategy
-4. If duplicate problems (same root cause + fix), select ONE
+SELECTION CRITERIA (IN PRIORITY ORDER):
+1. **HIGH PRIORITY**: Files appearing in MULTIPLE problems (frequency >= 2)
+   - These likely represent root causes with cascading failures
+   - Check the FILE FREQUENCY ANALYSIS section above
+   - Prioritize selecting problems for these high-frequency files
+2. Problem appears in multiple trajectories (check "frequency", "frequency_ratio", "appears_in_issues")
+3. Same validation/failure family
+4. Same or similar fix strategy
+5. If duplicate problems (same root cause + fix), select ONE
 
 IGNORE:
 - Problems that appear in only 1 trajectory (not common)
@@ -620,6 +997,21 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
         logger.warning("[L2 Common] No common problems selected")
     else:
         logger.info(f"[L2 Common] Selected {len(selected)} common problems")
+
+        # Log file frequency coverage
+        if file_analysis["high_frequency_count"] > 0:
+            selected_files = set()
+            for p in selected:
+                selected_files.update(p.get("files", []))
+
+            covered_count = sum(
+                1 for f in file_analysis["high_frequency_files"].keys()
+                if f in selected_files
+            )
+            logger.info(
+                f"[L2 Common] High-frequency file coverage: "
+                f"{covered_count}/{file_analysis['high_frequency_count']}"
+            )
     return selected
 
 
@@ -636,23 +1028,31 @@ def _llm_select_consecutive_problems(
     if not consecutive_candidates:
         return []
 
+    # Analyze file frequency to identify high-priority targets
+    file_analysis = _analyze_file_frequency(consecutive_candidates)
+    file_freq_section = _format_file_frequency_for_prompt(file_analysis)
+
     current_problem = _compact_problem(problem_1)
     prompt = f"""Select CONSECUTIVE problems that may appear after fixing the primary CI failure.
 
 CURRENT CI FAILURE (PRIMARY):
 {json.dumps(current_problem, indent=2)}
 
+{file_freq_section}
 CONSECUTIVE CANDIDATES (non-primary problems from trajectories):
 {json.dumps(_limit_candidates(consecutive_candidates, 40), indent=2)}
 
 TASK:
 Select problems that can REASONABLY appear AFTER fixing the current CI failure.
 
-SELECTION CRITERIA:
-1. Technically connected to the current failure (same system/component/validation)
-2. Revealed by the same validation sequence
-3. Dependent on the current failure being fixed first
-4. Config/dependency/plugin changes connected to the same failure family
+SELECTION CRITERIA (IN PRIORITY ORDER):
+1. **HIGH PRIORITY**: Files appearing in MULTIPLE problems (frequency >= 2)
+   - Check the FILE FREQUENCY ANALYSIS section above
+   - Prioritize selecting problems for these high-frequency files
+2. Technically connected to the current failure (same system/component/validation)
+3. Revealed by the same validation sequence
+4. Dependent on the current failure being fixed first
+5. Config/dependency/plugin changes connected to the same failure family
 
 IGNORE:
 - Unrelated problems
@@ -772,6 +1172,21 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
         logger.warning("[L2 Consecutive] No consecutive problems selected")
     else:
         logger.info(f"[L2 Consecutive] Selected {len(selected)} consecutive problems")
+
+        # Log file frequency coverage
+        if file_analysis["high_frequency_count"] > 0:
+            selected_files = set()
+            for p in selected:
+                selected_files.update(p.get("files", []))
+
+            covered_count = sum(
+                1 for f in file_analysis["high_frequency_files"].keys()
+                if f in selected_files
+            )
+            logger.info(
+                f"[L2 Consecutive] High-frequency file coverage: "
+                f"{covered_count}/{file_analysis['high_frequency_count']}"
+            )
     return selected
 
 
@@ -836,6 +1251,165 @@ def _normalize_selected_problem(problem: Dict[str, Any], index: int) -> Dict[str
     }
 
 
+def _extract_consecutive_from_l2_after_match(
+    problem_1: Dict[str, Any],
+    l2_memories: List[Dict[str, Any]],
+    similarity_threshold: float = 0.6
+) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    Extract consecutive problems from L2 records by finding where they match
+    the current CI failure, then extracting everything AFTER that match.
+
+    The matching problem can be at ANY step in the L2 trajectory (not just primary).
+    Once a match is found, all subsequent steps are extracted as consecutive problems.
+
+    Args:
+        problem_1: Current CI failure (may contain multiple sub-problems)
+        l2_memories: All L2 repair trajectories
+        similarity_threshold: Cosine similarity threshold (0.6 = moderate)
+
+    Returns:
+        Tuple of (consecutive_problem_rows, number_of_matched_l2_records)
+    """
+    if not _EMBEDDING_AVAILABLE or not _NUMPY_AVAILABLE or not l2_memories:
+        logger.warning("[L2 Consecutive Extract] Embeddings not available, returning empty")
+        return [], 0
+
+    # Type guards
+    assert np is not None
+    assert _EmbeddingProvider is not None
+
+    embedder = _EmbeddingProvider.get()
+
+    # Embed current CI failure (may have multiple aspects)
+    ci_signatures = []
+
+    # Overall description and root cause
+    ci_desc = problem_1.get("description") or problem_1.get("problem", "")
+    ci_root = problem_1.get("root_cause", "")
+    if ci_desc or ci_root:
+        ci_signatures.append(f"{ci_desc} | {ci_root}".strip())
+
+    # Individual error details (sub-problems)
+    ci_errors = problem_1.get("error_details", [])
+    for error in ci_errors if isinstance(ci_errors, list) else []:
+        if isinstance(error, dict):
+            err_msg = error.get("message", "")
+            err_file = error.get("file", "")
+            if err_msg:
+                ci_signatures.append(f"{err_file} {err_msg}".strip())
+        elif isinstance(error, str):
+            ci_signatures.append(error.strip())
+
+    # Embed all CI signatures
+    ci_embeddings = []
+    for sig in ci_signatures:
+        if sig and sig != "|":
+            emb = embedder.embed(sig)
+            if emb is not None:
+                ci_embeddings.append(emb)
+
+    if not ci_embeddings:
+        logger.warning("[L2 Consecutive Extract] Failed to embed current problem")
+        return [], 0
+
+    all_consecutive_rows = []
+    matched_l2_count = 0
+
+    # For each L2 record, find where it matches current CI
+    for l2_memory in l2_memories:
+        trajectory = (l2_memory.get("repair_trajectory") or
+                     l2_memory.get("trajectory") or
+                     l2_memory.get("problems") or [])
+
+        if not isinstance(trajectory, list) or not trajectory:
+            continue
+
+        issue_id = l2_memory.get("issue_id", "unknown")
+        matching_step_index = None
+        best_similarity = 0.0
+
+        # Search through ALL steps to find a match
+        for step_index, step in enumerate(trajectory):
+            if not isinstance(step, dict):
+                continue
+
+            step_problems = _step_problems(step)
+            if not step_problems:
+                continue
+
+            # Check each problem in this step
+            for problem in step_problems:
+                l2_desc = problem.get("problem") or problem.get("description", "")
+                l2_root = problem.get("root_cause", "")
+                l2_signature = f"{l2_desc} | {l2_root}".strip()
+
+                if not l2_signature or l2_signature == "|":
+                    continue
+
+                l2_embedding = embedder.embed(l2_signature)
+                if l2_embedding is None:
+                    continue
+
+                # Check similarity with ANY CI sub-problem
+                for ci_embedding in ci_embeddings:
+                    similarity = float(np.dot(ci_embedding, l2_embedding))
+
+                    if similarity >= similarity_threshold and similarity > best_similarity:
+                        best_similarity = similarity
+                        matching_step_index = step_index
+
+        # If match found, extract all subsequent steps
+        if matching_step_index is not None:
+            matched_l2_count += 1
+            logger.debug(
+                f"[L2 Consecutive Extract] Matched L2 {issue_id} at step {matching_step_index + 1} "
+                f"(similarity: {best_similarity:.3f})"
+            )
+
+            # Extract consecutive problems (everything AFTER the match)
+            for step_index in range(matching_step_index + 1, len(trajectory)):
+                step = trajectory[step_index]
+                if not isinstance(step, dict):
+                    continue
+
+                for problem in _step_problems(step):
+                    problem_text = _clean_text(problem.get("problem") or problem.get("description"), 700)
+                    root_cause = _clean_text(problem.get("root_cause"), 700)
+                    how_fixed = _clean_text(problem.get("how_fixed") or problem.get("fix"), 700)
+                    why_fix_works = _clean_text(problem.get("why_fix_works"), 500)
+
+                    if not any((problem_text, root_cause, how_fixed, why_fix_works)):
+                        continue
+
+                    all_consecutive_rows.append({
+                        "row_id": len(all_consecutive_rows) + 1,
+                        "issue_id": issue_id,
+                        "repo": l2_memory.get("repo", ""),
+                        "step": step_index + 1,
+                        "step_index": step_index + 1,
+                        "is_primary_step": False,  # All consecutive
+                        "matched_at_step": matching_step_index + 1,
+                        "match_similarity": best_similarity,
+                        "validation_cmd": _clean_text(step.get("validation_cmd") or l2_memory.get("validation_cmd")),
+                        "failure_type": _clean_text(step.get("failure_type") or l2_memory.get("failure_type")),
+                        "issue_type": _clean_text(problem.get("issue_type") or step.get("issue_type"), 160),
+                        "problem": problem_text,
+                        "root_cause": root_cause,
+                        "how_fixed": how_fixed,
+                        "why_fix_works": why_fix_works,
+                        "files": _dedupe_keep_order(_as_list(problem.get("files") or problem.get("affected_files")), 20),
+                    })
+
+    logger.info(
+        f"[L2 Consecutive Extract] Found {len(all_consecutive_rows)} consecutive problems "
+        f"from {matched_l2_count}/{len(l2_memories)} matched L2 records "
+        f"(similarity >= {similarity_threshold})"
+    )
+
+    return all_consecutive_rows, matched_l2_count
+
+
 def staged_l2_analysis(
     problem_1: Dict[str, Any],
     l2_memories: List[Dict[str, Any]],
@@ -845,10 +1419,11 @@ def staged_l2_analysis(
     Analyze fetched L2 trajectories using embedding-based clustering.
 
     Steps:
-    1. Flatten all L2 trajectories into problem rows
-    2. Cluster problems by embedding similarity (problem + root_cause)
-    3. Filter by frequency (>= threshold % of L2 records, not total problems)
-    4. Pass high-frequency problems to LLM for final selection
+    1. Filter L2 by similarity to current CI failure (for consecutive problems)
+    2. Flatten all L2 trajectories into problem rows
+    3. Cluster problems by embedding similarity (problem + root_cause)
+    4. Filter by frequency (>= threshold % of L2 records, not total problems)
+    5. Pass high-frequency problems to LLM for final selection
 
     Frequency is L2-based: counts how many unique L2 records contain the problem,
     not total problem instances. This identifies problems that appear across
@@ -858,16 +1433,17 @@ def staged_l2_analysis(
         logger.info("[L2] No L2 memories provided")
         return []
 
-    rows, total_trajectories = _flatten_l2(l2_memories)
-    if not rows:
+    # Extract ALL problems for common selection (from ALL L2 records)
+    all_rows, total_trajectories = _flatten_l2(l2_memories)
+    if not all_rows:
         logger.info("[L2] No trajectory problems found")
         return []
 
-    logger.info(f"[L2] Extracted {len(rows)} problems from {total_trajectories} trajectories")
+    logger.info(f"[L2] Extracted {len(all_rows)} problems from {total_trajectories} trajectories")
 
-    # Use embedding-based clustering to find common problems
+    # Use embedding-based clustering to find common problems (from ALL L2)
     common_candidates = _cluster_problems_by_embedding(
-        rows,
+        all_rows,
         total_trajectories=total_trajectories,
         similarity_threshold=0.6,
         frequency_threshold=0.3,
@@ -877,24 +1453,37 @@ def staged_l2_analysis(
         logger.warning("[L2] No common problems found with embedding clustering, falling back to old method")
         # Fallback to old grouping method if clustering fails
         common_candidates = _group_candidate_rows(
-            rows,
+            all_rows,
             total_trajectories=total_trajectories,
             prefix="C",
             include_primary=True,
         )
 
-    # Also get consecutive candidates (non-primary problems)
-    consecutive_candidates = _group_candidate_rows(
-        rows,
-        total_trajectories=total_trajectories,
-        prefix="N",
-        include_primary=False,
+    # Extract consecutive problems by finding matches in L2 and taking what comes after
+    # The match can be at ANY step in the L2 trajectory (not just primary)
+    consecutive_rows, matched_l2_count = _extract_consecutive_from_l2_after_match(
+        problem_1,
+        l2_memories,
+        similarity_threshold=0.6
     )
 
+    if consecutive_rows:
+        consecutive_candidates = _group_candidate_rows(
+            consecutive_rows,
+            total_trajectories=matched_l2_count,
+            prefix="N",
+            include_primary=False,
+        )
+    else:
+        logger.warning("[L2] No matching L2 records found for consecutive problems")
+        consecutive_candidates = []
+
     logger.info(
-        "[L2] Prepared candidates: common=%d consecutive=%d",
+        "[L2] Prepared candidates: common=%d (from %d L2), consecutive=%d (from %d matched L2)",
         len(common_candidates),
+        total_trajectories,
         len(consecutive_candidates),
+        matched_l2_count,
     )
 
     # Select common and consecutive problems SEPARATELY
@@ -903,6 +1492,15 @@ def staged_l2_analysis(
 
     # Merge and deduplicate
     merged = _merge_and_deduplicate(common_problems, consecutive_problems)
+
+    # Validate file frequency coverage (safeguard)
+    # This ensures high-frequency files (2+ occurrences) are not missed
+    all_candidates = common_candidates + consecutive_candidates
+    merged = _validate_file_frequency_coverage(
+        merged,
+        all_candidates,
+        min_frequency_threshold=2  # Force-add files appearing 2+ times (lowered from 3)
+    )
 
     # Normalize to final format
     normalized = [_normalize_selected_problem(problem, index) for index, problem in enumerate(merged, 1)]

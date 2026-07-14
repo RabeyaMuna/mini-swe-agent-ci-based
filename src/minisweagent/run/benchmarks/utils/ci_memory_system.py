@@ -1572,8 +1572,71 @@ def _with_source(memory: Dict[str, Any], source: str) -> Dict[str, Any]:
   return row
 
 
+def _calculate_coverage_score(l2_record: Dict[str, Any]) -> float:
+  """
+  Calculate coverage score for L2 record based on problems and files.
+
+  Args:
+      l2_record: L2 memory record
+
+  Returns:
+      Coverage score (0.0 to 1.0)
+  """
+  # Count problems from multiple possible keys
+  problems = l2_record.get('problems', [])
+  atomic_problems = l2_record.get('atomic_problems', [])
+  repair_trajectory = l2_record.get('repair_trajectory', [])
+
+  num_problems = 0
+  if problems:
+    num_problems = len(problems)
+  elif atomic_problems:
+    num_problems = len(atomic_problems)
+  elif repair_trajectory:
+    # Count problems across all steps
+    for step in repair_trajectory:
+      if isinstance(step, list):
+        num_problems += len(step)
+
+  # Count files
+  num_files = l2_record.get('total_changed_files', 0)
+  if not num_files:
+    # Try to extract from changed_files
+    changed_files = l2_record.get('changed_files', [])
+    num_files = len(changed_files) if changed_files else 0
+
+  # Normalize (assume max 30 problems, 150 files for typical L2)
+  problem_normalized = min(num_problems / 30.0, 1.0)
+  file_normalized = min(num_files / 150.0, 1.0)
+
+  # Weighted: 60% problems, 40% files
+  coverage = (problem_normalized * 0.6) + (file_normalized * 0.4)
+
+  return coverage
+
+
 def _sort_by_similarity(memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
   return sorted(memories, key=lambda row: float(row.get("similarity_score", 0.0) or 0.0), reverse=True)
+
+
+def _sort_l2_by_similarity_and_coverage(l2_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+  """
+  Sort L2 records by combined score: similarity × 0.7 + coverage × 0.3
+
+  Args:
+      l2_records: List of L2 memory records
+
+  Returns:
+      Sorted list (highest score first)
+  """
+  for record in l2_records:
+    similarity = float(record.get("similarity_score", 0.0) or 0.0)
+    coverage = _calculate_coverage_score(record)
+
+    # Combined score: 70% similarity, 30% coverage
+    record['_selection_score'] = (similarity * 0.7) + (coverage * 0.3)
+
+  return sorted(l2_records, key=lambda x: x.get('_selection_score', 0.0), reverse=True)
 
 
 def _balanced_memories_by_source(
@@ -1594,10 +1657,16 @@ def _balanced_memories_by_source(
       if source in by_source:
         by_source[source].append(_with_source(row, source))
 
-  return {
-    source: _sort_by_similarity(rows)[:per_level]
-    for source, rows in by_source.items()
-  }
+  # For L2: rank by similarity × coverage (not just similarity)
+  # For L1 & L3: keep similarity-only sorting
+  result = {}
+  for source, rows in by_source.items():
+    if source == "L2" and rows:
+      result[source] = _sort_l2_by_similarity_and_coverage(rows)[:per_level]
+    else:
+      result[source] = _sort_by_similarity(rows)[:per_level]
+
+  return result
 
 
 def _normalize_separate_problem(problem: Dict[str, Any], validation_sequence: List[Dict[str, Any]]) -> Dict[str, Any]:
