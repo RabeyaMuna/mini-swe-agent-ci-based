@@ -191,6 +191,10 @@ pyrightconfig.json
 repo/
 results/
 
+# Agent-specific virtual environments
+miniswe-agent/.venv/
+openhands/.venv/
+
 # Test memory directories
 test_memory/
 *_rebuilt/

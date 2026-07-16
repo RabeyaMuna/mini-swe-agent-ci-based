@@ -1,19 +1,73 @@
-# mini-swe-agent CI Benchmark Workspace
+# CI-Repair-Bench: Multi-Agent Evaluation Framework
 
-This workspace is a trimmed CI-repair benchmark setup built around `mini-swe-agent`.
-It is intended to run CI-failure repair experiments on the prepared eval split in:
+Benchmark for evaluating agent scaffolds on CI failure repair with memory-guided repair at the pull-request level.
 
-- `data/trs/eval_issues.json` — evaluation issues
-- `data/trs/failure_memory.json` — L1 seeded memories (per-file)
-- `data/trs/repo_memory.json` — L2 seeded memories (repo-level patterns)
-- `data/trs/cross_memory.json` — L3 seeded memories (universal principles)
+## 🎯 Problem Statement
 
-It supports four ablations:
+Unlike existing benchmarks (SWE-bench, SWE-bench Verified, SWE-bench Pro) that focus on resolving single, atomic issues, **CI-Repair-Bench targets CI failure repair at the pull-request level**, where:
 
-- `baseline`
-- `L1`
-- `L1+L2`
-- `L1+L2+L3`
+- One PR may contain **multiple commits**
+- Multiple **types of CI failures** (style checks, dependency issues, test failures, configuration errors)
+- Multiple **verification stages** (linting, tests, builds, deployment checks)
+- **Merge-related problems** (conflicts, integration issues)
+
+This is closer to real-world software development workflows.
+
+## 🏗️ Project Structure
+
+```
+.
+├── data/              # Shared datasets and memory
+│   └── trs/          # Three-layer memory system
+│       ├── failure_memory.json      # L1: Similar CI failures
+│       ├── repo_memory.json         # L2: Repository-specific patterns
+│       ├── cross_memory.json        # L3: Cross-repository failures
+│       ├── eval_set.jsonl           # Evaluation dataset
+│       └── memory_set.jsonl         # Memory building dataset
+│
+├── results/          # All experiment results
+│   ├── miniswe-agent/
+│   │   ├── minimax/{baseline,L1,L1_L2,L1_L2_L3}/
+│   │   ├── glm/{baseline,L1_L2_L3}/
+│   │   └── kimi/{baseline,L1_L2_L3}/
+│   └── openhands/
+│       ├── glm/{baseline,L1_L2_L3}/
+│       └── minimax/{baseline,L1_L2_L3}/
+│
+├── repo/             # Testbed repository clones
+│   └── {owner}__{repo}/
+│
+├── scripts/          # Evaluation and memory tools
+│   ├── decompose_ci_failure.py       # Build memory
+│   ├── evaluate_ablation_preds.py    # Calculate metrics
+│   ├── compare_runs.py               # Compare experiments
+│   └── run_eval.py                   # Run evaluations
+│
+├── miniswe-agent/    # Mini-SWE-Agent implementation
+│   ├── src/minisweagent/
+│   ├── tests/
+│   └── README.md
+│
+└── openhands/        # OpenHands integration (TODO)
+    └── README.md
+```
+
+## 📊 Three-Layer Memory System
+
+| Layer | Name | Description |
+|-------|------|-------------|
+| **L1** | Failure Memory | Similar CI failures from the same repository |
+| **L2** | Repository Memory | Repository-specific patterns and conventions |
+| **L3** | Cross-Repository Memory | Common failures across different projects |
+
+Memory is retrieved **one problem at a time** to reduce hallucination.
+
+## Supported Ablations
+
+- `baseline` — No memory
+- `L1` — Failure memory only
+- `L1_L2` (or `L1+L2`) — Failure + Repository memory
+- `L1_L2_L3` (or `L1+L2+L3`) — All three layers
 
 ## What This Workspace Contains
 
