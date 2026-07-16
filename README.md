@@ -69,6 +69,73 @@ Memory is retrieved **one problem at a time** to reduce hallucination.
 - `L1_L2` (or `L1+L2`) — Failure + Repository memory
 - `L1_L2_L3` (or `L1+L2+L3`) — All three layers
 
+## 🚀 Quick Setup
+
+### Automated Setup (Recommended)
+
+```bash
+# Run automated setup script
+bash setup_environments.sh
+```
+
+This creates 3 virtual environments:
+- `.venv/` - Shared tools (memory, evaluation)
+- `miniswe-agent/.venv/` - Mini-SWE-Agent
+- `openhands/.venv/` - OpenHands
+
+### Manual Setup
+
+#### 1. ROOT Environment (Shared Tools)
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-shared.txt
+deactivate
+```
+
+#### 2. Mini-SWE-Agent
+```bash
+cd miniswe-agent
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+pip install sentence-transformers
+deactivate
+```
+
+#### 3. OpenHands (Optional)
+```bash
+cd openhands
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install poetry
+poetry install
+deactivate
+```
+
+### First Experiment
+
+```bash
+# Activate mini-swe-agent environment
+cd miniswe-agent
+source .venv/bin/activate
+
+# Run on first 5 issues
+python -m minisweagent cibench \
+    --dataset ../data/trs/eval_set.jsonl \
+    --model minimax \
+    --slice 0:5 \
+    --output ../results/miniswe-agent/minimax/test
+
+# Evaluate
+cd ..
+source .venv/bin/activate
+python scripts/evaluate_ablation_preds.py \
+    results/miniswe-agent/minimax/test/preds.json
+```
+
+See [FINAL_SETUP_SUMMARY.md](FINAL_SETUP_SUMMARY.md) for complete guide.
+
 ## What This Workspace Contains
 
 - `scripts/run_cibench_minimax_openrouter.sh`
