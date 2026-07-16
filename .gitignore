@@ -191,9 +191,10 @@ pyrightconfig.json
 repo/
 results/
 
-# Agent-specific virtual environments
-miniswe-agent/.venv/
-openhands/.venv/
+# Virtual environments
+/.venv/                  # Root shared tools venv
+miniswe-agent/.venv/     # Mini-SWE-Agent venv
+openhands/.venv/         # OpenHands venv
 
 # Test memory directories
 test_memory/
