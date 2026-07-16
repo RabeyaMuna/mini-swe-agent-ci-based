@@ -2,6 +2,8 @@
 
 Benchmark for evaluating agent scaffolds on CI failure repair with memory-guided repair at the pull-request level.
 
+---
+
 ## 🎯 Problem Statement
 
 Unlike existing benchmarks (SWE-bench, SWE-bench Verified, SWE-bench Pro) that focus on resolving single, atomic issues, **CI-Repair-Bench targets CI failure repair at the pull-request level**, where:
@@ -13,44 +15,7 @@ Unlike existing benchmarks (SWE-bench, SWE-bench Verified, SWE-bench Pro) that f
 
 This is closer to real-world software development workflows.
 
-## 🏗️ Project Structure
-
-```
-.
-├── data/              # Shared datasets and memory
-│   └── trs/          # Three-layer memory system
-│       ├── failure_memory.json      # L1: Similar CI failures
-│       ├── repo_memory.json         # L2: Repository-specific patterns
-│       ├── cross_memory.json        # L3: Cross-repository failures
-│       ├── eval_set.jsonl           # Evaluation dataset
-│       └── memory_set.jsonl         # Memory building dataset
-│
-├── results/          # All experiment results
-│   ├── miniswe-agent/
-│   │   ├── minimax/{baseline,L1,L1_L2,L1_L2_L3}/
-│   │   ├── glm/{baseline,L1_L2_L3}/
-│   │   └── kimi/{baseline,L1_L2_L3}/
-│   └── openhands/
-│       ├── glm/{baseline,L1_L2_L3}/
-│       └── minimax/{baseline,L1_L2_L3}/
-│
-├── repo/             # Testbed repository clones
-│   └── {owner}__{repo}/
-│
-├── scripts/          # Evaluation and memory tools
-│   ├── decompose_ci_failure.py       # Build memory
-│   ├── evaluate_ablation_preds.py    # Calculate metrics
-│   ├── compare_runs.py               # Compare experiments
-│   └── run_eval.py                   # Run evaluations
-│
-├── miniswe-agent/    # Mini-SWE-Agent implementation
-│   ├── src/minisweagent/
-│   ├── tests/
-│   └── README.md
-│
-└── openhands/        # OpenHands integration (TODO)
-    └── README.md
-```
+---
 
 ## 📊 Three-Layer Memory System
 
@@ -62,492 +27,524 @@ This is closer to real-world software development workflows.
 
 Memory is retrieved **one problem at a time** to reduce hallucination.
 
-## Supported Ablations
-
+**Ablation Levels**:
 - `baseline` — No memory
 - `L1` — Failure memory only
-- `L1_L2` (or `L1+L2`) — Failure + Repository memory
-- `L1_L2_L3` (or `L1+L2+L3`) — All three layers
+- `L1_L2` — Failure + Repository memory
+- `L1_L2_L3` — All three layers
 
-## 🚀 Quick Setup
+---
 
-### Automated Setup (Recommended)
+## 🏗️ Project Structure
+
+```
+mini-swe-agent-ci-based/
+├── .venv/                    # ROOT - Shared tools (memory, evaluation)
+├── miniswe-agent/            # Agent 1 - Mini-SWE-Agent
+│   ├── .venv/                # Isolated environment
+│   ├── src/minisweagent/     # Source code
+│   └── tests/                # Tests
+├── openhands/                # Agent 2 - OpenHands (optional)
+│   └── .venv/                # Isolated environment
+├── data/trs/                 # SHARED - Three-layer memory
+│   ├── failure_memory.json   # L1
+│   ├── repo_memory.json      # L2
+│   ├── cross_memory.json     # L3
+│   └── eval_set.jsonl        # Evaluation dataset
+├── results/                  # SHARED - Organized results
+│   ├── miniswe-agent/
+│   │   └── {model}/{ablation}/
+│   └── openhands/
+│       └── {model}/{ablation}/
+├── repo/                     # SHARED - Testbed repositories
+└── scripts/                  # SHARED - Evaluation tools
+```
+
+**Key Concept**: 3 isolated virtual environments allow multi-agent, multi-model experiments with shared resources but no dependency conflicts.
+
+---
+
+## 🚀 Complete Setup Guide
+
+### Prerequisites
+
+- **Python**: 3.10+ (3.12 recommended)
+- **Git**: For repository management
+- **API Keys**: OpenRouter (for MiniMax), GLM, or other model providers
+
+### Step 1: Clone Repository
 
 ```bash
-# Run automated setup script
+git clone https://github.com/RabeyaMuna/mini-swe-agent-ci-based.git
+cd mini-swe-agent-ci-based
+```
+
+### Step 2: Automated Setup (Recommended)
+
+```bash
 bash setup_environments.sh
 ```
 
-This creates 3 virtual environments:
-- `.venv/` - Shared tools (memory, evaluation)
-- `miniswe-agent/.venv/` - Mini-SWE-Agent
-- `openhands/.venv/` - OpenHands
+This creates all 3 virtual environments and installs dependencies.
 
-### Manual Setup
+**What it does**:
+1. Creates ROOT `.venv/` with shared tools
+2. Creates `miniswe-agent/.venv/` with Mini-SWE-Agent
+3. Creates `openhands/.venv/` with OpenHands (optional)
 
-#### 1. ROOT Environment (Shared Tools)
+### Step 3: Manual Setup (If Automated Fails)
+
+#### 3.1 ROOT Environment (Shared Tools)
+
 ```bash
+# Create virtual environment
 python3 -m venv .venv
+
+# Activate
 source .venv/bin/activate
+
+# Upgrade pip (with SSL workaround if needed)
+python -m pip install --upgrade pip --trusted-host pypi.org --trusted-host files.pythonhosted.org
+
+# Install shared tools
 pip install -r requirements-shared.txt
+
+# Deactivate
 deactivate
 ```
 
-#### 2. Mini-SWE-Agent
+**Installed tools**:
+- `sentence-transformers` - Memory retrieval
+- `numpy`, `pandas` - Data processing
+- `matplotlib`, `seaborn` - Visualization
+- `jupyter` - Analysis notebooks
+
+#### 3.2 Mini-SWE-Agent Environment
+
+```bash
+# Navigate to agent directory
+cd miniswe-agent
+
+# Create virtual environment
+python3 -m venv .venv
+
+# Activate
+source .venv/bin/activate
+
+# Install mini-swe-agent
+pip install -e .
+
+# Install memory retrieval backend
+pip install sentence-transformers
+
+# Deactivate
+deactivate
+
+# Return to root
+cd ..
+```
+
+#### 3.3 OpenHands Environment (Optional)
+
+```bash
+# Navigate to openhands directory
+cd openhands
+
+# Create virtual environment (needs Python 3.12+)
+python3.12 -m venv .venv
+
+# Activate
+source .venv/bin/activate
+
+# Install poetry
+pip install poetry
+
+# Install OpenHands
+poetry install
+
+# Deactivate
+deactivate
+
+# Return to root
+cd ..
+```
+
+### Step 4: Configure API Keys
+
+Create `.env` file in `miniswe-agent/` directory:
+
 ```bash
 cd miniswe-agent
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-pip install sentence-transformers
-deactivate
+cat > .env <<'EOF'
+# MiniMax via OpenRouter
+MINIMAX_API_KEY=your_openrouter_key_here
+OPENROUTER_API_KEY=your_openrouter_key_here
+MINIMAX_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+MEMCI_LLM_MODEL=minimax/minimax-m2.5
+
+# GLM (if using)
+GLM_API_KEY=your_glm_key_here
+
+# Kimi (if using)
+KIMI_API_KEY=your_kimi_key_here
+
+# Python binary
+PYTHON_BIN=.venv/bin/python
+EOF
+
+# Edit with your actual keys
+nano .env
 ```
 
-#### 3. OpenHands (Optional)
+**Important**: Replace `your_openrouter_key_here` with your actual API key!
+
+### Step 5: Verify Installation
+
 ```bash
-cd openhands
-python3.12 -m venv .venv
+# Test ROOT environment
 source .venv/bin/activate
-pip install poetry
-poetry install
+python -c "import sentence_transformers, numpy, pandas; print('✓ ROOT venv OK')"
 deactivate
+
+# Test Mini-SWE-Agent
+cd miniswe-agent
+source .venv/bin/activate
+mini --help  # Should show usage
+python -c "from minisweagent.config.paths import get_memory_root; print('✓ Paths OK:', get_memory_root())"
+deactivate
+cd ..
 ```
 
-### First Experiment
+**Expected output**: No errors, confirmation messages
+
+---
+
+## 🧪 Running Experiments
+
+### Understanding Virtual Environments
+
+**Which venv to use?**
+
+| Task | Directory | Command | Purpose |
+|------|-----------|---------|---------|
+| **Build memory** | Root | `source .venv/bin/activate` | Memory building (L1/L2/L3) |
+| **Run experiments** | `miniswe-agent/` | `source .venv/bin/activate` | Run Mini-SWE-Agent |
+| **Evaluate results** | Root | `source .venv/bin/activate` | Calculate metrics, plots |
+| **Run OpenHands** | `openhands/` | `source .venv/bin/activate` | Run OpenHands (optional) |
+
+### Experiment 1: Quick Test (5 Issues)
 
 ```bash
 # Activate mini-swe-agent environment
 cd miniswe-agent
 source .venv/bin/activate
 
-# Run on first 5 issues
-python -m minisweagent cibench \
-    --dataset ../data/trs/eval_set.jsonl \
-    --model minimax \
-    --slice 0:5 \
-    --output ../results/miniswe-agent/minimax/test
+# Run baseline on 5 issues
+bash ../scripts/run_cibench_minimax_openrouter.sh --ablation baseline --slice 0:5
 
-# Evaluate
-cd ..
+# Results saved to: ../results/miniswe-agent/minimax/baseline/
+```
+
+### Experiment 2: Full Baseline
+
+```bash
+# Activate mini-swe-agent environment
+cd miniswe-agent
 source .venv/bin/activate
+
+# Run full baseline (no memory)
+bash ../scripts/run_cibench_minimax_openrouter.sh --ablation baseline
+```
+
+### Experiment 3: With Memory (L1+L2+L3)
+
+```bash
+# Activate mini-swe-agent environment
+cd miniswe-agent
+source .venv/bin/activate
+
+# Run with full memory
+bash ../scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2+L3
+```
+
+### Experiment 4: Ablation Studies
+
+```bash
+# L1 only
+bash ../scripts/run_cibench_minimax_openrouter.sh --ablation L1
+
+# L1 + L2
+bash ../scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2
+
+# L1 + L2 + L3
+bash ../scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2+L3
+```
+
+### Evaluating Results
+
+```bash
+# Return to root directory
+cd /path/to/mini-swe-agent-ci-based
+
+# Activate ROOT environment
+source .venv/bin/activate
+
+# Evaluate single run
 python scripts/evaluate_ablation_preds.py \
-    results/miniswe-agent/minimax/test/preds.json
+    results/miniswe-agent/minimax/baseline/preds.json
+
+# Compare baseline vs memory
+python scripts/evaluate_ablation_preds.py \
+    results/miniswe-agent/minimax/baseline/preds.json \
+    results/miniswe-agent/minimax/L1_L2_L3/preds.json
+
+# Compare multiple ablations
+python scripts/compare_runs.py \
+    --baseline results/miniswe-agent/minimax/baseline \
+    --memory results/miniswe-agent/minimax/L1_L2_L3
 ```
 
-See [FINAL_SETUP_SUMMARY.md](FINAL_SETUP_SUMMARY.md) for complete guide.
+---
 
-## What This Workspace Contains
+## 📁 Results Organization
 
-- `scripts/run_cibench_minimax_openrouter.sh`
-  - main run entrypoint
-- `src/minisweagent/run/benchmarks/cibench.py`
-  - benchmark runner
-- `data/trs/`
-  - seeded L1/L2/L3 memory bank (high-quality, built from CI-REPAIR-BENCH)
-- `repo/`
-  - shared repo clone cache
+Results are automatically organized hierarchically:
 
-## Setup Overview
+```
+results/
+├── miniswe-agent/
+│   ├── minimax/
+│   │   ├── baseline/
+│   │   │   ├── preds.json          # Predictions
+│   │   │   ├── cibench.log         # Run log
+│   │   │   └── {sha}/              # Individual trajectories
+│   │   ├── L1/
+│   │   ├── L1_L2/
+│   │   └── L1_L2_L3/
+│   ├── glm/
+│   │   ├── baseline/
+│   │   └── L1_L2_L3/
+│   └── kimi/
+└── openhands/
+    └── glm/
+        ├── baseline/
+        └── L1_L2_L3/
+```
 
-There are two common ways to run this workspace:
+This makes it easy to:
+- Compare same agent, different models
+- Compare same model, different agents
+- Compare ablation levels
 
-- local machine
-  - foreground runs first, then longer runs
-- remote server / dev server
-  - smoke test first, then `nohup` background runs
+---
 
-This workspace is now installable again via `pip install -e .`.
+## 🔧 Advanced Usage
 
-## Local Setup
-
-Create and activate a virtual environment:
+### Running on Server (Background)
 
 ```bash
-python3 -m venv .venv
+# Use nohup for background execution
+cd miniswe-agent
 source .venv/bin/activate
-python -m pip install -U pip setuptools wheel
+
+nohup bash ../scripts/run_cibench_minimax_openrouter.sh --ablation baseline > baseline.log 2>&1 &
+nohup bash ../scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2+L3 > memory.log 2>&1 &
+
+# Monitor progress
+tail -f baseline.log
 ```
 
-Install the workspace:
+### Running Specific Issues
 
 ```bash
-python -m pip install -e .
+# Filter by instance ID
+bash ../scripts/run_cibench_minimax_openrouter.sh \
+    --ablation baseline \
+    --filter '^(abc123|def456)'
+
+# Slice by index
+bash ../scripts/run_cibench_minimax_openrouter.sh \
+    --ablation baseline \
+    --slice 10:20  # Issues 10-19
 ```
 
-Install an embedding backend for memory retrieval:
+### Building Memory (Advanced)
+
+If you need to rebuild memory from scratch:
 
 ```bash
-python -m pip install sentence-transformers
-```
-
-If `sentence-transformers` is problematic on your machine, use:
-
-```bash
-python -m pip install fastembed
-```
-
-## Server Setup
-
-Create and activate a virtual environment:
-
-```bash
-python3.13 -m venv .venv
+# Activate ROOT environment
 source .venv/bin/activate
-python -m pip install -U pip setuptools wheel
+
+# Build memory layers
+python scripts/decompose_ci_failure.py \
+    --eval-issues data/trs/eval_issues.json \
+    --output-dir data/trs
+
+# Verify memory created
+ls data/trs/*.json
 ```
 
-Install the workspace:
+---
 
+## 🐛 Troubleshooting
+
+### Issue: `pip` SSL Certificate Error
+
+**Solution**: Use trusted hosts flag:
 ```bash
-python -m pip install -e .
+pip install --upgrade pip --trusted-host pypi.org --trusted-host files.pythonhosted.org
 ```
 
-Install an embedding backend for memory retrieval:
+### Issue: Wrong Virtual Environment Active
 
+**Symptom**: `ModuleNotFoundError`
+
+**Solution**: Check which venv is active:
 ```bash
-python -m pip install sentence-transformers
+which python
+# Should show correct .venv/bin/python path
+
+# If wrong, deactivate and reactivate
+deactivate
+source .venv/bin/activate  # From correct directory
 ```
 
-Fallback:
+### Issue: `mini` command not found
 
+**Solution**: Make sure you're in miniswe-agent and venv is activated:
 ```bash
-python -m pip install fastembed
-```
-
-## Project `.env`
-
-Create a local `.env` in the project root:
-
-```bash
-cat > .env <<'EOF'
-MINIMAX_API_KEY=<your_openrouter_key>
-OPENROUTER_API_KEY=<your_openrouter_key>
-MINIMAX_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-MEMCI_LLM_MODEL=minimax/minimax-m2.5
-PYTHON_BIN=.venv/bin/python
-EOF
-```
-
-Optional:
-
-```bash
-echo 'MSWEA_REPO_CACHE_ROOT=/path/to/shared/repo-cache' >> .env
-```
-
-Notes:
-
-- Use `minimax/minimax-m2.5`, not `MiniMax-M2.5`
-- Shell exports override `.env`
-- Repo cache defaults to `<project>/repo`
-- `PYTHON_BIN` should usually point to the venv Python on that machine
-
-## Required Packages
-
-Installed by `pip install -e .`:
-
-- `requests`
-- `pyyaml`
-- `jinja2`
-- `pydantic`
-- `litellm`
-- `tenacity`
-- `rich`
-- `python-dotenv`
-- `typer`
-- `platformdirs`
-- `textual`
-- `prompt_toolkit`
-- `datasets`
-- `openai`
-
-Additional package needed for memory-enabled runs:
-
-- `sentence-transformers`
-  - recommended
-- or `fastembed`
-  - fallback
-
-Without one of those, `L1`, `L1+L2`, and `L1+L2+L3` will log:
-
-```text
-No embedding model available ... memory retrieval disabled
-```
-
-and behave like no-memory runs.
-
-## Data Check
-
-Confirm required files exist:
-
-```bash
-ls -lh data/trs/eval_issues.json
-ls -lh data/trs/
-```
-
-Expected:
-
-- `data/trs/eval_issues.json` — evaluation dataset
-- `data/trs/failure_memory.json` — L1 per-file memories (1.3MB)
-- `data/trs/repo_memory.json` — L2 repo-level patterns (900KB)
-- `data/trs/cross_memory.json` — L3 universal principles (468KB)
-
-## Quick Sanity Checks
-
-```bash
+cd miniswe-agent
 source .venv/bin/activate
-python -c "import minisweagent; print(minisweagent.__file__)"
-python -m minisweagent.run.benchmarks.cibench --help
-python -m py_compile src/minisweagent/run/benchmarks/cibench.py
-python -m py_compile src/minisweagent/run/benchmarks/utils/ci_context.py
-bash -n scripts/run_cibench_minimax_openrouter.sh
+which mini  # Should show: .../miniswe-agent/.venv/bin/mini
 ```
 
-Check memory backend:
+### Issue: Memory retrieval disabled
+
+**Symptom**: Logs show "No embedding model available"
+
+**Solution**: Install sentence-transformers:
+```bash
+# In miniswe-agent venv
+pip install sentence-transformers
+
+# Verify
+python -c "import sentence_transformers; print('OK')"
+```
+
+### Issue: API key not found
+
+**Solution**: Check `.env` file exists and has correct keys:
+```bash
+cat miniswe-agent/.env
+# Should show API keys
+
+# Re-edit if needed
+nano miniswe-agent/.env
+```
+
+---
+
+## 📊 Expected Results
+
+After running experiments, you should see:
+
+**Current Performance**:
+- Baseline (no memory): ~13.48%
+- L1+L2+L3 (full memory): ~17.98%
+- **Improvement**: +4.5 percentage points
+
+**Your experiments will**:
+- Test multiple models (MiniMax, GLM, Kimi)
+- Compare ablation levels (baseline, L1, L1_L2, L1_L2_L3)
+- Analyze failure types
+- Generate comparison tables
+
+---
+
+## 🎓 For Researchers
+
+### Dataset Statistics
+
+Collect these for your paper:
+- Number of PRs
+- Commits per PR
+- Modified files per PR
+- Lines changed per PR
+- CI failure types distribution
 
 ```bash
-python -c "import sentence_transformers; print('sentence-transformers ok')"
-```
-
-or:
-
-```bash
-python -c "import fastembed; print('fastembed ok')"
-```
-
-## Smoke Test
-
-Run a single instance:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh --ablation baseline --slice 0:1
-```
-
-Run first 10:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh --ablation baseline --slice 0:10
-```
-
-Memory-enabled smoke test:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh --ablation L1 --slice 0:1
-```
-
-In memory-enabled logs, confirm you do **not** see:
-
-```text
-No embedding model available
-Cosine similarity will return 0.0
-memory retrieval disabled
-```
-
-## Main Run Commands
-
-Baseline:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh --ablation baseline
-```
-
-L1:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh --ablation L1
-```
-
-L1 + L2:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2
-```
-
-L1 + L2 + L3:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2+L3
-```
-
-The last one is also the default:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh
-```
-
-## Run Selected Issues Only
-
-Example:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh --ablation baseline --filter '^(110e09997f8a22a617e261dec9e301129bbead65|16c6139ab089)'
-```
-
-## Run On Local Machine
-
-Recommended order:
-
-1. smoke test `baseline --slice 0:1`
-2. smoke test `L1 --slice 0:1`
-3. full `baseline`
-4. full memory runs
-
-Examples:
-
-```bash
-bash scripts/run_cibench_minimax_openrouter.sh --ablation baseline --slice 0:1
-bash scripts/run_cibench_minimax_openrouter.sh --ablation L1 --slice 0:1
-bash scripts/run_cibench_minimax_openrouter.sh --ablation baseline
-```
-
-## Run On Server / `nohup`
-
-Use separate logs per run:
-
-```bash
-nohup bash scripts/run_cibench_minimax_openrouter.sh --ablation baseline > baseline.log 2>&1 &
-nohup bash scripts/run_cibench_minimax_openrouter.sh --ablation L1 > l1.log 2>&1 &
-nohup bash scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2 > l1_l2.log 2>&1 &
-nohup bash scripts/run_cibench_minimax_openrouter.sh --ablation L1+L2+L3 > l1_l2_l3.log 2>&1 &
-```
-
-Monitor:
-
-```bash
-tail -n 50 baseline.log
-tail -n 50 l1.log
-tail -n 50 l1_l2.log
-tail -n 50 l1_l2_l3.log
-```
-
-Safer server workflow:
-
-1. run one smoke test first
-2. confirm imports, checkout, and model access work
-3. confirm memory backend is installed
-4. then launch the full `nohup` jobs
-
-## Stop Background Jobs
-
-Kill all benchmark wrapper jobs:
-
-```bash
-pkill -f 'scripts/run_cibench_minimax_openrouter.sh'
-pkill -f 'minisweagent.run.benchmarks.cibench'
-```
-
-## Outputs
-
-Each run writes to:
-
-- `results/baseline/`
-- `results/l1/`
-- `results/l1_l2/`
-- `results/l1_l2_l3/`
-
-Important files:
-
-- `preds.json`
-  - predicted patch per instance
-- `cibench.log`
-  - runner log
-- `<sha_fail>/<sha_fail>.traj.json`
-  - full agent trajectory
-
-Examples:
-
-```bash
-tail -n 100 results/baseline/cibench.log
-cat results/baseline/preds.json
-```
-
-Inspect one issue:
-
-```bash
-ls results/baseline/<instance_id>/
-cat results/baseline/<sha_fail>/<sha_fail>.traj.json
-```
-
-## Notes About Validation
-
-- installation and validation commands are provided as hints
-- the agent may use them, extend them, or ignore them
-- local validation is optional
-- patch generation does not require successful local reproduction
-- the agent may run extra setup commands first if it decides local execution is worthwhile
-
-## Notes About Repo Cloning
-
-- remote repos are cached under `repo/`
-- each issue gets its own isolated working copy under `results/.../testbed`
-- the runner fetches the exact historical `sha_fail` if needed
-- the worktree is force-checked out, hard-reset, and cleaned before the agent runs
-
-## Troubleshooting
-
-### `ModuleNotFoundError: No module named 'minisweagent'`
-
-Fix:
-
-```bash
+# Activate ROOT venv
 source .venv/bin/activate
-python -m pip install -e .
+
+# Run analysis
+python scripts/analyze_dataset.py data/trs/eval_set.jsonl
 ```
 
-Then verify:
+### Comparing with SWE-bench
 
-```bash
-python -c "import minisweagent; print(minisweagent.__file__)"
-```
+| Aspect | SWE-bench | CI-Repair-Bench |
+|--------|-----------|-----------------|
+| **Scope** | Single issue | Pull request (multi-issue) |
+| **Commits** | One patch | Multiple commits |
+| **Verification** | Single test | Multi-stage CI |
+| **Problem Types** | Code bugs | Style, config, deps, tests, merge |
+| **Complexity** | Atomic | Compositional |
 
-### `No embedding model available ... memory retrieval disabled`
+### Adding New Agents
 
-Fix:
+To add a new agent (e.g., CodeAct, AutoCodeRover):
 
-```bash
-source .venv/bin/activate
-python -m pip install sentence-transformers
-```
+1. Create directory: `mkdir newagent`
+2. Create venv: `python3 -m venv newagent/.venv`
+3. Install agent: `cd newagent && pip install ...`
+4. Adapt to use shared memory from `../data/trs/`
+5. Save results to `../results/newagent/{model}/{ablation}/`
 
-Fallback:
+---
 
-```bash
-python -m pip install fastembed
-```
+## 📖 Additional Documentation
 
-### `fatal: unable to read tree` or missing historical commit
+For more detailed information, see:
+- `FINAL_SETUP_SUMMARY.md` - Complete framework overview
+- `VIRTUAL_ENVIRONMENT_SETUP.md` - 3-venv architecture details
+- `OPENHANDS_QUESTIONS_ANSWERED.md` - OpenHands integration Q&A
+- `miniswe-agent/README.md` - Agent-specific docs
 
-The runner now fetches the exact `sha_fail`, force-checks it out, hard-resets, and cleans the worktree.
-If a run was interrupted, remove that instance directory and rerun:
+---
 
-```bash
-rm -rf results/baseline/<instance_id>
-```
+## 🤝 Contributing
 
-### Existing partial run outputs
+This framework supports:
+- Multiple agent scaffolds
+- Multiple models
+- Multiple ablation levels
+- Shared memory and resources
+- Fair comparisons
 
-Delete one broken instance run:
+To contribute:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
 
-```bash
-rm -rf results/baseline/<instance_id>
-```
+---
 
-Delete prior predictions for a rerun:
+## 📄 License
 
-```bash
-rm -f results/baseline/preds.json
-```
+See [LICENSE.md](LICENSE.md)
 
-## Common Cleanup
+---
 
-Delete one broken instance run:
+## 📞 Contact
 
-```bash
-rm -rf results/baseline/<instance_id>
-```
+For questions or issues:
+- GitHub Issues: https://github.com/RabeyaMuna/mini-swe-agent-ci-based/issues
+- Email: rabeykhatunmuna@gmail.com
 
-Delete prior predictions for a rerun:
+---
 
-```bash
-rm -f results/baseline/preds.json
-```
+**Last Updated**: July 16, 2026  
+**Version**: 2.3.0  
+**Status**: Production Ready
