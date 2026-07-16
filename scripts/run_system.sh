@@ -44,10 +44,10 @@ echo ""
 
 # Check Step 1: filtered_issues.jsonl
 if [ ! -f "$OUTPUT_DIR/filtered_issues.jsonl" ]; then
-    echo "⚠ Step 1 needed: filtered_issues.jsonl not found"
+    echo "[WARN] Step 1 needed: filtered_issues.jsonl not found"
     NEEDS_STEP_1=true
 else
-    echo "✓ Step 1 done: filtered_issues.jsonl exists"
+    echo "OK Step 1 done: filtered_issues.jsonl exists"
     # Count issues
     ISSUE_COUNT=$(wc -l < "$OUTPUT_DIR/filtered_issues.jsonl" | tr -d ' ')
     echo "  → Contains $ISSUE_COUNT issues"
@@ -57,7 +57,7 @@ fi
 DECOMP_COUNT=0
 FILTERED_COUNT=0
 if [ ! -f "$OUTPUT_DIR/decomposed_issues.json" ]; then
-    echo "⚠ Step 2 needed: decomposed_issues.json not found"
+    echo "[WARN] Step 2 needed: decomposed_issues.json not found"
     NEEDS_STEP_2=true
 else
     if command -v jq &> /dev/null; then
@@ -70,10 +70,10 @@ else
     fi
 
     if [ "$DECOMP_COUNT" -lt "$FILTERED_COUNT" ]; then
-        echo "⚠ Step 2 needed: Only $DECOMP_COUNT/$FILTERED_COUNT issues decomposed"
+        echo "[WARN] Step 2 needed: Only $DECOMP_COUNT/$FILTERED_COUNT issues decomposed"
         NEEDS_STEP_2=true
     else
-        echo "✓ Step 2 done: decomposed_issues.json exists"
+        echo "OK Step 2 done: decomposed_issues.json exists"
         echo "  → Contains $DECOMP_COUNT decomposed issues (all done)"
     fi
 fi
@@ -81,13 +81,13 @@ fi
 # Check Step 3: memory/eval split
 # IMPORTANT: Re-run if Step 2 is needed (new decompositions)
 if [ "$NEEDS_STEP_2" = true ]; then
-    echo "⚠ Step 3 needed: Will regenerate split after new decompositions"
+    echo "[WARN] Step 3 needed: Will regenerate split after new decompositions"
     NEEDS_STEP_3=true
 elif [ ! -f "$OUTPUT_DIR/memory_set.jsonl" ] || [ ! -f "$OUTPUT_DIR/eval_set.jsonl" ]; then
-    echo "⚠ Step 3 needed: memory_set.jsonl or eval_set.jsonl not found"
+    echo "[WARN] Step 3 needed: memory_set.jsonl or eval_set.jsonl not found"
     NEEDS_STEP_3=true
 else
-    echo "✓ Step 3 done: memory_set.jsonl and eval_set.jsonl exist"
+    echo "OK Step 3 done: memory_set.jsonl and eval_set.jsonl exist"
     if command -v jq &> /dev/null && [ -f "$OUTPUT_DIR/split_metadata.json" ]; then
         cat "$OUTPUT_DIR/split_metadata.json" | jq -r '
             "  → Memory: \(.memory_set_size) issues (\(.memory_ratio * 100 | floor)%)",
@@ -99,13 +99,13 @@ fi
 # Check Step 4: L1/L2/L3 memory
 # IMPORTANT: Re-run if Step 3 is needed (new memory split)
 if [ "$NEEDS_STEP_3" = true ]; then
-    echo "⚠ Step 4 needed: Will regenerate L1/L2/L3 after new memory split"
+    echo "[WARN] Step 4 needed: Will regenerate L1/L2/L3 after new memory split"
     NEEDS_STEP_4=true
 elif [ ! -f "$OUTPUT_DIR/failure_memory.json" ] || [ ! -f "$OUTPUT_DIR/repo_memory.json" ] || [ ! -f "$OUTPUT_DIR/cross_memory.json" ]; then
-    echo "⚠ Step 4 needed: L1/L2/L3 memory files not found"
+    echo "[WARN] Step 4 needed: L1/L2/L3 memory files not found"
     NEEDS_STEP_4=true
 else
-    echo "✓ Step 4 done: L1/L2/L3 memory files exist"
+    echo "OK Step 4 done: L1/L2/L3 memory files exist"
     if command -v jq &> /dev/null; then
         L1_COUNT=$(cat "$OUTPUT_DIR/failure_memory.json" | jq 'length' 2>/dev/null || echo "?")
         L2_COUNT=$(cat "$OUTPUT_DIR/repo_memory.json" | jq 'length' 2>/dev/null || echo "?")
@@ -121,7 +121,7 @@ echo "==========================================================================
 
 # Check if everything is done
 if [ "$NEEDS_STEP_1" = false ] && [ "$NEEDS_STEP_2" = false ] && [ "$NEEDS_STEP_3" = false ] && [ "$NEEDS_STEP_4" = false ]; then
-    echo "✓ ALL STEPS COMPLETE - System is ready!"
+    echo "OK ALL STEPS COMPLETE - System is ready!"
     echo ""
     echo "All memory files exist. Nothing to do."
     echo ""
@@ -193,10 +193,10 @@ print(f'Saved {len(filtered_issues)} issues to: {output_file}')
 
     if [ $? -eq 0 ]; then
         echo ""
-        echo "✓ Step 1 complete"
+        echo "OK Step 1 complete"
     else
         echo ""
-        echo "✗ Step 1 failed"
+        echo "FAIL Step 1 failed"
         exit 1
     fi
     echo ""
@@ -270,10 +270,10 @@ if missing:
 
     if [ $? -eq 0 ]; then
         echo ""
-        echo "✓ Step 2 complete"
+        echo "OK Step 2 complete"
     else
         echo ""
-        echo "✗ Step 2 failed"
+        echo "FAIL Step 2 failed"
         exit 1
     fi
     echo ""
@@ -298,10 +298,10 @@ if [ "$NEEDS_STEP_3" = true ]; then
 
     if [ $? -eq 0 ]; then
         echo ""
-        echo "✓ Step 3 complete"
+        echo "OK Step 3 complete"
     else
         echo ""
-        echo "✗ Step 3 failed"
+        echo "FAIL Step 3 failed"
         exit 1
     fi
     echo ""
@@ -326,10 +326,10 @@ if [ "$NEEDS_STEP_4" = true ]; then
 
     if [ $? -eq 0 ]; then
         echo ""
-        echo "✓ Step 4 complete"
+        echo "OK Step 4 complete"
     else
         echo ""
-        echo "✗ Step 4 failed"
+        echo "FAIL Step 4 failed"
         exit 1
     fi
     echo ""
@@ -346,17 +346,17 @@ echo ""
 echo "Output directory: $OUTPUT_DIR/"
 echo ""
 echo "Files:"
-echo "  ✓ filtered_issues.jsonl       - All issues"
-echo "  ✓ decomposed_issues.json      - Decomposed problems"
-echo "  ✓ memory_set.jsonl           - 30% memory"
-echo "  ✓ eval_set.jsonl             - 70% eval"
-echo "  ✓ failure_memory.json        - L1 file-level"
-echo "  ✓ repo_memory.json           - L2 sequences"
-echo "  ✓ cross_memory.json          - L3 patterns"
+echo "  OK filtered_issues.jsonl       - All issues"
+echo "  OK decomposed_issues.json      - Decomposed problems"
+echo "  OK memory_set.jsonl           - 30% memory"
+echo "  OK eval_set.jsonl             - 70% eval"
+echo "  OK failure_memory.json        - L1 file-level"
+echo "  OK repo_memory.json           - L2 sequences"
+echo "  OK cross_memory.json          - L3 patterns"
 echo ""
 echo "Cache directory: $CACHE_DIR/"
-echo "  ✓ workflow_validation_cache.json"
-echo "  ✓ log_details.json"
+echo "  OK workflow_validation_cache.json"
+echo "  OK log_details.json"
 echo ""
 echo "================================================================================"
 echo "System is ready! Run evaluation:"

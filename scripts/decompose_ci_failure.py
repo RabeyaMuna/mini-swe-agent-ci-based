@@ -905,11 +905,25 @@ def merge_chunks_by_validation(
         structured_chunks: Original parsed diff chunks with actual changes
     """
     validation_groups = {}
+    sequence_by_order = {
+        str(item.get("order")): item
+        for item in validation_sequence
+        if item.get("order") is not None
+    }
 
     for chunk in chunk_findings:
         for val_entry in chunk.get("validations_in_this_chunk", []):
             val_order = val_entry.get("validation_order")
             val_cmd = val_entry.get("validation_cmd")
+            if (not val_cmd or val_cmd == "unknown") and val_order not in (None, "unknown"):
+                seq_item = sequence_by_order.get(str(val_order), {})
+                val_cmd = str(
+                    seq_item.get("validation_cmd")
+                    or seq_item.get("installation_cmd")
+                    or seq_item.get("validates")
+                    or ""
+                ).strip()
+                val_entry["validation_cmd"] = val_cmd
             if val_order in (None, "unknown") or not val_cmd or val_cmd == "unknown":
                 continue
 
@@ -982,11 +996,14 @@ def merge_chunks_by_validation(
     # CRITICAL FIX: Attach actual file changes to validation groups
     # Build a lookup of file -> changes from the original structured chunks
     file_changes_lookup = {}
+    all_changed_files = set()
     if structured_chunks:
         for chunk in structured_chunks:
             if "files" in chunk:
                 for file_info in chunk["files"]:
                     file_path = file_info.get("path", "")
+                    if file_path:
+                        all_changed_files.add(file_path)
                     if file_path and "changes" in file_info:
                         if file_path not in file_changes_lookup:
                             file_changes_lookup[file_path] = []
@@ -1019,6 +1036,13 @@ def merge_chunks_by_validation(
         "validation_groups": sorted_groups,
         "total_validations": len(set(g["validation_order"] for g in sorted_groups.values())),
         "total_groups": len(sorted_groups),  # May be > total_validations if sub-problems exist
+        "all_changed_files_from_diff": sorted(all_changed_files),
+        "all_config_files_from_diff": sorted(
+            file_path
+            for file_path in all_changed_files
+            if _is_dependency_file(file_path)
+            or file_path.endswith((".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock"))
+        ),
     }
 
 
@@ -1091,15 +1115,17 @@ def _final_verify_config_files(
         'Cargo.toml', 'pom.xml', 'build.gradle', 'Gemfile', 'go.mod'
     ]
 
-    # Collect all config files from validation groups
-    all_config_files = set()
+    # Prefer original parsed-diff metadata. Falling back to validation_groups
+    # alone misses files that were dropped during LLM classification.
+    all_config_files = set(validation_groups.get("all_config_files_from_diff") or [])
     groups_data = validation_groups.get('validation_groups', {})
 
-    for val_order, val_group in groups_data.items():
-        for change in val_group.get('all_changes', []):
-            file_path = change.get('file', '')
-            if any(pattern in file_path for pattern in config_file_patterns):
-                all_config_files.add(file_path)
+    if not all_config_files:
+        for val_order, val_group in groups_data.items():
+            for change in val_group.get('all_changes', []):
+                file_path = change.get('file', '')
+                if any(pattern in file_path for pattern in config_file_patterns):
+                    all_config_files.add(file_path)
 
     if not all_config_files:
         return  # No config files to verify
@@ -1260,7 +1286,7 @@ Issue Type: {prob.get('issue_type', '')}
 
     except ImportError:
         # Fallback: no clustering if dependencies not available
-        print("    ⚠️ sentence-transformers not available, skipping clustering")
+        print("    [WARN] sentence-transformers not available, skipping clustering")
         return [[prob] for prob in problems]
 
 
@@ -1334,15 +1360,15 @@ YOUR TASK: Decide ONE of these actions:
    - Example: "Missing type hint" vs "Incorrect type hint"
 
 MERGE CRITERIA (ALL must be true to merge):
-✓ Root causes express the SAME underlying issue
-✓ Fixes use the SAME pattern/approach
-✓ Files can be treated as "same problem in multiple places"
-✓ No interdependencies within cluster
+OK Root causes express the SAME underlying issue
+OK Fixes use the SAME pattern/approach
+OK Files can be treated as "same problem in multiple places"
+OK No interdependencies within cluster
 
 SEPARATE if ANY true:
-✗ Root causes are DIFFERENT
-✗ Fixes require DIFFERENT approaches
-✗ Problems have different complexity levels
+FAIL Root causes are DIFFERENT
+FAIL Fixes require DIFFERENT approaches
+FAIL Problems have different complexity levels
 
 OUTPUT VALID JSON ONLY:
 
@@ -1470,7 +1496,7 @@ IMPORTANT: Be CONSERVATIVE. When in doubt, SEPARATE.
             }
 
     except Exception as e:
-        print(f"    ⚠️ LLM merge decision failed: {e}, keeping problems separate")
+        print(f"    [WARN] LLM merge decision failed: {e}, keeping problems separate")
         return {
             "action": "separate",
             "result": cluster,
@@ -1529,7 +1555,7 @@ def _cluster_and_merge_problems(problems: List[Dict[str, Any]], validation_cmd: 
 
         if decision["action"] == "merge":
             merge_stats["merged"] += len(cluster)
-            print(f"          ✓ MERGED {len(cluster)} problems → 1")
+            print(f"          OK MERGED {len(cluster)} problems → 1")
         elif decision["action"] == "partial_merge":
             merge_stats["partial"] += 1
             print(f"          ⊕ PARTIAL MERGE: {len(cluster)} → {len(decision['result'])}")
@@ -1907,14 +1933,14 @@ CRITICAL RULES:
                     )
 
                     if not sub_problems:
-                        print(f"      {indent}  ⚠️  Sub-chunk {sub_idx} returned 0 problems")
+                        print(f"      {indent}  [WARN] Sub-chunk {sub_idx} returned 0 problems")
                     else:
-                        print(f"      {indent}  ✓ Sub-chunk {sub_idx} returned {len(sub_problems)} problems")
+                        print(f"      {indent}  OK Sub-chunk {sub_idx} returned {len(sub_problems)} problems")
 
                     split_problems.extend(sub_problems)
 
                 except Exception as e:
-                    print(f"      {indent}  ✗ ERROR in sub-chunk {sub_idx}: {type(e).__name__}: {str(e)[:200]}")
+                    print(f"      {indent}  FAIL ERROR in sub-chunk {sub_idx}: {type(e).__name__}: {str(e)[:200]}")
                     # Continue with other sub-chunks even if one fails
 
                 # Exponential backoff: deeper splits wait longer
@@ -1990,14 +2016,14 @@ CRITICAL RULES:
                         )
 
                         if not sub_problems:
-                            print(f"      {indent}  ⚠️  Retry {sub_idx} returned 0 problems")
+                            print(f"      {indent}  [WARN] Retry {sub_idx} returned 0 problems")
                         else:
-                            print(f"      {indent}  ✓ Retry {sub_idx} returned {len(sub_problems)} problems")
+                            print(f"      {indent}  OK Retry {sub_idx} returned {len(sub_problems)} problems")
 
                         split_problems.extend(sub_problems)
 
                     except Exception as e:
-                        print(f"      {indent}  ✗ ERROR in retry {sub_idx}: {type(e).__name__}: {str(e)[:200]}")
+                        print(f"      {indent}  FAIL ERROR in retry {sub_idx}: {type(e).__name__}: {str(e)[:200]}")
 
                     # Exponential backoff
                     sleep_time = min(2 ** depth, 8)
@@ -2353,6 +2379,23 @@ def classify_chunk_with_fallback(
 
     # Extract files visible in CI failure logs
     ci_visible_files = [rf.get('file', '') for rf in visible_failure_context.get('relevant_files', [])]
+    formatted_validations = []
+    for item in validation_sequence:
+        effective_cmd = str(
+            item.get("validation_cmd")
+            or item.get("installation_cmd")
+            or item.get("validates")
+            or ""
+        ).strip()
+        formatted_validations.append({
+            "order": item.get("order"),
+            "validates": item.get("validates", ""),
+            "validation_cmd": item.get("validation_cmd", ""),
+            "installation_cmd": item.get("installation_cmd", ""),
+            "effective_cmd": effective_cmd,
+            "source": item.get("source", ""),
+            "evidence": item.get("evidence", ""),
+        })
 
     prompt = f"""Classify each changed file by the validation command that would catch the fixed issue.
 
@@ -2365,7 +2408,7 @@ FILES VISIBLE IN CI FAILURE LOGS (primary errors):
 {json.dumps(ci_visible_files, indent=2) if ci_visible_files else "[]"}
 
 Available validations:
-{json.dumps(validation_sequence, indent=2)}
+{json.dumps(formatted_validations, indent=2)}
 
 Changed files, chunk {chunk_index}/{total_chunks} ({files_in_chunk} files):
 {format_structured_for_llm(chunk)}
@@ -2375,9 +2418,10 @@ Changed files, chunk {chunk_index}/{total_chunks} ({files_in_chunk} files):
 For every file:
 1. Inspect before/after changes
 2. Decide what CI failure the change fixes
-3. Choose validation_cmd from VALIDATIONS
-4. Group files with same validation_cmd + failure_type + issue_type
-5. Determine if file was VISIBLE in CI logs or HIDDEN
+3. Choose validation_order from VALIDATIONS
+4. Use effective_cmd as the validation_cmd when validation_cmd is empty
+5. Group files with same validation_cmd + failure_type + issue_type
+6. Determine if file was VISIBLE in CI logs or HIDDEN
 
 Use two levels:
 - failure_type: broad category (Type Checking, Linting, Formatting, etc.)
@@ -2386,10 +2430,19 @@ Use two levels:
 Config files must be assigned to the validation they affect:
 - Tool/dependency added or configured -> that tool's validation.
 - Formatter config changed -> formatter validation.
+- If a setup/install/dependency validation failed because a project
+  configuration or dependency file was invalid, classify that changed config
+  file under the setup/install/dependency validation.
+- Distinguish executor files from root-cause files. Workflow files and local
+  actions may run commands, while project config/dependency/source files may be
+  the actual repair target. Use the CI evidence and the diff together.
 
 VISIBILITY CLASSIFICATION:
 - "primary" = file appears in "FILES VISIBLE IN CI FAILURE LOGS" above
 - "hidden" = file does NOT appear in CI logs (enablement fix, cascaded fix)
+- For setup/install failures, a config/dependency file can be primary when the
+  CI evidence says that file's configuration caused the setup/install command
+  to fail, even if the visible file list names the workflow action.
 
 ## OUTPUT
 
@@ -2411,7 +2464,7 @@ Return JSON array:
 REQUIREMENTS:
 - Array only (no wrapper)
 - validation_order = INTEGER from VALIDATIONS
-- validation_cmd = exact match
+- validation_cmd = effective_cmd from VALIDATIONS when validation_cmd is empty
 - visibility must be either "primary" or "hidden"
 - Every file in at least one group
 
@@ -2436,17 +2489,82 @@ REQUIREMENTS:
         else:
             validations = []
 
-        # Fix missing validation_order
+        sequence_by_order = {
+            str(item.get("order")): item
+            for item in validation_sequence
+            if item.get("order") is not None
+        }
+
+        # Fix missing validation_order and normalize install/setup commands.
         for v in validations:
             if not v.get("validation_order"):
                 val_cmd = str(v.get("validation_cmd", "")).strip()
                 for seq_item in validation_sequence:
-                    if seq_item.get("validation_cmd") == val_cmd:
+                    effective_cmd = str(
+                        seq_item.get("validation_cmd")
+                        or seq_item.get("installation_cmd")
+                        or seq_item.get("validates")
+                        or ""
+                    ).strip()
+                    if seq_item.get("validation_cmd") == val_cmd or effective_cmd == val_cmd:
                         v["validation_order"] = seq_item.get("order")
                         break
+            seq_item = sequence_by_order.get(str(v.get("validation_order")), {})
+            if seq_item and not str(v.get("validation_cmd") or "").strip():
+                v["validation_cmd"] = str(
+                    seq_item.get("validation_cmd")
+                    or seq_item.get("installation_cmd")
+                    or seq_item.get("validates")
+                    or ""
+                ).strip()
 
         # Keep only valid entries
         valid = [v for v in validations if v.get("validation_order")]
+
+        # Enforce ground-truth diff coverage. The prompt asks the model to
+        # include every file, but setup/config files are too important to trust
+        # to prompt compliance alone.
+        actual_files = [
+            str(file_info.get("path") or "")
+            for file_info in chunk.get("files", [])
+            if file_info.get("path")
+        ]
+        classified_files = {
+            str(file_path)
+            for entry in valid
+            for file_path in (entry.get("files") or [])
+            if file_path
+        }
+        missing_files = [file_path for file_path in actual_files if file_path not in classified_files]
+        if missing_files:
+            print(
+                f"    WARNING Chunk {chunk_index}: classifier missed {len(missing_files)} changed file(s); "
+                "adding deterministic fallback groups"
+            )
+        for file_path in missing_files:
+            fallback_validation = validation_sequence[0] if validation_sequence else {}
+            if not fallback_validation:
+                continue
+            effective_cmd = str(
+                fallback_validation.get("validation_cmd")
+                or fallback_validation.get("installation_cmd")
+                or fallback_validation.get("validates")
+                or ""
+            ).strip()
+            is_config = _is_dependency_file(file_path) or file_path.endswith((
+                ".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock"
+            ))
+            valid.append({
+                "validation_order": fallback_validation.get("order"),
+                "validation_cmd": effective_cmd,
+                "failure_type": "Configuration/Dependency" if is_config else "Unclassified Changed File",
+                "issue_type": "Diff-backed file omitted by classifier",
+                "change_type": "config" if is_config else "code",
+                "visibility": "hidden",
+                "files": [file_path],
+                "total_files": 1,
+                "_fallback_reason": "LLM omitted changed file from validation classification",
+            })
 
         print(f"    OK Chunk {chunk_index} ({files_in_chunk} files): {len(valid)} validation groups")
         return valid
@@ -2555,7 +2673,6 @@ def analyze_diff_chunks(
 
         if validations:
             chunk_findings.append({"chunk_index": index, "validations_in_this_chunk": validations})
-            chunk_findings.append({"chunk_index": index, "validations_in_this_chunk": []})
 
     # Step 2: Merge by validation (deterministic)
     print(f"  Step 2: Merging chunks by validation...")
@@ -3009,9 +3126,9 @@ Example correct order:
   Problem D: validation_order=11, problem_type="hidden"     ← 4th (hidden, same validation, use deps)
 
 WRONG order (NEVER do this):
-  ✗ Hidden before primary
-  ✗ validation_order=11 before validation_order=8
-  ✗ Ignoring validation sequence for "semantic dependencies"
+  FAIL Hidden before primary
+  FAIL validation_order=11 before validation_order=8
+  FAIL Ignoring validation sequence for "semantic dependencies"
 
 Based on dependencies, determine WITHIN each (problem_type, validation_order) group:
 1. Which problems should be fixed first (block others in same group)
@@ -3621,13 +3738,13 @@ def _stage4_generate_l2_llm(deduplicated: List[Dict], dependencies: Dict, llm, i
 
             # Validate: check if ALL problems returned
             if len(result.get("problems", [])) >= actual_count * 0.9:  # 90% threshold
-                print(f"  ✓ Tier 1 success: {len(result['problems'])} problems")
+                print(f"  OK Tier 1 success: {len(result['problems'])} problems")
                 return result
             else:
-                print(f"  ⚠️ Tier 1 incomplete ({len(result.get('problems', []))}/{actual_count})")
+                print(f"  [WARN] Tier 1 incomplete ({len(result.get('problems', []))}/{actual_count})")
                 # Fall through to Tier 2
         except Exception as e:
-            print(f"  ⚠️ Tier 1 failed: {str(e)[:100]}")
+            print(f"  [WARN] Tier 1 failed: {str(e)[:100]}")
             # Fall through to Tier 2
 
     # Tier 2: Medium dataset - Grouped LLM
@@ -3638,19 +3755,19 @@ def _stage4_generate_l2_llm(deduplicated: List[Dict], dependencies: Dict, llm, i
 
             # Validate
             if len(result.get("problems", [])) >= actual_count * 0.9:
-                print(f"  ✓ Tier 2 success: {len(result['problems'])} problems")
+                print(f"  OK Tier 2 success: {len(result['problems'])} problems")
                 return result
             else:
-                print(f"  ⚠️ Tier 2 incomplete ({len(result.get('problems', []))}/{actual_count})")
+                print(f"  [WARN] Tier 2 incomplete ({len(result.get('problems', []))}/{actual_count})")
                 # Fall through to Tier 3
         except Exception as e:
-            print(f"  ⚠️ Tier 2 failed: {str(e)[:100]}")
+            print(f"  [WARN] Tier 2 failed: {str(e)[:100]}")
             # Fall through to Tier 3
 
     # Tier 3: Large dataset or fallback - Mechanical (guaranteed)
     print(f"  → Tier 3: Mechanical generation (guaranteed complete)")
     result = _l2_tier3_mechanical(flattened_problems, dependencies, issue_id, repo)
-    print(f"  ✓ Tier 3 success: {len(result['problems'])} problems")
+    print(f"  OK Tier 3 success: {len(result['problems'])} problems")
 
     return result
 

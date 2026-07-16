@@ -255,14 +255,14 @@ def main():
     print("="*80)
 
     if len(critical_and_high) > 0:
-        print(f"⚠ {len(set(p['issue_id'] for p in critical_and_high))} issues need reprocessing")
+        print(f"[WARN] {len(set(p['issue_id'] for p in critical_and_high))} issues need reprocessing")
         print(f"  Run: python scripts/track_problem_issues.py --fix-list problematic_issues.txt")
         print(f"  Then reprocess using the command above")
     else:
-        print("✓ All issues processed successfully!")
+        print("OK All issues processed successfully!")
 
     if len(debug_prompts) > 5:
-        print(f"⚠ {len(debug_prompts)} debug prompts saved (LLM had trouble)")
+        print(f"[WARN] {len(debug_prompts)} debug prompts saved (LLM had trouble)")
         print(f"  Consider:")
         print(f"    - Using a different model (Claude/GPT-4 instead of MiniMax)")
         print(f"    - Reducing chunk size (max_files_per_chunk)")

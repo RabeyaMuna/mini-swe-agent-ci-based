@@ -55,10 +55,10 @@ def pre_validate_problem(
         )
 
         if result.returncode == 0:
-            logger.info(f"[Pre-Validation] ✓ Problem {problem_id}: ALREADY FIXED (validation passed)")
+            logger.info(f"[Pre-Validation] OK Problem {problem_id}: ALREADY FIXED (validation passed)")
             return (True, "validation passed - problem already fixed in current SHA")
         else:
-            logger.info(f"[Pre-Validation] ✗ Problem {problem_id}: Still exists (exit code {result.returncode})")
+            logger.info(f"[Pre-Validation] FAIL Problem {problem_id}: Still exists (exit code {result.returncode})")
             logger.debug(f"[Pre-Validation] Output: {result.stdout[:200]}")
             return (False, None)
 

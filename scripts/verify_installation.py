@@ -11,9 +11,9 @@ def check_import(module_name: str, package_name: str = None) -> Tuple[bool, str]
     """Check if a module can be imported."""
     try:
         __import__(module_name)
-        return True, f"✓ {package_name or module_name}"
+        return True, f"OK {package_name or module_name}"
     except ImportError as e:
-        return False, f"✗ {package_name or module_name}: {e}"
+        return False, f"FAIL {package_name or module_name}: {e}"
 
 def check_sentence_transformers() -> Tuple[bool, str]:
     """Check if sentence-transformers works correctly."""
@@ -21,9 +21,9 @@ def check_sentence_transformers() -> Tuple[bool, str]:
         from sentence_transformers import SentenceTransformer
         model = SentenceTransformer('all-MiniLM-L6-v2')
         embedding = model.encode("test")
-        return True, f"✓ sentence-transformers (embedding size: {len(embedding)})"
+        return True, f"OK sentence-transformers (embedding size: {len(embedding)})"
     except Exception as e:
-        return False, f"✗ sentence-transformers: {e}"
+        return False, f"FAIL sentence-transformers: {e}"
 
 def main():
     print("=" * 60)
@@ -89,7 +89,7 @@ def main():
 
     if critical_failed:
         print()
-        print("🚨 CRITICAL FAILURES:")
+        print("[CRITICAL] FAILURES:")
         for msg in critical_failed:
             print(f"  {msg}")
         print()
@@ -100,13 +100,13 @@ def main():
 
     if failed > 0:
         print()
-        print("⚠️  Some optional dependencies missing (non-critical)")
+        print("[WARN] Some optional dependencies missing (non-critical)")
         print("   System will work but some features may be unavailable")
         print()
         return 0
 
     print()
-    print("✅ All dependencies installed correctly!")
+    print("[OK] All dependencies installed correctly!")
     print()
     print("Ready to run:")
     print("  python3 scripts/run_eval.py --issue-ids-file data/trs/eval_issue_ids.json --ablation L1+L2+L3 --workers 4")

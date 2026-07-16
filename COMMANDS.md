@@ -106,8 +106,8 @@ Your current situation:
 bash scripts/check_outputs.sh
 
 # Shows:
-# ✓ Step 1-3 complete
-# ✗ L1/L2/L3 missing
+# OK Step 1-3 complete
+# FAIL L1/L2/L3 missing
 
 # Fix: Run Step 4
 python3 scripts/decompose_ci_failure.py \

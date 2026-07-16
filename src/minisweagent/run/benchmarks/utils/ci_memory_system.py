@@ -26,6 +26,20 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+try:
+  import numpy as np
+  _NUMPY_AVAILABLE = True
+except Exception:
+  np = None  # type: ignore
+  _NUMPY_AVAILABLE = False
+
+try:
+  from minisweagent.run.benchmarks.utils.memory_plugin import _EmbeddingProvider
+  _EMBEDDING_AVAILABLE = True
+except Exception:
+  _EmbeddingProvider = None  # type: ignore
+  _EMBEDDING_AVAILABLE = False
+
 # Import LLM analysis functions
 from minisweagent.run.benchmarks.utils.ci_memory_llm_analysis import (
   llm_analyze_l1_for_problem_1,
@@ -2412,9 +2426,208 @@ def _merge_problem_details(existing: Dict[str, Any], incoming: Dict[str, Any]) -
   return merged
 
 
+def _parse_json_array(raw: str) -> List[Dict[str, Any]]:
+  raw = (raw or "").strip()
+  if not raw:
+    return []
+  raw = re.sub(r'```(?:json)?\s*\n?(.*?)\n?```', r'\1', raw, flags=re.DOTALL).strip()
+  raw = re.sub(r',(\s*[}\]])', r'\1', raw)
+  match = re.search(r"\[.*\]", raw, re.DOTALL)
+  if not match:
+    return []
+  try:
+    parsed = json.loads(match.group())
+  except Exception:
+    return []
+  return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
+
+def _semantic_problem_signature(problem: Dict[str, Any]) -> str:
+  return " | ".join(
+    part for part in [
+      str(problem.get("verification_cmd") or problem.get("validation_cmd") or "").strip(),
+      str(problem.get("issue_type") or "").strip(),
+      str(problem.get("failure_type") or problem.get("error_type") or "").strip(),
+      " ".join(_problem_files(problem)),
+      _problem_text(problem),
+      str(problem.get("root_cause") or "").strip(),
+      str(problem.get("fix_strategy") or problem.get("how_fixed") or "").strip(),
+    ]
+    if part
+  )
+
+
+def _problem_group_similarity(left: Dict[str, Any], right: Dict[str, Any], left_embedding: Any, right_embedding: Any) -> float:
+  if _NUMPY_AVAILABLE and np is not None and left_embedding is not None and right_embedding is not None:
+    cosine = float(np.dot(left_embedding, right_embedding))
+  else:
+    cosine = 0.0
+
+  left_files = {path.lower() for path in _problem_files(left)}
+  right_files = {path.lower() for path in _problem_files(right)}
+  file_overlap = len(left_files & right_files) / len(left_files | right_files) if left_files and right_files else 0.0
+
+  left_cmd = _normalize_text_for_key(left.get("verification_cmd") or left.get("validation_cmd"))
+  right_cmd = _normalize_text_for_key(right.get("verification_cmd") or right.get("validation_cmd"))
+  cmd_match = 1.0 if left_cmd and left_cmd == right_cmd else 0.0
+
+  left_issue = _normalize_text_for_key(left.get("issue_type") or left.get("failure_type") or left.get("error_type"))
+  right_issue = _normalize_text_for_key(right.get("issue_type") or right.get("failure_type") or right.get("error_type"))
+  issue_match = 1.0 if left_issue and left_issue == right_issue else 0.0
+
+  return 0.55 * cosine + 0.25 * file_overlap + 0.10 * cmd_match + 0.10 * issue_match
+
+
+def _group_memory_problems_by_similarity(problems: List[Dict[str, Any]], threshold: float = 0.72) -> List[List[Dict[str, Any]]]:
+  if not problems:
+    return []
+  if len(problems) == 1:
+    return [problems]
+
+  embeddings: List[Any] = []
+  if _EMBEDDING_AVAILABLE and _NUMPY_AVAILABLE and _EmbeddingProvider is not None:
+    embedder = _EmbeddingProvider.get()
+    embeddings = [embedder.embed(_semantic_problem_signature(problem)) for problem in problems]
+  else:
+    embeddings = [None] * len(problems)
+
+  assigned = [False] * len(problems)
+  groups: List[List[Dict[str, Any]]] = []
+
+  for i, problem in enumerate(problems):
+    if assigned[i]:
+      continue
+    group = [problem]
+    assigned[i] = True
+    for j in range(i + 1, len(problems)):
+      if assigned[j]:
+        continue
+      similarity = _problem_group_similarity(problem, problems[j], embeddings[i], embeddings[j])
+      if similarity >= threshold:
+        group.append(problems[j])
+        assigned[j] = True
+    groups.append(group)
+
+  return groups
+
+
+def _llm_merge_memory_group(group: List[Dict[str, Any]], llm: Any) -> Optional[List[Dict[str, Any]]]:
+  if llm is None or len(group) <= 1:
+    return None
+
+  prompt_group = [
+    {
+      "index": index,
+      "source": problem.get("source", ""),
+      "validation_cmd": problem.get("verification_cmd") or problem.get("validation_cmd") or "",
+      "error_type": problem.get("error_type") or problem.get("failure_type") or "",
+      "issue_type": problem.get("issue_type") or "",
+      "files": _problem_files(problem),
+      "problem": _problem_text(problem),
+      "root_cause": problem.get("root_cause") or "",
+      "fix_strategy": problem.get("fix_strategy") or "",
+    }
+    for index, problem in enumerate(group, 1)
+  ]
+
+  prompt = f"""Decide whether these similar L1/L2/L3 memory problems should be merged.
+
+PROBLEMS:
+{json.dumps(prompt_group, indent=2)}
+
+Use cosine-similar problem meaning plus validation_cmd, issue_type, affected files,
+root cause, and fix strategy. Merge only when the problems describe the same
+repair target or can be safely combined into one organized guidance item.
+
+Return STRICT JSON:
+[
+  {{
+    "action": "MERGE|KEEP_SEPARATE|REMOVE_DUPLICATE",
+    "validation_cmd": "command",
+    "error_type": "type",
+    "issue_type": "type",
+    "files": ["paths"],
+    "problem_statement": "organized problem summary",
+    "root_cause": "organized root cause",
+    "fix_strategy": "organized fix guidance"
+  }}
+]
+"""
+  selected = _parse_json_array(_call_llm(llm, prompt))
+  if not selected:
+    return None
+
+  normalized: List[Dict[str, Any]] = []
+  for problem in selected:
+    if not any(problem.get(key) for key in ("problem_statement", "root_cause", "fix_strategy", "files")):
+      continue
+    normalized.append({
+      "source": "previous experience",
+      "problem_statement": str(problem.get("problem_statement") or problem.get("problem") or "").strip(),
+      "root_cause": str(problem.get("root_cause") or "").strip(),
+      "fix_strategy": str(problem.get("fix_strategy") or problem.get("how_fixed") or "").strip(),
+      "files": _as_file_entries(problem.get("files")),
+      "verification_cmd": str(problem.get("validation_cmd") or problem.get("verification_cmd") or "").strip(),
+      "error_type": str(problem.get("error_type") or problem.get("failure_type") or "").strip(),
+      "failure_type": str(problem.get("failure_type") or problem.get("error_type") or "").strip(),
+      "issue_type": str(problem.get("issue_type") or "").strip(),
+      "error_details": problem.get("error_details") if isinstance(problem.get("error_details"), list) else [],
+    })
+  return normalized or None
+
+
+def _fallback_merge_memory_group(group: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+  if len(group) <= 1:
+    return group
+
+  file_sets = [{path.lower() for path in _problem_files(problem)} for problem in group]
+  non_empty_file_sets = [files for files in file_sets if files]
+  has_file_overlap = bool(non_empty_file_sets and set.intersection(*non_empty_file_sets))
+  commands = {
+    _normalize_text_for_key(problem.get("verification_cmd") or problem.get("validation_cmd"))
+    for problem in group
+    if problem.get("verification_cmd") or problem.get("validation_cmd")
+  }
+  issue_types = {
+    _normalize_text_for_key(problem.get("issue_type") or problem.get("error_type") or problem.get("failure_type"))
+    for problem in group
+    if problem.get("issue_type") or problem.get("error_type") or problem.get("failure_type")
+  }
+  same_command_or_issue = (bool(commands) and len(commands) == 1) or (bool(issue_types) and len(issue_types) == 1)
+
+  if not (has_file_overlap and same_command_or_issue):
+    return group
+
+  merged = dict(group[0])
+  for incoming in group[1:]:
+    merged = _merge_problem_details(merged, incoming)
+  return [merged]
+
+
+def _semantic_merge_memory_problems(problems: List[Dict[str, Any]], llm: Any) -> List[Dict[str, Any]]:
+  groups = _group_memory_problems_by_similarity(problems)
+  merged: List[Dict[str, Any]] = []
+  for group in groups:
+    if len(group) == 1:
+      merged.append(group[0])
+      continue
+    decided = _llm_merge_memory_group(group, llm)
+    if decided is None:
+      decided = _fallback_merge_memory_group(group)
+    merged.extend(decided)
+  logger.info(
+    "[Final Memory Merge] %d previous-experience problems -> %d organized problems across %d similarity groups",
+    len(problems),
+    len(merged),
+    len(groups),
+  )
+  return merged
+
+
 def _finalize_serial_problems(
   ci_problems: List[Dict[str, Any]],
   memory_problems: List[Dict[str, Any]],
+  llm: Any = None,
 ) -> List[Dict[str, Any]]:
   """
   Build the final serial problem list for the agent.
@@ -2430,18 +2643,18 @@ def _finalize_serial_problems(
   for problem in memory_problems:
     ordered_inputs.append(("previous experience", problem))
 
-  unique: List[Dict[str, Any]] = []
-  key_to_index: Dict[tuple, int] = {}
+  ci_failure_items: List[Dict[str, Any]] = []
+  memory_items: List[Dict[str, Any]] = []
 
   for source, problem in ordered_inputs:
-    normalized = _normalize_problem_for_agent(problem, len(unique) + 1, source)
-    key = _final_problem_key(normalized)
-    if key in key_to_index:
-      index = key_to_index[key]
-      unique[index] = _merge_problem_details(unique[index], normalized)
-      continue
-    key_to_index[key] = len(unique)
-    unique.append(normalized)
+    normalized = _normalize_problem_for_agent(problem, 0, source)
+    if source == "ci failure":
+      ci_failure_items.append(normalized)
+    else:
+      memory_items.append(normalized)
+
+  merged_memory_items = _semantic_merge_memory_problems(memory_items, llm)
+  unique = ci_failure_items + merged_memory_items
 
   for index, problem in enumerate(unique, 1):
     problem["problem_id"] = index
@@ -2545,7 +2758,7 @@ def _run_two_llm_gate(
     else:
       logger.info("[L3 Pipeline] No L3 memories or LLM available")
 
-    separate_problems = _finalize_serial_problems(primary_problems, consecutive_problems)
+    separate_problems = _finalize_serial_problems(primary_problems, consecutive_problems, llm)
 
     ci_count = sum(1 for problem in separate_problems if problem.get("source") == "ci failure")
     experience_count = len(separate_problems) - ci_count

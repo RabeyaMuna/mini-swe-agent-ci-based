@@ -311,7 +311,7 @@ def verify_patch_with_precheck(
     llm_result = llm_verify_patch(problem, patch, llm)
 
     if not llm_result.get("correct", False):
-        logger.warning(f"❌ [LLM] REJECTED: {llm_result.get('reason')}")
+        logger.warning(f"[FAIL] [LLM] REJECTED: {llm_result.get('reason')}")
 
         return {
             "verified": False,
@@ -322,7 +322,7 @@ def verify_patch_with_precheck(
             "should_retry": True  # Agent should try again
         }
 
-    logger.info(f"✅ [LLM] APPROVED: {llm_result.get('reason', '')[:100]}")
+    logger.info(f"[OK] [LLM] APPROVED: {llm_result.get('reason', '')[:100]}")
 
     # ── Stage 2: Actual Validation ──
     validation_cmd = problem.get("validation_cmd")

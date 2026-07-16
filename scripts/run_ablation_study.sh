@@ -51,7 +51,7 @@ Running: $name
             --no-save-memory
     fi
 
-    echo "✅ $name complete: $output_dir"
+    echo "[OK] $name complete: $output_dir"
 }
 
 # Run all ablations

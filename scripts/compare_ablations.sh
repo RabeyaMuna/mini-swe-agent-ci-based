@@ -61,10 +61,10 @@ if [ -d "$RESULTS_ROOT/baseline" ]; then
         echo "Issue: $issue_sha"
 
         # Check if exists in each ablation
-        [ -d "$RESULTS_ROOT/baseline/$issue_sha" ] && echo "  ✅ Baseline" || echo "  ❌ Baseline"
-        [ -d "$RESULTS_ROOT/L1/$issue_sha" ] && echo "  ✅ L1" || echo "  ❌ L1"
-        [ -d "$RESULTS_ROOT/L1_L2/$issue_sha" ] && echo "  ✅ L1+L2" || echo "  ❌ L1+L2"
-        [ -d "$RESULTS_ROOT/L1_L2_L3/$issue_sha" ] && echo "  ✅ L1+L2+L3" || echo "  ❌ L1+L2+L3"
+        [ -d "$RESULTS_ROOT/baseline/$issue_sha" ] && echo "  [OK] Baseline" || echo "  [FAIL] Baseline"
+        [ -d "$RESULTS_ROOT/L1/$issue_sha" ] && echo "  [OK] L1" || echo "  [FAIL] L1"
+        [ -d "$RESULTS_ROOT/L1_L2/$issue_sha" ] && echo "  [OK] L1+L2" || echo "  [FAIL] L1+L2"
+        [ -d "$RESULTS_ROOT/L1_L2_L3/$issue_sha" ] && echo "  [OK] L1+L2+L3" || echo "  [FAIL] L1+L2+L3"
 
         echo ""
     done

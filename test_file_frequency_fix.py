@@ -95,7 +95,7 @@ def test_file_frequency_analysis():
     assert "framework/py/flwr/common/exit/exit_code_test.py" in result['high_frequency_files']
     assert result['high_frequency_files']["framework/py/flwr/common/exit/exit_code_test.py"]["frequency"] == 3
 
-    print("\n✓ TEST 1 PASSED: exit_code_test.py correctly identified as high-frequency (3 occurrences)")
+    print("\nOK TEST 1 PASSED: exit_code_test.py correctly identified as high-frequency (3 occurrences)")
     return result
 
 def test_format_for_prompt(file_analysis):
@@ -115,7 +115,7 @@ def test_format_for_prompt(file_analysis):
     assert "HIGH PRIORITY" in formatted
     assert "3 problems" in formatted
 
-    print("\n✓ TEST 2 PASSED: Prompt formatting includes high-frequency file info")
+    print("\nOK TEST 2 PASSED: Prompt formatting includes high-frequency file info")
 
 def test_validation_safeguard():
     """Test that validation safeguard adds missing high-frequency files."""
@@ -181,7 +181,7 @@ def test_validation_safeguard():
     assert "framework/py/flwr/common/exit/exit_code_test.py" in all_files
     assert len(validated) == len(selected) + 1  # One problem added
 
-    print("\n✓ TEST 3 PASSED: High-frequency file (3+ occurrences) was force-added by safeguard")
+    print("\nOK TEST 3 PASSED: High-frequency file (3+ occurrences) was force-added by safeguard")
 
 def test_no_false_positives():
     """Test that validation doesn't add files when threshold not met."""
@@ -233,7 +233,7 @@ def test_no_false_positives():
     # Should be unchanged
     assert len(validated) == len(selected)
 
-    print("\n✓ TEST 4 PASSED: No false positives (file with freq=2 not added when threshold=3)")
+    print("\nOK TEST 4 PASSED: No false positives (file with freq=2 not added when threshold=3)")
 
 def main():
     """Run all tests."""
@@ -251,25 +251,25 @@ def main():
         test_no_false_positives()
 
         print("\n" + "="*80)
-        print("ALL TESTS PASSED ✓")
+        print("ALL TESTS PASSED OK")
         print("="*80)
         print("\nThe file frequency fix is working correctly!")
         print("\nKey features verified:")
-        print("  ✓ High-frequency files (3+ occurrences) are identified")
-        print("  ✓ File frequency info is formatted for LLM prompt")
-        print("  ✓ Validation safeguard adds missing high-frequency files")
-        print("  ✓ No false positives (respects frequency threshold)")
+        print("  OK High-frequency files (3+ occurrences) are identified")
+        print("  OK File frequency info is formatted for LLM prompt")
+        print("  OK Validation safeguard adds missing high-frequency files")
+        print("  OK No false positives (respects frequency threshold)")
         print()
 
         return 0
 
     except AssertionError as e:
-        print(f"\n✗ TEST FAILED: {e}")
+        print(f"\nFAIL TEST FAILED: {e}")
         import traceback
         traceback.print_exc()
         return 1
     except Exception as e:
-        print(f"\n✗ ERROR: {e}")
+        print(f"\nFAIL ERROR: {e}")
         import traceback
         traceback.print_exc()
         return 1

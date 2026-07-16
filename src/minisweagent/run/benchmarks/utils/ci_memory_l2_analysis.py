@@ -442,8 +442,8 @@ def _is_valid_validation_problem(problem: Dict[str, Any]) -> bool:
 
     IMPORTANT: Merge conflicts are excluded UNLESS the file changes are related
     to solving the validation failure. For example:
-    - ❌ Exclude: "merge conflict markers in file.py" (pure git artifact)
-    - ✓ Include: "type error in file.py" even if found during merge conflict resolution
+    - [FAIL] Exclude: "merge conflict markers in file.py" (pure git artifact)
+    - OK Include: "type error in file.py" even if found during merge conflict resolution
 
     The deep analysis and classify prompts are already instructed to focus on
     validation-related changes, so this filter only removes PURE git workflow issues.
@@ -838,7 +838,7 @@ def _validate_file_frequency_coverage(
     else:
         logger.info(
             f"[L2 File Frequency Safeguard] All high-frequency files "
-            f"(>={min_frequency_threshold} occurrences) are covered ✓"
+            f"(>={min_frequency_threshold} occurrences) are covered OK"
         )
 
     return selected + additions
@@ -1193,41 +1193,274 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
 def _merge_and_deduplicate(
     common_problems: List[Dict[str, Any]],
     consecutive_problems: List[Dict[str, Any]],
+    llm: Any = None,
 ) -> List[Dict[str, Any]]:
     """
-    Merge common and consecutive problems, removing duplicates.
+    Merge common and consecutive problems using semantic groups.
 
-    If a problem appears in both lists (same root_cause + how_fixed), keep ONE.
+    The old exact-key rule (root_cause + how_fixed) was too brittle. This path
+    first builds small similarity groups from structured fields and embeddings,
+    then asks the LLM to decide whether each group should be merged, kept
+    separate, or reduced to a representative. If the LLM is unavailable or
+    returns invalid output, a conservative fallback only merges near-duplicates.
     """
-    def problem_key(p):
-        """Create a unique key for deduplication."""
-        root = _clean_text(p.get("root_cause", ""), 200).lower()
-        fix = _clean_text(p.get("how_fixed", ""), 200).lower()
-        return f"{root}|{fix}"
+    problems = [
+        {**problem, "_dedupe_source": "common"}
+        for problem in common_problems
+        if isinstance(problem, dict)
+    ] + [
+        {**problem, "_dedupe_source": "consecutive"}
+        for problem in consecutive_problems
+        if isinstance(problem, dict)
+    ]
 
-    seen = set()
-    merged = []
+    if not problems:
+        return []
 
-    # Add common problems first (higher priority)
-    for p in common_problems:
-        key = problem_key(p)
-        if key not in seen:
-            seen.add(key)
-            merged.append(p)
+    groups = _group_similar_selected_problems(problems)
+    merged: List[Dict[str, Any]] = []
 
-    # Add consecutive problems (skip if already in common)
-    for p in consecutive_problems:
-        key = problem_key(p)
-        if key not in seen:
-            seen.add(key)
-            merged.append(p)
+    for group in groups:
+        if len(group) == 1:
+            merged.append(_strip_dedupe_metadata(group[0]))
+            continue
+
+        decided = _llm_decide_problem_group(group, llm)
+        if decided is None:
+            decided = _fallback_merge_problem_group(group)
+
+        merged.extend(_strip_dedupe_metadata(problem) for problem in decided)
 
     logger.info(
         f"[L2 Merge] {len(common_problems)} common + {len(consecutive_problems)} consecutive "
-        f"→ {len(merged)} distinct problems (removed {len(common_problems) + len(consecutive_problems) - len(merged)} duplicates)"
+        f"→ {len(merged)} distinct problems across {len(groups)} semantic groups "
+        f"(removed {len(problems) - len(merged)} duplicates/merged items)"
     )
 
     return merged
+
+
+def _dedupe_signature(problem: Dict[str, Any]) -> str:
+    files = " ".join(str(path) for path in _as_list(problem.get("files")) if path)
+    return " | ".join(
+        text for text in [
+            _clean_text(problem.get("validation_cmd"), 300),
+            _clean_text(problem.get("issue_type"), 200),
+            _clean_text(problem.get("failure_type"), 200),
+            _clean_text(files, 500),
+            _clean_text(problem.get("problem") or problem.get("description"), 700),
+            _clean_text(problem.get("root_cause"), 700),
+            _clean_text(problem.get("how_fixed") or problem.get("fix"), 700),
+        ]
+        if text
+    )
+
+
+def _selected_problem_similarity(
+    left: Dict[str, Any],
+    right: Dict[str, Any],
+    left_embedding: Any,
+    right_embedding: Any,
+) -> float:
+    if np is not None and left_embedding is not None and right_embedding is not None:
+        semantic = float(np.dot(left_embedding, right_embedding))
+    else:
+        semantic = 0.0
+
+    left_files = {str(path).lower() for path in _as_list(left.get("files")) if path}
+    right_files = {str(path).lower() for path in _as_list(right.get("files")) if path}
+    if left_files and right_files:
+        file_overlap = len(left_files & right_files) / len(left_files | right_files)
+    else:
+        file_overlap = 0.0
+
+    left_cmd = _clean_text(left.get("validation_cmd")).lower()
+    right_cmd = _clean_text(right.get("validation_cmd")).lower()
+    if left_cmd and right_cmd:
+        cmd_match = 1.0 if left_cmd == right_cmd else 0.0
+    else:
+        cmd_match = 0.0
+
+    left_issue = _clean_text(left.get("issue_type")).lower()
+    right_issue = _clean_text(right.get("issue_type")).lower()
+    if left_issue and right_issue:
+        issue_match = 1.0 if left_issue == right_issue else 0.0
+    else:
+        issue_match = 0.0
+
+    left_failure = _clean_text(left.get("failure_type")).lower()
+    right_failure = _clean_text(right.get("failure_type")).lower()
+    failure_match = 1.0 if left_failure and left_failure == right_failure else 0.0
+
+    return (
+        0.45 * semantic
+        + 0.25 * file_overlap
+        + 0.15 * issue_match
+        + 0.10 * cmd_match
+        + 0.05 * failure_match
+    )
+
+
+def _group_similar_selected_problems(
+    problems: List[Dict[str, Any]],
+    similarity_threshold: float = 0.72,
+) -> List[List[Dict[str, Any]]]:
+    """Build small semantic groups for LLM merge decisions."""
+    if len(problems) <= 1:
+        return [problems] if problems else []
+
+    embeddings: List[Any] = []
+    if _EMBEDDING_AVAILABLE and _NUMPY_AVAILABLE and _EmbeddingProvider is not None:
+        embedder = _EmbeddingProvider.get()
+        for problem in problems:
+            embeddings.append(embedder.embed(_dedupe_signature(problem)))
+    else:
+        embeddings = [None] * len(problems)
+
+    assigned = [False] * len(problems)
+    groups: List[List[Dict[str, Any]]] = []
+
+    for i, problem in enumerate(problems):
+        if assigned[i]:
+            continue
+        group = [problem]
+        assigned[i] = True
+
+        for j in range(i + 1, len(problems)):
+            if assigned[j]:
+                continue
+            similarity = _selected_problem_similarity(
+                problem,
+                problems[j],
+                embeddings[i],
+                embeddings[j],
+            )
+            if similarity >= similarity_threshold:
+                group.append(problems[j])
+                assigned[j] = True
+
+        groups.append(group)
+
+    return groups
+
+
+def _llm_decide_problem_group(group: List[Dict[str, Any]], llm: Any) -> Optional[List[Dict[str, Any]]]:
+    if llm is None or len(group) <= 1:
+        return None
+
+    compact_group = []
+    for index, problem in enumerate(group, 1):
+        compact_group.append({
+            "index": index,
+            "source": problem.get("_dedupe_source", ""),
+            "validation_cmd": problem.get("validation_cmd", ""),
+            "failure_type": problem.get("failure_type", ""),
+            "issue_type": problem.get("issue_type", ""),
+            "files": _as_list(problem.get("files"))[:15],
+            "problem": _clean_text(problem.get("problem") or problem.get("description"), 500),
+            "root_cause": _clean_text(problem.get("root_cause"), 500),
+            "how_fixed": _clean_text(problem.get("how_fixed") or problem.get("fix"), 500),
+            "why_fix_works": _clean_text(problem.get("why_fix_works"), 300),
+        })
+
+    prompt = f"""Decide whether these similar CI repair problems should be merged.
+
+PROBLEMS:
+{json.dumps(compact_group, indent=2)}
+
+TASK:
+Return STRICT JSON with one action:
+- MERGE: same underlying validation problem/fix intent. Return one merged problem.
+- KEEP_SEPARATE: related but distinct problems. Return the original problems that should remain.
+- REMOVE_DUPLICATE: one or more entries duplicate another. Return the best representative problem(s).
+
+Use validation_cmd, issue_type, affected files, root_cause, fix strategy, and semantic problem meaning.
+Do not merge problems only because root_cause or how_fixed are generic.
+
+OUTPUT JSON:
+[
+  {{
+    "action": "MERGE|KEEP_SEPARATE|REMOVE_DUPLICATE",
+    "validation_cmd": "exact command",
+    "failure_type": "category",
+    "issue_type": "type",
+    "files": ["file paths"],
+    "problem": "description",
+    "root_cause": "why",
+    "how_fixed": "what to change",
+    "why_fix_works": "why it works"
+  }}
+]
+"""
+    selected = _parse_json_array(_call_llm(llm, prompt))
+    if not selected:
+        return None
+
+    normalized = []
+    for problem in selected:
+        if not any(problem.get(key) for key in ("problem", "root_cause", "how_fixed", "files")):
+            continue
+        normalized.append({
+            "validation_cmd": problem.get("validation_cmd", ""),
+            "failure_type": problem.get("failure_type", ""),
+            "issue_type": problem.get("issue_type", ""),
+            "files": _dedupe_keep_order(_as_list(problem.get("files")), 20),
+            "problem": problem.get("problem", ""),
+            "root_cause": problem.get("root_cause", ""),
+            "how_fixed": problem.get("how_fixed") or problem.get("fix", ""),
+            "why_fix_works": problem.get("why_fix_works", ""),
+        })
+
+    return normalized or None
+
+
+def _fallback_merge_problem_group(group: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Conservative fallback when LLM cannot decide.
+
+    It merges only when every grouped problem shares validation command or issue
+    type and has overlapping files. Otherwise it keeps the group separate.
+    """
+    if len(group) <= 1:
+        return group
+
+    commands = {_clean_text(problem.get("validation_cmd")).lower() for problem in group if problem.get("validation_cmd")}
+    issue_types = {_clean_text(problem.get("issue_type")).lower() for problem in group if problem.get("issue_type")}
+    file_sets = [
+        {str(path).lower() for path in _as_list(problem.get("files")) if path}
+        for problem in group
+    ]
+    non_empty_file_sets = [files for files in file_sets if files]
+    has_file_overlap = bool(
+        non_empty_file_sets
+        and set.intersection(*non_empty_file_sets)
+    )
+    same_command = bool(commands) and len(commands) == 1
+    same_issue_type = bool(issue_types) and len(issue_types) == 1
+    same_cmd_or_issue = same_command or same_issue_type
+
+    if not (has_file_overlap and same_cmd_or_issue):
+        return group
+
+    representative = group[0]
+    return [{
+        **representative,
+        "files": _dedupe_keep_order(
+            file_path
+            for problem in group
+            for file_path in _as_list(problem.get("files"))
+        ),
+        "problem": "\n".join(_dedupe_keep_order(problem.get("problem") or problem.get("description") for problem in group)),
+        "root_cause": "\n".join(_dedupe_keep_order(problem.get("root_cause") for problem in group)),
+        "how_fixed": "\n".join(_dedupe_keep_order(problem.get("how_fixed") or problem.get("fix") for problem in group)),
+        "why_fix_works": "\n".join(_dedupe_keep_order(problem.get("why_fix_works") for problem in group)),
+    }]
+
+
+def _strip_dedupe_metadata(problem: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = dict(problem)
+    cleaned.pop("_dedupe_source", None)
+    return cleaned
 
 
 def _normalize_selected_problem(problem: Dict[str, Any], index: int) -> Dict[str, Any]:
@@ -1491,7 +1724,7 @@ def staged_l2_analysis(
     consecutive_problems = _llm_select_consecutive_problems(problem_1, consecutive_candidates, llm)
 
     # Merge and deduplicate
-    merged = _merge_and_deduplicate(common_problems, consecutive_problems)
+    merged = _merge_and_deduplicate(common_problems, consecutive_problems, llm)
 
     # Validate file frequency coverage (safeguard)
     # This ensures high-frequency files (2+ occurrences) are not missed

@@ -79,6 +79,11 @@ from minisweagent.models import get_model
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.benchmarks.utils.common import ProgressTrackingAgent
 from minisweagent.run.benchmarks.utils.ci_context import build_ci_context, save_memory_after_patch
+from minisweagent.run.benchmarks.utils.patch_merger import (
+    merge_duplicate_patches,
+    detect_duplicate_patches,
+    validate_patch,
+)
 # Memory-guided repair is now integrated into ci_memory_system.py
 # No need for separate import
 from minisweagent.utils.log import add_file_handler, logger
@@ -573,7 +578,38 @@ def update_preds_file(
     sha_fail: str,
     diff: str,
 ) -> None:
-    """Write / update the prediction for one instance (thread-safe)."""
+    """
+    Write / update the prediction for one instance (thread-safe).
+
+    Automatically merges duplicate file patches in the diff to prevent
+    merge conflicts during application.
+    """
+    # Detect and merge duplicate patches
+    if diff:
+        duplicates = detect_duplicate_patches(diff)
+        duplicate_files = [f for f, count in duplicates.items() if count > 1]
+
+        if duplicate_files:
+            logger.warning(
+                "[CIBench] Instance %s has duplicate patches for %d file(s): %s",
+                instance_id,
+                len(duplicate_files),
+                ", ".join(duplicate_files)
+            )
+            logger.info("[CIBench] Merging duplicate patches for instance %s", instance_id)
+
+            # Merge duplicates
+            try:
+                diff = merge_duplicate_patches(diff)
+                logger.info("[CIBench] Successfully merged duplicate patches for instance %s", instance_id)
+            except Exception as e:
+                logger.error(
+                    "[CIBench] Failed to merge duplicate patches for instance %s: %s",
+                    instance_id,
+                    str(e)
+                )
+                # Continue with original diff (will likely fail during application)
+
     with _OUTPUT_FILE_LOCK:
         data = _read_preds(output_path)
         data[instance_id] = {
@@ -689,7 +725,7 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
                     timeout=180
                 )
                 if result.returncode == 0:
-                    logger.info(f"[CIBench] ✓ Cache install command succeeded")
+                    logger.info(f"[CIBench] OK Cache install command succeeded")
                     # Continue to next command (don't return - install all)
                 else:
                     logger.warning(f"[CIBench] Cache command failed (code {result.returncode}), trying next...")
@@ -697,7 +733,7 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
                 logger.warning(f"[CIBench] Cache command error: {e}, trying next...")
 
         # If we executed cache commands, return (don't try fallback)
-        logger.info("[CIBench] ✓ Executed all cache install commands")
+        logger.info("[CIBench] OK Executed all cache install commands")
         return
 
     # ── Strategy 2: Smart project detection (FALLBACK) ───────────────────────
@@ -743,7 +779,7 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
                 timeout=timeout
             )
             if result.returncode == 0:
-                logger.info(f"[CIBench] ✓ {description} succeeded")
+                logger.info(f"[CIBench] OK {description} succeeded")
                 return True
             else:
                 logger.warning(f"[CIBench] {description} failed (return code {result.returncode})")
@@ -826,7 +862,7 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
                     timeout=180
                 )
                 if result.returncode == 0:
-                    logger.info(f"[CIBench] ✓ {pkg_name} installed with poetry")
+                    logger.info(f"[CIBench] OK {pkg_name} installed with poetry")
                     installed_count += 1
                     continue
                 else:
@@ -842,13 +878,13 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
                 timeout=180
             )
             if result.returncode == 0:
-                logger.info(f"[CIBench] ✓ {pkg_name} installed")
+                logger.info(f"[CIBench] OK {pkg_name} installed")
                 installed_count += 1
             else:
                 logger.warning(f"[CIBench] Failed to install {pkg_name} (continuing...)")
 
         if installed_count > 0:
-            logger.info(f"[CIBench] ✓ Installed {installed_count}/{len(packages_found)} monorepo packages")
+            logger.info(f"[CIBench] OK Installed {installed_count}/{len(packages_found)} monorepo packages")
             return
 
     # Node.js projects
@@ -887,7 +923,7 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
         if _try_command(['./gradlew', 'dependencies'], 'gradle dependencies', timeout=300):
             return
 
-    logger.info("[CIBench] ⚠ Could not install dependencies - agent will work without them")
+    logger.info("[CIBench] [WARN] Could not install dependencies - agent will work without them")
 
 def setup_local_environment(
     config: Dict[str, Any],
@@ -1252,7 +1288,7 @@ This problem can be solved completely by running these commands:
 
 {repair_plan}
 
-⚠️  CRITICAL INSTRUCTIONS:
+[WARN] CRITICAL INSTRUCTIONS:
 1. Execute the Install command EXACTLY as shown above
 2. Execute the Run/Fix command EXACTLY as shown above
 3. DO NOT manually edit any files - the automated tool will fix them
@@ -1297,6 +1333,40 @@ def _combine_partial_fixes(partial_fixes: List[Dict[str, Any]]) -> str:
 
     # Join with double newline to separate patches cleanly
     return "\n\n".join(unified)
+
+
+def _collect_final_workspace_diff(testbed_path: Path) -> str:
+    """
+    Return one final diff from the checkout after all sequential repair steps.
+
+    Partial per-problem submissions are not composable when multiple problems
+    touch the same file. The checkout is the source of truth because each agent
+    run mutates the same working tree.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--binary", "--no-ext-diff"],
+            cwd=testbed_path,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as exc:
+        logger.warning("[CIBench] Failed to collect final workspace diff: %s", exc)
+        return ""
+
+    if result.returncode != 0:
+        logger.warning(
+            "[CIBench] git diff failed while collecting final workspace diff: %s",
+            result.stderr or result.stdout,
+        )
+        return ""
+
+    diff = result.stdout or ""
+    parts = diff.split("\n")
+    while parts and parts[-1] == "":
+        parts.pop()
+    return ("\n".join(parts) + "\n") if parts else ""
 
 
 def _analyze_and_group_problems(problems: List[Dict[str, Any]], context_llm: Any) -> List[Dict[str, Any]]:
@@ -1369,7 +1439,7 @@ Merge if:
 - Related files (same file or related files)
 - Can be fixed with ONE unified approach
 
-⚠️  CRITICAL: Do NOT merge if:
+[WARN] CRITICAL: Do NOT merge if:
 - Different root causes
 - Unrelated files
 - Require different fix approaches
@@ -1392,10 +1462,10 @@ OUTPUT (JSON only):
         if json_match:
             analysis = json.loads(json_match.group(0))
             if analysis.get('can_merge'):
-                logger.info(f"[CIBench] ✓ Merging {len(group_problems)} problems: {analysis.get('reason')}")
+                logger.info(f"[CIBench] OK Merging {len(group_problems)} problems: {analysis.get('reason')}")
                 return [_merge_problems(group_problems)]
             else:
-                logger.info(f"[CIBench] ✗ Keeping separate: {analysis.get('reason')}")
+                logger.info(f"[CIBench] FAIL Keeping separate: {analysis.get('reason')}")
                 return group_problems
     except Exception as e:
         logger.warning(f"[CIBench] LLM merge analysis failed: {e}")
@@ -1570,13 +1640,13 @@ def _run_sequential_repair(
             # CRITICAL: Detect immediate exit (agent state corruption)
             # ═══════════════════════════════════════════════════════════════
             if elapsed < 1.0:
-                logger.error(f"[CIBench] ⚠️  Problem {i} completed in {elapsed:.3f}s - SUSPICIOUS IMMEDIATE EXIT!")
+                logger.error(f"[CIBench] [WARN] Problem {i} completed in {elapsed:.3f}s - SUSPICIOUS IMMEDIATE EXIT!")
                 logger.error(f"[CIBench]    This indicates agent state corruption or configuration issue")
                 logger.error(f"[CIBench]    Exit status: {info.get('exit_status')}")
                 logger.error(f"[CIBench]    Submission length: {len(info.get('submission', ''))}")
                 logger.error(f"[CIBench]    Agent start_time: {getattr(agent, '_start_time', 'unknown')}")
                 logger.error(f"[CIBench]    Agent timeout: {getattr(agent.config, 'wall_time_limit_seconds', 'unknown')}")
-                logger.error(f"[CIBench] ⚠️  STOPPING sequential repair to prevent cascade failures")
+                logger.error(f"[CIBench] [WARN] STOPPING sequential repair to prevent cascade failures")
                 # Break the loop - agent is broken, don't try more problems
                 break
 
@@ -1595,8 +1665,8 @@ def _run_sequential_repair(
                 # If we've had multiple consecutive no-patch failures, stop
                 recent_failures = sum(1 for f in partial_fixes[-3:] if f.get('patch', '').strip() == '')
                 if recent_failures >= 3:
-                    logger.error(f"[CIBench] ⚠️  3+ consecutive no-patch failures - agent may be broken")
-                    logger.error(f"[CIBench] ⚠️  STOPPING to prevent wasted time")
+                    logger.error(f"[CIBench] [WARN] 3+ consecutive no-patch failures - agent may be broken")
+                    logger.error(f"[CIBench] [WARN] STOPPING to prevent wasted time")
                     break
 
                 # Don't break - continue to next problem
@@ -1626,8 +1696,41 @@ def _run_sequential_repair(
                 logger.info("[CIBench] Waiting 5 seconds before next problem...")
                 time.sleep(5)
 
-    # Combine all successful partial fixes
-    unified_diff = _combine_partial_fixes(partial_fixes)
+    # The working tree is the source of truth. Concatenating per-problem
+    # submissions can create duplicate diffs for the same file.
+    unified_diff = _collect_final_workspace_diff(testbed_path)
+    if unified_diff:
+        logger.info(
+            "[CIBench] Collected final workspace diff after sequential repair (%d chars)",
+            len(unified_diff),
+        )
+    elif partial_fixes:
+        logger.warning(
+            "[CIBench] Final workspace diff is empty despite %d submitted partial patch(es); "
+            "falling back to concatenated partial diffs",
+            len(partial_fixes),
+        )
+        unified_diff = _combine_partial_fixes(partial_fixes)
+
+        # CRITICAL: Merge duplicate file patches to avoid conflicts
+        from minisweagent.run.benchmarks.utils.patch_merger import (
+            detect_duplicate_patches,
+            merge_duplicate_patches,
+        )
+        duplicates = detect_duplicate_patches(unified_diff)
+        if duplicates:
+            logger.warning(
+                "[CIBench] Detected duplicate patches for %d file(s): %s",
+                len(duplicates),
+                list(duplicates.keys())
+            )
+            logger.info("[CIBench] Merging duplicate patches...")
+            try:
+                unified_diff = merge_duplicate_patches(unified_diff, repo_path=testbed_path)
+                logger.info("[CIBench] Successfully merged duplicate patches into unified diff")
+            except Exception as e:
+                logger.error(f"[CIBench] Failed to merge patches: {e}")
+                # Keep original even if merge fails
 
     logger.info("[CIBench] Sequential repair complete:")
     logger.info(f"[CIBench]   Total problems: {total_problems}")
@@ -1790,9 +1893,15 @@ def process_instance(
             problems = _analyze_and_group_problems(problems, context_llm)
 
         # ══════════════════════════════════════════════════════════════════
-
+        # SEQUENTIAL REPAIR: Fix problems one-by-one, collect ONE final diff
+        # ══════════════════════════════════════════════════════════════════
         if problems and len(problems) > 1:
-            # SEQUENTIAL REPAIR MODE: Fix problems one at a time
+            # SEQUENTIAL REPAIR MODE: Fix problems one at a time in same workspace
+            # Agent fixes Problem 1 → modifies files
+            # Agent fixes Problem 2 → modifies more files
+            # ...
+            # Agent fixes Problem 8 → modifies more files
+            # THEN: Collect ONE unified diff from workspace with ALL changes
             logger.info(f"[CIBench] Sequential repair mode: {len(problems)} problems to fix")
 
             info, diff = _run_sequential_repair(
@@ -2099,6 +2208,9 @@ def _extract_diff(submission: str) -> str:
     "corrupt patch" (hunk header claims N lines but body only has N-1).
     Instead we lstrip leading whitespace and remove only truly empty trailing
     lines so that blank context lines like " " are preserved.
+
+    Also detects duplicate file patches (multiple diffs for the same file)
+    and logs a warning - these will be merged later in update_preds_file().
     """
     sentinel = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     if sentinel in submission:
@@ -2109,7 +2221,21 @@ def _extract_diff(submission: str) -> str:
     parts = diff.split("\n")
     while parts and parts[-1] == "":
         parts.pop()
-    return ("\n".join(parts) + "\n") if parts else ""
+
+    diff = ("\n".join(parts) + "\n") if parts else ""
+
+    # Detect duplicate patches (will be merged in update_preds_file)
+    if diff:
+        duplicates = detect_duplicate_patches(diff)
+        duplicate_files = [f for f, count in duplicates.items() if count > 1]
+        if duplicate_files:
+            logger.debug(
+                "[CIBench] Detected %d file(s) with duplicate patches: %s (will be merged)",
+                len(duplicate_files),
+                ", ".join(duplicate_files[:3]) + ("..." if len(duplicate_files) > 3 else "")
+            )
+
+    return diff
 
 
 # ─────────────────────────────────────────────────────────────────────────────

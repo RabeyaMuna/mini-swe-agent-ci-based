@@ -564,9 +564,9 @@ def sequential_repair(instance_id: str, problems: List[Dict]) -> List[Dict]:
                 'problem_id': problem['id'],
                 'patch': patch
             })
-            print(f"  ✓ Patch generated")
+            print(f"  OK Patch generated")
         else:
-            print(f"  ⚠ No patch generated (placeholder)")
+            print(f"  [WARN] No patch generated (placeholder)")
 
     print(f"\nTotal patches: {len(patches)}")
     return patches
@@ -671,7 +671,7 @@ def main():
     with open(result_file, 'w') as f:
         json.dump(result, f, indent=2)
 
-    print(f"✓ Saved result to: {result_file}")
+    print(f"OK Saved result to: {result_file}")
     print(f"\n{'='*80}")
     print("COMPLETE")
     print(f"{'='*80}")

@@ -22,10 +22,10 @@ ERRORS=0
 # Function to check command
 check_command() {
     if command -v $1 &> /dev/null; then
-        echo -e "${GREEN}✓${NC} $1 is installed"
+        echo -e "${GREEN}OK${NC} $1 is installed"
         return 0
     else
-        echo -e "${RED}✗${NC} $1 is NOT installed"
+        echo -e "${RED}FAIL${NC} $1 is NOT installed"
         ((ERRORS++))
         return 1
     fi
@@ -34,10 +34,10 @@ check_command() {
 # Function to check Python package
 check_python_package() {
     if python3 -c "import $1" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} Python package '$1' is installed"
+        echo -e "${GREEN}OK${NC} Python package '$1' is installed"
         return 0
     else
-        echo -e "${RED}✗${NC} Python package '$1' is NOT installed"
+        echo -e "${RED}FAIL${NC} Python package '$1' is NOT installed"
         ((ERRORS++))
         return 1
     fi
@@ -46,11 +46,11 @@ check_python_package() {
 # Function to check environment variable
 check_env_var() {
     if [ -z "${!1}" ]; then
-        echo -e "${YELLOW}⚠${NC} Environment variable $1 is NOT set"
+        echo -e "${YELLOW}[WARN]${NC} Environment variable $1 is NOT set"
         ((WARNINGS++))
         return 1
     else
-        echo -e "${GREEN}✓${NC} Environment variable $1 is set"
+        echo -e "${GREEN}OK${NC} Environment variable $1 is set"
         return 0
     fi
 }
@@ -58,10 +58,10 @@ check_env_var() {
 # Function to check file exists
 check_file() {
     if [ -f "$1" ]; then
-        echo -e "${GREEN}✓${NC} File exists: $1"
+        echo -e "${GREEN}OK${NC} File exists: $1"
         return 0
     else
-        echo -e "${YELLOW}⚠${NC} File not found: $1"
+        echo -e "${YELLOW}[WARN]${NC} File not found: $1"
         ((WARNINGS++))
         return 1
     fi
@@ -70,10 +70,10 @@ check_file() {
 # Function to check directory
 check_directory() {
     if [ -d "$1" ]; then
-        echo -e "${GREEN}✓${NC} Directory exists: $1"
+        echo -e "${GREEN}OK${NC} Directory exists: $1"
         return 0
     else
-        echo -e "${YELLOW}⚠${NC} Directory not found: $1 (will be created)"
+        echo -e "${YELLOW}[WARN]${NC} Directory not found: $1 (will be created)"
         ((WARNINGS++))
         return 1
     fi
@@ -138,14 +138,14 @@ echo "==========================================================================
 echo ""
 
 if [ $ERRORS -eq 0 ] && [ $WARNINGS -eq 0 ]; then
-    echo -e "${GREEN}✓ ALL CHECKS PASSED!${NC}"
+    echo -e "${GREEN}OK ALL CHECKS PASSED!${NC}"
     echo ""
     echo "Your system is ready to run. Execute:"
     echo ""
     echo "  bash scripts/run_complete_workflow.sh"
     echo ""
 elif [ $ERRORS -eq 0 ]; then
-    echo -e "${YELLOW}⚠ SYSTEM READY WITH WARNINGS${NC}"
+    echo -e "${YELLOW}[WARN] SYSTEM READY WITH WARNINGS${NC}"
     echo ""
     echo "Warnings: $WARNINGS"
     echo ""
@@ -155,7 +155,7 @@ elif [ $ERRORS -eq 0 ]; then
     echo "  bash scripts/run_complete_workflow.sh"
     echo ""
 else
-    echo -e "${RED}✗ SYSTEM NOT READY${NC}"
+    echo -e "${RED}FAIL SYSTEM NOT READY${NC}"
     echo ""
     echo "Errors: $ERRORS"
     echo "Warnings: $WARNINGS"

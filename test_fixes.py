@@ -37,11 +37,11 @@ def test_pre_validation():
 
     should_skip, reason = pre_validate_problem(problem_fixed, '/tmp')
 
-    print(f"\n✓ Test 1.1: Already-fixed problem")
+    print(f"\nOK Test 1.1: Already-fixed problem")
     print(f"   Should skip: {should_skip}")
     print(f"   Reason: {reason}")
     assert should_skip == True, "Should skip already-fixed problem"
-    print("   ✅ PASS")
+    print("   [OK] PASS")
 
     # Test case 2: Validation fails (problem still exists)
     problem_exists = {
@@ -52,14 +52,14 @@ def test_pre_validation():
 
     should_skip, reason = pre_validate_problem(problem_exists, '/tmp')
 
-    print(f"\n✓ Test 1.2: Problem still exists")
+    print(f"\nOK Test 1.2: Problem still exists")
     print(f"   Should skip: {should_skip}")
     print(f"   Reason: {reason}")
     assert should_skip == False, "Should NOT skip problem that still exists"
-    print("   ✅ PASS")
+    print("   [OK] PASS")
 
     print(f"\n{'='*80}")
-    print("✅ PRE-VALIDATION TESTS PASSED")
+    print("[OK] PRE-VALIDATION TESTS PASSED")
     print(f"{'='*80}\n")
 
 
@@ -81,11 +81,11 @@ def test_file_existence():
         '/Users/rabeyakhatunmuna/Documents/mini-swe-agent-ci-based'
     )
 
-    print(f"\n✓ Test 2.1: Existing file")
+    print(f"\nOK Test 2.1: Existing file")
     print(f"   All exist: {all_exist}")
     print(f"   Missing: {missing}")
     assert all_exist == True, "File should exist"
-    print("   ✅ PASS")
+    print("   [OK] PASS")
 
     # Test case 2: File missing
     problem_invalid = {
@@ -99,15 +99,15 @@ def test_file_existence():
         '/Users/rabeyakhatunmuna/Documents/mini-swe-agent-ci-based'
     )
 
-    print(f"\n✓ Test 2.2: Missing file")
+    print(f"\nOK Test 2.2: Missing file")
     print(f"   All exist: {all_exist}")
     print(f"   Missing: {missing}")
     assert all_exist == False, "File should be missing"
     assert 'nonexistent_file.py' in missing, "Should detect missing file"
-    print("   ✅ PASS")
+    print("   [OK] PASS")
 
     print(f"\n{'='*80}")
-    print("✅ FILE EXISTENCE TESTS PASSED")
+    print("[OK] FILE EXISTENCE TESTS PASSED")
     print(f"{'='*80}\n")
 
 
@@ -126,11 +126,11 @@ def test_conflict_detection():
 
     has_conflict, desc = detect_conflicting_solutions(problem_no_conflict)
 
-    print(f"\n✓ Test 3.1: No conflict")
+    print(f"\nOK Test 3.1: No conflict")
     print(f"   Has conflict: {has_conflict}")
     print(f"   Description: {desc}")
     assert has_conflict == False, "Should not detect conflict"
-    print("   ✅ PASS")
+    print("   [OK] PASS")
 
     # Test case 2: Conflicting solutions (code vs config)
     problem_conflict = {
@@ -143,14 +143,14 @@ def test_conflict_detection():
 
     has_conflict, desc = detect_conflicting_solutions(problem_conflict)
 
-    print(f"\n✓ Test 3.2: Conflicting solutions")
+    print(f"\nOK Test 3.2: Conflicting solutions")
     print(f"   Has conflict: {has_conflict}")
     print(f"   Description: {desc}")
     assert has_conflict == True, "Should detect conflict"
-    print("   ✅ PASS")
+    print("   [OK] PASS")
 
     print(f"\n{'='*80}")
-    print("✅ CONFLICT DETECTION TESTS PASSED")
+    print("[OK] CONFLICT DETECTION TESTS PASSED")
     print(f"{'='*80}\n")
 
 
@@ -168,11 +168,11 @@ def test_merged_problem_split():
 
     should_split, reason = should_split_merged_problem(problem_regular)
 
-    print(f"\n✓ Test 4.1: Regular problem")
+    print(f"\nOK Test 4.1: Regular problem")
     print(f"   Should split: {should_split}")
     print(f"   Reason: {reason}")
     assert should_split == False, "Regular problem should not split"
-    print("   ✅ PASS")
+    print("   [OK] PASS")
 
     # Test case 2: Merged problem with conflict
     problem_merged_conflict = {
@@ -185,14 +185,14 @@ def test_merged_problem_split():
 
     should_split, reason = should_split_merged_problem(problem_merged_conflict)
 
-    print(f"\n✓ Test 4.2: Merged problem with conflict")
+    print(f"\nOK Test 4.2: Merged problem with conflict")
     print(f"   Should split: {should_split}")
     print(f"   Reason: {reason}")
     assert should_split == True, "Conflicting merged problem should split"
-    print("   ✅ PASS")
+    print("   [OK] PASS")
 
     print(f"\n{'='*80}")
-    print("✅ MERGED PROBLEM TESTS PASSED")
+    print("[OK] MERGED PROBLEM TESTS PASSED")
     print(f"{'='*80}\n")
 
 
@@ -231,7 +231,7 @@ def test_filter_and_validate():
         enable_conflict_detection=True
     )
 
-    print(f"\n✓ Test 5.1: Filter 3 problems")
+    print(f"\nOK Test 5.1: Filter 3 problems")
     print(f"   Input: 3 problems")
     print(f"   Valid: {len(valid)} problems")
     print(f"   Skipped: {len(skip_reasons)} problems")
@@ -243,10 +243,10 @@ def test_filter_and_validate():
     assert valid[0]['problem_id'] == '3', "Problem 3 should be valid"
     assert '1' in skip_reasons, "Problem 1 should be skipped (already fixed)"
     assert '2' in skip_reasons, "Problem 2 should be skipped (missing file)"
-    print("   ✅ PASS")
+    print("   [OK] PASS")
 
     print(f"\n{'='*80}")
-    print("✅ FILTERING PIPELINE TESTS PASSED")
+    print("[OK] FILTERING PIPELINE TESTS PASSED")
     print(f"{'='*80}\n")
 
 
@@ -264,16 +264,16 @@ def main():
         test_filter_and_validate()
 
         print("\n" + "="*80)
-        print("🎉 ALL TESTS PASSED! 🎉")
+        print(" ALL TESTS PASSED! ")
         print("="*80)
         print("""
 The following fixes are now working:
 
-✅ Pre-validation: Skip problems that are already fixed
-✅ File existence: Skip problems with missing files
-✅ Conflict detection: Warn about conflicting solutions
-✅ Merged problem split: Detect when merged problems should be split
-✅ Complete filtering: Pipeline filters invalid problems before agent runs
+[OK] Pre-validation: Skip problems that are already fixed
+[OK] File existence: Skip problems with missing files
+[OK] Conflict detection: Warn about conflicting solutions
+[OK] Merged problem split: Detect when merged problems should be split
+[OK] Complete filtering: Pipeline filters invalid problems before agent runs
 
 These fixes should dramatically improve success rates:
 - Instance 125: 25% → ~87% (skip already-fixed, use automated tools)
@@ -282,10 +282,10 @@ These fixes should dramatically improve success rates:
 """)
 
     except AssertionError as e:
-        print(f"\n❌ TEST FAILED: {e}")
+        print(f"\n[FAIL] TEST FAILED: {e}")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ ERROR: {e}")
+        print(f"\n[FAIL] ERROR: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
