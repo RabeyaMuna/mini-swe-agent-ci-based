@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 class TimeoutError(Exception):
     """Raised when an LLM call exceeds timeout."""
+
     pass
 
 
@@ -103,7 +104,7 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -
     for attempt in range(max_retries + 1):
         try:
             # Set alarm signal for timeout (Unix/Mac only)
-            if hasattr(signal, 'SIGALRM'):
+            if hasattr(signal, "SIGALRM"):
                 signal.signal(signal.SIGALRM, _timeout_handler)
                 signal.alarm(timeout)
 
@@ -111,6 +112,7 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -
                 # Try LangChain interface
                 try:
                     from langchain_core.messages import HumanMessage
+
                     result = llm.invoke([HumanMessage(content=prompt)])
                     response = (getattr(result, "content", None) or "").strip()
                     if response:
@@ -132,7 +134,7 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -
 
             finally:
                 # Cancel alarm
-                if hasattr(signal, 'SIGALRM'):
+                if hasattr(signal, "SIGALRM"):
                     signal.alarm(0)
 
             # Fallback: direct callable
@@ -141,13 +143,17 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -
                 return response
 
         except TimeoutError:
-            logger.warning(f"[_call_llm] Timeout on attempt {attempt + 1}/{max_retries + 1}")
+            logger.warning(
+                f"[_call_llm] Timeout on attempt {attempt + 1}/{max_retries + 1}"
+            )
             if attempt < max_retries:
                 continue
             return ""
 
         except Exception as e:
-            logger.warning(f"[_call_llm] Error on attempt {attempt + 1}/{max_retries + 1}: {e}")
+            logger.warning(
+                f"[_call_llm] Error on attempt {attempt + 1}/{max_retries + 1}: {e}"
+            )
             if attempt < max_retries:
                 continue
             return ""
@@ -278,7 +284,9 @@ Example: ["L1-0012", "L1-0088"]
             response = _call_llm(llm, prompt, timeout=60, max_retries=1)
 
             if not response or not response.strip():
-                logger.warning(f"  Chunk {chunk_idx}: LLM returned empty response, skipping")
+                logger.warning(
+                    f"  Chunk {chunk_idx}: LLM returned empty response, skipping"
+                )
                 continue
 
             chunk_ids = _parse_l1_selection_ids(response)
@@ -629,7 +637,9 @@ def llm_analyze_l1_for_problem_1(
         # EARLY FALLBACK: If LLM returned empty response after all retries
         if not response or not response.strip():
             logger.warning("[L1 Enrich] LLM returned empty response after all retries")
-            logger.warning("[L1 Enrich] Falling back to original CI problem without enrichment")
+            logger.warning(
+                "[L1 Enrich] Falling back to original CI problem without enrichment"
+            )
             return [ci_problem]  # Return as array
 
         # Log response for debugging

@@ -78,12 +78,15 @@ from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.benchmarks.utils.common import ProgressTrackingAgent
-from minisweagent.run.benchmarks.utils.ci_context import build_ci_context, save_memory_after_patch
+from minisweagent.run.benchmarks.utils.ci_context import (
+    build_ci_context,
+    save_memory_after_patch,
+)
 from minisweagent.run.benchmarks.utils.patch_merger import (
     merge_duplicate_patches,
     detect_duplicate_patches,
-    validate_patch,
 )
+
 # Memory-guided repair is now integrated into ci_memory_system.py
 # No need for separate import
 from minisweagent.utils.log import add_file_handler, logger
@@ -93,8 +96,10 @@ from scripts.model_registry import configure_model_environment, resolve_model_al
 
 # ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG_FILE = builtin_config_dir / "benchmarks" / "cibench.yaml"
-_OUTPUT_FILE_LOCK   = threading.Lock()
+_OUTPUT_FILE_LOCK = threading.Lock()
 app = typer.Typer(rich_markup_mode="rich", add_completion=False)
+
+
 def _discover_project_root() -> Path:
     """Find the workspace root that owns shared data/ and memory_plugin/."""
     current_file = Path(__file__).resolve()
@@ -106,7 +111,9 @@ def _discover_project_root() -> Path:
 
 
 PROJECT_ROOT = _discover_project_root()
-REPO_CACHE_ROOT = Path(os.getenv("MSWEA_REPO_CACHE_ROOT") or (PROJECT_ROOT / "repo")).resolve()
+REPO_CACHE_ROOT = Path(
+    os.getenv("MSWEA_REPO_CACHE_ROOT") or (PROJECT_ROOT / "repo")
+).resolve()
 
 # Automated fix tools for mechanical/static problems (formatting, linting, style)
 AUTOMATED_TOOLS = [
@@ -168,7 +175,10 @@ AUTOMATED_TOOLS = [
     },
 ]
 
-def _make_context_llm(config: Dict[str, Any], context_model: Optional[str] = None) -> Any:
+
+def _make_context_llm(
+    config: Dict[str, Any], context_model: Optional[str] = None
+) -> Any:
     """
     Build a plain callable (prompt: str) -> str for Phase A and Phase C
     using chat completion directly.
@@ -337,7 +347,9 @@ def _has_local_precomputed_analysis(inst: Dict[str, Any]) -> bool:
     )
 
 
-def _prepare_local_instance(inst: Dict[str, Any], *, allow_hf_enrichment: bool) -> Dict[str, Any]:
+def _prepare_local_instance(
+    inst: Dict[str, Any], *, allow_hf_enrichment: bool
+) -> Dict[str, Any]:
     normalized = _normalize_instance(inst)
     injected = _inject_precomputed_analysis(normalized)
     if _has_local_precomputed_analysis(injected) or not allow_hf_enrichment:
@@ -366,14 +378,16 @@ def _normalize_instance(inst: Dict[str, Any]) -> Dict[str, Any]:
         inst["instance_id"] = str(inst["id"])
     elif "instance_id" not in inst:
         # Fallback: generate from repo@sha if neither exists
-        repo = f"{inst.get('repo_owner', '')}/{inst.get('repo_name', '')}".strip('/')
-        sha = str(inst.get('sha_fail', ''))[:12]
+        repo = f"{inst.get('repo_owner', '')}/{inst.get('repo_name', '')}".strip("/")
+        sha = str(inst.get("sha_fail", ""))[:12]
         inst["instance_id"] = f"{repo}@{sha}" if repo and sha else "unknown"
 
     # workflow_filename -> workflow_path
     if "workflow_path" not in inst and "workflow_filename" in inst:
         wf = str(inst["workflow_filename"])
-        inst["workflow_path"] = f".github/workflows/{wf}" if not wf.startswith(".github") else wf
+        inst["workflow_path"] = (
+            f".github/workflows/{wf}" if not wf.startswith(".github") else wf
+        )
 
     # error_type as list -> overall_error_types
     # eval_issues.json stores ["Dependency Issues", "Syntax Error", ...]
@@ -389,7 +403,7 @@ def _normalize_instance(inst: Dict[str, Any]) -> Dict[str, Any]:
 
 
 _HF_DATASET_NAME = "ci-benchmark-user/ci-repair-bench"
-_hf_index: Optional[Dict[str, Dict[str, Any]]] = None   # module-level cache
+_hf_index: Optional[Dict[str, Dict[str, Any]]] = None  # module-level cache
 
 
 def _load_hf_index() -> Dict[str, Dict[str, Any]]:
@@ -403,9 +417,14 @@ def _load_hf_index() -> Dict[str, Dict[str, Any]]:
 
     try:
         from datasets import load_dataset  # type: ignore
-        logger.info("[CIBench] Loading HuggingFace dataset %s for instance enrichment...", _HF_DATASET_NAME)
+
+        logger.info(
+            "[CIBench] Loading HuggingFace dataset %s for instance enrichment...",
+            _HF_DATASET_NAME,
+        )
         # Suppress noisy HuggingFace "Repo card metadata block was not found" warnings
         import logging as _logging
+
         _hf_logger = _logging.getLogger("datasets")
         _prev_level = _hf_logger.level
         _hf_logger.setLevel(_logging.ERROR)
@@ -428,9 +447,9 @@ def _load_hf_index() -> Dict[str, Dict[str, Any]]:
             sha = str(row.get("sha_fail") or "")
             iid = str(row.get("instance_id") or row.get("id") or "")
             if sha:
-                index[sha] = row       # match by sha_fail
+                index[sha] = row  # match by sha_fail
             if iid:
-                index[iid] = row       # match by id / instance_id
+                index[iid] = row  # match by id / instance_id
             # Also index by numeric string of id (eval_issues stores id as string)
             raw_id = row.get("id")
             if raw_id is not None:
@@ -439,7 +458,10 @@ def _load_hf_index() -> Dict[str, Dict[str, Any]]:
         logger.info("[CIBench] HuggingFace index built: %d records", len(index))
         return index
     except Exception as exc:
-        logger.warning("[CIBench] Could not load HuggingFace dataset (%s) - using local data only", exc)
+        logger.warning(
+            "[CIBench] Could not load HuggingFace dataset (%s) - using local data only",
+            exc,
+        )
         _hf_index = {}
         return {}
 
@@ -461,7 +483,9 @@ def _enrich_from_hf(inst: Dict[str, Any]) -> Dict[str, Any]:
 
     hf_row = index.get(sha) or index.get(iid)
     if not hf_row:
-        logger.debug("[CIBench] No HF match for sha=%s id=%s - using local data", sha[:12], iid)
+        logger.debug(
+            "[CIBench] No HF match for sha=%s id=%s - using local data", sha[:12], iid
+        )
         return inst
 
     # Merge: HF record is the base (has pre-computed fields like overall_failure_reasons),
@@ -494,13 +518,19 @@ def load_ci_instances(dataset_path: str, split: str = "test") -> List[Dict[str, 
             try:
                 data = json.loads(raw_text)
             except json.JSONDecodeError as e:
-                raise ValueError(f"Could not parse JSON array in {dataset_path}: {e}") from e
+                raise ValueError(
+                    f"Could not parse JSON array in {dataset_path}: {e}"
+                ) from e
             instances = []
             for x in data:
                 if not isinstance(x, dict):
                     continue
                 instances.append(_prepare_local_instance(x, allow_hf_enrichment=True))
-            logger.info("Loaded %d instances from %s (enriched from HuggingFace)", len(instances), dataset_path)
+            logger.info(
+                "Loaded %d instances from %s (enriched from HuggingFace)",
+                len(instances),
+                dataset_path,
+            )
             return instances
 
         # JSONL - one object per line.  Filtered eval files may contain only
@@ -517,20 +547,33 @@ def load_ci_instances(dataset_path: str, split: str = "test") -> List[Dict[str, 
                     for x in obj:
                         if not isinstance(x, dict):
                             continue
-                        instances_.append(_prepare_local_instance(x, allow_hf_enrichment=True))
+                        instances_.append(
+                            _prepare_local_instance(x, allow_hf_enrichment=True)
+                        )
                 elif isinstance(obj, dict):
-                    instances_.append(_prepare_local_instance(obj, allow_hf_enrichment=True))
+                    instances_.append(
+                        _prepare_local_instance(obj, allow_hf_enrichment=True)
+                    )
             except json.JSONDecodeError as e:
                 logger.warning("Skipping malformed line in %s: %s", dataset_path, e)
-        logger.info("Loaded %d instances from %s (enriched from HuggingFace/local cache)", len(instances_), dataset_path)
+        logger.info(
+            "Loaded %d instances from %s (enriched from HuggingFace/local cache)",
+            len(instances_),
+            dataset_path,
+        )
         return instances_
 
     # HuggingFace dataset name passed directly
     try:
         from datasets import load_dataset  # type: ignore
+
         ds = load_dataset(dataset_path, split=split)
         instances_ = [_normalize_instance(dict(x)) for x in ds]  # type: ignore
-        logger.info("Loaded %d instances from HuggingFace dataset %s", len(instances_), dataset_path)
+        logger.info(
+            "Loaded %d instances from HuggingFace dataset %s",
+            len(instances_),
+            dataset_path,
+        )
         return instances_
     except Exception as e:
         raise ValueError(
@@ -543,8 +586,8 @@ def filter_instances(
     instances: List[Dict[str, Any]],
     *,
     filter_spec: str = "",
-    slice_spec: str  = "",
-    shuffle:    bool = False,
+    slice_spec: str = "",
+    shuffle: bool = False,
 ) -> List[Dict[str, Any]]:
     import random
 
@@ -556,16 +599,21 @@ def filter_instances(
     if filter_spec:
         before = len(instances)
         instances = [
-            inst for inst in instances
+            inst
+            for inst in instances
             if re.match(filter_spec, str(inst.get("instance_id", "")))
         ]
-        logger.info("Filter '%s': %d -> %d instances", filter_spec, before, len(instances))
+        logger.info(
+            "Filter '%s': %d -> %d instances", filter_spec, before, len(instances)
+        )
 
     if slice_spec:
         before = len(instances)
-        parts  = [int(x) if x else None for x in slice_spec.split(":")]
+        parts = [int(x) if x else None for x in slice_spec.split(":")]
         instances = instances[slice(*parts)]
-        logger.info("Slice '%s': %d -> %d instances", slice_spec, before, len(instances))
+        logger.info(
+            "Slice '%s': %d -> %d instances", slice_spec, before, len(instances)
+        )
 
     return instances
 
@@ -573,6 +621,7 @@ def filter_instances(
 # ─────────────────────────────────────────────────────────────────────────────
 # Predictions file helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _read_preds(path: Path) -> Dict[str, Any]:
     if path.exists():
@@ -605,30 +654,37 @@ def update_preds_file(
                 "[CIBench] Instance %s has duplicate patches for %d file(s): %s",
                 instance_id,
                 len(duplicate_files),
-                ", ".join(duplicate_files)
+                ", ".join(duplicate_files),
             )
-            logger.info("[CIBench] Merging duplicate patches for instance %s", instance_id)
+            logger.info(
+                "[CIBench] Merging duplicate patches for instance %s", instance_id
+            )
 
             # Merge duplicates
             try:
                 diff = merge_duplicate_patches(diff)
-                logger.info("[CIBench] Successfully merged duplicate patches for instance %s", instance_id)
+                logger.info(
+                    "[CIBench] Successfully merged duplicate patches for instance %s",
+                    instance_id,
+                )
             except Exception as e:
                 logger.error(
                     "[CIBench] Failed to merge duplicate patches for instance %s: %s",
                     instance_id,
-                    str(e)
+                    str(e),
                 )
                 # Continue with original diff (will likely fail during application)
 
     with _OUTPUT_FILE_LOCK:
         data = _read_preds(output_path)
         data[instance_id] = {
-            "id":       instance_id,
+            "id": instance_id,
             "sha_fail": sha_fail,
-            "diff":     diff or "",
+            "diff": diff or "",
         }
-        output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        output_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
 
 def remove_from_preds_file(output_path: Path, instance_id: str) -> None:
@@ -638,12 +694,15 @@ def remove_from_preds_file(output_path: Path, instance_id: str) -> None:
         data = _read_preds(output_path)
         if instance_id in data:
             del data[instance_id]
-            output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            output_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Local environment setup  (clone -> checkout -> LocalEnvironment)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _load_install_commands_from_cache(sha_fail: str) -> list:
     """
@@ -683,14 +742,18 @@ def _load_install_commands_from_cache(sha_fail: str) -> list:
                     install_cmd = step.get("installation_cmd", "").strip()
                     if install_cmd and install_cmd != "":
                         # Split multiple commands (comma-separated)
-                        for cmd in install_cmd.split(','):
+                        for cmd in install_cmd.split(","):
                             cmd = cmd.strip()
                             # Skip action references (not shell commands)
-                            if not cmd.startswith('actions/') and not cmd.startswith('astral-sh/'):
+                            if not cmd.startswith("actions/") and not cmd.startswith(
+                                "astral-sh/"
+                            ):
                                 commands.append(cmd)
 
                 if commands:
-                    logger.info(f"[CIBench] Loaded {len(commands)} install command(s) from cache for {sha_fail[:8]}")
+                    logger.info(
+                        f"[CIBench] Loaded {len(commands)} install command(s) from cache for {sha_fail[:8]}"
+                    )
                 return commands
 
         logger.info(f"[CIBench] No cache entry found for {sha_fail[:8]}")
@@ -699,6 +762,7 @@ def _load_install_commands_from_cache(sha_fail: str) -> list:
     except Exception as e:
         logger.warning(f"[CIBench] Failed to load install commands from cache: {e}")
         return []
+
 
 def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
     """
@@ -734,13 +798,15 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
                     shell=True,  # Commands may have pipes, &&, etc.
                     capture_output=True,
                     text=True,
-                    timeout=180
+                    timeout=180,
                 )
                 if result.returncode == 0:
-                    logger.info(f"[CIBench] OK Cache install command succeeded")
+                    logger.info("[CIBench] OK Cache install command succeeded")
                     # Continue to next command (don't return - install all)
                 else:
-                    logger.warning(f"[CIBench] Cache command failed (code {result.returncode}), trying next...")
+                    logger.warning(
+                        f"[CIBench] Cache command failed (code {result.returncode}), trying next..."
+                    )
             except Exception as e:
                 logger.warning(f"[CIBench] Cache command error: {e}, trying next...")
 
@@ -753,25 +819,27 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
 
     # Detect project files
     project_files = {
-        'pyproject.toml': (testbed_path / 'pyproject.toml').exists(),
-        'setup.py': (testbed_path / 'setup.py').exists(),
-        'requirements.txt': (testbed_path / 'requirements.txt').exists(),
-        'package.json': (testbed_path / 'package.json').exists(),
-        'package-lock.json': (testbed_path / 'package-lock.json').exists(),
-        'yarn.lock': (testbed_path / 'yarn.lock').exists(),
-        'pnpm-lock.yaml': (testbed_path / 'pnpm-lock.yaml').exists(),
-        'Gemfile': (testbed_path / 'Gemfile').exists(),
-        'Cargo.toml': (testbed_path / 'Cargo.toml').exists(),
-        'go.mod': (testbed_path / 'go.mod').exists(),
-        'pom.xml': (testbed_path / 'pom.xml').exists(),
-        'build.gradle': (testbed_path / 'build.gradle').exists(),
+        "pyproject.toml": (testbed_path / "pyproject.toml").exists(),
+        "setup.py": (testbed_path / "setup.py").exists(),
+        "requirements.txt": (testbed_path / "requirements.txt").exists(),
+        "package.json": (testbed_path / "package.json").exists(),
+        "package-lock.json": (testbed_path / "package-lock.json").exists(),
+        "yarn.lock": (testbed_path / "yarn.lock").exists(),
+        "pnpm-lock.yaml": (testbed_path / "pnpm-lock.yaml").exists(),
+        "Gemfile": (testbed_path / "Gemfile").exists(),
+        "Cargo.toml": (testbed_path / "Cargo.toml").exists(),
+        "go.mod": (testbed_path / "go.mod").exists(),
+        "pom.xml": (testbed_path / "pom.xml").exists(),
+        "build.gradle": (testbed_path / "build.gradle").exists(),
     }
 
     detected_files = [k for k, v in project_files.items() if v]
     if detected_files:
         logger.info(f"[CIBench] Detected project files: {', '.join(detected_files)}")
     else:
-        logger.info("[CIBench] No standard project files detected - skipping installation")
+        logger.info(
+            "[CIBench] No standard project files detected - skipping installation"
+        )
         return
 
     def _try_command(cmd: list, description: str, timeout: int = 180) -> bool:
@@ -780,33 +848,34 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
             logger.info(f"[CIBench] Trying: {description}")
             # CRITICAL: Use python -m pip instead of pip to ensure we use testbed's Python
             # This ensures dependencies install to the same Python the agent will use
-            if cmd[0] == 'pip':
-                cmd = ['python', '-m', 'pip'] + cmd[1:]
+            if cmd[0] == "pip":
+                cmd = ["python", "-m", "pip"] + cmd[1:]
 
             result = subprocess.run(
-                cmd,
-                cwd=testbed_path,
-                capture_output=True,
-                text=True,
-                timeout=timeout
+                cmd, cwd=testbed_path, capture_output=True, text=True, timeout=timeout
             )
             if result.returncode == 0:
                 logger.info(f"[CIBench] OK {description} succeeded")
                 return True
             else:
-                logger.warning(f"[CIBench] {description} failed (return code {result.returncode})")
+                logger.warning(
+                    f"[CIBench] {description} failed (return code {result.returncode})"
+                )
                 return False
         except Exception as e:
             logger.warning(f"[CIBench] {description} error: {e}")
             return False
 
     # Python projects - ROOT level
-    if project_files['pyproject.toml'] or project_files['setup.py']:
-        if _try_command(['pip', 'install', '-e', '.'], 'pip install -e .'):
+    if project_files["pyproject.toml"] or project_files["setup.py"]:
+        if _try_command(["pip", "install", "-e", "."], "pip install -e ."):
             return
 
-    if project_files['requirements.txt']:
-        if _try_command(['pip', 'install', '-r', 'requirements.txt'], 'pip install -r requirements.txt'):
+    if project_files["requirements.txt"]:
+        if _try_command(
+            ["pip", "install", "-r", "requirements.txt"],
+            "pip install -r requirements.txt",
+        ):
             return
 
     # Python projects - MONOREPO (DYNAMIC - works for ANY repo structure!)
@@ -817,17 +886,36 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
     try:
         # Find all pyproject.toml files (excluding root, venv, .git, node_modules)
         result = subprocess.run(
-            ['find', '.', '-name', 'pyproject.toml', '-not', '-path', './pyproject.toml',
-             '-not', '-path', '*/.venv/*', '-not', '-path', '*/venv/*',
-             '-not', '-path', '*/.git/*', '-not', '-path', '*/node_modules/*',
-             '-maxdepth', '4'],
+            [
+                "find",
+                ".",
+                "-name",
+                "pyproject.toml",
+                "-not",
+                "-path",
+                "./pyproject.toml",
+                "-not",
+                "-path",
+                "*/.venv/*",
+                "-not",
+                "-path",
+                "*/venv/*",
+                "-not",
+                "-path",
+                "*/.git/*",
+                "-not",
+                "-path",
+                "*/node_modules/*",
+                "-maxdepth",
+                "4",
+            ],
             cwd=testbed_path,
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
         )
 
-        for line in result.stdout.strip().split('\n'):
+        for line in result.stdout.strip().split("\n"):
             if line and line.strip():
                 pkg_path = testbed_path / Path(line).parent
                 if pkg_path.is_dir():
@@ -835,17 +923,36 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
 
         # Also find setup.py files (avoid duplicates)
         result = subprocess.run(
-            ['find', '.', '-name', 'setup.py', '-not', '-path', './setup.py',
-             '-not', '-path', '*/.venv/*', '-not', '-path', '*/venv/*',
-             '-not', '-path', '*/.git/*', '-not', '-path', '*/node_modules/*',
-             '-maxdepth', '4'],
+            [
+                "find",
+                ".",
+                "-name",
+                "setup.py",
+                "-not",
+                "-path",
+                "./setup.py",
+                "-not",
+                "-path",
+                "*/.venv/*",
+                "-not",
+                "-path",
+                "*/venv/*",
+                "-not",
+                "-path",
+                "*/.git/*",
+                "-not",
+                "-path",
+                "*/node_modules/*",
+                "-maxdepth",
+                "4",
+            ],
             cwd=testbed_path,
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
         )
 
-        for line in result.stdout.strip().split('\n'):
+        for line in result.stdout.strip().split("\n"):
             if line and line.strip():
                 pkg_path = testbed_path / Path(line).parent
                 if pkg_path.is_dir() and pkg_path not in packages_found:
@@ -855,87 +962,102 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
         logger.warning(f"[CIBench] Dynamic package search failed: {e}")
 
     if packages_found:
-        logger.info(f"[CIBench] Found {len(packages_found)} Python package(s) in monorepo")
+        logger.info(
+            f"[CIBench] Found {len(packages_found)} Python package(s) in monorepo"
+        )
         installed_count = 0
 
         # Try installing ALL packages (don't stop on first success!)
         for pkg_path in packages_found:
             pkg_name = pkg_path.name
-            has_poetry = (pkg_path / 'poetry.lock').exists()
+            has_poetry = (pkg_path / "poetry.lock").exists()
 
             # Prefer poetry for poetry projects
             if has_poetry:
                 logger.info(f"[CIBench] Installing {pkg_name} with poetry...")
                 result = subprocess.run(
-                    ['poetry', 'install'],
+                    ["poetry", "install"],
                     cwd=pkg_path,
                     capture_output=True,
                     text=True,
-                    timeout=180
+                    timeout=180,
                 )
                 if result.returncode == 0:
                     logger.info(f"[CIBench] OK {pkg_name} installed with poetry")
                     installed_count += 1
                     continue
                 else:
-                    logger.warning(f"[CIBench] Poetry failed for {pkg_name}, trying pip...")
+                    logger.warning(
+                        f"[CIBench] Poetry failed for {pkg_name}, trying pip..."
+                    )
 
             # Fallback to pip install -e
             logger.info(f"[CIBench] Installing {pkg_name} with pip...")
             result = subprocess.run(
-                ['python', '-m', 'pip', 'install', '-e', '.'],
+                ["python", "-m", "pip", "install", "-e", "."],
                 cwd=pkg_path,
                 capture_output=True,
                 text=True,
-                timeout=180
+                timeout=180,
             )
             if result.returncode == 0:
                 logger.info(f"[CIBench] OK {pkg_name} installed")
                 installed_count += 1
             else:
-                logger.warning(f"[CIBench] Failed to install {pkg_name} (continuing...)")
+                logger.warning(
+                    f"[CIBench] Failed to install {pkg_name} (continuing...)"
+                )
 
         if installed_count > 0:
-            logger.info(f"[CIBench] OK Installed {installed_count}/{len(packages_found)} monorepo packages")
+            logger.info(
+                f"[CIBench] OK Installed {installed_count}/{len(packages_found)} monorepo packages"
+            )
             return
 
     # Node.js projects
-    if project_files['package.json']:
-        if project_files['pnpm-lock.yaml']:
-            if _try_command(['pnpm', 'install'], 'pnpm install'):
+    if project_files["package.json"]:
+        if project_files["pnpm-lock.yaml"]:
+            if _try_command(["pnpm", "install"], "pnpm install"):
                 return
-        if project_files['yarn.lock']:
-            if _try_command(['yarn', 'install'], 'yarn install'):
+        if project_files["yarn.lock"]:
+            if _try_command(["yarn", "install"], "yarn install"):
                 return
-        if _try_command(['npm', 'install'], 'npm install'):
+        if _try_command(["npm", "install"], "npm install"):
             return
 
     # Ruby projects
-    if project_files['Gemfile']:
-        if _try_command(['bundle', 'install'], 'bundle install'):
+    if project_files["Gemfile"]:
+        if _try_command(["bundle", "install"], "bundle install"):
             return
 
     # Rust projects
-    if project_files['Cargo.toml']:
-        if _try_command(['cargo', 'build'], 'cargo build', timeout=300):
+    if project_files["Cargo.toml"]:
+        if _try_command(["cargo", "build"], "cargo build", timeout=300):
             return
 
     # Go projects
-    if project_files['go.mod']:
-        if _try_command(['go', 'mod', 'download'], 'go mod download'):
+    if project_files["go.mod"]:
+        if _try_command(["go", "mod", "download"], "go mod download"):
             return
 
     # Java/Maven projects
-    if project_files['pom.xml']:
-        if _try_command(['mvn', 'dependency:resolve'], 'mvn dependency:resolve', timeout=300):
+    if project_files["pom.xml"]:
+        if _try_command(
+            ["mvn", "dependency:resolve"], "mvn dependency:resolve", timeout=300
+        ):
             return
 
     # Gradle projects
-    if project_files['build.gradle']:
-        if _try_command(['./gradlew', 'dependencies'], 'gradle dependencies', timeout=300):
+    if project_files["build.gradle"]:
+        if _try_command(
+            ["./gradlew", "dependencies"], "gradle dependencies", timeout=300
+        ):
             return
 
-    logger.info("[CIBench] [WARN] Could not install dependencies - agent will work without them")
+    logger.info(
+        "[CIBench] [WARN] Could not install dependencies - agent will work without them"
+    )
+
 
 def setup_local_environment(
     config: Dict[str, Any],
@@ -955,15 +1077,17 @@ def setup_local_environment(
     the local working copy is reused so previous work is preserved.
     """
     repo_owner = instance.get("repo_owner", "")
-    repo_name  = instance.get("repo_name", "")
-    sha_fail   = str(instance.get("sha_fail") or "")
+    repo_name = instance.get("repo_name", "")
+    sha_fail = str(instance.get("sha_fail") or "")
 
     testbed_path = instance_dir / "testbed"
     cache_dir_name = f"{repo_owner}__{repo_name}"
     repo_cache_path = REPO_CACHE_ROOT / cache_dir_name
     clone_url = f"https://github.com/{repo_owner}/{repo_name}.git"
 
-    def _run_git(args: list[str], cwd: Path, timeout: int = 300) -> subprocess.CompletedProcess[str]:
+    def _run_git(
+        args: list[str], cwd: Path, timeout: int = 300
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
             cwd=str(cwd),
@@ -972,7 +1096,9 @@ def setup_local_environment(
             timeout=timeout,
         )
 
-    def _ensure_commit_available(repo_path: Path, commit: str, remote: str = "origin") -> None:
+    def _ensure_commit_available(
+        repo_path: Path, commit: str, remote: str = "origin"
+    ) -> None:
         if not commit:
             return
         verify = _run_git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repo_path)
@@ -991,14 +1117,20 @@ def setup_local_environment(
                 f"{verify.stderr[:800]}"
             )
 
-    def _must_run_git(args: list[str], cwd: Path, error_label: str, timeout: int = 300) -> None:
+    def _must_run_git(
+        args: list[str], cwd: Path, error_label: str, timeout: int = 300
+    ) -> None:
         result = _run_git(args, cwd, timeout=timeout)
         if result.returncode != 0:
-            raise RuntimeError(f"{error_label} in {cwd}:\n{result.stderr[:800] or result.stdout[:800]}")
+            raise RuntimeError(
+                f"{error_label} in {cwd}:\n{result.stderr[:800] or result.stdout[:800]}"
+            )
 
     def _prepare_worktree(repo_path: Path, commit: str) -> None:
         if not commit:
-            raise RuntimeError(f"Missing sha_fail for worktree preparation in {repo_path}")
+            raise RuntimeError(
+                f"Missing sha_fail for worktree preparation in {repo_path}"
+            )
         _must_run_git(
             ["config", "user.email", "ci-repair@mini-swe-agent"],
             repo_path,
@@ -1028,7 +1160,9 @@ def setup_local_environment(
     # ── Shared repo cache ─────────────────────────────────────────────────────
     REPO_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     if not (repo_cache_path / ".git").exists():
-        logger.info("[CIBench] Cloning %s -> shared cache %s", clone_url, repo_cache_path)
+        logger.info(
+            "[CIBench] Cloning %s -> shared cache %s", clone_url, repo_cache_path
+        )
         result = subprocess.run(
             ["git", "clone", "--quiet", clone_url, str(repo_cache_path)],
             capture_output=True,
@@ -1037,13 +1171,21 @@ def setup_local_environment(
         )
         if result.returncode != 0:
             raise RuntimeError(
-                f"git clone failed for {repo_owner}/{repo_name}:\n"
-                f"{result.stderr[:800]}"
+                f"git clone failed for {repo_owner}/{repo_name}:\n{result.stderr[:800]}"
             )
     else:
         logger.info("[CIBench] Reusing shared cache at %s", repo_cache_path)
         fetch_result = subprocess.run(
-            ["git", "-C", str(repo_cache_path), "fetch", "--all", "--tags", "--prune", "--quiet"],
+            [
+                "git",
+                "-C",
+                str(repo_cache_path),
+                "fetch",
+                "--all",
+                "--tags",
+                "--prune",
+                "--quiet",
+            ],
             capture_output=True,
             text=True,
             timeout=300,
@@ -1059,9 +1201,20 @@ def setup_local_environment(
     # ── Per-instance working copy ─────────────────────────────────────────────
     if not (testbed_path / ".git").exists():
         testbed_path.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("[CIBench] Creating local working copy %s -> %s", repo_cache_path, testbed_path)
+        logger.info(
+            "[CIBench] Creating local working copy %s -> %s",
+            repo_cache_path,
+            testbed_path,
+        )
         result = subprocess.run(
-            ["git", "clone", "--quiet", "--shared", str(repo_cache_path), str(testbed_path)],
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--shared",
+                str(repo_cache_path),
+                str(testbed_path),
+            ],
             capture_output=True,
             text=True,
             timeout=300,
@@ -1083,7 +1236,8 @@ def setup_local_environment(
     # ── Build LocalEnvironment ────────────────────────────────────────────────
     # Strip environment_class from the env config dict (LocalEnvironment doesn't accept it).
     env_cfg: Dict[str, Any] = {
-        k: v for k, v in config.get("environment", {}).items()
+        k: v
+        for k, v in config.get("environment", {}).items()
         if k != "environment_class"
     }
     env_cfg["cwd"] = str(testbed_path)
@@ -1095,7 +1249,9 @@ def setup_local_environment(
     startup_tpl = config.get("run", {}).get("startup_command", "")
     if startup_tpl:
         try:
-            rendered = Template(startup_tpl, undefined=StrictUndefined).render(**instance)
+            rendered = Template(startup_tpl, undefined=StrictUndefined).render(
+                **instance
+            )
         except Exception:
             # Fallback: manual substitution if instance has unexpected keys
             rendered = startup_tpl.replace("{{sha_fail}}", sha_fail)
@@ -1114,14 +1270,16 @@ def setup_local_environment(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _analyze_repair_with_llm(problem: Dict[str, Any], context_llm: Any) -> Dict[str, Any]:
+def _analyze_repair_with_llm(
+    problem: Dict[str, Any], context_llm: Any
+) -> Dict[str, Any]:
     """Analyze problem and generate repair plan (automated tool or manual fix)."""
 
-    problem_statement = problem.get('problem_statement', '')
-    error_details = problem.get('error_details', [])
-    root_cause = problem.get('root_cause', '')
-    fix_strategy = problem.get('fix_strategy', '')
-    files = problem.get('files', [])
+    problem_statement = problem.get("problem_statement", "")
+    error_details = problem.get("error_details", [])
+    root_cause = problem.get("root_cause", "")
+    fix_strategy = problem.get("fix_strategy", "")
+    files = problem.get("files", [])
 
     file_items = files if isinstance(files, list) else [files]
     file_lines = []
@@ -1137,7 +1295,9 @@ def _analyze_repair_with_llm(problem: Dict[str, Any], context_llm: Any) -> Dict[
     detail_lines = []
     for detail in error_details if isinstance(error_details, list) else [error_details]:
         if isinstance(detail, dict):
-            detail_text = "; ".join(f"{key}: {value}" for key, value in detail.items() if value)
+            detail_text = "; ".join(
+                f"{key}: {value}" for key, value in detail.items() if value
+            )
             if detail_text:
                 detail_lines.append(f"  - {detail_text}")
         elif detail:
@@ -1239,7 +1399,7 @@ Hybrid:
                 pass
 
             # Fallback 2: Extract JSON from markdown fences if present
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            json_match = re.search(r"\{.*\}", response, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group(0))
 
@@ -1249,7 +1409,7 @@ Hybrid:
     # Fallback to manual fix
     return {
         "type": "manual_fix",
-        "repair_plan": fix_strategy or "Analyze error and apply fix"
+        "repair_plan": fix_strategy or "Analyze error and apply fix",
     }
 
 
@@ -1257,7 +1417,7 @@ def _build_single_problem_task(
     problem: Dict[str, Any],
     problem_num: int,
     total_problems: int,
-    context_llm: Any = None
+    context_llm: Any = None,
 ) -> str:
     """Build focused repair task with automated tool detection or manual repair instructions."""
 
@@ -1284,8 +1444,8 @@ def _build_single_problem_task(
     if context_llm:
         logger.info(f"[CIBench] Analyzing repair approach for problem {problem_num}...")
         analysis = _analyze_repair_with_llm(problem, context_llm)
-        repair_plan = analysis.get('repair_plan', '')
-        repair_type = analysis.get('type', 'manual_fix')
+        repair_plan = analysis.get("repair_plan", "")
+        repair_type = analysis.get("type", "manual_fix")
     else:
         # No LLM available - use fix_strategy
         repair_plan = fix_strategy or "Analyze error and apply fix"
@@ -1313,7 +1473,11 @@ The automated tool handles all file changes. Your job is to execute the commands
         repair_plan_formatted = repair_plan
 
     # Format files list
-    files_str = '\n'.join(f"- {f}" for f in (files if isinstance(files, list) else [files])) if files else "N/A"
+    files_str = (
+        "\n".join(f"- {f}" for f in (files if isinstance(files, list) else [files]))
+        if files
+        else "N/A"
+    )
 
     return f"""Problem {problem_num}/{total_problems}
 
@@ -1329,6 +1493,7 @@ Repair Plan:
 {repair_plan_formatted}
 """
 
+
 def _combine_partial_fixes(partial_fixes: List[Dict[str, Any]]) -> str:
     """
     Combine multiple partial fixes into a unified diff.
@@ -1338,7 +1503,7 @@ def _combine_partial_fixes(partial_fixes: List[Dict[str, Any]]) -> str:
 
     unified = []
     for fix in partial_fixes:
-        patch = fix.get('patch', '')
+        patch = fix.get("patch", "")
         if patch:
             # Don't add comments - just append patch directly for valid unified diff
             unified.append(patch)
@@ -1381,7 +1546,9 @@ def _collect_final_workspace_diff(testbed_path: Path) -> str:
     return ("\n".join(parts) + "\n") if parts else ""
 
 
-def _analyze_and_group_problems(problems: List[Dict[str, Any]], context_llm: Any) -> List[Dict[str, Any]]:
+def _analyze_and_group_problems(
+    problems: List[Dict[str, Any]], context_llm: Any
+) -> List[Dict[str, Any]]:
     """
     Two-step grouping:
     1. Pre-group by validation_cmd + failure_type
@@ -1395,8 +1562,8 @@ def _analyze_and_group_problems(problems: List[Dict[str, Any]], context_llm: Any
     # Step 1: Pre-group by validation_cmd + failure_type
     groups = {}
     for problem in problems:
-        validation_cmd = problem.get('verification_cmd', '')
-        failure_type = problem.get('failure_type') or problem.get('error_type', '')
+        validation_cmd = problem.get("verification_cmd", "")
+        failure_type = problem.get("failure_type") or problem.get("error_type", "")
         group_key = f"{validation_cmd}|{failure_type}"
 
         if group_key not in groups:
@@ -1413,15 +1580,21 @@ def _analyze_and_group_problems(problems: List[Dict[str, Any]], context_llm: Any
             final_problems.append(group_problems[0])
         else:
             # Multiple problems, ask LLM if they can merge
-            logger.info(f"[CIBench] Analyzing group with {len(group_problems)} problems...")
+            logger.info(
+                f"[CIBench] Analyzing group with {len(group_problems)} problems..."
+            )
             merged = _analyze_group_for_merge(group_problems, context_llm)
             final_problems.extend(merged)
 
-    logger.info(f"[CIBench] After grouping: {len(problems)} → {len(final_problems)} problems")
+    logger.info(
+        f"[CIBench] After grouping: {len(problems)} → {len(final_problems)} problems"
+    )
     return final_problems
 
 
-def _analyze_group_for_merge(group_problems: List[Dict[str, Any]], context_llm: Any) -> List[Dict[str, Any]]:
+def _analyze_group_for_merge(
+    group_problems: List[Dict[str, Any]], context_llm: Any
+) -> List[Dict[str, Any]]:
     """
     LLM analyzes if problems in group are similar/related and can be merged.
     Returns: list of problems (merged or separate)
@@ -1432,12 +1605,14 @@ def _analyze_group_for_merge(group_problems: List[Dict[str, Any]], context_llm: 
     # Build analysis prompt
     problems_summary = []
     for i, p in enumerate(group_problems, 1):
-        problems_summary.append({
-            "id": i,
-            "problem_statement": p.get('problem_statement', '')[:200],
-            "root_cause": p.get('root_cause', '')[:200],
-            "files": p.get('files', [])
-        })
+        problems_summary.append(
+            {
+                "id": i,
+                "problem_statement": p.get("problem_statement", "")[:200],
+                "root_cause": p.get("root_cause", "")[:200],
+                "files": p.get("files", []),
+            }
+        )
 
     prompt = f"""Analyze if these {len(group_problems)} problems can be merged into one.
 
@@ -1470,14 +1645,18 @@ OUTPUT (JSON only):
 
     try:
         response = context_llm(prompt)
-        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        json_match = re.search(r"\{.*\}", response, re.DOTALL)
         if json_match:
             analysis = json.loads(json_match.group(0))
-            if analysis.get('can_merge'):
-                logger.info(f"[CIBench] OK Merging {len(group_problems)} problems: {analysis.get('reason')}")
+            if analysis.get("can_merge"):
+                logger.info(
+                    f"[CIBench] OK Merging {len(group_problems)} problems: {analysis.get('reason')}"
+                )
                 return [_merge_problems(group_problems)]
             else:
-                logger.info(f"[CIBench] FAIL Keeping separate: {analysis.get('reason')}")
+                logger.info(
+                    f"[CIBench] FAIL Keeping separate: {analysis.get('reason')}"
+                )
                 return group_problems
     except Exception as e:
         logger.warning(f"[CIBench] LLM merge analysis failed: {e}")
@@ -1492,47 +1671,51 @@ def _merge_problems(problems: List[Dict[str, Any]]) -> Dict[str, Any]:
     Combines: problem_statement, root_cause, files, fixes
     """
     merged = {
-        'problem_id': f"merged_{problems[0].get('problem_id', 1)}",
-        'source': problems[0].get('source', ''),
-        'verification_cmd': problems[0].get('verification_cmd', ''),
-        'error_type': problems[0].get('error_type', ''),
-        'failure_type': problems[0].get('failure_type', ''),
-        'issue_type': problems[0].get('issue_type', ''),
+        "problem_id": f"merged_{problems[0].get('problem_id', 1)}",
+        "source": problems[0].get("source", ""),
+        "verification_cmd": problems[0].get("verification_cmd", ""),
+        "error_type": problems[0].get("error_type", ""),
+        "failure_type": problems[0].get("failure_type", ""),
+        "issue_type": problems[0].get("issue_type", ""),
     }
 
     # Combine problem statements
-    statements = [p.get('problem_statement', '') for p in problems if p.get('problem_statement')]
-    merged['problem_statement'] = "Multiple related issues:\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(statements))
+    statements = [
+        p.get("problem_statement", "") for p in problems if p.get("problem_statement")
+    ]
+    merged["problem_statement"] = "Multiple related issues:\n" + "\n".join(
+        f"{i + 1}. {s}" for i, s in enumerate(statements)
+    )
 
     # Combine root causes
-    causes = [p.get('root_cause', '') for p in problems if p.get('root_cause')]
+    causes = [p.get("root_cause", "") for p in problems if p.get("root_cause")]
     if causes:
-        merged['root_cause'] = "\n".join(set(causes))  # Deduplicate
+        merged["root_cause"] = "\n".join(set(causes))  # Deduplicate
     else:
-        merged['root_cause'] = ''
+        merged["root_cause"] = ""
 
     # Combine fix strategies
-    fixes = [p.get('fix_strategy', '') for p in problems if p.get('fix_strategy')]
+    fixes = [p.get("fix_strategy", "") for p in problems if p.get("fix_strategy")]
     if fixes:
-        merged['fix_strategy'] = "\n".join(set(fixes))
+        merged["fix_strategy"] = "\n".join(set(fixes))
     else:
-        merged['fix_strategy'] = ''
+        merged["fix_strategy"] = ""
 
     # Combine files (deduplicate)
     all_files = []
     for p in problems:
-        files = p.get('files', [])
+        files = p.get("files", [])
         if isinstance(files, list):
             all_files.extend(files)
-    merged['files'] = list(set(all_files))
+    merged["files"] = list(set(all_files))
 
     # Combine error details
     all_errors = []
     for p in problems:
-        errors = p.get('error_details', [])
+        errors = p.get("error_details", [])
         if isinstance(errors, list):
             all_errors.extend(errors)
-    merged['error_details'] = all_errors
+    merged["error_details"] = all_errors
 
     logger.info(f"[CIBench] Merged {len(problems)} problems into 1")
     return merged
@@ -1544,7 +1727,7 @@ def _run_sequential_repair(
     testbed_path: Path,
     progress_manager: Any,
     instance_id: str,
-    context_llm: Any = None
+    context_llm: Any = None,
 ) -> Tuple[Dict[str, Any], str]:
     """
     Fix problems sequentially, one at a time.
@@ -1569,7 +1752,9 @@ def _run_sequential_repair(
     total_problems_initial = len(problems)
     per_problem_timeout = 600  # 10 minutes per problem
 
-    logger.info(f"[CIBench] Starting sequential repair: {total_problems_initial} problems")
+    logger.info(
+        f"[CIBench] Starting sequential repair: {total_problems_initial} problems"
+    )
 
     # ═══════════════════════════════════════════════════════════════════════════
     # NOTE: Agent handles all validation internally
@@ -1586,9 +1771,9 @@ def _run_sequential_repair(
     total_problems = total_problems_initial
 
     for i, problem in enumerate(problems, 1):
-        logger.info(f"[CIBench] {'='*60}")
+        logger.info(f"[CIBench] {'=' * 60}")
         logger.info(f"[CIBench] Problem {i}/{total_problems}")
-        logger.info(f"[CIBench] {'='*60}")
+        logger.info(f"[CIBench] {'=' * 60}")
         # Support both old and new problem formats
 
         # New simplified format
@@ -1603,27 +1788,30 @@ def _run_sequential_repair(
         logger.info(f"[CIBench] Problem ID: {problem_id}")
         logger.info(f"[CIBench] Source: {source or 'unknown'}")
         # problem_statement is now a string, not a dict
-        problem_desc = problem.get('problem_statement', '')
+        problem_desc = problem.get("problem_statement", "")
         if isinstance(problem_desc, str):
             logger.info(f"[CIBench] Description: {problem_desc[:100]}")
         else:
             # Very old format (dict) - shouldn't happen with our new code
-            logger.info(f"[CIBench] Description: {problem_desc.get('description', '')[:100]}")
+            logger.info(
+                f"[CIBench] Description: {problem_desc.get('description', '')[:100]}"
+            )
 
         logger.info(f"[CIBench] Status: {status}")
         logger.info(f"[CIBench] Stage: {stage}")
         logger.info(f"[CIBench] Validation: {validation_cmd}")
 
         # Build focused task for THIS problem only
-        single_task = _build_single_problem_task(problem, i, total_problems, context_llm)
+        single_task = _build_single_problem_task(
+            problem, i, total_problems, context_llm
+        )
 
         logger.info("[CIBench] Task preview (first 300 chars):")
         logger.info(single_task[:300] + "...")
 
         # Update progress
         progress_manager.update_instance_status(
-            instance_id,
-            f"Fixing problem {i}/{total_problems}"
+            instance_id, f"Fixing problem {i}/{total_problems}"
         )
 
         # Agent fixes THIS problem (with timeout to avoid getting stuck)
@@ -1652,13 +1840,25 @@ def _run_sequential_repair(
             # CRITICAL: Detect immediate exit (agent state corruption)
             # ═══════════════════════════════════════════════════════════════
             if elapsed < 1.0:
-                logger.error(f"[CIBench] [WARN] Problem {i} completed in {elapsed:.3f}s - SUSPICIOUS IMMEDIATE EXIT!")
-                logger.error(f"[CIBench]    This indicates agent state corruption or configuration issue")
+                logger.error(
+                    f"[CIBench] [WARN] Problem {i} completed in {elapsed:.3f}s - SUSPICIOUS IMMEDIATE EXIT!"
+                )
+                logger.error(
+                    "[CIBench]    This indicates agent state corruption or configuration issue"
+                )
                 logger.error(f"[CIBench]    Exit status: {info.get('exit_status')}")
-                logger.error(f"[CIBench]    Submission length: {len(info.get('submission', ''))}")
-                logger.error(f"[CIBench]    Agent start_time: {getattr(agent, '_start_time', 'unknown')}")
-                logger.error(f"[CIBench]    Agent timeout: {getattr(agent.config, 'wall_time_limit_seconds', 'unknown')}")
-                logger.error(f"[CIBench] [WARN] STOPPING sequential repair to prevent cascade failures")
+                logger.error(
+                    f"[CIBench]    Submission length: {len(info.get('submission', ''))}"
+                )
+                logger.error(
+                    f"[CIBench]    Agent start_time: {getattr(agent, '_start_time', 'unknown')}"
+                )
+                logger.error(
+                    f"[CIBench]    Agent timeout: {getattr(agent.config, 'wall_time_limit_seconds', 'unknown')}"
+                )
+                logger.error(
+                    "[CIBench] [WARN] STOPPING sequential repair to prevent cascade failures"
+                )
                 # Break the loop - agent is broken, don't try more problems
                 break
 
@@ -1675,27 +1875,37 @@ def _run_sequential_repair(
                 logger.warning(f"[CIBench]    Submission length: {len(raw_submission)}")
 
                 # If we've had multiple consecutive no-patch failures, stop
-                recent_failures = sum(1 for f in partial_fixes[-3:] if f.get('patch', '').strip() == '')
+                recent_failures = sum(
+                    1 for f in partial_fixes[-3:] if f.get("patch", "").strip() == ""
+                )
                 if recent_failures >= 3:
-                    logger.error(f"[CIBench] [WARN] 3+ consecutive no-patch failures - agent may be broken")
-                    logger.error(f"[CIBench] [WARN] STOPPING to prevent wasted time")
+                    logger.error(
+                        "[CIBench] [WARN] 3+ consecutive no-patch failures - agent may be broken"
+                    )
+                    logger.error("[CIBench] [WARN] STOPPING to prevent wasted time")
                     break
 
                 # Don't break - continue to next problem
                 continue
 
-            logger.info(f"[CIBench] OK Problem {i}: Agent generated patch ({len(patch)} chars)")
+            logger.info(
+                f"[CIBench] OK Problem {i}: Agent generated patch ({len(patch)} chars)"
+            )
 
             # Save patch (no validation - agent's loop handles self-correction)
-            logger.info(f"[CIBench] Saving patch for problem {i} (agent self-corrects in loop)")
-            partial_fixes.append({
-                'problem_id': i,
-                'problem_number': problem.get('problem_number', i),
-                'status': status,
-                'validation_stage': stage,
-                'patch': patch,
-                'exit_status': exit_status
-            })
+            logger.info(
+                f"[CIBench] Saving patch for problem {i} (agent self-corrects in loop)"
+            )
+            partial_fixes.append(
+                {
+                    "problem_id": i,
+                    "problem_number": problem.get("problem_number", i),
+                    "status": status,
+                    "validation_stage": stage,
+                    "patch": patch,
+                    "exit_status": exit_status,
+                }
+            )
 
         except Exception as e:
             logger.error(f"[CIBench] ERROR Problem {i}: {e} - SKIPPING to next problem")
@@ -1729,17 +1939,22 @@ def _run_sequential_repair(
             detect_duplicate_patches,
             merge_duplicate_patches,
         )
+
         duplicates = detect_duplicate_patches(unified_diff)
         if duplicates:
             logger.warning(
                 "[CIBench] Detected duplicate patches for %d file(s): %s",
                 len(duplicates),
-                list(duplicates.keys())
+                list(duplicates.keys()),
             )
             logger.info("[CIBench] Merging duplicate patches...")
             try:
-                unified_diff = merge_duplicate_patches(unified_diff, repo_path=testbed_path)
-                logger.info("[CIBench] Successfully merged duplicate patches into unified diff")
+                unified_diff = merge_duplicate_patches(
+                    unified_diff, repo_path=testbed_path
+                )
+                logger.info(
+                    "[CIBench] Successfully merged duplicate patches into unified diff"
+                )
             except Exception as e:
                 logger.error(f"[CIBench] Failed to merge patches: {e}")
                 # Keep original even if merge fails
@@ -1747,19 +1962,23 @@ def _run_sequential_repair(
     logger.info("[CIBench] Sequential repair complete:")
     logger.info(f"[CIBench]   Total problems: {total_problems}")
     logger.info(f"[CIBench]   Fixed problems: {len(partial_fixes)}")
-    logger.info(f"[CIBench]   Success rate: {len(partial_fixes)}/{total_problems} = {100*len(partial_fixes)/total_problems:.1f}%")
+    logger.info(
+        f"[CIBench]   Success rate: {len(partial_fixes)}/{total_problems} = {100 * len(partial_fixes) / total_problems:.1f}%"
+    )
     logger.info(f"[CIBench]   Unified diff: {len(unified_diff)} chars")
 
     # Build info dict
     info = {
-        'exit_status': 'submitted' if unified_diff else 'failed',
-        'submission': unified_diff,
-        'sequential_repair': {
-            'total_problems': total_problems,
-            'fixed_problems': len(partial_fixes),
-            'success_rate': len(partial_fixes) / total_problems if total_problems > 0 else 0,
-            'partial_fixes': partial_fixes
-        }
+        "exit_status": "submitted" if unified_diff else "failed",
+        "submission": unified_diff,
+        "sequential_repair": {
+            "total_problems": total_problems,
+            "fixed_problems": len(partial_fixes),
+            "success_rate": len(partial_fixes) / total_problems
+            if total_problems > 0
+            else 0,
+            "partial_fixes": partial_fixes,
+        },
     }
 
     return info, unified_diff
@@ -1769,27 +1988,28 @@ def _run_sequential_repair(
 # Per-instance processing
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def process_instance(
-    instance:         Dict[str, Any],
-    output_dir:       Path,
-    config:           Dict[str, Any],
+    instance: Dict[str, Any],
+    output_dir: Path,
+    config: Dict[str, Any],
     progress_manager: RunBatchProgressManager,
     *,
-    memory_root:             Optional[str],
-    memory_enabled:          bool,
-    memory_top_k:            int,
-    memory_ablation_levels:  str,
-    memory_plugin_path:      Optional[str],
-    context_model:           str,
-    save_memory:             bool,
+    memory_root: Optional[str],
+    memory_enabled: bool,
+    memory_top_k: int,
+    memory_ablation_levels: str,
+    memory_plugin_path: Optional[str],
+    context_model: str,
+    save_memory: bool,
 ) -> None:
     """
     Full pipeline for one CI instance:
       pre-process logs -> clone repo -> checkout sha_fail -> run agent -> save diff
     """
     instance_id = str(instance.get("instance_id") or instance.get("id") or "unknown")
-    sha_fail    = str(instance.get("sha_fail") or "")
-    dir_name    = sha_fail or instance_id   # prefer sha_fail as the directory key
+    sha_fail = str(instance.get("sha_fail") or "")
+    dir_name = sha_fail or instance_id  # prefer sha_fail as the directory key
     instance_dir = output_dir / dir_name
     instance_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1799,11 +2019,11 @@ def process_instance(
     progress_manager.on_instance_start(instance_id)
     progress_manager.update_instance_status(instance_id, "Pre-processing CI logs")
 
-    agent        = None
+    agent = None
     exit_status: Optional[str] = None
-    diff         = ""
-    ci_ctx       = {}
-    ci_memory: Dict[str, Any] = {}   # full memory retrieval result - saved to trajectory
+    diff = ""
+    ci_ctx = {}
+    ci_memory: Dict[str, Any] = {}  # full memory retrieval result - saved to trajectory
     extra_info: Dict[str, Any] = {}
 
     # ── Phase 1: build enriched CI problem statement ──────────────────────────
@@ -1819,30 +2039,37 @@ def process_instance(
             model=context_model,
             llm=context_llm,
         )
-        ci_ctx    = ci_result["context"]
-        task      = ci_result["problem_statement"]
+        ci_ctx = ci_result["context"]
+        task = ci_result["problem_statement"]
         ci_memory = ci_result["memory"]
 
         # Validate ci_memory is a dict (not a list)
         if not isinstance(ci_memory, dict):
-            logger.warning("[CIBench] ci_memory is not a dict (got %s), using empty dict", type(ci_memory).__name__)
+            logger.warning(
+                "[CIBench] ci_memory is not a dict (got %s), using empty dict",
+                type(ci_memory).__name__,
+            )
             ci_memory = {}
 
         extra_info["memory_summary"] = {
-            "enabled":             memory_enabled,
+            "enabled": memory_enabled,
             "weighted_similarity": ci_memory.get("weighted_similarity", 0.0),
-            "levels_retrieved":    ci_memory.get("selected_memory_levels", []),
+            "levels_retrieved": ci_memory.get("selected_memory_levels", []),
         }
         # Write per-instance retrieval diagnostics for manual inspection
-        _save_retrieval_diagnostic(output_dir / "memory_retrieval_debug.jsonl", instance_id, ci_ctx, ci_memory)
+        _save_retrieval_diagnostic(
+            output_dir / "memory_retrieval_debug.jsonl", instance_id, ci_ctx, ci_memory
+        )
     except Exception as exc:
-        logger.exception("[CIBench] CI pre-processing failed for %s: %s", instance_id, exc)
+        logger.exception(
+            "[CIBench] CI pre-processing failed for %s: %s", instance_id, exc
+        )
         raw_log = instance.get("logs") or instance.get("log") or ""
         if isinstance(raw_log, list):
             raw_log = "\n".join(str(x) for x in raw_log)
         task = (
             f"# CI Failure\n\n"
-            f"Repo: {instance.get('repo_owner','')}/{instance.get('repo_name','')}\n"
+            f"Repo: {instance.get('repo_owner', '')}/{instance.get('repo_name', '')}\n"
             f"sha_fail: {sha_fail}\n\n"
             f"## Logs\n{str(raw_log)[:3000]}"
         )
@@ -1880,11 +2107,13 @@ def process_instance(
             separate_problems = llm_sel.get("separate_problems", [])
             if separate_problems:
                 ci_failure_count = sum(
-                    1 for problem in separate_problems
+                    1
+                    for problem in separate_problems
                     if str(problem.get("source", "")).strip() == "ci failure"
                 )
                 previous_experience_count = sum(
-                    1 for problem in separate_problems
+                    1
+                    for problem in separate_problems
                     if str(problem.get("source", "")).strip() == "previous experience"
                 )
                 logger.info(
@@ -1893,10 +2122,14 @@ def process_instance(
                     ci_failure_count,
                     previous_experience_count,
                 )
-                logger.info(f"[CIBench] Using {len(separate_problems)} separate problems from memory-guided repair")
+                logger.info(
+                    f"[CIBench] Using {len(separate_problems)} separate problems from memory-guided repair"
+                )
                 problems = separate_problems
             else:
-                logger.info("[CIBench] No separate problems - using standard single problem mode")
+                logger.info(
+                    "[CIBench] No separate problems - using standard single problem mode"
+                )
 
         # ══════════════════════════════════════════════════════════════════
         # ANALYZE AND GROUP PROBLEMS
@@ -1914,7 +2147,9 @@ def process_instance(
             # ...
             # Agent fixes Problem 8 → modifies more files
             # THEN: Collect ONE unified diff from workspace with ALL changes
-            logger.info(f"[CIBench] Sequential repair mode: {len(problems)} problems to fix")
+            logger.info(
+                f"[CIBench] Sequential repair mode: {len(problems)} problems to fix"
+            )
 
             info, diff = _run_sequential_repair(
                 agent=agent,
@@ -1922,7 +2157,7 @@ def process_instance(
                 testbed_path=testbed_path,
                 progress_manager=progress_manager,
                 instance_id=instance_id,
-                context_llm=context_llm
+                context_llm=context_llm,
             )
             exit_status = info.get("exit_status")
 
@@ -1955,38 +2190,48 @@ def process_instance(
                     memory_plugin_path=memory_plugin_path,
                 )
             except Exception as exc:
-                logger.warning("[CIBench] save_memory_after_patch failed for %s: %s", instance_id, exc)
+                logger.warning(
+                    "[CIBench] save_memory_after_patch failed for %s: %s",
+                    instance_id,
+                    exc,
+                )
 
     except Exception as exc:
-        logger.error("[CIBench] Agent run failed for %s: %s", instance_id, exc, exc_info=True)
+        logger.error(
+            "[CIBench] Agent run failed for %s: %s", instance_id, exc, exc_info=True
+        )
         exit_status = type(exc).__name__
         diff = ""
-        extra_info.update({"traceback": traceback.format_exc(), "exception_str": str(exc)})
+        extra_info.update(
+            {"traceback": traceback.format_exc(), "exception_str": str(exc)}
+        )
 
     finally:
         if agent is not None:
             traj_path = instance_dir / f"{dir_name}.traj.json"
-            llm_sel   = ci_memory.get("llm_selection") or {}
+            llm_sel = ci_memory.get("llm_selection") or {}
             agent.save(
                 traj_path,
                 {
                     "info": {
                         "exit_status": exit_status,
-                        "submission":  diff,
-                        "sha_fail":    sha_fail,
+                        "submission": diff,
+                        "sha_fail": sha_fail,
                         **extra_info,
                     },
                     "instance_id": instance_id,
-
                     # ── Phase A + B: Structured CI failure context ────────
                     "ci_context": {
-                        "overall_failure_reasons": ci_ctx.get("overall_failure_reasons", []),
-                        "overall_error_types":     ci_ctx.get("overall_error_types", []),
-                        "effected_files":          ci_ctx.get("effected_files", []),
-                        "failed_jobs":             ci_ctx.get("failed_jobs", []),
-                        "workflow_profile":        ci_ctx.get("workflow_profile", {}),
-                    } if ci_ctx else {},
-
+                        "overall_failure_reasons": ci_ctx.get(
+                            "overall_failure_reasons", []
+                        ),
+                        "overall_error_types": ci_ctx.get("overall_error_types", []),
+                        "effected_files": ci_ctx.get("effected_files", []),
+                        "failed_jobs": ci_ctx.get("failed_jobs", []),
+                        "workflow_profile": ci_ctx.get("workflow_profile", {}),
+                    }
+                    if ci_ctx
+                    else {},
                     # ── Phase C: Full memory retrieval + two-LLM analysis ─
                     "memory_retrieval": _build_memory_traj(ci_memory, task),
                 },
@@ -2012,26 +2257,27 @@ def _build_memory_traj(ci_memory: Dict[str, Any], task: str) -> Dict[str, Any]:
     if not ci_memory:
         return {}
 
-    llm_sel   = ci_memory.get("llm_selection") or {}
-    threshold = float((ci_memory.get("thresholds") or {}).get("similarity_threshold") or 0.0)
-    weighted  = float(ci_memory.get("weighted_similarity") or 0.0)
+    llm_sel = ci_memory.get("llm_selection") or {}
+    threshold = float(
+        (ci_memory.get("thresholds") or {}).get("similarity_threshold") or 0.0
+    )
+    weighted = float(ci_memory.get("weighted_similarity") or 0.0)
 
     return {
         # ── Retrieval metadata ────────────────────────────────────────────
-        "enabled":            bool(ci_memory.get("enabled", False)),
+        "enabled": bool(ci_memory.get("enabled", False)),
         "weighted_similarity": round(weighted, 4),
-        "level_scores":       {
+        "level_scores": {
             k: round(float(v), 4)
             for k, v in (ci_memory.get("level_scores") or {}).items()
         },
-        "threshold":          round(threshold, 4),
-        "above_threshold":    weighted >= threshold,
+        "threshold": round(threshold, 4),
+        "above_threshold": weighted >= threshold,
         "counts": {
             "L1": len(ci_memory.get("l1_matches") or []),
             "L2": len(ci_memory.get("l2_matches") or []),
             "L3": len(ci_memory.get("l3_matches") or []),
         },
-
         # ── Step 3-4: Raw cosine search results ───────────────────────────
         # All matches stored in full - no truncation - for manual analysis
         "cosine_search": {
@@ -2039,24 +2285,20 @@ def _build_memory_traj(ci_memory: Dict[str, Any], task: str) -> Dict[str, Any]:
             "L2": _slim_matches(ci_memory.get("l2_matches") or []),
             "L3": _slim_matches(ci_memory.get("l3_matches") or []),
         },
-
         # ── Step 5a: LLM 1 - Relevance Filter output ─────────────────────
         # Which candidates did LLM 1 select as relevant and why
         "llm1_filter": {
-            "use_memory":          bool(llm_sel.get("use_memory", False)),
-            "n_relevant":          len(llm_sel.get("relevant_candidates") or []),
+            "use_memory": bool(llm_sel.get("use_memory", False)),
+            "n_relevant": len(llm_sel.get("relevant_candidates") or []),
             "relevant_candidates": llm_sel.get("relevant_candidates") or [],
             # easy to check: did LLM 1 fire? how many candidates passed?
         },
-
         # ── Step 5b: LLM 2 - Experience Synthesizer output ───────────────
         # The full repair guidance document produced from relevant candidates
         "llm2_guidance": llm_sel.get("guidance_document") or {},
-
         # ── What went into the agent's context ────────────────────────────
         # The exact ## Memory Context section injected into problem_statement
         "injected_memory_block": _extract_memory_block(task),
-
         # ── Quick-read summary ────────────────────────────────────────────
         "analysis_summary": str(llm_sel.get("analysis_summary") or ""),
     }
@@ -2066,17 +2308,24 @@ def _slim_matches(matches: List[Dict[str, Any]], n: int = 3) -> List[Dict[str, A
     """Keep only the fields needed for analysis - avoids bloating the trajectory."""
     out = []
     for row in matches[:n]:
-        out.append({
-            "score":           round(float(row.get("similarity_score") or 0.0), 4),
-            "file":            row.get("file", ""),
-            "error_type":      row.get("error_type", ""),
-            "failure_pattern": row.get("failure_pattern") or row.get("issue_type", ""),
-            "failure_reason":  str(row.get("failure_reason") or row.get("overall_failure_reason") or "")[:300],
-            "fix_direction":   str(row.get("fix_direction") or row.get("fix_strategy") or "")[:300],
-            "matched_on":      row.get("matched_on") or {},
-            "repo":            row.get("repo", ""),
-            "sha_fail":        str(row.get("sha_fail") or "")[:12],
-        })
+        out.append(
+            {
+                "score": round(float(row.get("similarity_score") or 0.0), 4),
+                "file": row.get("file", ""),
+                "error_type": row.get("error_type", ""),
+                "failure_pattern": row.get("failure_pattern")
+                or row.get("issue_type", ""),
+                "failure_reason": str(
+                    row.get("failure_reason") or row.get("overall_failure_reason") or ""
+                )[:300],
+                "fix_direction": str(
+                    row.get("fix_direction") or row.get("fix_strategy") or ""
+                )[:300],
+                "matched_on": row.get("matched_on") or {},
+                "repo": row.get("repo", ""),
+                "sha_fail": str(row.get("sha_fail") or "")[:12],
+            }
+        )
     return out
 
 
@@ -2111,11 +2360,11 @@ def _save_retrieval_diagnostic(
       top_matches     (raw top-3 records per level for manual similarity check)
     """
     try:
-        llm_sel   = memory.get("llm_selection") or {}
-        query     = memory.get("query") or {}
-        scores    = memory.get("level_scores") or {"L1": 0.0, "L2": 0.0, "L3": 0.0}
+        llm_sel = memory.get("llm_selection") or {}
+        query = memory.get("query") or {}
+        scores = memory.get("level_scores") or {"L1": 0.0, "L2": 0.0, "L3": 0.0}
         threshold = (memory.get("thresholds") or {}).get("similarity_threshold", 0.0)
-        weighted  = float(memory.get("weighted_similarity") or 0.0)
+        weighted = float(memory.get("weighted_similarity") or 0.0)
 
         # Counts per level
         counts = {
@@ -2128,16 +2377,27 @@ def _save_retrieval_diagnostic(
         def _top_matches(level_key: str, n: int = 3) -> List[Dict[str, Any]]:
             out = []
             for row in (memory.get(level_key) or [])[:n]:
-                out.append({
-                    "level":           row.get("memory_level", level_key.split("_")[0].upper()),
-                    "score":           round(float(row.get("similarity_score") or 0.0), 4),
-                    "file":            row.get("file", ""),
-                    "error_type":      row.get("error_type", ""),
-                    "failure_pattern": row.get("failure_pattern") or row.get("issue_type", ""),
-                    "failure_reason":  str(row.get("failure_reason") or row.get("overall_failure_reason") or "")[:200],
-                    "fix_direction":   str(row.get("fix_direction") or row.get("fix_strategy") or "")[:200],
-                    "matched_on":      row.get("matched_on") or {},
-                })
+                out.append(
+                    {
+                        "level": row.get(
+                            "memory_level", level_key.split("_")[0].upper()
+                        ),
+                        "score": round(float(row.get("similarity_score") or 0.0), 4),
+                        "file": row.get("file", ""),
+                        "error_type": row.get("error_type", ""),
+                        "failure_pattern": row.get("failure_pattern")
+                        or row.get("issue_type", ""),
+                        "failure_reason": str(
+                            row.get("failure_reason")
+                            or row.get("overall_failure_reason")
+                            or ""
+                        )[:200],
+                        "fix_direction": str(
+                            row.get("fix_direction") or row.get("fix_strategy") or ""
+                        )[:200],
+                        "matched_on": row.get("matched_on") or {},
+                    }
+                )
             return out
 
         top_matches = (
@@ -2154,43 +2414,43 @@ def _save_retrieval_diagnostic(
 
         record = {
             # ── Instance identity ─────────────────────────────────────────
-            "instance_id":     instance_id,
-            "repo":            context.get("repo", ""),
-            "sha_fail":        str(context.get("sha_fail", ""))[:12],
+            "instance_id": instance_id,
+            "repo": context.get("repo", ""),
+            "sha_fail": str(context.get("sha_fail", ""))[:12],
             # ── Current failure ───────────────────────────────────────────
-            "error_type":      (
+            "error_type": (
                 query.get("error_type")
                 or (context.get("overall_error_types") or [""])[0]
             ),
             "failure_pattern": query.get("failure_pattern", ""),
-            "failure_reason":  str(query.get("overall_failure_reason") or ""),
+            "failure_reason": str(query.get("overall_failure_reason") or ""),
             # ── Cosine retrieval outcome ──────────────────────────────────
-            "memory_enabled":  bool(memory.get("enabled", False)),
-            "level_scores":    {k: round(float(v), 4) for k, v in scores.items()},
-            "weighted_sim":    round(weighted, 4),
-            "threshold":       round(float(threshold), 4),
+            "memory_enabled": bool(memory.get("enabled", False)),
+            "level_scores": {k: round(float(v), 4) for k, v in scores.items()},
+            "weighted_sim": round(weighted, 4),
+            "threshold": round(float(threshold), 4),
             "above_threshold": weighted >= threshold if threshold > 0 else False,
-            "counts":          counts,
-            "top_matches":     top_matches,           # raw candidates for manual check
+            "counts": counts,
+            "top_matches": top_matches,  # raw candidates for manual check
             # ── LLM 1: Relevance Filter ───────────────────────────────────
             "llm1": {
-                "used_memory":         bool(llm_sel.get("use_memory", False)),
-                "n_relevant":          len(relevant_candidates),
+                "used_memory": bool(llm_sel.get("use_memory", False)),
+                "n_relevant": len(relevant_candidates),
                 "relevant_candidates": relevant_candidates,
                 # each item: {index, memory_level, similarity_score, relevance, why_relevant}
             },
             # ── LLM 2: Experience Synthesizer ─────────────────────────────
             "llm2": {
                 "produced_guidance": bool(guidance),
-                "confidence":        guidance.get("confidence", ""),
+                "confidence": guidance.get("confidence", ""),
                 "confidence_reason": guidance.get("confidence_reason", ""),
-                "diagnosis":         guidance.get("diagnosis", ""),
-                "full_scope":        guidance.get("full_scope", {}),
-                "linked_issues":     guidance.get("linked_issues", []),
-                "fix_approach":      guidance.get("fix_approach", []),
+                "diagnosis": guidance.get("diagnosis", ""),
+                "full_scope": guidance.get("full_scope", {}),
+                "linked_issues": guidance.get("linked_issues", []),
+                "fix_approach": guidance.get("fix_approach", []),
                 "post_fix_patterns": guidance.get("post_fix_patterns", []),
-                "verification":      guidance.get("verification", {}),
-                "summary":           guidance.get("summary", ""),
+                "verification": guidance.get("verification", {}),
+                "summary": guidance.get("summary", ""),
                 # full document also stored for completeness
                 "_full_guidance_document": guidance,
             },
@@ -2204,7 +2464,11 @@ def _save_retrieval_diagnostic(
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     except Exception as exc:
-        logger.warning("[CIBench] Failed to write retrieval diagnostic for %s: %s", instance_id, exc)
+        logger.warning(
+            "[CIBench] Failed to write retrieval diagnostic for %s: %s",
+            instance_id,
+            exc,
+        )
 
 
 def _extract_diff(submission: str) -> str:
@@ -2226,7 +2490,7 @@ def _extract_diff(submission: str) -> str:
     """
     sentinel = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     if sentinel in submission:
-        diff = submission[submission.index(sentinel) + len(sentinel):].lstrip()
+        diff = submission[submission.index(sentinel) + len(sentinel) :].lstrip()
     else:
         diff = submission.lstrip()
     # Strip only completely empty trailing lines, not blank context lines (" ")
@@ -2244,7 +2508,8 @@ def _extract_diff(submission: str) -> str:
             logger.debug(
                 "[CIBench] Detected %d file(s) with duplicate patches: %s (will be merged)",
                 len(duplicate_files),
-                ", ".join(duplicate_files[:3]) + ("..." if len(duplicate_files) > 3 else "")
+                ", ".join(duplicate_files[:3])
+                + ("..." if len(duplicate_files) > 3 else ""),
             )
 
     return diff
@@ -2253,6 +2518,7 @@ def _extract_diff(submission: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 # fmt: off
 @app.command(help=_HELP_TEXT)

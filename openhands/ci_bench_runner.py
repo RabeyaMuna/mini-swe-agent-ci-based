@@ -288,9 +288,7 @@ def run_batch(
     print('Next steps:')
     print('1. Implement actual OpenHands agent execution')
     print('2. Replace placeholder results with real patches')
-    print(
-        f'3. Evaluate with: python scripts/evaluate_ablation_preds.py {preds_file}'
-    )
+    print(f'3. Evaluate with: python scripts/evaluate_ablation_preds.py {preds_file}')
 
 
 def main():

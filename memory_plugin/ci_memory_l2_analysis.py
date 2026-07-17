@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 class TimeoutError(Exception):
     """Raised when an LLM call exceeds timeout."""
+
     pass
 
 
@@ -63,7 +64,7 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -
     for attempt in range(max_retries + 1):
         try:
             # Set alarm signal for timeout (Unix/Mac only)
-            if hasattr(signal, 'SIGALRM'):
+            if hasattr(signal, "SIGALRM"):
                 signal.signal(signal.SIGALRM, _timeout_handler)
                 signal.alarm(timeout)
 
@@ -71,6 +72,7 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -
                 # Try LangChain interface
                 try:
                     from langchain_core.messages import HumanMessage
+
                     result = llm.invoke([HumanMessage(content=prompt)])
                     response = (getattr(result, "content", None) or "").strip()
                     if response:
@@ -92,7 +94,7 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -
 
             finally:
                 # Cancel alarm
-                if hasattr(signal, 'SIGALRM'):
+                if hasattr(signal, "SIGALRM"):
                     signal.alarm(0)
 
             # Fallback: direct callable
@@ -101,13 +103,17 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -
                 return response
 
         except TimeoutError:
-            logger.warning(f"[_call_llm] Timeout on attempt {attempt + 1}/{max_retries + 1}")
+            logger.warning(
+                f"[_call_llm] Timeout on attempt {attempt + 1}/{max_retries + 1}"
+            )
             if attempt < max_retries:
                 continue
             return ""
 
         except Exception as e:
-            logger.warning(f"[_call_llm] Error on attempt {attempt + 1}/{max_retries + 1}: {e}")
+            logger.warning(
+                f"[_call_llm] Error on attempt {attempt + 1}/{max_retries + 1}: {e}"
+            )
             if attempt < max_retries:
                 continue
             return ""
