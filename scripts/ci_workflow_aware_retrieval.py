@@ -53,7 +53,9 @@ STRICT_JSON_ARRAY_RULES = """### Output Rules (STRICT)
 
 def _call_llm(llm: Any, prompt: str) -> str:
     if llm is None:
-        raise WorkflowValidationExtractionError("LLM is required for workflow validation extraction.")
+        raise WorkflowValidationExtractionError(
+            "LLM is required for workflow validation extraction."
+        )
     try:
         result = llm.invoke(prompt)
         return str(getattr(result, "content", result) or "").strip()
@@ -85,13 +87,13 @@ def _load_json(content: str, default: Any) -> Any:
         extracted = None
 
         # Try to find JSON array
-        array_match = re.search(r'\[[\s\S]*\]', content)
+        array_match = re.search(r"\[[\s\S]*\]", content)
         if array_match:
             extracted = array_match.group(0)
 
         # If no array found, try to find JSON object
         if not extracted:
-            obj_match = re.search(r'\{[\s\S]*\}', content)
+            obj_match = re.search(r"\{[\s\S]*\}", content)
             if obj_match:
                 extracted = obj_match.group(0)
 
@@ -125,7 +127,9 @@ def _load_json(content: str, default: Any) -> Any:
         return default
 
 
-def _read_repo_file(repo_path: Optional[str], rel_path: str, max_chars: int = 80_000) -> Optional[str]:
+def _read_repo_file(
+    repo_path: Optional[str], rel_path: str, max_chars: int = 80_000
+) -> Optional[str]:
     if not repo_path or not rel_path:
         return None
 
@@ -163,12 +167,16 @@ def _normalize_dependent_files(raw: Any) -> List[Dict[str, str]]:
 
 def _normalize_validation_sequence(raw_steps: Any) -> List[Dict[str, Any]]:
     steps: List[Dict[str, Any]] = []
-    for index, item in enumerate(raw_steps if isinstance(raw_steps, list) else [], start=1):
+    for index, item in enumerate(
+        raw_steps if isinstance(raw_steps, list) else [], start=1
+    ):
         if not isinstance(item, dict):
             continue
 
         installation_cmd = str(item.get("installation_cmd") or "").strip()
-        validation_cmd = str(item.get("validation_cmd") or item.get("command") or "").strip()
+        validation_cmd = str(
+            item.get("validation_cmd") or item.get("command") or ""
+        ).strip()
         validates = str(item.get("validates") or item.get("name") or "").strip()
         source = str(item.get("source") or item.get("source_file") or "").strip()
         evidence = str(item.get("evidence") or "").strip()
@@ -176,14 +184,16 @@ def _normalize_validation_sequence(raw_steps: Any) -> List[Dict[str, Any]]:
         if not installation_cmd and not validation_cmd:
             continue
 
-        steps.append({
-            "order": int(item.get("order") or index),
-            "validates": validates,
-            "installation_cmd": installation_cmd,
-            "validation_cmd": validation_cmd,
-            "source": source,
-            "evidence": evidence,
-        })
+        steps.append(
+            {
+                "order": int(item.get("order") or index),
+                "validates": validates,
+                "installation_cmd": installation_cmd,
+                "validation_cmd": validation_cmd,
+                "source": source,
+                "evidence": evidence,
+            }
+        )
 
     steps.sort(key=lambda row: int(row["order"]))
     for index, step in enumerate(steps, start=1):
@@ -308,26 +318,34 @@ def analyze_workflow_from_benchmark(
     if not workflow_content.strip():
         raise WorkflowValidationExtractionError("workflow_content is required.")
 
-    dependent_raw = _call_llm(llm, build_dependent_file_prompt(workflow_path, workflow_content))
-    dependent_files = _normalize_dependent_files(_load_json(dependent_raw, {"dependent_files": []}))
+    dependent_raw = _call_llm(
+        llm, build_dependent_file_prompt(workflow_path, workflow_content)
+    )
+    dependent_files = _normalize_dependent_files(
+        _load_json(dependent_raw, {"dependent_files": []})
+    )
 
     dependent_file_contents: List[Dict[str, Any]] = []
     for dep in dependent_files:
         content = _read_repo_file(repo_path, dep["path"])
-        dependent_file_contents.append({
-            "path": dep["path"],
-            "reason": dep.get("reason", ""),
-            "found": content is not None,
-            "content": content or "",
-        })
+        dependent_file_contents.append(
+            {
+                "path": dep["path"],
+                "reason": dep.get("reason", ""),
+                "found": content is not None,
+                "content": content or "",
+            }
+        )
 
     sequence_raw = _call_llm(
         llm,
-        build_validation_sequence_prompt(workflow_path, workflow_content, dependent_file_contents),
+        build_validation_sequence_prompt(
+            workflow_path, workflow_content, dependent_file_contents
+        ),
     )
 
     # Log raw LLM response for debugging
-    print(f"[DEBUG] Workflow validation LLM raw response (first 1000 chars):")
+    print("[DEBUG] Workflow validation LLM raw response (first 1000 chars):")
     print(f"{str(sequence_raw)[:1000]}")
     print(f"[DEBUG] Response length: {len(str(sequence_raw))} chars")
 

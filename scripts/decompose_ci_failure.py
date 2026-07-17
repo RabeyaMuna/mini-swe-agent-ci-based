@@ -31,24 +31,26 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
+
 from deterministic_diff_parser import (
-    parse_diff_to_structured,
     chunk_structured_diff,
-    format_structured_for_llm
+    format_structured_for_llm,
+    parse_diff_to_structured,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT / 'src'))
 
-import litellm
-from dotenv import load_dotenv
-from datasets import load_dataset
-from minisweagent.run.benchmarks.utils.ci_context import (
+import litellm  # noqa: E402
+from datasets import load_dataset  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
+from minisweagent.run.benchmarks.utils.ci_context import (  # noqa: E402
     _log_analysis_to_context,
     _run_log_analysis,
 )
-from minisweagent.run.benchmarks.utils.ci_workflow_aware_retrieval import (
+
+from scripts.ci_workflow_aware_retrieval import (  # noqa: E402
     analyze_workflow_from_benchmark,
 )
 
@@ -57,10 +59,11 @@ try:
 except Exception:
     demjson3 = None  # type: ignore
 
+
 # Load memory issue IDs from workflow_validation_cache.json
-def _load_memory_issue_ids() -> List[str]:
+def _load_memory_issue_ids() -> list[str]:
     """Load issue IDs from workflow_validation_cache.json."""
-    cache_path = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
+    cache_path = PROJECT_ROOT / 'data' / 'workflow_validation_cache.json'
     if cache_path.exists():
         try:
             with open(cache_path) as f:
@@ -68,14 +71,15 @@ def _load_memory_issue_ids() -> List[str]:
                 issue_ids = [str(item['id']) for item in cache if 'id' in item]
                 return issue_ids
         except Exception as e:
-            print(f"Warning: Could not load workflow_validation_cache.json: {e}")
+            print(f'Warning: Could not load workflow_validation_cache.json: {e}')
             return ['121']  # Fallback to default
     return ['121']  # Fallback to default
+
 
 # Load memory issue IDs dynamically
 MEMORY_ISSUE_IDS = _load_memory_issue_ids()
 
-DIFF_CHUNK_CHAR_LIMIT = int(os.getenv("DIFF_CHUNK_CHAR_LIMIT", "30000"))
+DIFF_CHUNK_CHAR_LIMIT = int(os.getenv('DIFF_CHUNK_CHAR_LIMIT', '30000'))
 CHUNK_FINDINGS_INLINE_CHAR_LIMIT = 22000
 CHUNK_FINDINGS_BATCH_CHAR_LIMIT = 14000
 LOGGER = logging.getLogger(__name__)
@@ -90,12 +94,12 @@ STRICT_JSON_RULES = """### Output Rules (STRICT) - CRITICAL FOR PARSING
 - Do not emit trailing commas.
 - Your entire response will be passed directly to json.loads() - ensure it's valid JSON."""
 
-load_dotenv(PROJECT_ROOT / ".env", override=False)
+load_dotenv(PROJECT_ROOT / '.env', override=False)
 
-if not os.getenv("OPENROUTER_API_KEY") and os.getenv("MINIMAX_API_KEY"):
-    os.environ["OPENROUTER_API_KEY"] = os.getenv("MINIMAX_API_KEY", "")
-if not os.getenv("OPENROUTER_BASE_URL") and os.getenv("MINIMAX_BASE_URL"):
-    os.environ["OPENROUTER_BASE_URL"] = os.getenv("MINIMAX_BASE_URL", "")
+if not os.getenv('OPENROUTER_API_KEY') and os.getenv('MINIMAX_API_KEY'):
+    os.environ['OPENROUTER_API_KEY'] = os.getenv('MINIMAX_API_KEY', '')
+if not os.getenv('OPENROUTER_BASE_URL') and os.getenv('MINIMAX_BASE_URL'):
+    os.environ['OPENROUTER_BASE_URL'] = os.getenv('MINIMAX_BASE_URL', '')
 
 
 class LitellmModel:
@@ -107,37 +111,39 @@ class LitellmModel:
     @staticmethod
     def _normalize_model_name(model_name: str) -> str:
         if (
-            model_name.startswith("minimax/")
-            and os.getenv("OPENROUTER_API_KEY")
+            model_name.startswith('minimax/')
+            and os.getenv('OPENROUTER_API_KEY')
             and (
-                "openrouter.ai" in os.getenv("OPENROUTER_BASE_URL", "")
-                or "openrouter.ai" in os.getenv("MINIMAX_BASE_URL", "")
+                'openrouter.ai' in os.getenv('OPENROUTER_BASE_URL', '')
+                or 'openrouter.ai' in os.getenv('MINIMAX_BASE_URL', '')
             )
         ):
-            return f"openrouter/{model_name}"
+            return f'openrouter/{model_name}'
         return model_name
 
     def invoke(self, prompt: Any, max_tokens: int | None = None):
         if isinstance(prompt, list):
             messages = [
                 {
-                    "role": "user",
-                    "content": str(getattr(message, "content", message)),
+                    'role': 'user',
+                    'content': str(getattr(message, 'content', message)),
                 }
                 for message in prompt
             ]
         else:
-            messages = [{"role": "user", "content": str(prompt)}]
+            messages = [{'role': 'user', 'content': str(prompt)}]
 
         try:
             import time
+
             start_time = time.time()
 
             response = litellm.completion(
                 model=self.model_name,
                 messages=messages,
                 temperature=0,
-                max_tokens=max_tokens or 16000,  # MiniMax M2.5 supports large outputs; cap per task.
+                max_tokens=max_tokens
+                or 16000,  # MiniMax M2.5 supports large outputs; cap per task.
             )
 
             elapsed = time.time() - start_time
@@ -151,35 +157,43 @@ class LitellmModel:
                 prompt_tokens = getattr(usage, 'prompt_tokens', '?')
                 completion_tokens = getattr(usage, 'completion_tokens', '?')
                 total_tokens = getattr(usage, 'total_tokens', '?')
-                print(f"      [API] finish_reason={finish_reason}, tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}")
+                print(
+                    f'      [API] finish_reason={finish_reason}, tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}'
+                )
             else:
-                print(f"      [API] finish_reason={finish_reason}, no usage data")
+                print(f'      [API] finish_reason={finish_reason}, no usage data')
 
             if finish_reason == 'error':
                 error_msg = getattr(response, 'error', 'Unknown error')
                 if hasattr(response, '_hidden_params'):
-                    error_msg += f" | Details: {response._hidden_params}"
-                LOGGER.error(f"LLM error after {elapsed:.1f}s. Error: {error_msg}")
-                print(f"    FAIL LLM Error ({elapsed:.1f}s): {error_msg}")
+                    error_msg += f' | Details: {response._hidden_params}'
+                LOGGER.error(f'LLM error after {elapsed:.1f}s. Error: {error_msg}')
+                print(f'    FAIL LLM Error ({elapsed:.1f}s): {error_msg}')
             elif finish_reason == 'length':
                 # Log detailed info for length errors
-                LOGGER.warning(f"Hit length limit: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}")
-                print(f"    WARNING Length limit hit!")
-                print(f"       Tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}")
-                print(f"       max_tokens setting: {max_tokens or 16000}")
-                print(f"       Chunk too large - reduce max_changes_per_chunk or simplify prompt")
+                LOGGER.warning(
+                    f'Hit length limit: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}'
+                )
+                print('    WARNING Length limit hit!')
+                print(
+                    f'       Tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}'
+                )
+                print(f'       max_tokens setting: {max_tokens or 16000}')
+                print(
+                    '       Chunk too large - reduce max_changes_per_chunk or simplify prompt'
+                )
 
             class Result:
-                content = response.choices[0].message.content or ""
+                content = response.choices[0].message.content or ''
                 raw_response = response
 
             return Result()
         except Exception as e:
-            LOGGER.error(f"LiteLLM API call failed: {type(e).__name__}: {e}")
-            print(f"    FAIL API Error: {type(e).__name__}: {str(e)[:200]}")
+            LOGGER.error(f'LiteLLM API call failed: {type(e).__name__}: {e}')
+            print(f'    FAIL API Error: {type(e).__name__}: {str(e)[:200]}')
 
             class Result:
-                content = ""
+                content = ''
                 error = str(e)
                 raw_response = None
 
@@ -193,7 +207,7 @@ class LitellmModel:
 
 def _extract_json_from_text(content: str) -> str:
     """Extract JSON from LLM response that may include markdown fences or explanatory text."""
-    content = str(content or "").strip()
+    content = str(content or '').strip()
 
     # Try to extract JSON from markdown code blocks
     json_fence_pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
@@ -245,7 +259,7 @@ def _extract_json_from_text(content: str) -> str:
             elif char == close_char:
                 depth -= 1
                 if depth == 0:
-                    return content[start:i+1]
+                    return content[start : i + 1]
 
     # If we didn't find a match, return original
     return content
@@ -253,7 +267,7 @@ def _extract_json_from_text(content: str) -> str:
 
 def _clean_malformed_json(content: str) -> str:
     """Clean common LLM JSON formatting mistakes before parsing."""
-    content = str(content or "").strip()
+    content = str(content or '').strip()
     content = re.sub(r'```(?:json)?\s*\n?(.*?)\n?```', r'\1', content, flags=re.DOTALL)
     content = re.sub(r',(\s*[}\]])', r'\1', content)
     content = re.sub(r',\s*,', ',', content)
@@ -265,7 +279,7 @@ def _clean_malformed_json(content: str) -> str:
 
 def _load_llm_json(content: str) -> Any:
     """Parse raw LLM JSON. Handles markdown fences and explanatory text."""
-    content = str(content or "").strip()
+    content = str(content or '').strip()
 
     if not content:
         return []
@@ -278,7 +292,7 @@ def _load_llm_json(content: str) -> Any:
     ]
 
     last_json_err: Any = None
-    last_demjson3_err: Any = "demjson3 is not installed"
+    last_demjson3_err: Any = 'demjson3 is not installed'
 
     for candidate in candidates:
         if not candidate:
@@ -315,10 +329,10 @@ def _load_llm_json(content: str) -> Any:
 
     preview = content[:500] if len(content) > 500 else content
     parse_error = ValueError(
-        f"JSON parse failed: json={last_json_err}; demjson3={last_demjson3_err}\n"
-        f"Content preview (first 500 chars):\n{preview}"
+        f'JSON parse failed: json={last_json_err}; demjson3={last_demjson3_err}\n'
+        f'Content preview (first 500 chars):\n{preview}'
     )
-    LOGGER.warning("%s", parse_error)
+    LOGGER.warning('%s', parse_error)
     return []
 
 
@@ -327,56 +341,66 @@ def _invoke_json(llm: Any, prompt: str, max_tokens: int | None = None) -> Any:
     # Check prompt size upfront
     prompt_size_kb = len(prompt) / 1024
     if prompt_size_kb > 80:
-        print(f"        WARNING  Large prompt: {prompt_size_kb:.1f}KB - may cause API errors")
+        print(
+            f'        WARNING  Large prompt: {prompt_size_kb:.1f}KB - may cause API errors'
+        )
 
     try:
         try:
-            response = llm.invoke(prompt, max_tokens=max_tokens) if max_tokens else llm.invoke(prompt)
+            response = (
+                llm.invoke(prompt, max_tokens=max_tokens)
+                if max_tokens
+                else llm.invoke(prompt)
+            )
         except TypeError:
             response = llm.invoke(prompt)
-        content = str(getattr(response, "content", response) or "").strip()
+        content = str(getattr(response, 'content', response) or '').strip()
     except Exception as exc:
         error_msg = str(exc)
 
         # Provide specific guidance based on error type
-        if "Unable to get json response" in error_msg or "Expecting value" in error_msg:
-            print(f"        FAIL API returned malformed/truncated JSON")
-            print(f"          Prompt size: {prompt_size_kb:.1f}KB")
-            print(f"          -> Chunk too large, reduce max_files_per_chunk")
-        elif "rate limit" in error_msg.lower():
-            print(f"        FAIL Rate limit - increase delay (currently 3s)")
+        if 'Unable to get json response' in error_msg or 'Expecting value' in error_msg:
+            print('        FAIL API returned malformed/truncated JSON')
+            print(f'          Prompt size: {prompt_size_kb:.1f}KB')
+            print('          -> Chunk too large, reduce max_files_per_chunk')
+        elif 'rate limit' in error_msg.lower():
+            print('        FAIL Rate limit - increase delay (currently 3s)')
         else:
-            print(f"        FAIL API Error: {type(exc).__name__}: {str(exc)[:200]}")
+            print(f'        FAIL API Error: {type(exc).__name__}: {str(exc)[:200]}')
 
-        LOGGER.error(f"LLM API call failed: {type(exc).__name__}: {exc}")
+        LOGGER.error(f'LLM API call failed: {type(exc).__name__}: {exc}')
         return []  # Return empty, continue processing other chunks
 
     if not content:
         # Get detailed error info if available
-        error_details = ""
+        error_details = ''
         finish_reason = None
         if hasattr(response, 'error'):
-            error_details = f"Error: {response.error}"
+            error_details = f'Error: {response.error}'
         elif hasattr(response, 'raw_response') and response.raw_response:
             raw = response.raw_response
             if hasattr(raw, 'error'):
-                error_details = f"Error: {raw.error}"
+                error_details = f'Error: {raw.error}'
             if hasattr(raw.choices[0], 'finish_reason'):
                 finish_reason = raw.choices[0].finish_reason
-                error_details += f" | Finish reason: {finish_reason}"
+                error_details += f' | Finish reason: {finish_reason}'
 
-        print(f"        FAIL LLM returned empty content")
-        print(f"          Prompt size: {len(prompt)} chars ({len(prompt)/1024:.1f}KB)")
+        print('        FAIL LLM returned empty content')
+        print(
+            f'          Prompt size: {len(prompt)} chars ({len(prompt) / 1024:.1f}KB)'
+        )
         if error_details:
-            print(f"          {error_details}")
+            print(f'          {error_details}')
 
         # Special handling for length limit: return signal to re-split
         if finish_reason == 'length':
-            print(f"          -> Returning 'SPLIT_REQUIRED' signal for auto-retry")
-            LOGGER.warning(f"Length limit hit, chunk needs splitting")
-            return "SPLIT_REQUIRED"  # Signal to caller to split chunk
+            print("          -> Returning 'SPLIT_REQUIRED' signal for auto-retry")
+            LOGGER.warning('Length limit hit, chunk needs splitting')
+            return 'SPLIT_REQUIRED'  # Signal to caller to split chunk
 
-        LOGGER.warning(f"LLM empty content. Prompt size: {len(prompt)} chars. {error_details}")
+        LOGGER.warning(
+            f'LLM empty content. Prompt size: {len(prompt)} chars. {error_details}'
+        )
         return []
 
     parsed = _load_llm_json(content)
@@ -385,7 +409,9 @@ def _invoke_json(llm: Any, prompt: str, max_tokens: int | None = None) -> Any:
 
     # One repair pass helps when the model produced almost-valid JSON or was
     # wrapped/truncated. Keep this prompt small.
-    LOGGER.warning(f"Initial JSON parse failed, attempting repair. Content preview: {content[:200]}")
+    LOGGER.warning(
+        f'Initial JSON parse failed, attempting repair. Content preview: {content[:200]}'
+    )
     repair_prompt = f"""{STRICT_JSON_RULES}
 
 Repair the following model output into valid JSON only.
@@ -397,15 +423,19 @@ If the output is truncated, close the current JSON structure conservatively and 
 """
     try:
         repaired_response = llm.invoke(repair_prompt)
-        repaired_content = str(getattr(repaired_response, "content", repaired_response) or "").strip()
+        repaired_content = str(
+            getattr(repaired_response, 'content', repaired_response) or ''
+        ).strip()
         repaired = _load_llm_json(repaired_content)
         if repaired not in (None, [], {}):
-            LOGGER.info("Recovered malformed JSON with repair prompt")
+            LOGGER.info('Recovered malformed JSON with repair prompt')
             return repaired
     except Exception as exc:
-        LOGGER.warning("JSON repair prompt failed: %s", exc)
+        LOGGER.warning('JSON repair prompt failed: %s', exc)
 
-    LOGGER.warning(f"All JSON parsing attempts failed. Returning empty. Original content length: {len(content)}")
+    LOGGER.warning(
+        f'All JSON parsing attempts failed. Returning empty. Original content length: {len(content)}'
+    )
     return parsed
 
 
@@ -413,30 +443,32 @@ def _json_text(value: Any) -> str:
     return json.dumps(value, indent=2)
 
 
-def _extract_diff_file_sections(diff: str) -> List[Dict[str, Any]]:
+def _extract_diff_file_sections(diff: str) -> list[dict[str, Any]]:
     """Return complete `diff --git` file sections. Never splits a file diff."""
-    diff = str(diff or "")
+    diff = str(diff or '')
     if not diff.strip():
         return []
 
-    matches = list(re.finditer(r"(?m)^diff --git ", diff))
+    matches = list(re.finditer(r'(?m)^diff --git ', diff))
     if not matches:
-        return [{"files": [], "diff": diff, "char_count": len(diff)}]
+        return [{'files': [], 'diff': diff, 'char_count': len(diff)}]
 
-    sections: List[Dict[str, Any]] = []
+    sections: list[dict[str, Any]] = []
     for index, match in enumerate(matches):
         start = match.start()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(diff)
         section = diff[start:end].rstrip()
         first_line = section.split('\n')[0]
-        file_match = re.search(r"a/(.*?) b/", first_line)
+        file_match = re.search(r'a/(.*?) b/', first_line)
         files = [file_match.group(1)] if file_match else []
-        sections.append({"files": files, "diff": section, "char_count": len(section)})
+        sections.append({'files': files, 'diff': section, 'char_count': len(section)})
 
     return sections
 
 
-def chunk_diff_by_file(diff: str, max_chars: int = DIFF_CHUNK_CHAR_LIMIT) -> List[Dict[str, Any]]:
+def chunk_diff_by_file(
+    diff: str, max_chars: int = DIFF_CHUNK_CHAR_LIMIT
+) -> list[dict[str, Any]]:
     """
     Group complete file diffs into prompt chunks.
 
@@ -449,40 +481,46 @@ def chunk_diff_by_file(diff: str, max_chars: int = DIFF_CHUNK_CHAR_LIMIT) -> Lis
     if not sections:
         return []
 
-    chunks: List[Dict[str, Any]] = []
-    current_sections: List[Dict[str, Any]] = []
+    chunks: list[dict[str, Any]] = []
+    current_sections: list[dict[str, Any]] = []
     current_chars = 0
 
     def flush_current() -> None:
         nonlocal current_sections, current_chars
         if not current_sections:
             return
-        chunks.append({
-            "files": [
-                file_path
-                for section in current_sections
-                for file_path in section.get("files", [])
-            ],
-            "diff": "\n\n".join(section.get("diff", "") for section in current_sections),
-            "char_count": current_chars,
-            "file_count": len(current_sections),
-            "oversized_single_file": False,
-        })
+        chunks.append(
+            {
+                'files': [
+                    file_path
+                    for section in current_sections
+                    for file_path in section.get('files', [])
+                ],
+                'diff': '\n\n'.join(
+                    section.get('diff', '') for section in current_sections
+                ),
+                'char_count': current_chars,
+                'file_count': len(current_sections),
+                'oversized_single_file': False,
+            }
+        )
         current_sections = []
         current_chars = 0
 
     for section in sections:
-        section_chars = int(section.get("char_count") or len(section.get("diff", "")))
+        section_chars = int(section.get('char_count') or len(section.get('diff', '')))
 
         if section_chars > max_chars:
             flush_current()
-            chunks.append({
-                "files": section.get("files", []),
-                "diff": section.get("diff", ""),
-                "char_count": section_chars,
-                "file_count": 1,
-                "oversized_single_file": True,
-            })
+            chunks.append(
+                {
+                    'files': section.get('files', []),
+                    'diff': section.get('diff', ''),
+                    'char_count': section_chars,
+                    'file_count': 1,
+                    'oversized_single_file': True,
+                }
+            )
             continue
 
         if current_sections and current_chars + section_chars > max_chars:
@@ -496,22 +534,22 @@ def chunk_diff_by_file(diff: str, max_chars: int = DIFF_CHUNK_CHAR_LIMIT) -> Lis
     return chunks
 
 
-def _repo_checkout_path(issue: Dict[str, Any]) -> str | None:
+def _repo_checkout_path(issue: dict[str, Any]) -> str | None:
     """Return local checkout path for dependent workflow/config files if present."""
-    explicit = issue.get("repo_path") or issue.get("checkout_path")
+    explicit = issue.get('repo_path') or issue.get('checkout_path')
     if explicit and Path(str(explicit)).exists():
         return str(explicit)
 
-    repo = str(issue.get("repo") or "").strip()
-    repo_name = str(issue.get("repo_name") or "").strip()
-    repo_owner = str(issue.get("repo_owner") or "").strip()
-    candidates: List[Path] = []
-    if "/" in repo:
-        candidates.append(PROJECT_ROOT / "repo" / repo.replace("/", "__"))
+    repo = str(issue.get('repo') or '').strip()
+    repo_name = str(issue.get('repo_name') or '').strip()
+    repo_owner = str(issue.get('repo_owner') or '').strip()
+    candidates: list[Path] = []
+    if '/' in repo:
+        candidates.append(PROJECT_ROOT / 'repo' / repo.replace('/', '__'))
     if repo_owner and repo_name:
-        candidates.append(PROJECT_ROOT / "repo" / f"{repo_owner}__{repo_name}")
+        candidates.append(PROJECT_ROOT / 'repo' / f'{repo_owner}__{repo_name}')
     if repo_name:
-        candidates.append(PROJECT_ROOT / "repo" / repo_name)
+        candidates.append(PROJECT_ROOT / 'repo' / repo_name)
 
     for path in candidates:
         if path.exists():
@@ -519,7 +557,7 @@ def _repo_checkout_path(issue: Dict[str, Any]) -> str | None:
     return None
 
 
-def build_benchmark_ci_context(issue: Dict, llm: Any) -> Dict[str, Any]:
+def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
     """
     Build structured CI context for decomposition.
 
@@ -530,64 +568,83 @@ def build_benchmark_ci_context(issue: Dict, llm: Any) -> Dict[str, Any]:
 
     This function does not pass raw CI logs into decomposition prompts.
     """
-    raw_workflow = str(issue.get("workflow") or "")
+    raw_workflow = str(issue.get('workflow') or '')
     if not raw_workflow.strip():
-        raise ValueError(f"Issue {issue.get('id')} has no workflow YAML in benchmark data")
+        raise ValueError(
+            f'Issue {issue.get("id")} has no workflow YAML in benchmark data'
+        )
 
-    workflow_path = str(issue.get("workflow_path") or issue.get("workflow_filename") or "")
+    workflow_path = str(
+        issue.get('workflow_path') or issue.get('workflow_filename') or ''
+    )
     repo_path = _repo_checkout_path(issue)
-    model_name = str(getattr(llm, "model_name", "") or os.getenv("MEMCI_LLM_MODEL") or "")
-    issue_id = str(issue.get("id") or issue.get("instance_id") or "")
+    model_name = str(
+        getattr(llm, 'model_name', '') or os.getenv('MEMCI_LLM_MODEL') or ''
+    )
+    issue_id = str(issue.get('id') or issue.get('instance_id') or '')
 
     # Check cache first to avoid re-running CILogAnalyzer
-    sha_fail = issue.get("sha_fail", "")
-    cache_file = PROJECT_ROOT / "data" / "log_details.json"
+    sha_fail = issue.get('sha_fail', '')
+    cache_file = PROJECT_ROOT / 'data' / 'log_details.json'
     cached_analysis = None
 
     if cache_file.exists() and sha_fail:
         try:
             with open(cache_file) as f:
                 cache = json.load(f)
-            cached_analysis = next((entry for entry in cache if entry.get("sha_fail") == sha_fail), None)
+            cached_analysis = next(
+                (entry for entry in cache if entry.get('sha_fail') == sha_fail), None
+            )
             if cached_analysis:
-                print(f"  [1/2] Loading cached CI log analysis for {sha_fail[:12]}...")
+                print(f'  [1/2] Loading cached CI log analysis for {sha_fail[:12]}...')
         except Exception as e:
-            print(f"  WARNING:  Cache load failed: {e}, will re-analyze")
+            print(f'  WARNING:  Cache load failed: {e}, will re-analyze')
 
     if cached_analysis:
         log_analysis = cached_analysis
     else:
-        print("  [1/2] Building structured CI failure context with CILogAnalyzer...")
+        print('  [1/2] Building structured CI failure context with CILogAnalyzer...')
         log_analysis = _run_log_analysis(issue, llm=llm, model=model_name)
 
     context = _log_analysis_to_context(log_analysis, issue, workflow_profile={})
 
     # Check workflow validation cache
-    validation_cache_file = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
+    validation_cache_file = PROJECT_ROOT / 'data' / 'workflow_validation_cache.json'
     cached_validation = None
 
     if validation_cache_file.exists() and sha_fail:
         try:
             with open(validation_cache_file) as f:
                 validation_cache = json.load(f)
-            cached_validation = next((entry for entry in validation_cache if entry.get("sha_fail") == sha_fail), None)
+            cached_validation = next(
+                (
+                    entry
+                    for entry in validation_cache
+                    if entry.get('sha_fail') == sha_fail
+                ),
+                None,
+            )
             if cached_validation:
-                print(f"  [2/2] Loading cached workflow validation sequence for {sha_fail[:12]}...")
+                print(
+                    f'  [2/2] Loading cached workflow validation sequence for {sha_fail[:12]}...'
+                )
         except Exception as e:
-            print(f"  WARNING:  Validation cache load failed: {e}, will re-analyze")
+            print(f'  WARNING:  Validation cache load failed: {e}, will re-analyze')
 
     if cached_validation:
-        validation_sequence = cached_validation.get("validation_sequence", [])
+        validation_sequence = cached_validation.get('validation_sequence', [])
         workflow_validation_context = {
-            "id": str(cached_validation.get("id") or issue_id),
-            "sha_fail": str(cached_validation.get("sha_fail") or sha_fail),
-            "workflow_path": str(cached_validation.get("workflow_path") or workflow_path),
-            "dependent_files": cached_validation.get("dependent_files", []),
-            "validation_sequence": validation_sequence,
+            'id': str(cached_validation.get('id') or issue_id),
+            'sha_fail': str(cached_validation.get('sha_fail') or sha_fail),
+            'workflow_path': str(
+                cached_validation.get('workflow_path') or workflow_path
+            ),
+            'dependent_files': cached_validation.get('dependent_files', []),
+            'validation_sequence': validation_sequence,
         }
-        print(f"       Found {len(validation_sequence)} validation steps (cached)")
+        print(f'       Found {len(validation_sequence)} validation steps (cached)')
     else:
-        print("  [2/2] Analyzing workflow to extract validation sequence...")
+        print('  [2/2] Analyzing workflow to extract validation sequence...')
         try:
             workflow_validation_context = analyze_workflow_from_benchmark(
                 workflow_content=raw_workflow,
@@ -595,19 +652,21 @@ def build_benchmark_ci_context(issue: Dict, llm: Any) -> Dict[str, Any]:
                 repo_path=repo_path,
                 llm=llm,
                 issue_id=issue_id,
-                sha_fail=str(sha_fail or ""),
+                sha_fail=str(sha_fail or ''),
             )
 
-            validation_sequence = workflow_validation_context.get("validation_sequence", [])
+            validation_sequence = workflow_validation_context.get(
+                'validation_sequence', []
+            )
 
-            print(f"       Found {len(validation_sequence)} validation steps")
+            print(f'       Found {len(validation_sequence)} validation steps')
         except Exception as e:
-            print(f"       WARNING: Workflow extraction failed: {e}")
-            print(f"       Using fallback: empty validation sequence")
+            print(f'       WARNING: Workflow extraction failed: {e}')
+            print('       Using fallback: empty validation sequence')
             workflow_validation_context = {
-                "workflow_path": str(workflow_path),
-                "dependent_files": [],
-                "validation_sequence": [],
+                'workflow_path': str(workflow_path),
+                'dependent_files': [],
+                'validation_sequence': [],
             }
             validation_sequence = []
 
@@ -622,7 +681,7 @@ def build_benchmark_ci_context(issue: Dict, llm: Any) -> Dict[str, Any]:
                 # Update or append compact workflow-validation context.
                 updated = False
                 for entry in existing_cache:
-                    if entry.get("sha_fail") == sha_fail:
+                    if entry.get('sha_fail') == sha_fail:
                         entry.clear()
                         entry.update(workflow_validation_context)
                         updated = True
@@ -634,73 +693,79 @@ def build_benchmark_ci_context(issue: Dict, llm: Any) -> Dict[str, Any]:
                 validation_cache_file.parent.mkdir(parents=True, exist_ok=True)
                 with open(validation_cache_file, 'w') as f:
                     json.dump(existing_cache, f, indent=2)
-                print(f"Saved workflow validation to cache")
+                print('Saved workflow validation to cache')
             except Exception as e:
-                print(f" Failed to save validation cache: {e}")
+                print(f' Failed to save validation cache: {e}')
 
     # Allow empty validation_sequence as fallback (decomposition will work in simpler mode)
     if not validation_sequence:
-        print(f"       WARNING: No validation sequence available, using fallback decomposition mode")
+        print(
+            '       WARNING: No validation sequence available, using fallback decomposition mode'
+        )
 
     return {
-        "context": context,
-        "log_analysis": log_analysis,
-        "validation_sequence": validation_sequence,
-        "workflow_validation_context": workflow_validation_context,
-        "workflow_path": workflow_path,
-        "workflow_name": str(issue.get("workflow_name") or ""),
-        "repo_path": repo_path,
+        'context': context,
+        'log_analysis': log_analysis,
+        'validation_sequence': validation_sequence,
+        'workflow_validation_context': workflow_validation_context,
+        'workflow_path': workflow_path,
+        'workflow_name': str(issue.get('workflow_name') or ''),
+        'repo_path': repo_path,
     }
 
 
-def _has_structured_ci_context(benchmark_context: Dict[str, Any]) -> bool:
+def _has_structured_ci_context(benchmark_context: dict[str, Any]) -> bool:
     """Return True when CILogAnalyzer produced usable structured failure context."""
-    context = benchmark_context.get("context") or {}
-    log_analysis = benchmark_context.get("log_analysis") or {}
+    context = benchmark_context.get('context') or {}
+    log_analysis = benchmark_context.get('log_analysis') or {}
     return bool(
-        context.get("overall_failure_reasons")
-        or context.get("overall_error_types")
-        or context.get("effected_files")
-        or context.get("failed_jobs")
-        or log_analysis.get("error_context")
-        or log_analysis.get("relevant_files")
-        or log_analysis.get("error_types")
-        or log_analysis.get("failed_job")
-        or log_analysis.get("analysis_document")
-        or log_analysis.get("overall_ci_summary")
-        or log_analysis.get("chunk_summaries")
+        context.get('overall_failure_reasons')
+        or context.get('overall_error_types')
+        or context.get('effected_files')
+        or context.get('failed_jobs')
+        or log_analysis.get('error_context')
+        or log_analysis.get('relevant_files')
+        or log_analysis.get('error_types')
+        or log_analysis.get('failed_job')
+        or log_analysis.get('analysis_document')
+        or log_analysis.get('overall_ci_summary')
+        or log_analysis.get('chunk_summaries')
     )
 
 
-def validate_required_ci_inputs(benchmark_context: Dict[str, Any]) -> bool:
+def validate_required_ci_inputs(benchmark_context: dict[str, Any]) -> bool:
     """Both CI analyzer context and workflow validation sequence are required."""
     has_ci_context = _has_structured_ci_context(benchmark_context)
-    has_validation_sequence = bool(benchmark_context.get("validation_sequence"))
+    has_validation_sequence = bool(benchmark_context.get('validation_sequence'))
     if not has_ci_context:
-        print("  ERROR Missing structured CI context from CILogAnalyzer; skipping decomposition")
+        print(
+            '  ERROR Missing structured CI context from CILogAnalyzer; skipping decomposition'
+        )
     if not has_validation_sequence:
-        print("  ERROR Missing CI workflow validation sequence; skipping decomposition")
+        print('  ERROR Missing CI workflow validation sequence; skipping decomposition')
     return has_ci_context and has_validation_sequence
 
 
 def _compact_context_for_diff_analysis(
-    issue: Dict,
-    benchmark_context: Dict[str, Any],
-) -> Dict[str, Any]:
-    context = benchmark_context.get("context") or {}
+    issue: dict,
+    benchmark_context: dict[str, Any],
+) -> dict[str, Any]:
+    context = benchmark_context.get('context') or {}
     return {
-        "issue_id": issue.get("id"),
-        "repo": issue.get("repo_name", issue.get("repo")),
-        "workflow_path": benchmark_context.get("workflow_path"),
-        "overall_failure_reasons": context.get("overall_failure_reasons", []),
-        "overall_error_types": context.get("overall_error_types", []),
-        "failed_jobs": context.get("failed_jobs", []),
+        'issue_id': issue.get('id'),
+        'repo': issue.get('repo_name', issue.get('repo')),
+        'workflow_path': benchmark_context.get('workflow_path'),
+        'overall_failure_reasons': context.get('overall_failure_reasons', []),
+        'overall_error_types': context.get('overall_error_types', []),
+        'failed_jobs': context.get('failed_jobs', []),
     }
 
 
-def _batch_findings_by_size(findings: List[Dict[str, Any]], max_chars: int) -> List[List[Dict[str, Any]]]:
-    batches: List[List[Dict[str, Any]]] = []
-    current: List[Dict[str, Any]] = []
+def _batch_findings_by_size(
+    findings: list[dict[str, Any]], max_chars: int
+) -> list[list[dict[str, Any]]]:
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
     current_size = 2
 
     for finding in findings:
@@ -718,18 +783,27 @@ def _batch_findings_by_size(findings: List[Dict[str, Any]], max_chars: int) -> L
 
     return batches
 
+
 # ============================================================================
 # CI-DIFF CORRELATION: Layered Analysis
 # ============================================================================
 
+
 def _is_dependency_file(file_path: str) -> bool:
     """Check if file is a dependency configuration file."""
-    dep_files = ['pyproject.toml', 'package.json', 'requirements.txt',
-                 'Cargo.toml', 'pom.xml', 'build.gradle', 'setup.py']
+    dep_files = [
+        'pyproject.toml',
+        'package.json',
+        'requirements.txt',
+        'Cargo.toml',
+        'pom.xml',
+        'build.gradle',
+        'setup.py',
+    ]
     return any(file_path.endswith(f) for f in dep_files)
 
 
-def extract_primary_ci_failures(ci_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+def extract_primary_ci_failures(ci_context: dict[str, Any]) -> list[dict[str, Any]]:
     """
     LAYER 1: Extract PRIMARY CI failures that actually happened.
 
@@ -741,25 +815,27 @@ def extract_primary_ci_failures(ci_context: Dict[str, Any]) -> List[Dict[str, An
 
     # From overall_error_types (structured CI analysis)
     for error_type in ci_context.get('overall_error_types', []):
-        primary_failures.append({
-            "failure_id": failure_id,
-            "validation_order": None,  # Will be inferred from validation sequence
-            "error_type": error_type,
-            "error_category": error_type,
-            "error_message": "",
-            "severity": "primary",
-        })
+        primary_failures.append(
+            {
+                'failure_id': failure_id,
+                'validation_order': None,  # Will be inferred from validation sequence
+                'error_type': error_type,
+                'error_category': error_type,
+                'error_message': '',
+                'severity': 'primary',
+            }
+        )
         failure_id += 1
 
     # From overall_failure_reasons (detailed descriptions)
     for reason in ci_context.get('overall_failure_reasons', []):
         # Try to extract validation info from reason
         validation_info = {
-            "failure_id": failure_id,
-            "validation_order": None,
-            "error_type": "Unknown",
-            "error_message": reason[:500],  # First 500 chars
-            "severity": "primary",
+            'failure_id': failure_id,
+            'validation_order': None,
+            'error_type': 'Unknown',
+            'error_message': reason[:500],  # First 500 chars
+            'severity': 'primary',
         }
 
         # Try to infer error type from message
@@ -775,17 +851,21 @@ def extract_primary_ci_failures(ci_context: Dict[str, Any]) -> List[Dict[str, An
         primary_failures.append(validation_info)
         failure_id += 1
 
-    print(f"    Extracted {len(primary_failures)} primary CI failures")
-    print(f"      From overall_error_types: {len(ci_context.get('overall_error_types', []))}")
-    print(f"      From overall_failure_reasons: {len(ci_context.get('overall_failure_reasons', []))}")
+    print(f'    Extracted {len(primary_failures)} primary CI failures')
+    print(
+        f'      From overall_error_types: {len(ci_context.get("overall_error_types", []))}'
+    )
+    print(
+        f'      From overall_failure_reasons: {len(ci_context.get("overall_failure_reasons", []))}'
+    )
 
     return primary_failures
 
 
 def match_failures_with_diff_fixes(
-    primary_failures: List[Dict[str, Any]],
-    validation_groups: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+    primary_failures: list[dict[str, Any]],
+    validation_groups: dict[str, Any],
+) -> list[dict[str, Any]]:
     """
     LAYER 2: For EACH validation group with changes, determine fix type.
 
@@ -799,7 +879,7 @@ def match_failures_with_diff_fixes(
     matched = []
     groups_data = validation_groups.get('validation_groups', {})
 
-    print(f"    Analyzing {len(groups_data)} validation groups with changes...")
+    print(f'    Analyzing {len(groups_data)} validation groups with changes...')
 
     # For EACH validation group, classify the fix type
     for val_order_str, val_group in groups_data.items():
@@ -810,41 +890,45 @@ def match_failures_with_diff_fixes(
 
         # Classify changes
         dep_changes = [c for c in all_changes if _is_dependency_file(c.get('file', ''))]
-        code_changes = [c for c in all_changes if not _is_dependency_file(c.get('file', ''))]
+        code_changes = [
+            c for c in all_changes if not _is_dependency_file(c.get('file', ''))
+        ]
 
         # Determine fix type based on what's present
         if dep_changes and code_changes:
             # Has BOTH - this is an enablement that reveals secondary
-            fix_type = "ENABLEMENT_FIX"  # Mark as enablement, cascade detection will handle secondary
+            fix_type = 'ENABLEMENT_FIX'  # Mark as enablement, cascade detection will handle secondary
         elif dep_changes and not code_changes:
             # ONLY dependency changes - pure enablement
-            fix_type = "ENABLEMENT_FIX"
+            fix_type = 'ENABLEMENT_FIX'
         elif code_changes and not dep_changes:
             # ONLY code changes - direct fix
-            fix_type = "DIRECT_FIX"
+            fix_type = 'DIRECT_FIX'
         else:
             # No changes (shouldn't happen)
             continue
 
-        matched.append({
-            "failure_id": len(matched) + 1,
-            "fix_type": fix_type,
-            "validation_order": int(val_order_str),
-            "validation_cmd": val_group.get('validation_cmd', ''),
-            "diff_changes": all_changes,
-            "dependency_changes": dep_changes,
-            "code_changes": code_changes,
-            "error_type": val_group.get('failure_type', 'Unknown'),
-            "error_message": f"Validation {val_order_str}: {val_group.get('validation_cmd', '')}"
-        })
+        matched.append(
+            {
+                'failure_id': len(matched) + 1,
+                'fix_type': fix_type,
+                'validation_order': int(val_order_str),
+                'validation_cmd': val_group.get('validation_cmd', ''),
+                'diff_changes': all_changes,
+                'dependency_changes': dep_changes,
+                'code_changes': code_changes,
+                'error_type': val_group.get('failure_type', 'Unknown'),
+                'error_message': f'Validation {val_order_str}: {val_group.get("validation_cmd", "")}',
+            }
+        )
 
     return matched
 
 
 def detect_enablement_cascades(
-    matched_failures: List[Dict[str, Any]],
-    validation_groups: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+    matched_failures: list[dict[str, Any]],
+    validation_groups: dict[str, Any],
+) -> list[dict[str, Any]]:
     """
     LAYER 3: Detect which fixes ENABLE validations and REVEAL secondary failures.
 
@@ -869,29 +953,32 @@ def detect_enablement_cascades(
 
         # Check if there are code changes in same validation
         all_changes = val_group.get('all_changes', [])
-        code_changes = [c for c in all_changes if not _is_dependency_file(c.get('file', ''))]
+        code_changes = [
+            c for c in all_changes if not _is_dependency_file(c.get('file', ''))
+        ]
 
         if code_changes:
             # This enablement REVEALS secondary failures
             cascade = {
-                "primary_failure_id": failure['failure_id'],
-                "validation_order": val_order,
-                "validation_cmd": val_group.get('validation_cmd', ''),
-                "enablement_type": "dependency_installation",
-                "reveals_secondary_failures": True,
-                "secondary_changes": code_changes,
-                "secondary_file_count": len(set(c.get('file') for c in code_changes)),
-                "cascade_explanation": f"Enabling validation reveals {len(set(c.get('file') for c in code_changes))} files with violations"
+                'primary_failure_id': failure['failure_id'],
+                'validation_order': val_order,
+                'validation_cmd': val_group.get('validation_cmd', ''),
+                'enablement_type': 'dependency_installation',
+                'reveals_secondary_failures': True,
+                'secondary_changes': code_changes,
+                'secondary_file_count': len(set(c.get('file') for c in code_changes)),
+                'cascade_explanation': f'Enabling validation reveals {len(set(c.get("file") for c in code_changes))} files with violations',
             }
             cascades.append(cascade)
 
     return cascades
 
+
 def merge_chunks_by_validation(
-    chunk_findings: List[Dict[str, Any]],
-    validation_sequence: List[Dict[str, Any]],
-    structured_chunks: List[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    chunk_findings: list[dict[str, Any]],
+    validation_sequence: list[dict[str, Any]],
+    structured_chunks: list[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """
     Step 2: Merge chunk findings by validation (deterministic, no LLM).
 
@@ -906,92 +993,104 @@ def merge_chunks_by_validation(
     """
     validation_groups = {}
     sequence_by_order = {
-        str(item.get("order")): item
+        str(item.get('order')): item
         for item in validation_sequence
-        if item.get("order") is not None
+        if item.get('order') is not None
     }
 
     for chunk in chunk_findings:
-        for val_entry in chunk.get("validations_in_this_chunk", []):
-            val_order = val_entry.get("validation_order")
-            val_cmd = val_entry.get("validation_cmd")
-            if (not val_cmd or val_cmd == "unknown") and val_order not in (None, "unknown"):
+        for val_entry in chunk.get('validations_in_this_chunk', []):
+            val_order = val_entry.get('validation_order')
+            val_cmd = val_entry.get('validation_cmd')
+            if (not val_cmd or val_cmd == 'unknown') and val_order not in (
+                None,
+                'unknown',
+            ):
                 seq_item = sequence_by_order.get(str(val_order), {})
                 val_cmd = str(
-                    seq_item.get("validation_cmd")
-                    or seq_item.get("installation_cmd")
-                    or seq_item.get("validates")
-                    or ""
+                    seq_item.get('validation_cmd')
+                    or seq_item.get('installation_cmd')
+                    or seq_item.get('validates')
+                    or ''
                 ).strip()
-                val_entry["validation_cmd"] = val_cmd
-            if val_order in (None, "unknown") or not val_cmd or val_cmd == "unknown":
+                val_entry['validation_cmd'] = val_cmd
+            if val_order in (None, 'unknown') or not val_cmd or val_cmd == 'unknown':
                 continue
 
             # Check if this validation has multiple failure types
-            if val_entry.get("has_multiple_failure_types"):
+            if val_entry.get('has_multiple_failure_types'):
                 # Handle sub-problems
-                for sub_problem in val_entry.get("sub_problems", []):
+                for sub_problem in val_entry.get('sub_problems', []):
                     # Unique key: validation_order + sub_problem_id
-                    sub_id = sub_problem.get("sub_problem_id", "")
-                    key = f"{val_order}_{sub_id}" if sub_id else str(val_order)
+                    sub_id = sub_problem.get('sub_problem_id', '')
+                    key = f'{val_order}_{sub_id}' if sub_id else str(val_order)
 
                     if key not in validation_groups:
                         validation_groups[key] = {
-                            "validation_order": val_order,
-                            "validation_cmd": val_cmd,
-                            "has_sub_problems": True,
-                            "sub_problem_id": sub_id,
-                            "failure_type": sub_problem.get("failure_type"),
-                            "issue_type": sub_problem.get("issue_type") or sub_problem.get("failure_name"),
-                            "error_code": sub_problem.get("error_code"),
-                            "chunks": [],
-                            "all_files": [],
-                            "all_changes": [],
-                            "has_pattern": False,
-                            "total_files": 0,
+                            'validation_order': val_order,
+                            'validation_cmd': val_cmd,
+                            'has_sub_problems': True,
+                            'sub_problem_id': sub_id,
+                            'failure_type': sub_problem.get('failure_type'),
+                            'issue_type': sub_problem.get('issue_type')
+                            or sub_problem.get('failure_name'),
+                            'error_code': sub_problem.get('error_code'),
+                            'chunks': [],
+                            'all_files': [],
+                            'all_changes': [],
+                            'has_pattern': False,
+                            'total_files': 0,
                         }
 
-                    validation_groups[key]["chunks"].append(chunk["chunk_index"])
-                    validation_groups[key]["all_files"].extend(sub_problem.get("files", []))
+                    validation_groups[key]['chunks'].append(chunk['chunk_index'])
+                    validation_groups[key]['all_files'].extend(
+                        sub_problem.get('files', [])
+                    )
                     # Don't add changes here - they'll be populated from structured_chunks below
-                    validation_groups[key]["total_files"] += sub_problem.get("total_files", len(sub_problem.get("files", [])))
+                    validation_groups[key]['total_files'] += sub_problem.get(
+                        'total_files', len(sub_problem.get('files', []))
+                    )
 
                     # Cross-chunk pattern detection
-                    if sub_problem.get("has_pattern"):
-                        validation_groups[key]["has_pattern"] = True
+                    if sub_problem.get('has_pattern'):
+                        validation_groups[key]['has_pattern'] = True
             else:
                 # Single failure type - keep distinct issue subtypes separate.
-                failure_type = str(val_entry.get("failure_type") or "").strip()
-                issue_type = str(val_entry.get("issue_type") or val_entry.get("failure_name") or "").strip()
+                failure_type = str(val_entry.get('failure_type') or '').strip()
+                issue_type = str(
+                    val_entry.get('issue_type') or val_entry.get('failure_name') or ''
+                ).strip()
                 key_parts = [str(val_order)]
                 if failure_type:
-                    key_parts.append(failure_type.lower().replace(" ", "_"))
+                    key_parts.append(failure_type.lower().replace(' ', '_'))
                 if issue_type:
-                    key_parts.append(issue_type.lower().replace(" ", "_"))
-                key = "::".join(key_parts)
+                    key_parts.append(issue_type.lower().replace(' ', '_'))
+                key = '::'.join(key_parts)
 
                 if key not in validation_groups:
                     validation_groups[key] = {
-                        "validation_order": val_order,
-                        "validation_cmd": val_cmd,
-                        "failure_type": failure_type,
-                        "issue_type": issue_type,
-                        "has_sub_problems": False,
-                        "chunks": [],
-                        "all_files": [],
-                        "all_changes": [],
-                        "has_pattern": False,
-                        "total_files": 0,
+                        'validation_order': val_order,
+                        'validation_cmd': val_cmd,
+                        'failure_type': failure_type,
+                        'issue_type': issue_type,
+                        'has_sub_problems': False,
+                        'chunks': [],
+                        'all_files': [],
+                        'all_changes': [],
+                        'has_pattern': False,
+                        'total_files': 0,
                     }
 
-                validation_groups[key]["chunks"].append(chunk["chunk_index"])
-                validation_groups[key]["all_files"].extend(val_entry.get("files", []))
+                validation_groups[key]['chunks'].append(chunk['chunk_index'])
+                validation_groups[key]['all_files'].extend(val_entry.get('files', []))
                 # Don't add changes here - they'll be populated from structured_chunks below
-                validation_groups[key]["total_files"] += val_entry.get("total_files", len(val_entry.get("files", [])))
+                validation_groups[key]['total_files'] += val_entry.get(
+                    'total_files', len(val_entry.get('files', []))
+                )
 
                 # Cross-chunk pattern detection
-                if val_entry.get("has_pattern"):
-                    validation_groups[key]["has_pattern"] = True
+                if val_entry.get('has_pattern'):
+                    validation_groups[key]['has_pattern'] = True
 
     # CRITICAL FIX: Attach actual file changes to validation groups
     # Build a lookup of file -> changes from the original structured chunks
@@ -999,32 +1098,32 @@ def merge_chunks_by_validation(
     all_changed_files = set()
     if structured_chunks:
         for chunk in structured_chunks:
-            if "files" in chunk:
-                for file_info in chunk["files"]:
-                    file_path = file_info.get("path", "")
+            if 'files' in chunk:
+                for file_info in chunk['files']:
+                    file_path = file_info.get('path', '')
                     if file_path:
                         all_changed_files.add(file_path)
-                    if file_path and "changes" in file_info:
+                    if file_path and 'changes' in file_info:
                         if file_path not in file_changes_lookup:
                             file_changes_lookup[file_path] = []
-                        file_changes_lookup[file_path].extend(file_info["changes"])
+                        file_changes_lookup[file_path].extend(file_info['changes'])
 
     # Now attach changes to each validation group
     for val_group in validation_groups.values():
-        for file_path in val_group["all_files"]:
+        for file_path in val_group['all_files']:
             if file_path in file_changes_lookup:
                 # Add all changes for this file
                 file_changes = file_changes_lookup[file_path]
                 for change in file_changes:
                     # Add file context to each change
                     change_with_file = change.copy()
-                    change_with_file["file"] = file_path
-                    val_group["all_changes"].append(change_with_file)
+                    change_with_file['file'] = file_path
+                    val_group['all_changes'].append(change_with_file)
 
     # Sort by validation order for sequential processing. LLMs should return
     # numeric orders, but keep this deterministic if a string slips through.
-    def _validation_sort_key(item: tuple[str, Dict[str, Any]]) -> tuple[int, str]:
-        order = item[1].get("validation_order")
+    def _validation_sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
+        order = item[1].get('validation_order')
         try:
             return (int(order), str(order))
         except (TypeError, ValueError):
@@ -1033,23 +1132,28 @@ def merge_chunks_by_validation(
     sorted_groups = dict(sorted(validation_groups.items(), key=_validation_sort_key))
 
     return {
-        "validation_groups": sorted_groups,
-        "total_validations": len(set(g["validation_order"] for g in sorted_groups.values())),
-        "total_groups": len(sorted_groups),  # May be > total_validations if sub-problems exist
-        "all_changed_files_from_diff": sorted(all_changed_files),
-        "all_config_files_from_diff": sorted(
+        'validation_groups': sorted_groups,
+        'total_validations': len(
+            set(g['validation_order'] for g in sorted_groups.values())
+        ),
+        'total_groups': len(
+            sorted_groups
+        ),  # May be > total_validations if sub-problems exist
+        'all_changed_files_from_diff': sorted(all_changed_files),
+        'all_config_files_from_diff': sorted(
             file_path
             for file_path in all_changed_files
             if _is_dependency_file(file_path)
-            or file_path.endswith((".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock"))
+            or file_path.endswith(
+                ('.toml', '.yaml', '.yml', '.json', '.ini', '.cfg', '.lock')
+            )
         ),
     }
 
 
 def _chunk_validation_changes(
-    val_group: Dict[str, Any],
-    max_changes_per_chunk: int = 400
-) -> List[Dict[str, Any]]:
+    val_group: dict[str, Any], max_changes_per_chunk: int = 400
+) -> list[dict[str, Any]]:
     """
     Chunk a single validation if it has too many changes.
 
@@ -1064,7 +1168,7 @@ def _chunk_validation_changes(
     # Split into chunks
     chunks = []
     for start_idx in range(0, len(all_changes), max_changes_per_chunk):
-        chunk_changes = all_changes[start_idx:start_idx + max_changes_per_chunk]
+        chunk_changes = all_changes[start_idx : start_idx + max_changes_per_chunk]
 
         chunk = {
             'validation_cmd': val_group.get('validation_cmd', ''),
@@ -1072,7 +1176,7 @@ def _chunk_validation_changes(
             'issue_type': val_group.get('issue_type', ''),
             'all_files': val_group.get('all_files', []),  # Keep full file list
             'all_changes': chunk_changes,
-            'chunk_info': f"Changes {start_idx + 1}-{start_idx + len(chunk_changes)} of {len(all_changes)} total"
+            'chunk_info': f'Changes {start_idx + 1}-{start_idx + len(chunk_changes)} of {len(all_changes)} total',
         }
         chunks.append(chunk)
 
@@ -1080,17 +1184,19 @@ def _chunk_validation_changes(
 
 
 ATOMIC_ANALYSIS_MAX_PROMPT_CHARS = 48000
-ATOMIC_ANALYSIS_MAX_OUTPUT_TOKENS = 16000  # MiniMax M2.5 supports up to 64K, 16K is safe
+ATOMIC_ANALYSIS_MAX_OUTPUT_TOKENS = (
+    16000  # MiniMax M2.5 supports up to 64K, 16K is safe
+)
 VALIDATION_MERGE_MAX_PROMPT_CHARS = 32000
 VALIDATION_MERGE_MAX_OUTPUT_TOKENS = 8000  # Increased from 6000
 
 
 def _compact_text(value: Any, limit: int = 1200) -> str:
     """Compact text fields before placing them in prompts."""
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r'\s+', ' ', str(value or '')).strip()
     if len(text) <= limit:
         return text
-    return text[:limit].rsplit(" ", 1)[0] + "..."
+    return text[:limit].rsplit(' ', 1)[0] + '...'
 
 
 def _compact_json(value: Any, limit: int = 6000) -> str:
@@ -1098,11 +1204,11 @@ def _compact_json(value: Any, limit: int = 6000) -> str:
     text = json.dumps(value, indent=2, default=str)
     if len(text) <= limit:
         return text
-    return text[:limit].rsplit("\n", 1)[0] + "\n  ...\n}"
+    return text[:limit].rsplit('\n', 1)[0] + '\n  ...\n}'
+
 
 def _final_verify_config_files(
-    validation_groups: Dict[str, Any],
-    all_atomic_problems: List[Dict[str, Any]]
+    validation_groups: dict[str, Any], all_atomic_problems: list[dict[str, Any]]
 ) -> None:
     """
     Final verification that ALL config files from ground truth are included.
@@ -1111,13 +1217,20 @@ def _final_verify_config_files(
     might have been filtered out during processing.
     """
     config_file_patterns = [
-        'pyproject.toml', 'package.json', 'requirements.txt', 'setup.py',
-        'Cargo.toml', 'pom.xml', 'build.gradle', 'Gemfile', 'go.mod'
+        'pyproject.toml',
+        'package.json',
+        'requirements.txt',
+        'setup.py',
+        'Cargo.toml',
+        'pom.xml',
+        'build.gradle',
+        'Gemfile',
+        'go.mod',
     ]
 
     # Prefer original parsed-diff metadata. Falling back to validation_groups
     # alone misses files that were dropped during LLM classification.
-    all_config_files = set(validation_groups.get("all_config_files_from_diff") or [])
+    all_config_files = set(validation_groups.get('all_config_files_from_diff') or [])
     groups_data = validation_groups.get('validation_groups', {})
 
     if not all_config_files:
@@ -1139,13 +1252,17 @@ def _final_verify_config_files(
     missing_config_files = all_config_files - files_in_problems
 
     if missing_config_files:
-        print(f"\n CRITICAL ERROR: Config files missing from decomposition!")
-        print(f"     Config files in ground truth: {all_config_files}")
-        print(f"     Missing from problems: {missing_config_files}")
-        print(f"\n     These files MUST be included in problems (primary or hidden).")
-        print(f"     This is a violation of: NEVER remove config file changes from ground truth")
+        print('\n CRITICAL ERROR: Config files missing from decomposition!')
+        print(f'     Config files in ground truth: {all_config_files}')
+        print(f'     Missing from problems: {missing_config_files}')
+        print('\n     These files MUST be included in problems (primary or hidden).')
+        print(
+            '     This is a violation of: NEVER remove config file changes from ground truth'
+        )
     else:
-        print(f"  OK Config file verification: All {len(all_config_files)} config files included in problems")
+        print(
+            f'  OK Config file verification: All {len(all_config_files)} config files included in problems'
+        )
         # If this happens frequently, we need to strengthen the prompt
 
 
@@ -1153,46 +1270,49 @@ def _normalize_chunk_finding(
     finding: Any,
     *,
     chunk_index: int,
-    chunk: Dict[str, Any],
-) -> Dict[str, Any]:
+    chunk: dict[str, Any],
+) -> dict[str, Any]:
     """Normalize common LLM schema/key/path drift before validation."""
     if isinstance(finding, list):
-        finding = {"chunk_index": chunk_index, "validations_in_this_chunk": finding}
+        finding = {'chunk_index': chunk_index, 'validations_in_this_chunk': finding}
     elif not isinstance(finding, dict):
         print(
-            f"    Chunk {chunk_index} WARNING: LLM returned {type(finding).__name__}, "
-            "treating as empty"
+            f'    Chunk {chunk_index} WARNING: LLM returned {type(finding).__name__}, '
+            'treating as empty'
         )
-        return {"chunk_index": chunk_index, "validations_in_this_chunk": []}
+        return {'chunk_index': chunk_index, 'validations_in_this_chunk': []}
 
-    if "validations_in_this_chunk" not in finding and "validations_this_chunk" in finding:
-        finding["validations_in_this_chunk"] = finding.pop("validations_this_chunk")
+    if (
+        'validations_in_this_chunk' not in finding
+        and 'validations_this_chunk' in finding
+    ):
+        finding['validations_in_this_chunk'] = finding.pop('validations_this_chunk')
 
-    finding.setdefault("chunk_index", chunk_index)
-    validations = finding.get("validations_in_this_chunk")
+    finding.setdefault('chunk_index', chunk_index)
+    validations = finding.get('validations_in_this_chunk')
     if not isinstance(validations, list):
-        finding["validations_in_this_chunk"] = []
+        finding['validations_in_this_chunk'] = []
         return finding
 
     actual_files = [
-        str(file_info.get("path") or "")
-        for file_info in chunk.get("files", [])
-        if file_info.get("path")
+        str(file_info.get('path') or '')
+        for file_info in chunk.get('files', [])
+        if file_info.get('path')
     ]
     actual_set = set(actual_files)
 
     for validation in validations:
         if not isinstance(validation, dict):
             continue
-        files = validation.get("files")
+        files = validation.get('files')
         if not isinstance(files, list):
-            validation["files"] = []
-            validation["total_files"] = 0
+            validation['files'] = []
+            validation['total_files'] = 0
             continue
 
-        normalized_files: List[str] = []
+        normalized_files: list[str] = []
         for file_path in files:
-            file_path = str(file_path or "").strip()
+            file_path = str(file_path or '').strip()
             if not file_path:
                 continue
             if file_path in actual_set:
@@ -1204,16 +1324,18 @@ def _normalize_chunk_finding(
                 normalized_files.append(match[0])
             else:
                 print(
-                    f"    Chunk {chunk_index} WARNING: dropping hallucinated file path: {file_path}"
+                    f'    Chunk {chunk_index} WARNING: dropping hallucinated file path: {file_path}'
                 )
 
-        validation["files"] = list(dict.fromkeys(normalized_files))
-        validation["total_files"] = len(validation["files"])
+        validation['files'] = list(dict.fromkeys(normalized_files))
+        validation['total_files'] = len(validation['files'])
 
     return finding
 
 
-def _semantic_cluster_problems(problems: List[Dict[str, Any]], threshold: float = 0.5) -> List[List[Dict[str, Any]]]:
+def _semantic_cluster_problems(
+    problems: list[dict[str, Any]], threshold: float = 0.5
+) -> list[list[dict[str, Any]]]:
     """
     Cluster problems by semantic similarity using embeddings.
 
@@ -1234,8 +1356,8 @@ def _semantic_cluster_problems(problems: List[Dict[str, Any]], threshold: float 
         return [problems]
 
     try:
-        from sklearn.metrics.pairwise import cosine_similarity
         from sentence_transformers import SentenceTransformer
+        from sklearn.metrics.pairwise import cosine_similarity
 
         # Generate text representation for each problem
         problem_texts = []
@@ -1286,11 +1408,13 @@ Issue Type: {prob.get('issue_type', '')}
 
     except ImportError:
         # Fallback: no clustering if dependencies not available
-        print("    [WARN] sentence-transformers not available, skipping clustering")
+        print('    [WARN] sentence-transformers not available, skipping clustering')
         return [[prob] for prob in problems]
 
 
-def _llm_merge_decision(cluster: List[Dict[str, Any]], validation_cmd: str, llm: Any) -> Dict[str, Any]:
+def _llm_merge_decision(
+    cluster: list[dict[str, Any]], validation_cmd: str, llm: Any
+) -> dict[str, Any]:
     """
     LLM analyzes cluster and decides: MERGE, PARTIAL_MERGE, or SEPARATE.
 
@@ -1310,9 +1434,9 @@ def _llm_merge_decision(cluster: List[Dict[str, Any]], validation_cmd: str, llm:
     if len(cluster) == 1:
         # Single problem, no merge needed
         return {
-            "action": "keep_as_is",
-            "result": cluster,
-            "reasoning": "Single problem in cluster"
+            'action': 'keep_as_is',
+            'result': cluster,
+            'reasoning': 'Single problem in cluster',
         }
 
     # Build prompt for LLM
@@ -1320,9 +1444,10 @@ def _llm_merge_decision(cluster: List[Dict[str, Any]], validation_cmd: str, llm:
     for idx, prob in enumerate(cluster, 1):
         files_str = ', '.join(prob.get('affected_files', [])[:5])
         if len(prob.get('affected_files', [])) > 5:
-            files_str += f" ... ({len(prob.get('affected_files', []))} total)"
+            files_str += f' ... ({len(prob.get("affected_files", []))} total)'
 
-        problems_text.append(f"""
+        problems_text.append(
+            f"""
 Problem {idx}:
   Affected files: {files_str}
   What broke: {prob.get('what_broke', 'N/A')}
@@ -1330,7 +1455,8 @@ Problem {idx}:
   How fixed: {prob.get('how_fixed', 'N/A')}
   Failure type: {prob.get('failure_type', 'N/A')}
   Issue type: {prob.get('issue_type', 'N/A')}
-""".strip())
+""".strip()
+        )
 
     prompt = f"""You are analyzing a cluster of SIMILAR problems to decide if they should be MERGED.
 
@@ -1418,64 +1544,82 @@ IMPORTANT: Be CONSERVATIVE. When in doubt, SEPARATE.
         decision = _invoke_json(llm, prompt)
 
         # Process decision
-        if decision.get("action") == "merge":
+        if decision.get('action') == 'merge':
             # Create merged problem
             all_files = []
             for prob in cluster:
-                all_files.extend(prob.get("affected_files", []))
+                all_files.extend(prob.get('affected_files', []))
 
-            merged_prob = decision.get("merged_problem", {})
+            merged_prob = decision.get('merged_problem', {})
             merged = {
-                "affected_files": list(dict.fromkeys(all_files)),  # Deduplicate
-                "root_cause": merged_prob.get("root_cause", cluster[0].get("root_cause")),
-                "how_fixed": merged_prob.get("how_fixed", cluster[0].get("how_fixed")),
-                "why_fixed_works": merged_prob.get("why_fixed_works", cluster[0].get("why_fixed_works")),
-                "what_broke": merged_prob.get("root_cause", cluster[0].get("what_broke")),
-                "failure_type": cluster[0].get("failure_type"),
-                "issue_type": cluster[0].get("issue_type"),
-                "validation_cmd": cluster[0].get("validation_cmd"),
-                "validation_order": cluster[0].get("validation_order"),
-                "problem_type": cluster[0].get("problem_type"),
-                "is_merged": True,
-                "merged_from": [p.get("problem_id", i) for i, p in enumerate(cluster)],
-                "merge_count": len(cluster)
+                'affected_files': list(dict.fromkeys(all_files)),  # Deduplicate
+                'root_cause': merged_prob.get(
+                    'root_cause', cluster[0].get('root_cause')
+                ),
+                'how_fixed': merged_prob.get('how_fixed', cluster[0].get('how_fixed')),
+                'why_fixed_works': merged_prob.get(
+                    'why_fixed_works', cluster[0].get('why_fixed_works')
+                ),
+                'what_broke': merged_prob.get(
+                    'root_cause', cluster[0].get('what_broke')
+                ),
+                'failure_type': cluster[0].get('failure_type'),
+                'issue_type': cluster[0].get('issue_type'),
+                'validation_cmd': cluster[0].get('validation_cmd'),
+                'validation_order': cluster[0].get('validation_order'),
+                'problem_type': cluster[0].get('problem_type'),
+                'is_merged': True,
+                'merged_from': [p.get('problem_id', i) for i, p in enumerate(cluster)],
+                'merge_count': len(cluster),
             }
 
             return {
-                "action": "merge",
-                "result": [merged],
-                "reasoning": decision.get("reasoning", "")
+                'action': 'merge',
+                'result': [merged],
+                'reasoning': decision.get('reasoning', ''),
             }
 
-        elif decision.get("action") == "partial_merge":
+        elif decision.get('action') == 'partial_merge':
             # Process sub-groups
             result = []
-            for sub_group in decision.get("sub_groups", []):
-                indices = sub_group.get("problem_indices", [])
+            for sub_group in decision.get('sub_groups', []):
+                indices = sub_group.get('problem_indices', [])
                 # Convert 1-based indices to 0-based
-                sub_problems = [cluster[i-1] for i in indices if 0 < i <= len(cluster)]
+                sub_problems = [
+                    cluster[i - 1] for i in indices if 0 < i <= len(cluster)
+                ]
 
-                if sub_group.get("action") == "merge" and len(sub_problems) > 1:
+                if sub_group.get('action') == 'merge' and len(sub_problems) > 1:
                     # Merge this sub-group
                     all_files = []
                     for prob in sub_problems:
-                        all_files.extend(prob.get("affected_files", []))
+                        all_files.extend(prob.get('affected_files', []))
 
-                    merged_prob = sub_group.get("merged_problem", {})
+                    merged_prob = sub_group.get('merged_problem', {})
                     merged = {
-                        "affected_files": list(dict.fromkeys(all_files)),
-                        "root_cause": merged_prob.get("root_cause", sub_problems[0].get("root_cause")),
-                        "how_fixed": merged_prob.get("how_fixed", sub_problems[0].get("how_fixed")),
-                        "why_fixed_works": merged_prob.get("why_fixed_works", sub_problems[0].get("why_fixed_works")),
-                        "what_broke": merged_prob.get("root_cause", sub_problems[0].get("what_broke")),
-                        "failure_type": sub_problems[0].get("failure_type"),
-                        "issue_type": sub_problems[0].get("issue_type"),
-                        "validation_cmd": sub_problems[0].get("validation_cmd"),
-                        "validation_order": sub_problems[0].get("validation_order"),
-                        "problem_type": sub_problems[0].get("problem_type"),
-                        "is_merged": True,
-                        "merged_from": [p.get("problem_id", i) for i, p in enumerate(sub_problems)],
-                        "merge_count": len(sub_problems)
+                        'affected_files': list(dict.fromkeys(all_files)),
+                        'root_cause': merged_prob.get(
+                            'root_cause', sub_problems[0].get('root_cause')
+                        ),
+                        'how_fixed': merged_prob.get(
+                            'how_fixed', sub_problems[0].get('how_fixed')
+                        ),
+                        'why_fixed_works': merged_prob.get(
+                            'why_fixed_works', sub_problems[0].get('why_fixed_works')
+                        ),
+                        'what_broke': merged_prob.get(
+                            'root_cause', sub_problems[0].get('what_broke')
+                        ),
+                        'failure_type': sub_problems[0].get('failure_type'),
+                        'issue_type': sub_problems[0].get('issue_type'),
+                        'validation_cmd': sub_problems[0].get('validation_cmd'),
+                        'validation_order': sub_problems[0].get('validation_order'),
+                        'problem_type': sub_problems[0].get('problem_type'),
+                        'is_merged': True,
+                        'merged_from': [
+                            p.get('problem_id', i) for i, p in enumerate(sub_problems)
+                        ],
+                        'merge_count': len(sub_problems),
                     }
                     result.append(merged)
                 else:
@@ -1483,28 +1627,33 @@ IMPORTANT: Be CONSERVATIVE. When in doubt, SEPARATE.
                     result.extend(sub_problems)
 
             return {
-                "action": "partial_merge",
-                "result": result,
-                "reasoning": decision.get("reasoning", "")
+                'action': 'partial_merge',
+                'result': result,
+                'reasoning': decision.get('reasoning', ''),
             }
 
         else:  # separate
             return {
-                "action": "separate",
-                "result": cluster,
-                "reasoning": decision.get("reasoning", "")
+                'action': 'separate',
+                'result': cluster,
+                'reasoning': decision.get('reasoning', ''),
             }
 
     except Exception as e:
-        print(f"    [WARN] LLM merge decision failed: {e}, keeping problems separate")
+        print(f'    [WARN] LLM merge decision failed: {e}, keeping problems separate')
         return {
-            "action": "separate",
-            "result": cluster,
-            "reasoning": f"Error: {str(e)}"
+            'action': 'separate',
+            'result': cluster,
+            'reasoning': f'Error: {str(e)}',
         }
 
 
-def _cluster_and_merge_problems(problems: List[Dict[str, Any]], validation_cmd: str, llm: Any, similarity_threshold: float = 0.85) -> List[Dict[str, Any]]:
+def _cluster_and_merge_problems(
+    problems: list[dict[str, Any]],
+    validation_cmd: str,
+    llm: Any,
+    similarity_threshold: float = 0.85,
+) -> list[dict[str, Any]]:
     """
     Cluster similar problems and let LLM decide whether to merge.
 
@@ -1529,7 +1678,9 @@ def _cluster_and_merge_problems(problems: List[Dict[str, Any]], validation_cmd: 
     if len(problems) == 1:
         return problems
 
-    print(f"      Clustering {len(problems)} problems (threshold={similarity_threshold})...")
+    print(
+        f'      Clustering {len(problems)} problems (threshold={similarity_threshold})...'
+    )
 
     # Step 1: Semantic clustering
     clusters = _semantic_cluster_problems(problems, threshold=similarity_threshold)
@@ -1537,11 +1688,13 @@ def _cluster_and_merge_problems(problems: List[Dict[str, Any]], validation_cmd: 
     multi_problem_clusters = [c for c in clusters if len(c) > 1]
     single_problem_clusters = [c for c in clusters if len(c) == 1]
 
-    print(f"        → {len(clusters)} clusters ({len(multi_problem_clusters)} multi-problem, {len(single_problem_clusters)} single)")
+    print(
+        f'        → {len(clusters)} clusters ({len(multi_problem_clusters)} multi-problem, {len(single_problem_clusters)} single)'
+    )
 
     # Step 2: LLM merge decisions for multi-problem clusters
     optimized = []
-    merge_stats = {"merged": 0, "partial": 0, "separate": 0}
+    merge_stats = {'merged': 0, 'partial': 0, 'separate': 0}
 
     for cluster in clusters:
         if len(cluster) == 1:
@@ -1550,34 +1703,38 @@ def _cluster_and_merge_problems(problems: List[Dict[str, Any]], validation_cmd: 
             continue
 
         # Multi-problem cluster → LLM decision
-        print(f"        Analyzing cluster of {len(cluster)} problems...")
+        print(f'        Analyzing cluster of {len(cluster)} problems...')
         decision = _llm_merge_decision(cluster, validation_cmd, llm)
 
-        if decision["action"] == "merge":
-            merge_stats["merged"] += len(cluster)
-            print(f"          OK MERGED {len(cluster)} problems → 1")
-        elif decision["action"] == "partial_merge":
-            merge_stats["partial"] += 1
-            print(f"          ⊕ PARTIAL MERGE: {len(cluster)} → {len(decision['result'])}")
+        if decision['action'] == 'merge':
+            merge_stats['merged'] += len(cluster)
+            print(f'          OK MERGED {len(cluster)} problems → 1')
+        elif decision['action'] == 'partial_merge':
+            merge_stats['partial'] += 1
+            print(
+                f'          ⊕ PARTIAL MERGE: {len(cluster)} → {len(decision["result"])}'
+            )
         else:
-            merge_stats["separate"] += len(cluster)
-            print(f"          → KEPT SEPARATE: {decision.get('reasoning', '')[:80]}")
+            merge_stats['separate'] += len(cluster)
+            print(f'          → KEPT SEPARATE: {decision.get("reasoning", "")[:80]}')
 
-        optimized.extend(decision["result"])
+        optimized.extend(decision['result'])
         time.sleep(0.5)  # Rate limiting
 
-    print(f"      Optimization: {len(problems)} → {len(optimized)} problems")
-    if merge_stats["merged"] > 0:
-        print(f"        Merged: {merge_stats['merged']} problems")
-    if merge_stats["partial"] > 0:
-        print(f"        Partial merges: {merge_stats['partial']}")
-    if merge_stats["separate"] > 0:
-        print(f"        Kept separate: {merge_stats['separate']}")
+    print(f'      Optimization: {len(problems)} → {len(optimized)} problems')
+    if merge_stats['merged'] > 0:
+        print(f'        Merged: {merge_stats["merged"]} problems')
+    if merge_stats['partial'] > 0:
+        print(f'        Partial merges: {merge_stats["partial"]}')
+    if merge_stats['separate'] > 0:
+        print(f'        Kept separate: {merge_stats["separate"]}')
 
     return optimized
 
 
-def _reorder_by_repair_trajectory(problems: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _reorder_by_repair_trajectory(
+    problems: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """
     Reorder problems by repair trajectory (LLM already assigned problem_type).
 
@@ -1593,8 +1750,8 @@ def _reorder_by_repair_trajectory(problems: List[Dict[str, Any]]) -> List[Dict[s
     hidden_problems = []
 
     for prob in problems:
-        ptype = prob.get("problem_type", "primary")
-        if ptype == "primary":
+        ptype = prob.get('problem_type', 'primary')
+        if ptype == 'primary':
             primary_problems.append(prob)
         else:
             hidden_problems.append(prob)
@@ -1602,7 +1759,7 @@ def _reorder_by_repair_trajectory(problems: List[Dict[str, Any]]) -> List[Dict[s
     # Sort each group by validation_order
     def get_validation_order(p):
         try:
-            return int(p.get("validation_order", 999))
+            return int(p.get('validation_order', 999))
         except (TypeError, ValueError):
             return 999
 
@@ -1612,22 +1769,22 @@ def _reorder_by_repair_trajectory(problems: List[Dict[str, Any]]) -> List[Dict[s
     # Reassign problem_ids in new order
     reordered = primary_problems + hidden_problems
     for idx, prob in enumerate(reordered, 1):
-        prob["problem_id"] = idx
-        prob["repair_sequence_index"] = idx
+        prob['problem_id'] = idx
+        prob['repair_sequence_index'] = idx
 
-    print(f"    Primary problems: {len(primary_problems)} (files in CI logs)")
-    print(f"    Hidden problems: {len(hidden_problems)} (files not in CI logs)")
-    print(f"    Total reordered: {len(reordered)}")
+    print(f'    Primary problems: {len(primary_problems)} (files in CI logs)')
+    print(f'    Hidden problems: {len(hidden_problems)} (files not in CI logs)')
+    print(f'    Total reordered: {len(reordered)}')
 
     return reordered
 
 
 def analyze_validation_groups_with_reasoning(
-    validation_groups: Dict[str, Any],
-    validation_sequence: List[Dict[str, Any]],
-    ci_context: Dict[str, Any],
+    validation_groups: dict[str, Any],
+    validation_sequence: list[dict[str, Any]],
+    ci_context: dict[str, Any],
     llm: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Analyze validation groups into atomic problems.
 
@@ -1637,8 +1794,8 @@ def analyze_validation_groups_with_reasoning(
     3. Merge chunk-level results back within the same validation so variants of
        one failure family become one atomic problem.
     """
-    groups_data = validation_groups.get("validation_groups", {})
-    print(f"  Processing {len(groups_data)} validation groups...")
+    groups_data = validation_groups.get('validation_groups', {})
+    print(f'  Processing {len(groups_data)} validation groups...')
 
     # Find the FIRST validation that failed (minimum validation_order with changes)
     failed_validation_order = None
@@ -1650,32 +1807,36 @@ def analyze_validation_groups_with_reasoning(
         except (ValueError, TypeError):
             pass
 
-    print(f"  First failed validation: {failed_validation_order}")
+    print(f'  First failed validation: {failed_validation_order}')
 
     all_problems = []
     next_id = 1
 
     # Process each validation group
-    def _group_order(item: tuple[str, Dict[str, Any]]) -> tuple[int, str]:
-        order = item[1].get("validation_order")
+    def _group_order(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
+        order = item[1].get('validation_order')
         try:
             return (int(order), str(item[0]))
         except (TypeError, ValueError):
             return (10**9, str(item[0]))
 
-    def _compact_changes(changes: List[Dict[str, Any]], max_per_field: int = 600) -> List[Dict[str, Any]]:
+    def _compact_changes(
+        changes: list[dict[str, Any]], max_per_field: int = 600
+    ) -> list[dict[str, Any]]:
         """Compress changes to fit more in one chunk. Reduce per-field size for large batches."""
         compact = []
         for change in changes:
-            compact.append({
-                "file": change.get("file", ""),
-                "before": _compact_text(change.get("before", ""), max_per_field),
-                "after": _compact_text(change.get("after", ""), max_per_field),
-            })
+            compact.append(
+                {
+                    'file': change.get('file', ''),
+                    'before': _compact_text(change.get('before', ''), max_per_field),
+                    'after': _compact_text(change.get('after', ''), max_per_field),
+                }
+            )
         return compact
 
-    def _changes_data(chunk: Dict[str, Any]) -> Dict[str, Any]:
-        changes = chunk.get("all_changes", [])
+    def _changes_data(chunk: dict[str, Any]) -> dict[str, Any]:
+        changes = chunk.get('all_changes', [])
         # Dynamic compression: smaller per-field limit for larger chunks
         if len(changes) > 100:
             max_per_field = 400  # Aggressive compression for large chunks
@@ -1685,26 +1846,28 @@ def analyze_validation_groups_with_reasoning(
             max_per_field = 600  # Standard compression
 
         return {
-            "validation_cmd": chunk.get("validation_cmd", ""),
-            "failure_type": chunk.get("failure_type", ""),
-            "issue_type": chunk.get("issue_type", ""),
-            "files_count": len({change.get("file", "") for change in changes if change.get("file")}),
-            "changes_count": len(changes),
-            "changes": _compact_changes(changes, max_per_field),
+            'validation_cmd': chunk.get('validation_cmd', ''),
+            'failure_type': chunk.get('failure_type', ''),
+            'issue_type': chunk.get('issue_type', ''),
+            'files_count': len(
+                {change.get('file', '') for change in changes if change.get('file')}
+            ),
+            'changes_count': len(changes),
+            'changes': _compact_changes(changes, max_per_field),
         }
 
     def _build_atomic_prompt(
         *,
         validation_order: Any,
-        val_info: Dict[str, Any],
-        chunk: Dict[str, Any],
-        changes_data: Dict[str, Any],
+        val_info: dict[str, Any],
+        chunk: dict[str, Any],
+        changes_data: dict[str, Any],
     ) -> str:
         change_type = chunk.get('change_type', 'unknown')
         change_type_context = {
             'config': 'These are CONFIGURATION file changes (.toml, .yaml, .json, .ini). Pay special attention to tool settings, plugin configurations, and dependency specifications.',
             'dependency': 'These are DEPENDENCY-related changes (imports, packages, requirements). Focus on package installations, version updates, and import fixes.',
-            'code': 'These are SOURCE CODE changes (.py, .rst, .md). Focus on code logic, formatting, type annotations, and documentation fixes.'
+            'code': 'These are SOURCE CODE changes (.py, .rst, .md). Focus on code logic, formatting, type annotations, and documentation fixes.',
         }.get(change_type, '')
 
         return f"""Analyze this validation group and create atomic CI repair problems.
@@ -1799,43 +1962,47 @@ CRITICAL RULES:
 {STRICT_JSON_RULES}
 """
 
-    def _extract_problems(result: Any) -> List[Dict[str, Any]]:
+    def _extract_problems(result: Any) -> list[dict[str, Any]]:
         if isinstance(result, list):
             # Validate each problem has correct schema
             valid_problems = []
             for p in result:
-                if isinstance(p, dict) and "problem_id" in p:
+                if isinstance(p, dict) and 'problem_id' in p:
                     valid_problems.append(p)
                 elif isinstance(p, dict):
                     # Malformed: has nested problem_1, problem_2, etc.
-                    print(f"      WARNING: Skipping malformed problem (missing problem_id): {list(p.keys())[:3]}")
+                    print(
+                        f'      WARNING: Skipping malformed problem (missing problem_id): {list(p.keys())[:3]}'
+                    )
             return valid_problems
         if isinstance(result, dict):
-            if "problem_id" in result and "atomic_problems" not in result:
+            if 'problem_id' in result and 'atomic_problems' not in result:
                 return [result]
-            problems = result.get("atomic_problems", [])
+            problems = result.get('atomic_problems', [])
             if isinstance(problems, list):
                 # Validate each problem
                 valid_problems = []
                 for p in problems:
-                    if isinstance(p, dict) and "problem_id" in p:
+                    if isinstance(p, dict) and 'problem_id' in p:
                         valid_problems.append(p)
                     elif isinstance(p, dict):
                         # Malformed: has nested problem_1, problem_2, etc.
-                        print(f"      WARNING: Skipping malformed problem (missing problem_id): {list(p.keys())[:3]}")
+                        print(
+                            f'      WARNING: Skipping malformed problem (missing problem_id): {list(p.keys())[:3]}'
+                        )
                 return valid_problems
             return []
         return []
 
     def _analyze_chunk(
         *,
-        chunk: Dict[str, Any],
+        chunk: dict[str, Any],
         chunk_label: str,
         validation_order: Any,
-        val_info: Dict[str, Any],
+        val_info: dict[str, Any],
         depth: int = 0,
-    ) -> List[Dict[str, Any]]:
-        changes = chunk.get("all_changes", [])
+    ) -> list[dict[str, Any]]:
+        changes = chunk.get('all_changes', [])
         changes_data = _changes_data(chunk)
         prompt = _build_atomic_prompt(
             validation_order=validation_order,
@@ -1844,38 +2011,52 @@ CRITICAL RULES:
             changes_data=changes_data,
         )
 
-        print(f"      Calling LLM for {chunk_label}")
-        print(f"        Prompt size: {len(prompt)} chars, {len(changes)} changes")
+        print(f'      Calling LLM for {chunk_label}')
+        print(f'        Prompt size: {len(prompt)} chars, {len(changes)} changes')
 
         # Proactive split checks:
         # 1. Prompt too large (>48KB)
         # 2. Too many changes (each change needs ~50 tokens output, limit is 16K tokens)
         #    16,000 tokens / 50 tokens per change = 320 max changes
         #    Use 200 as safe limit to leave headroom
-        if (len(prompt) > ATOMIC_ANALYSIS_MAX_PROMPT_CHARS or len(changes) > 200) and len(changes) > 1:
+        if (
+            len(prompt) > ATOMIC_ANALYSIS_MAX_PROMPT_CHARS or len(changes) > 200
+        ) and len(changes) > 1:
             if len(prompt) > ATOMIC_ANALYSIS_MAX_PROMPT_CHARS:
-                print(f"        Proactive split: prompt too large ({len(prompt)} chars)")
+                print(
+                    f'        Proactive split: prompt too large ({len(prompt)} chars)'
+                )
             else:
-                print(f"        Proactive split: too many changes ({len(changes)} changes, max 200)")
-            result = "SPLIT_REQUIRED"
+                print(
+                    f'        Proactive split: too many changes ({len(changes)} changes, max 200)'
+                )
+            result = 'SPLIT_REQUIRED'
         else:
-            result = _invoke_json(llm, prompt, max_tokens=ATOMIC_ANALYSIS_MAX_OUTPUT_TOKENS)
+            result = _invoke_json(
+                llm, prompt, max_tokens=ATOMIC_ANALYSIS_MAX_OUTPUT_TOKENS
+            )
 
-        if result == "SPLIT_REQUIRED" and len(changes) > 1:
+        if result == 'SPLIT_REQUIRED' and len(changes) > 1:
             # Safety check: don't split if already very small
             if len(changes) <= 10:
-                print(f"      WARNING: Chunk too small to split further ({len(changes)} changes)")
-                print(f"        Returning empty to avoid infinite recursion")
+                print(
+                    f'      WARNING: Chunk too small to split further ({len(changes)} changes)'
+                )
+                print('        Returning empty to avoid infinite recursion')
                 return []
 
             # Check depth limit (allow up to depth 5)
             MAX_RECURSION_DEPTH = 5
             if depth >= MAX_RECURSION_DEPTH:
-                print(f"      WARNING: Max recursion depth ({MAX_RECURSION_DEPTH}) reached")
-                print(f"        Chunk {chunk_label} with {len(changes)} changes cannot be processed")
+                print(
+                    f'      WARNING: Max recursion depth ({MAX_RECURSION_DEPTH}) reached'
+                )
+                print(
+                    f'        Chunk {chunk_label} with {len(changes)} changes cannot be processed'
+                )
                 return []
 
-            indent = "  " * depth
+            indent = '  ' * depth
 
             # SMART SPLITTING: Calculate optimal number of splits based on size
             # Target: each sub-chunk should be < 15KB prompt size
@@ -1894,11 +2075,15 @@ CRITICAL RULES:
             else:
                 num_splits = max_splits
 
-            print(f"      {indent}Token limit for {chunk_label}; smart splitting analysis:")
-            print(f"      {indent}  Current size: {current_prompt_size} chars, {len(changes)} changes")
-            print(f"      {indent}  Target size per chunk: {TARGET_PROMPT_SIZE} chars")
-            print(f"      {indent}  Estimated splits needed: {estimated_splits}")
-            print(f"      {indent}  → Splitting into {num_splits} sub-chunks")
+            print(
+                f'      {indent}Token limit for {chunk_label}; smart splitting analysis:'
+            )
+            print(
+                f'      {indent}  Current size: {current_prompt_size} chars, {len(changes)} changes'
+            )
+            print(f'      {indent}  Target size per chunk: {TARGET_PROMPT_SIZE} chars')
+            print(f'      {indent}  Estimated splits needed: {estimated_splits}')
+            print(f'      {indent}  → Splitting into {num_splits} sub-chunks')
 
             # Calculate chunk sizes (distribute evenly)
             chunk_size = len(changes) // num_splits
@@ -1912,71 +2097,98 @@ CRITICAL RULES:
                 size = chunk_size + (1 if i < remainder else 0)
                 end_idx = start_idx + size
 
-                sub_chunk = {**chunk, "all_changes": changes[start_idx:end_idx]}
+                sub_chunk = {**chunk, 'all_changes': changes[start_idx:end_idx]}
                 sub_chunks.append(sub_chunk)
 
-                print(f"      {indent}  Sub-chunk {i+1}: {size} changes (indices {start_idx}-{end_idx-1})")
+                print(
+                    f'      {indent}  Sub-chunk {i + 1}: {size} changes (indices {start_idx}-{end_idx - 1})'
+                )
                 start_idx = end_idx
 
             # Process all sub-chunks
             split_problems = []
             for sub_idx, sub_chunk in enumerate(sub_chunks, 1):
-                print(f"      {indent}→ Processing sub-chunk {sub_idx}/{num_splits} (depth {depth + 1})...")
+                print(
+                    f'      {indent}→ Processing sub-chunk {sub_idx}/{num_splits} (depth {depth + 1})...'
+                )
 
                 try:
                     sub_problems = _analyze_chunk(
                         chunk=sub_chunk,
-                        chunk_label=f"{chunk_label}.{sub_idx}",
+                        chunk_label=f'{chunk_label}.{sub_idx}',
                         validation_order=validation_order,
                         val_info=val_info,
                         depth=depth + 1,
                     )
 
                     if not sub_problems:
-                        print(f"      {indent}  [WARN] Sub-chunk {sub_idx} returned 0 problems")
+                        print(
+                            f'      {indent}  [WARN] Sub-chunk {sub_idx} returned 0 problems'
+                        )
                     else:
-                        print(f"      {indent}  OK Sub-chunk {sub_idx} returned {len(sub_problems)} problems")
+                        print(
+                            f'      {indent}  OK Sub-chunk {sub_idx} returned {len(sub_problems)} problems'
+                        )
 
                     split_problems.extend(sub_problems)
 
                 except Exception as e:
-                    print(f"      {indent}  FAIL ERROR in sub-chunk {sub_idx}: {type(e).__name__}: {str(e)[:200]}")
+                    print(
+                        f'      {indent}  FAIL ERROR in sub-chunk {sub_idx}: {type(e).__name__}: {str(e)[:200]}'
+                    )
                     # Continue with other sub-chunks even if one fails
 
                 # Exponential backoff: deeper splits wait longer
-                sleep_time = min(2 ** depth, 8)  # 1s, 2s, 4s, 8s (max)
+                sleep_time = min(2**depth, 8)  # 1s, 2s, 4s, 8s (max)
                 if sub_idx < len(sub_chunks):  # Don't sleep after last sub-chunk
-                    print(f"      {indent}  Waiting {sleep_time}s before next sub-chunk...")
+                    print(
+                        f'      {indent}  Waiting {sleep_time}s before next sub-chunk...'
+                    )
                     time.sleep(sleep_time)
 
-            print(f"      {indent}Split complete: {len(split_problems)} total problems from {num_splits} sub-chunks")
+            print(
+                f'      {indent}Split complete: {len(split_problems)} total problems from {num_splits} sub-chunks'
+            )
             return split_problems
 
         problems = _extract_problems(result)
         if changes and not problems:
-            print(f"      WARNING {chunk_label} has {len(changes)} changes but returned 0 problems")
-            debug_file = PROJECT_ROOT / "data" / "trs" / f"debug_prompt_val{validation_order}_{chunk_label.replace('.', '_')}.txt"
+            print(
+                f'      WARNING {chunk_label} has {len(changes)} changes but returned 0 problems'
+            )
+            debug_file = (
+                PROJECT_ROOT
+                / 'data'
+                / 'trs'
+                / f'debug_prompt_val{validation_order}_{chunk_label.replace(".", "_")}.txt'
+            )
             debug_file.parent.mkdir(parents=True, exist_ok=True)
-            debug_file.write_text(prompt, encoding="utf-8")
-            print(f"        Saved prompt to: {debug_file}")
+            debug_file.write_text(prompt, encoding='utf-8')
+            print(f'        Saved prompt to: {debug_file}')
 
             # RETRY STRATEGY: If we have multiple changes and not at max depth, try splitting
             MAX_RECURSION_DEPTH = 5
             if len(changes) > 1 and depth < MAX_RECURSION_DEPTH:
                 # Safety check
                 if len(changes) <= 5:
-                    print(f"      WARNING: Chunk too small to split further ({len(changes)} changes)")
+                    print(
+                        f'      WARNING: Chunk too small to split further ({len(changes)} changes)'
+                    )
                     return []
 
-                indent = "  " * depth
-                print(f"      {indent}RETRY: Malformed response, applying smart split strategy")
+                indent = '  ' * depth
+                print(
+                    f'      {indent}RETRY: Malformed response, applying smart split strategy'
+                )
 
                 # SMART SPLITTING for retry (same logic as token limit)
                 TARGET_PROMPT_SIZE = 15000  # 15KB
                 current_prompt_size = len(prompt)
 
                 # Calculate optimal splits
-                estimated_splits = max(2, (current_prompt_size // TARGET_PROMPT_SIZE) + 1)
+                estimated_splits = max(
+                    2, (current_prompt_size // TARGET_PROMPT_SIZE) + 1
+                )
                 max_splits = min(estimated_splits, len(changes) // 10, 8)
 
                 if max_splits <= 2:
@@ -1984,8 +2196,12 @@ CRITICAL RULES:
                 else:
                     num_splits = max_splits
 
-                print(f"      {indent}  Current size: {current_prompt_size} chars, {len(changes)} changes")
-                print(f"      {indent}  Estimated splits: {estimated_splits} → Using {num_splits} splits")
+                print(
+                    f'      {indent}  Current size: {current_prompt_size} chars, {len(changes)} changes'
+                )
+                print(
+                    f'      {indent}  Estimated splits: {estimated_splits} → Using {num_splits} splits'
+                )
 
                 # Distribute changes evenly
                 chunk_size = len(changes) // num_splits
@@ -1996,98 +2212,130 @@ CRITICAL RULES:
                 for i in range(num_splits):
                     size = chunk_size + (1 if i < remainder else 0)
                     end_idx = start_idx + size
-                    sub_chunk = {**chunk, "all_changes": changes[start_idx:end_idx]}
+                    sub_chunk = {**chunk, 'all_changes': changes[start_idx:end_idx]}
                     sub_chunks.append(sub_chunk)
-                    print(f"      {indent}  Retry sub-chunk {i+1}: {size} changes (indices {start_idx}-{end_idx-1})")
+                    print(
+                        f'      {indent}  Retry sub-chunk {i + 1}: {size} changes (indices {start_idx}-{end_idx - 1})'
+                    )
                     start_idx = end_idx
 
                 # Process sub-chunks
                 split_problems = []
                 for sub_idx, sub_chunk in enumerate(sub_chunks, 1):
-                    print(f"      {indent}→ Retry sub-chunk {sub_idx}/{num_splits}...")
+                    print(f'      {indent}→ Retry sub-chunk {sub_idx}/{num_splits}...')
 
                     try:
                         sub_problems = _analyze_chunk(
                             chunk=sub_chunk,
-                            chunk_label=f"{chunk_label}.retry{sub_idx}",
+                            chunk_label=f'{chunk_label}.retry{sub_idx}',
                             validation_order=validation_order,
                             val_info=val_info,
                             depth=depth + 1,
                         )
 
                         if not sub_problems:
-                            print(f"      {indent}  [WARN] Retry {sub_idx} returned 0 problems")
+                            print(
+                                f'      {indent}  [WARN] Retry {sub_idx} returned 0 problems'
+                            )
                         else:
-                            print(f"      {indent}  OK Retry {sub_idx} returned {len(sub_problems)} problems")
+                            print(
+                                f'      {indent}  OK Retry {sub_idx} returned {len(sub_problems)} problems'
+                            )
 
                         split_problems.extend(sub_problems)
 
                     except Exception as e:
-                        print(f"      {indent}  FAIL ERROR in retry {sub_idx}: {type(e).__name__}: {str(e)[:200]}")
+                        print(
+                            f'      {indent}  FAIL ERROR in retry {sub_idx}: {type(e).__name__}: {str(e)[:200]}'
+                        )
 
                     # Exponential backoff
-                    sleep_time = min(2 ** depth, 8)
+                    sleep_time = min(2**depth, 8)
                     if sub_idx < len(sub_chunks):
-                        print(f"      {indent}  Waiting {sleep_time}s...")
+                        print(f'      {indent}  Waiting {sleep_time}s...')
                         time.sleep(sleep_time)
 
                 if split_problems:
-                    print(f"      {indent}RETRY SUCCESS: Got {len(split_problems)} problems from {num_splits} splits")
+                    print(
+                        f'      {indent}RETRY SUCCESS: Got {len(split_problems)} problems from {num_splits} splits'
+                    )
                     return split_problems
                 else:
                     # If recursive retry failed, return empty - don't create low-quality generic problems
-                    print(f"      {indent}RETRY FAILED: Split returned 0 problems after depth {depth} retries")
-                    print(f"      {indent}WARNING: Skipping this chunk - retry mechanism exhausted")
+                    print(
+                        f'      {indent}RETRY FAILED: Split returned 0 problems after depth {depth} retries'
+                    )
+                    print(
+                        f'      {indent}WARNING: Skipping this chunk - retry mechanism exhausted'
+                    )
                     return []
 
         return problems
 
     def _normalize_problem_defaults(
-        problem: Dict[str, Any],
+        problem: dict[str, Any],
         *,
         validation_order: Any,
-        val_group: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        val_group: dict[str, Any],
+    ) -> dict[str, Any]:
         # Do NOT set problem_type here - it's assigned in _reorder_by_repair_trajectory
-        problem["validation_order"] = problem.get("validation_order") or validation_order
-        problem["validation_cmd"] = problem.get("validation_cmd") or val_group.get("validation_cmd", "")
-        problem["failure_type"] = problem.get("failure_type") or val_group.get("failure_type", "")
-        problem["issue_type"] = problem.get("issue_type") or val_group.get("issue_type", "")
-        if not isinstance(problem.get("affected_files"), list):
-            problem["affected_files"] = []
-        problem["affected_files"] = list(dict.fromkeys(
-            str(file_path)
-            for file_path in problem.get("affected_files", [])
-            if file_path
-        ))
-        for key in ["problem", "root_cause", "how_fixed", "why_fix_works"]:
-            problem[key] = str(problem.get(key, "") or "").strip()
+        problem['validation_order'] = (
+            problem.get('validation_order') or validation_order
+        )
+        problem['validation_cmd'] = problem.get('validation_cmd') or val_group.get(
+            'validation_cmd', ''
+        )
+        problem['failure_type'] = problem.get('failure_type') or val_group.get(
+            'failure_type', ''
+        )
+        problem['issue_type'] = problem.get('issue_type') or val_group.get(
+            'issue_type', ''
+        )
+        if not isinstance(problem.get('affected_files'), list):
+            problem['affected_files'] = []
+        problem['affected_files'] = list(
+            dict.fromkeys(
+                str(file_path)
+                for file_path in problem.get('affected_files', [])
+                if file_path
+            )
+        )
+        for key in ['problem', 'root_cause', 'how_fixed', 'why_fix_works']:
+            problem[key] = str(problem.get(key, '') or '').strip()
         return problem
 
     def _merge_validation_problems(
-        problems: List[Dict[str, Any]],
+        problems: list[dict[str, Any]],
         *,
         validation_order: Any,
-        val_group: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
+        val_group: dict[str, Any],
+    ) -> list[dict[str, Any]]:
         if len(problems) <= 1:
             return problems
 
         summaries = []
         for idx, problem in enumerate(problems, 1):
-            summaries.append({
-                "local_id": idx,
-                "problem_type": problem.get("problem_type", ""),
-                "validation_cmd": problem.get("validation_cmd", val_group.get("validation_cmd", "")),
-                "failure_type": problem.get("failure_type", val_group.get("failure_type", "")),
-                "issue_type": problem.get("issue_type", ""),
-                "problem": _compact_text(problem.get("problem", ""), 600),
-                "root_cause": _compact_text(problem.get("root_cause", ""), 600),
-                "how_fixed": _compact_text(problem.get("how_fixed", ""), 600),
-                "why_fix_works": _compact_text(problem.get("why_fix_works", ""), 600),
-                "affected_files": problem.get("affected_files", [])[:12],
-                "affected_files_count": len(problem.get("affected_files", [])),
-            })
+            summaries.append(
+                {
+                    'local_id': idx,
+                    'problem_type': problem.get('problem_type', ''),
+                    'validation_cmd': problem.get(
+                        'validation_cmd', val_group.get('validation_cmd', '')
+                    ),
+                    'failure_type': problem.get(
+                        'failure_type', val_group.get('failure_type', '')
+                    ),
+                    'issue_type': problem.get('issue_type', ''),
+                    'problem': _compact_text(problem.get('problem', ''), 600),
+                    'root_cause': _compact_text(problem.get('root_cause', ''), 600),
+                    'how_fixed': _compact_text(problem.get('how_fixed', ''), 600),
+                    'why_fix_works': _compact_text(
+                        problem.get('why_fix_works', ''), 600
+                    ),
+                    'affected_files': problem.get('affected_files', [])[:12],
+                    'affected_files_count': len(problem.get('affected_files', [])),
+                }
+            )
 
         prompt = f"""Merge atomic problems for one validation group.
 
@@ -2208,53 +2456,66 @@ OUTPUT FORMAT:
 {STRICT_JSON_RULES}
 """
         if len(prompt) > VALIDATION_MERGE_MAX_PROMPT_CHARS:
-            print("      WARNING Validation merge prompt too large; using chunk-level problems")
+            print(
+                '      WARNING Validation merge prompt too large; using chunk-level problems'
+            )
             return problems
 
-        result = _invoke_json(llm, prompt, max_tokens=VALIDATION_MERGE_MAX_OUTPUT_TOKENS)
+        result = _invoke_json(
+            llm, prompt, max_tokens=VALIDATION_MERGE_MAX_OUTPUT_TOKENS
+        )
         merged = _extract_problems(result)
         if not merged:
-            print("      WARNING Validation-level merge failed; using chunk-level problems")
+            print(
+                '      WARNING Validation-level merge failed; using chunk-level problems'
+            )
             return problems
-        if len(merged) == 1 and not merged[0].get("affected_files"):
+        if len(merged) == 1 and not merged[0].get('affected_files'):
             all_files = []
             for problem in problems:
-                all_files.extend(problem.get("affected_files", []))
-            merged[0]["affected_files"] = list(dict.fromkeys(all_files))
+                all_files.extend(problem.get('affected_files', []))
+            merged[0]['affected_files'] = list(dict.fromkeys(all_files))
         return merged
 
     for val_order, val_group in sorted(groups_data.items(), key=_group_order):
-        print(f"    Validation {val_order}: {val_group.get('validation_cmd', '')}")
+        print(f'    Validation {val_order}: {val_group.get("validation_cmd", "")}')
 
-        validation_order = val_group.get("validation_order", val_order)
+        validation_order = val_group.get('validation_order', val_order)
         val_info = next(
-            (v for v in validation_sequence if str(v.get("order")) == str(validation_order)),
+            (
+                v
+                for v in validation_sequence
+                if str(v.get('order')) == str(validation_order)
+            ),
             {},
         )
 
         # SMART GROUPING: Group by change_type first (config/dependency/code)
-        all_changes = val_group.get("all_changes", [])
+        all_changes = val_group.get('all_changes', [])
 
-        change_type_groups = {
-            'config': [],
-            'dependency': [],
-            'code': []
-        }
+        change_type_groups = {'config': [], 'dependency': [], 'code': []}
 
         for change in all_changes:
-            file_path = change.get("file", "")
-            before = str(change.get("before", "")).lower()
-            after = str(change.get("after", "")).lower()
+            file_path = change.get('file', '')
+            before = str(change.get('before', '')).lower()
+            after = str(change.get('after', '')).lower()
 
             # Determine change type
             if file_path.endswith(('.toml', '.yaml', '.yml', '.json', '.ini', '.cfg')):
                 change_type_groups['config'].append(change)
-            elif 'import' in before or 'import' in after or 'package' in before or 'package' in after:
+            elif (
+                'import' in before
+                or 'import' in after
+                or 'package' in before
+                or 'package' in after
+            ):
                 change_type_groups['dependency'].append(change)
             else:
                 change_type_groups['code'].append(change)
 
-        print(f"      Grouped: {len(change_type_groups['config'])} config, {len(change_type_groups['dependency'])} dependency, {len(change_type_groups['code'])} code changes")
+        print(
+            f'      Grouped: {len(change_type_groups["config"])} config, {len(change_type_groups["dependency"])} dependency, {len(change_type_groups["code"])} code changes'
+        )
 
         validation_problems = []
 
@@ -2264,13 +2525,15 @@ OUTPUT FORMAT:
             if not group_changes:
                 continue
 
-            print(f"      Processing {change_type.upper()} group ({len(group_changes)} changes)...")
+            print(
+                f'      Processing {change_type.upper()} group ({len(group_changes)} changes)...'
+            )
 
             # Create chunk with this group
             group_chunk = {
                 **val_group,
-                "all_changes": group_changes,
-                "change_type": change_type
+                'all_changes': group_changes,
+                'change_type': change_type,
             }
 
             # Check if group fits in one chunk
@@ -2286,32 +2549,40 @@ OUTPUT FORMAT:
                 # Fits in one chunk - analyze as-is
                 chunk_problems = _analyze_chunk(
                     chunk=group_chunk,
-                    chunk_label=f"{change_type}_group",
+                    chunk_label=f'{change_type}_group',
                     validation_order=validation_order,
                     val_info=val_info,
                 )
                 validation_problems.extend(chunk_problems)
-                print(f"        {change_type.upper()}: 1 chunk, {len(chunk_problems)} problems")
+                print(
+                    f'        {change_type.upper()}: 1 chunk, {len(chunk_problems)} problems'
+                )
                 time.sleep(1)
             else:
                 # Too big - split this group only
-                print(f"        {change_type.upper()} group too large, splitting...")
-                sub_chunks = _chunk_validation_changes(group_chunk, max_changes_per_chunk=150)  # Reduced from 250 to fit better
+                print(f'        {change_type.upper()} group too large, splitting...')
+                sub_chunks = _chunk_validation_changes(
+                    group_chunk, max_changes_per_chunk=150
+                )  # Reduced from 250 to fit better
 
                 for sub_idx, sub_chunk in enumerate(sub_chunks, 1):
-                    sub_chunk["change_type"] = change_type
+                    sub_chunk['change_type'] = change_type
                     chunk_problems = _analyze_chunk(
                         chunk=sub_chunk,
-                        chunk_label=f"{change_type}_chunk_{sub_idx}_of_{len(sub_chunks)}",
+                        chunk_label=f'{change_type}_chunk_{sub_idx}_of_{len(sub_chunks)}',
                         validation_order=validation_order,
                         val_info=val_info,
                     )
                     validation_problems.extend(chunk_problems)
-                    print(f"        {change_type.upper()} chunk {sub_idx}/{len(sub_chunks)}: {len(chunk_problems)} problems")
+                    print(
+                        f'        {change_type.upper()} chunk {sub_idx}/{len(sub_chunks)}: {len(chunk_problems)} problems'
+                    )
                     time.sleep(1)
 
         validation_problems = [
-            _normalize_problem_defaults(problem, validation_order=validation_order, val_group=val_group)
+            _normalize_problem_defaults(
+                problem, validation_order=validation_order, val_group=val_group
+            )
             for problem in validation_problems
         ]
         validation_problems = _merge_validation_problems(
@@ -2322,12 +2593,14 @@ OUTPUT FORMAT:
 
         # CLUSTER AND MERGE: Optimize problems using semantic similarity
         if len(validation_problems) > 1:
-            print(f"      Optimizing {len(validation_problems)} problems via clustering...")
+            print(
+                f'      Optimizing {len(validation_problems)} problems via clustering...'
+            )
             validation_problems = _cluster_and_merge_problems(
                 validation_problems,
                 validation_cmd=val_group.get('validation_cmd', ''),
                 llm=llm,
-                similarity_threshold=0.5  # Tune this if needed
+                similarity_threshold=0.5,  # Tune this if needed
             )
 
         for problem in validation_problems:
@@ -2336,33 +2609,35 @@ OUTPUT FORMAT:
                 validation_order=validation_order,
                 val_group=val_group,
             )
-            problem["problem_id"] = next_id
+            problem['problem_id'] = next_id
             next_id += 1
             all_problems.append(problem)
 
-        print(f"      Validation {val_order}: {len(validation_problems)} merged problems")
+        print(
+            f'      Validation {val_order}: {len(validation_problems)} merged problems'
+        )
 
     # Verify config files included
     _final_verify_config_files(validation_groups, all_problems)
 
-    print(f"  OK Total: {len(all_problems)} problems created")
+    print(f'  OK Total: {len(all_problems)} problems created')
 
     # Reorder problems by repair trajectory: primary → hidden
-    print(f"  Reordering problems by repair trajectory...")
+    print('  Reordering problems by repair trajectory...')
     all_problems = _reorder_by_repair_trajectory(all_problems)
 
-    return {"atomic_problems": all_problems}
+    return {'atomic_problems': all_problems}
 
 
 def classify_chunk_with_fallback(
-    chunk: Dict,
+    chunk: dict,
     chunk_index: int,
     total_chunks: int,
-    visible_failure_context: Dict,
-    validation_sequence: List,
+    visible_failure_context: dict,
+    validation_sequence: list,
     llm: Any,
-    max_files: int = 50
-) -> List[Dict]:
+    max_files: int = 50,
+) -> list[dict]:
     """
     Classify a chunk with automatic fallback to smaller chunks if token limit hit.
 
@@ -2372,30 +2647,34 @@ def classify_chunk_with_fallback(
     - Works down to 1 file if needed
     """
 
-    files_in_chunk = chunk.get("total_files", 0)
+    files_in_chunk = chunk.get('total_files', 0)
 
     if files_in_chunk == 0:
         return []
 
     # Extract files visible in CI failure logs
-    ci_visible_files = [rf.get('file', '') for rf in visible_failure_context.get('relevant_files', [])]
+    ci_visible_files = [
+        rf.get('file', '') for rf in visible_failure_context.get('relevant_files', [])
+    ]
     formatted_validations = []
     for item in validation_sequence:
         effective_cmd = str(
-            item.get("validation_cmd")
-            or item.get("installation_cmd")
-            or item.get("validates")
-            or ""
+            item.get('validation_cmd')
+            or item.get('installation_cmd')
+            or item.get('validates')
+            or ''
         ).strip()
-        formatted_validations.append({
-            "order": item.get("order"),
-            "validates": item.get("validates", ""),
-            "validation_cmd": item.get("validation_cmd", ""),
-            "installation_cmd": item.get("installation_cmd", ""),
-            "effective_cmd": effective_cmd,
-            "source": item.get("source", ""),
-            "evidence": item.get("evidence", ""),
-        })
+        formatted_validations.append(
+            {
+                'order': item.get('order'),
+                'validates': item.get('validates', ''),
+                'validation_cmd': item.get('validation_cmd', ''),
+                'installation_cmd': item.get('installation_cmd', ''),
+                'effective_cmd': effective_cmd,
+                'source': item.get('source', ''),
+                'evidence': item.get('evidence', ''),
+            }
+        )
 
     prompt = f"""Classify each changed file by the validation command that would catch the fixed issue.
 
@@ -2405,7 +2684,7 @@ CI failure context:
 {json.dumps(visible_failure_context, indent=2)}
 
 FILES VISIBLE IN CI FAILURE LOGS (primary errors):
-{json.dumps(ci_visible_files, indent=2) if ci_visible_files else "[]"}
+{json.dumps(ci_visible_files, indent=2) if ci_visible_files else '[]'}
 
 Available validations:
 {json.dumps(formatted_validations, indent=2)}
@@ -2480,7 +2759,7 @@ REQUIREMENTS:
             validations = result
         elif isinstance(result, dict):
             # Extract array from wrapper
-            for key in ["validations", "groups", "result", "data", "validation_groups"]:
+            for key in ['validations', 'groups', 'result', 'data', 'validation_groups']:
                 if key in result and isinstance(result[key], list):
                     validations = result[key]
                     break
@@ -2490,141 +2769,169 @@ REQUIREMENTS:
             validations = []
 
         sequence_by_order = {
-            str(item.get("order")): item
+            str(item.get('order')): item
             for item in validation_sequence
-            if item.get("order") is not None
+            if item.get('order') is not None
         }
 
         # Fix missing validation_order and normalize install/setup commands.
         for v in validations:
-            if not v.get("validation_order"):
-                val_cmd = str(v.get("validation_cmd", "")).strip()
+            if not v.get('validation_order'):
+                val_cmd = str(v.get('validation_cmd', '')).strip()
                 for seq_item in validation_sequence:
                     effective_cmd = str(
-                        seq_item.get("validation_cmd")
-                        or seq_item.get("installation_cmd")
-                        or seq_item.get("validates")
-                        or ""
+                        seq_item.get('validation_cmd')
+                        or seq_item.get('installation_cmd')
+                        or seq_item.get('validates')
+                        or ''
                     ).strip()
-                    if seq_item.get("validation_cmd") == val_cmd or effective_cmd == val_cmd:
-                        v["validation_order"] = seq_item.get("order")
+                    if (
+                        seq_item.get('validation_cmd') == val_cmd
+                        or effective_cmd == val_cmd
+                    ):
+                        v['validation_order'] = seq_item.get('order')
                         break
-            seq_item = sequence_by_order.get(str(v.get("validation_order")), {})
-            if seq_item and not str(v.get("validation_cmd") or "").strip():
-                v["validation_cmd"] = str(
-                    seq_item.get("validation_cmd")
-                    or seq_item.get("installation_cmd")
-                    or seq_item.get("validates")
-                    or ""
+            seq_item = sequence_by_order.get(str(v.get('validation_order')), {})
+            if seq_item and not str(v.get('validation_cmd') or '').strip():
+                v['validation_cmd'] = str(
+                    seq_item.get('validation_cmd')
+                    or seq_item.get('installation_cmd')
+                    or seq_item.get('validates')
+                    or ''
                 ).strip()
 
         # Keep only valid entries
-        valid = [v for v in validations if v.get("validation_order")]
+        valid = [v for v in validations if v.get('validation_order')]
 
         # Enforce ground-truth diff coverage. The prompt asks the model to
         # include every file, but setup/config files are too important to trust
         # to prompt compliance alone.
         actual_files = [
-            str(file_info.get("path") or "")
-            for file_info in chunk.get("files", [])
-            if file_info.get("path")
+            str(file_info.get('path') or '')
+            for file_info in chunk.get('files', [])
+            if file_info.get('path')
         ]
         classified_files = {
             str(file_path)
             for entry in valid
-            for file_path in (entry.get("files") or [])
+            for file_path in (entry.get('files') or [])
             if file_path
         }
-        missing_files = [file_path for file_path in actual_files if file_path not in classified_files]
+        missing_files = [
+            file_path for file_path in actual_files if file_path not in classified_files
+        ]
         if missing_files:
             print(
-                f"    WARNING Chunk {chunk_index}: classifier missed {len(missing_files)} changed file(s); "
-                "adding deterministic fallback groups"
+                f'    WARNING Chunk {chunk_index}: classifier missed {len(missing_files)} changed file(s); '
+                'adding deterministic fallback groups'
             )
         for file_path in missing_files:
             fallback_validation = validation_sequence[0] if validation_sequence else {}
             if not fallback_validation:
                 continue
             effective_cmd = str(
-                fallback_validation.get("validation_cmd")
-                or fallback_validation.get("installation_cmd")
-                or fallback_validation.get("validates")
-                or ""
+                fallback_validation.get('validation_cmd')
+                or fallback_validation.get('installation_cmd')
+                or fallback_validation.get('validates')
+                or ''
             ).strip()
-            is_config = _is_dependency_file(file_path) or file_path.endswith((
-                ".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock"
-            ))
-            valid.append({
-                "validation_order": fallback_validation.get("order"),
-                "validation_cmd": effective_cmd,
-                "failure_type": "Configuration/Dependency" if is_config else "Unclassified Changed File",
-                "issue_type": "Diff-backed file omitted by classifier",
-                "change_type": "config" if is_config else "code",
-                "visibility": "hidden",
-                "files": [file_path],
-                "total_files": 1,
-                "_fallback_reason": "LLM omitted changed file from validation classification",
-            })
+            is_config = _is_dependency_file(file_path) or file_path.endswith(
+                ('.toml', '.yaml', '.yml', '.json', '.ini', '.cfg', '.lock')
+            )
+            valid.append(
+                {
+                    'validation_order': fallback_validation.get('order'),
+                    'validation_cmd': effective_cmd,
+                    'failure_type': 'Configuration/Dependency'
+                    if is_config
+                    else 'Unclassified Changed File',
+                    'issue_type': 'Diff-backed file omitted by classifier',
+                    'change_type': 'config' if is_config else 'code',
+                    'visibility': 'hidden',
+                    'files': [file_path],
+                    'total_files': 1,
+                    '_fallback_reason': 'LLM omitted changed file from validation classification',
+                }
+            )
 
-        print(f"    OK Chunk {chunk_index} ({files_in_chunk} files): {len(valid)} validation groups")
+        print(
+            f'    OK Chunk {chunk_index} ({files_in_chunk} files): {len(valid)} validation groups'
+        )
         return valid
 
     except Exception as e:
         error_msg = str(e).lower()
 
         # Check if token limit error
-        if any(keyword in error_msg for keyword in ["token", "length", "limit", "too long", "maximum"]):
-            print(f"    WARNING Token limit hit with {files_in_chunk} files, splitting in half...")
+        if any(
+            keyword in error_msg
+            for keyword in ['token', 'length', 'limit', 'too long', 'maximum']
+        ):
+            print(
+                f'    WARNING Token limit hit with {files_in_chunk} files, splitting in half...'
+            )
 
             # Can't split further
             if files_in_chunk <= 1:
-                print(f"    FAIL Cannot split 1 file further, skipping")
+                print('    FAIL Cannot split 1 file further, skipping')
                 return []
 
             # Split chunk in half
-            files_list = list(chunk["files"].items())
+            files_list = list(chunk['files'].items())
             half = len(files_list) // 2
 
             chunk1_files = dict(files_list[:half])
             chunk2_files = dict(files_list[half:])
 
             chunk1 = {
-                "files": chunk1_files,
-                "total_files": len(chunk1_files),
-                "total_changes": sum(len(f.get("changes", [])) for f in chunk1_files.values())
+                'files': chunk1_files,
+                'total_files': len(chunk1_files),
+                'total_changes': sum(
+                    len(f.get('changes', [])) for f in chunk1_files.values()
+                ),
             }
 
             chunk2 = {
-                "files": chunk2_files,
-                "total_files": len(chunk2_files),
-                "total_changes": sum(len(f.get("changes", [])) for f in chunk2_files.values())
+                'files': chunk2_files,
+                'total_files': len(chunk2_files),
+                'total_changes': sum(
+                    len(f.get('changes', [])) for f in chunk2_files.values()
+                ),
             }
 
             # Recursively process both halves
             result1 = classify_chunk_with_fallback(
-                chunk1, chunk_index, total_chunks,
-                visible_failure_context, validation_sequence, llm,
-                max_files=half
+                chunk1,
+                chunk_index,
+                total_chunks,
+                visible_failure_context,
+                validation_sequence,
+                llm,
+                max_files=half,
             )
 
             result2 = classify_chunk_with_fallback(
-                chunk2, chunk_index, total_chunks,
-                visible_failure_context, validation_sequence, llm,
-                max_files=len(files_list) - half
+                chunk2,
+                chunk_index,
+                total_chunks,
+                visible_failure_context,
+                validation_sequence,
+                llm,
+                max_files=len(files_list) - half,
             )
 
             return result1 + result2
         else:
             # Other error - log and return empty
-            print(f"    FAIL Chunk {chunk_index} failed: {str(e)[:100]}")
+            print(f'    FAIL Chunk {chunk_index} failed: {str(e)[:100]}')
             return []
 
 
 def analyze_diff_chunks(
-    issue: Dict,
-    benchmark_context: Dict[str, Any],
+    issue: dict,
+    benchmark_context: dict[str, Any],
     llm: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Three-step diff analysis with deterministic pre-processing:
     0. Parse diff into structured format (deterministic, no LLM)
@@ -2632,18 +2939,17 @@ def analyze_diff_chunks(
     2. Merge by validation (deterministic)
     3. Deep reasoning with full context (LLM)
     """
-    diff = str(issue.get("diff") or "")
+    diff = str(issue.get('diff') or '')
     if not diff.strip():
-        raise ValueError(f"Issue {issue.get('id')} has no ground-truth diff")
+        raise ValueError(f'Issue {issue.get("id")} has no ground-truth diff')
 
     # Step 0: Deterministic diff parsing (NEW!)
-    print(f"  Step 0: Parsing diff into structured format...")
-
+    print('  Step 0: Parsing diff into structured format...')
 
     structured_diff = parse_diff_to_structured(diff)
-    total_files = structured_diff["total_files"]
-    total_changes = structured_diff["total_changes"]
-    print(f"    Parsed {total_files} files with {total_changes} changes")
+    total_files = structured_diff['total_files']
+    total_changes = structured_diff['total_changes']
+    print(f'    Parsed {total_files} files with {total_changes} changes')
 
     # Chunk by file count (not char count) - cleaner and more predictable
     # Reduced from 15 to 8 to avoid API errors with large responses
@@ -2651,13 +2957,19 @@ def analyze_diff_chunks(
     # classify_chunk_with_fallback will auto-split if token limit hit
     chunks = chunk_structured_diff(structured_diff, max_files_per_chunk=80)
     if not chunks:
-        raise ValueError(f"Issue {issue.get('id')} ground-truth diff could not be chunked")
+        raise ValueError(
+            f'Issue {issue.get("id")} ground-truth diff could not be chunked'
+        )
 
-    visible_failure_context = _compact_context_for_diff_analysis(issue, benchmark_context)
-    validation_sequence = benchmark_context.get("validation_sequence") or []
-    chunk_findings: List[Dict[str, Any]] = []
+    visible_failure_context = _compact_context_for_diff_analysis(
+        issue, benchmark_context
+    )
+    validation_sequence = benchmark_context.get('validation_sequence') or []
+    chunk_findings: list[dict[str, Any]] = []
 
-    print(f"  Step 1: Classifying patch changes by repaired validation ({total_files} files in {len(chunks)} chunk(s))...")
+    print(
+        f'  Step 1: Classifying patch changes by repaired validation ({total_files} files in {len(chunks)} chunk(s))...'
+    )
 
     for index, chunk in enumerate(chunks, start=1):
         # Use fallback function with automatic splitting
@@ -2668,48 +2980,53 @@ def analyze_diff_chunks(
             visible_failure_context=visible_failure_context,
             validation_sequence=validation_sequence,
             llm=llm,
-            max_files=80  # Start with 80, will auto-split if needed
+            max_files=80,  # Start with 80, will auto-split if needed
         )
 
         if validations:
-            chunk_findings.append({"chunk_index": index, "validations_in_this_chunk": validations})
+            chunk_findings.append(
+                {'chunk_index': index, 'validations_in_this_chunk': validations}
+            )
 
     # Step 2: Merge by validation (deterministic)
-    print(f"  Step 2: Merging chunks by validation...")
-    validation_groups = merge_chunks_by_validation(chunk_findings, validation_sequence, chunks)
-    print(f"    Found {validation_groups['total_groups']} groups from {validation_groups['total_validations']} validations")
+    print('  Step 2: Merging chunks by validation...')
+    validation_groups = merge_chunks_by_validation(
+        chunk_findings, validation_sequence, chunks
+    )
+    print(
+        f'    Found {validation_groups["total_groups"]} groups from {validation_groups["total_validations"]} validations'
+    )
 
     # Step 2.5: CI-Diff Correlation (deterministic)
-    print(f"  Step 2.5: Analyzing CI-Diff correlation (layered structure)...")
+    print('  Step 2.5: Analyzing CI-Diff correlation (layered structure)...')
     ci_context = _compact_context_for_diff_analysis(issue, benchmark_context)
 
     # Step 3: Deep reasoning with full context + correlation
-    print(f"  Step 3: Deep reasoning with correlation context...")
+    print('  Step 3: Deep reasoning with correlation context...')
     reasoning_result = analyze_validation_groups_with_reasoning(
-        validation_groups,
-        validation_sequence,
-        ci_context,
-        llm
+        validation_groups, validation_sequence, ci_context, llm
     )
     # Log results
-    atomic_problems = reasoning_result.get("atomic_problems", [])
+    atomic_problems = reasoning_result.get('atomic_problems', [])
     if atomic_problems:
-        print(f"  OK Identified {len(atomic_problems)} atomic problems")
+        print(f'  OK Identified {len(atomic_problems)} atomic problems')
     else:
-        print(f"  WARNING: No atomic problems identified")
+        print('  WARNING: No atomic problems identified')
     return {
-        "mode": "structured_diff_3step",
-        "total_files": total_files,
-        "total_changes": total_changes,
-        "chunk_count": len(chunks),
-        "chunk_findings": chunk_findings,
-        "validation_groups": validation_groups,
-        "atomic_problems": atomic_problems,
-        "sequential_workflow_metadata": reasoning_result.get("sequential_workflow_metadata", {}),
+        'mode': 'structured_diff_3step',
+        'total_files': total_files,
+        'total_changes': total_changes,
+        'chunk_count': len(chunks),
+        'chunk_findings': chunk_findings,
+        'validation_groups': validation_groups,
+        'atomic_problems': atomic_problems,
+        'sequential_workflow_metadata': reasoning_result.get(
+            'sequential_workflow_metadata', {}
+        ),
     }
 
 
-def decompose_issue(issue: Dict, llm) -> Dict:
+def decompose_issue(issue: dict, llm) -> dict:
     """
     Three-step reverse engineering from CI failure + ground truth diff:
 
@@ -2721,14 +3038,14 @@ def decompose_issue(issue: Dict, llm) -> Dict:
     """
 
     issue_id = issue.get('id', '?')
-    print(f"\n{'='*80}")
-    print(f"Reverse Engineering Issue {issue_id}")
-    print(f"  Repo: {issue.get('repo_name', issue.get('repo', '?'))}")
-    print(f"  Changed files: {len(issue.get('changed_files', []))}")
-    print(f"{'='*80}")
+    print(f'\n{"=" * 80}')
+    print(f'Reverse Engineering Issue {issue_id}')
+    print(f'  Repo: {issue.get("repo_name", issue.get("repo", "?"))}')
+    print(f'  Changed files: {len(issue.get("changed_files", []))}')
+    print(f'{"=" * 80}')
 
     try:
-        print(f"  Fetching benchmark CI context and validation sequence...")
+        print('  Fetching benchmark CI context and validation sequence...')
         benchmark_context = build_benchmark_ci_context(
             issue,
             llm=llm,
@@ -2739,54 +3056,59 @@ def decompose_issue(issue: Dict, llm) -> Dict:
         # Three-step analysis
         diff_context = analyze_diff_chunks(issue, benchmark_context, llm)
 
-        atomic_problems = diff_context.get("atomic_problems", [])
-        sequential_metadata = diff_context.get("sequential_workflow_metadata", {})
+        atomic_problems = diff_context.get('atomic_problems', [])
+        diff_context.get('sequential_workflow_metadata', {})
 
         if not atomic_problems:
-            print("  WARNING: No atomic problems identified")
+            print('  WARNING: No atomic problems identified')
             return {}
 
-        print(f"  OK Identified {len(atomic_problems)} atomic problems")
+        print(f'  OK Identified {len(atomic_problems)} atomic problems')
 
         # Build final result
-        context = benchmark_context.get("context", {})
-        log_analysis = benchmark_context.get("log_analysis", {})
+        context = benchmark_context.get('context', {})
+        log_analysis = benchmark_context.get('log_analysis', {})
 
         result = {
-            "original_issue_id": issue_id,
-            "sha_fail": issue.get("sha_fail"),
-            "repo": issue.get("repo_name", issue.get("repo")),
-            "original_error_type": issue.get("error_type"),
-
+            'original_issue_id': issue_id,
+            'sha_fail': issue.get('sha_fail'),
+            'repo': issue.get('repo_name', issue.get('repo')),
+            'original_error_type': issue.get('error_type'),
             # Atomic problems from three-step analysis
-            "problems": atomic_problems,
-            "total_problems": len(atomic_problems),
-            "total_changed_files": len(issue.get("changed_files", [])),
-
+            'problems': atomic_problems,
+            'total_problems': len(atomic_problems),
+            'total_changed_files': len(issue.get('changed_files', [])),
             # Benchmark CI context (cleaned - no redundancy)
-            "benchmark_ci_context": {
-                "workflow_path": benchmark_context.get("workflow_path"),
-                "workflow_name": benchmark_context.get("workflow_name"),
-                "validation_sequence": benchmark_context.get("validation_sequence", []),
-
+            'benchmark_ci_context': {
+                'workflow_path': benchmark_context.get('workflow_path'),
+                'workflow_name': benchmark_context.get('workflow_name'),
+                'validation_sequence': benchmark_context.get('validation_sequence', []),
                 # Summary level (for quick access)
-                "overall_failure_reasons": context.get("overall_failure_reasons", []),
-                "overall_error_types": context.get("overall_error_types", []),
-
+                'overall_failure_reasons': context.get('overall_failure_reasons', []),
+                'overall_error_types': context.get('overall_error_types', []),
                 # Detailed analysis (structured)
-                "error_types": log_analysis.get("error_types", []),  # Detailed with subcategory + evidence
-                "relevant_files": log_analysis.get("relevant_files", []),  # Files with line numbers
-                "failed_jobs": log_analysis.get("failed_job", []),  # Job/step/command info
+                'error_types': log_analysis.get(
+                    'error_types', []
+                ),  # Detailed with subcategory + evidence
+                'relevant_files': log_analysis.get(
+                    'relevant_files', []
+                ),  # Files with line numbers
+                'failed_jobs': log_analysis.get(
+                    'failed_job', []
+                ),  # Job/step/command info
             },
-
             # Structured diff analysis metadata
-            "diff_analysis_context": {
-                "mode": diff_context.get("mode"),
-                "total_files": diff_context.get("total_files", 0),
-                "total_changes": diff_context.get("total_changes", 0),
-                "chunk_count": diff_context.get("chunk_count", 0),
-                "validation_groups_count": diff_context.get("validation_groups", {}).get("total_groups", 0),
-                "validation_groups": diff_context.get("validation_groups", {}).get("validation_groups", {}),
+            'diff_analysis_context': {
+                'mode': diff_context.get('mode'),
+                'total_files': diff_context.get('total_files', 0),
+                'total_changes': diff_context.get('total_changes', 0),
+                'chunk_count': diff_context.get('chunk_count', 0),
+                'validation_groups_count': diff_context.get(
+                    'validation_groups', {}
+                ).get('total_groups', 0),
+                'validation_groups': diff_context.get('validation_groups', {}).get(
+                    'validation_groups', {}
+                ),
             },
         }
 
@@ -2794,22 +3116,23 @@ def decompose_issue(issue: Dict, llm) -> Dict:
 
     except Exception as e:
         import traceback
+
         error_trace = traceback.format_exc()
-        print(f"  ERROR Failed to decompose: {e}")
-        print(f"\n--- FULL ERROR TRACE ---")
+        print(f'  ERROR Failed to decompose: {e}')
+        print('\n--- FULL ERROR TRACE ---')
         print(error_trace)
-        print(f"--- END TRACE ---\n")
+        print('--- END TRACE ---\n')
         return {
-            "error": "DECOMPOSITION_ERROR",
-            "error_message": str(e),
-            "error_trace": error_trace,
-            "error_type": type(e).__name__,
-            "original_issue_id": issue.get("id"),
-            "sha_fail": issue.get("sha_fail"),
+            'error': 'DECOMPOSITION_ERROR',
+            'error_message': str(e),
+            'error_trace': error_trace,
+            'error_type': type(e).__name__,
+            'original_issue_id': issue.get('id'),
+            'sha_fail': issue.get('sha_fail'),
         }
 
 
-def generate_l1_l2_l3_pipeline(decomposed_result: Dict, llm) -> Dict:
+def generate_l1_l2_l3_pipeline(decomposed_result: dict, llm) -> dict:
     """
     Full L1/L2/L3 generation pipeline.
 
@@ -2827,32 +3150,33 @@ def generate_l1_l2_l3_pipeline(decomposed_result: Dict, llm) -> Dict:
         Dictionary with l1, l2, l3 sections
     """
 
-    if "error" in decomposed_result or not decomposed_result.get("problems"):
+    if 'error' in decomposed_result or not decomposed_result.get('problems'):
         return decomposed_result
 
-    issue_id = decomposed_result.get("original_issue_id", "?")
-    print(f"\n{'='*80}")
-    print(f"L1/L2/L3 Pipeline for Issue {issue_id}")
-    print(f"{'='*80}")
+    issue_id = decomposed_result.get('original_issue_id', '?')
+    print(f'\n{"=" * 80}')
+    print(f'L1/L2/L3 Pipeline for Issue {issue_id}')
+    print(f'{"=" * 80}')
 
     # Stage 1: Deduplicate (mechanical)
-    print("\n[Stage 1/5] Clustering and optimizing problems...")
+    print('\n[Stage 1/5] Clustering and optimizing problems...')
     original_problems = decomposed_result.get('problems', [])
-    print(f"  Input: {len(original_problems)} problems")
+    print(f'  Input: {len(original_problems)} problems')
 
     # Group by validation_cmd first
     from collections import defaultdict
+
     validation_groups = defaultdict(list)
     for prob in original_problems:
-        validation_cmd = prob.get("validation_cmd", "unknown")
+        validation_cmd = prob.get('validation_cmd', 'unknown')
         validation_groups[validation_cmd].append(prob)
 
-    print(f"  Grouped into {len(validation_groups)} validations")
+    print(f'  Grouped into {len(validation_groups)} validations')
 
     # Cluster and merge within each validation
     optimized_problems = []
     for validation_cmd, val_problems in validation_groups.items():
-        print(f"    {validation_cmd}: {len(val_problems)} problems")
+        print(f'    {validation_cmd}: {len(val_problems)} problems')
 
         if len(val_problems) > 1:
             # Apply clustering + LLM merge
@@ -2860,9 +3184,9 @@ def generate_l1_l2_l3_pipeline(decomposed_result: Dict, llm) -> Dict:
                 val_problems,
                 validation_cmd=validation_cmd,
                 llm=llm,
-                similarity_threshold=0.5
+                similarity_threshold=0.5,
             )
-            print(f"      → Optimized to {len(optimized)} problems")
+            print(f'      → Optimized to {len(optimized)} problems')
             optimized_problems.extend(optimized)
         else:
             # Single problem, keep as-is
@@ -2871,58 +3195,72 @@ def generate_l1_l2_l3_pipeline(decomposed_result: Dict, llm) -> Dict:
     # Reorder: primary → hidden, sorted by validation_order
     deduplicated = _reorder_by_repair_trajectory(optimized_problems)
 
-    print(f"  Output: {len(deduplicated)} optimized problems (after clustering & merge)")
-    print(f"  Reduction: {len(original_problems) - len(deduplicated)} problems merged")
+    print(
+        f'  Output: {len(deduplicated)} optimized problems (after clustering & merge)'
+    )
+    print(f'  Reduction: {len(original_problems) - len(deduplicated)} problems merged')
 
     # Stage 2: Detect dependencies (LLM)
-    print("\n[Stage 2/5] Detecting dependencies with LLM...")
+    print('\n[Stage 2/5] Detecting dependencies with LLM...')
     dependencies = _stage2_detect_dependencies_llm(deduplicated, llm)
-    print(f"  Dependencies found: {len(dependencies.get('dependency_edges', []))}")
-    print(f"  Repair order: {dependencies.get('repair_order', [])}")
+    print(f'  Dependencies found: {len(dependencies.get("dependency_edges", []))}')
+    print(f'  Repair order: {dependencies.get("repair_order", [])}')
 
     # Stage 3: Generate L1 (with LLM for detailed descriptions)
-    print("\n[Stage 3/5] Generating L1 (file-level) with detailed descriptions...")
-    repo = decomposed_result.get("repo", "unknown")
-    workflow_path = decomposed_result.get("benchmark_ci_context", {}).get("workflow_path", "unknown")
-    issue_id_for_l1 = decomposed_result.get("original_issue_id", issue_id)
-    l1 = _stage3_generate_l1_with_llm(deduplicated, dependencies, decomposed_result, llm, repo, workflow_path, issue_id_for_l1)
-    print(f"  L1 file-level problems: {len(l1)}")
+    print('\n[Stage 3/5] Generating L1 (file-level) with detailed descriptions...')
+    repo = decomposed_result.get('repo', 'unknown')
+    workflow_path = decomposed_result.get('benchmark_ci_context', {}).get(
+        'workflow_path', 'unknown'
+    )
+    issue_id_for_l1 = decomposed_result.get('original_issue_id', issue_id)
+    l1 = _stage3_generate_l1_with_llm(
+        deduplicated,
+        dependencies,
+        decomposed_result,
+        llm,
+        repo,
+        workflow_path,
+        issue_id_for_l1,
+    )
+    print(f'  L1 file-level problems: {len(l1)}')
 
     # Stage 4: Generate L2 (LLM)
-    print("\n[Stage 4/5] Generating L2 (repair sequence) with LLM...")
-    l2 = _stage4_generate_l2_llm(deduplicated, dependencies, llm, issue_id, decomposed_result.get("repo"))
-    print(f"  L2 repair steps: {len(l2.get('problems', []))}")
+    print('\n[Stage 4/5] Generating L2 (repair sequence) with LLM...')
+    l2 = _stage4_generate_l2_llm(
+        deduplicated, dependencies, llm, issue_id, decomposed_result.get('repo')
+    )
+    print(f'  L2 repair steps: {len(l2.get("problems", []))}')
 
     # Stage 5: Generate L3 (LLM)
-    print("\n[Stage 5/5] Generating L3 (analysis) with LLM...")
+    print('\n[Stage 5/5] Generating L3 (analysis) with LLM...')
     l3 = _stage5_generate_l3_llm(l1, l2, deduplicated, llm)
-    print(f"  L3 insights generated")
+    print('  L3 insights generated')
 
     # Build final result
     result = {
-        "issue_id": str(issue_id),
-        "repo": decomposed_result.get("repo", "unknown"),
-        "workflow_path": workflow_path,
-        "l1_file_level": l1,
-        "l2_repair_sequence": l2,
-        "l3_analysis": l3,
-        "metadata": {
-            "original_problems_count": len(decomposed_result.get('problems', [])),
-            "deduplicated_count": len(deduplicated),
-            "l1_file_count": len(l1),
-            "l2_step_count": len(l2.get('problems', [])),
-            "total_time_minutes": l2.get('total_time_minutes', 0)
-        }
+        'issue_id': str(issue_id),
+        'repo': decomposed_result.get('repo', 'unknown'),
+        'workflow_path': workflow_path,
+        'l1_file_level': l1,
+        'l2_repair_sequence': l2,
+        'l3_analysis': l3,
+        'metadata': {
+            'original_problems_count': len(decomposed_result.get('problems', [])),
+            'deduplicated_count': len(deduplicated),
+            'l1_file_count': len(l1),
+            'l2_step_count': len(l2.get('problems', [])),
+            'total_time_minutes': l2.get('total_time_minutes', 0),
+        },
     }
 
-    print(f"\n{'='*80}")
-    print(f"Pipeline Complete!")
-    print(f"{'='*80}")
+    print(f'\n{"=" * 80}')
+    print('Pipeline Complete!')
+    print(f'{"=" * 80}')
 
     return result
 
 
-def _stage1_deduplicate_problems(decomposed_result: Dict) -> List[Dict]:
+def _stage1_deduplicate_problems(decomposed_result: dict) -> list[dict]:
     """
     Stage 1: Deduplicate similar problems (semantic grouping).
 
@@ -2934,12 +3272,12 @@ def _stage1_deduplicate_problems(decomposed_result: Dict) -> List[Dict]:
     Example: F401 (unused import) and E501 (line too long) both from ruff
     → Should stay separate because solutions are completely different!
     """
-    problems = decomposed_result.get("problems", [])
+    problems = decomposed_result.get('problems', [])
 
     # First group by validation command
     validation_groups = {}
     for prob in problems:
-        validation = prob.get("validation_cmd", "unknown")
+        validation = prob.get('validation_cmd', 'unknown')
         if validation not in validation_groups:
             validation_groups[validation] = []
         validation_groups[validation].append(prob)
@@ -2951,12 +3289,12 @@ def _stage1_deduplicate_problems(decomposed_result: Dict) -> List[Dict]:
         issue_groups = {}
         for prob in val_problems:
             # Use issue_type if available, otherwise use root cause pattern
-            issue_types = prob.get("issue_type", [])
+            issue_types = prob.get('issue_type', [])
             if isinstance(issue_types, list) and issue_types:
                 issue_key = issue_types[0]  # Primary issue type
             else:
                 # Fallback: use first 50 chars of root cause as grouping key
-                root_cause = prob.get("root_cause", "unknown")[:50]
+                root_cause = prob.get('root_cause', 'unknown')[:50]
                 issue_key = root_cause
 
             key = (validation, issue_key)
@@ -2969,29 +3307,35 @@ def _stage1_deduplicate_problems(decomposed_result: Dict) -> List[Dict]:
             # Collect all unique files
             all_files = []
             for p in group_problems:
-                all_files.extend(p.get("affected_files", []))
+                all_files.extend(p.get('affected_files', []))
             all_files = list(dict.fromkeys(all_files))  # Deduplicate
 
             # Use first as template but keep ALL sub_problems for L1
             template = group_problems[0]
             merged = {
-                "validation_cmd": val,
-                "validation_order": template.get("validation_order"),
-                "problem_type": template.get("problem_type", "unknown"),
-                "what_broke": template.get("what_broke", "Validation failed"),
-            "root_cause": template.get("root_cause", "Unknown"),
-            "how_fixed": template.get("how_fixed", ""),
-            "why_fixed_works": template.get("why_fixed_works", ""),
-            "affected_files": all_files,
-            "issue_types": list(set(p.get("issue_type", "") for p in group_problems if p.get("issue_type"))),
-            "sub_problems": group_problems  # CRITICAL: Keep ALL for L1 generation!
-        }
+                'validation_cmd': val,
+                'validation_order': template.get('validation_order'),
+                'problem_type': template.get('problem_type', 'unknown'),
+                'what_broke': template.get('what_broke', 'Validation failed'),
+                'root_cause': template.get('root_cause', 'Unknown'),
+                'how_fixed': template.get('how_fixed', ''),
+                'why_fixed_works': template.get('why_fixed_works', ''),
+                'affected_files': all_files,
+                'issue_types': list(
+                    set(
+                        p.get('issue_type', '')
+                        for p in group_problems
+                        if p.get('issue_type')
+                    )
+                ),
+                'sub_problems': group_problems,  # CRITICAL: Keep ALL for L1 generation!
+            }
         deduplicated.append(merged)
 
     return deduplicated
 
 
-def _stage2_detect_dependencies_llm(problems: List[Dict], llm) -> Dict:
+def _stage2_detect_dependencies_llm(problems: list[dict], llm) -> dict:
     """
     Stage 2: Detect dependencies between problems using LLM.
 
@@ -3002,46 +3346,60 @@ def _stage2_detect_dependencies_llm(problems: List[Dict], llm) -> Dict:
     """
 
     # Check data size
-    problems_json_size = len(json.dumps([{
-        "id": idx,
-        "validation_order": prob.get("validation_order"),
-        "validation_cmd": prob.get("validation_cmd"),
-        "problem_type": prob.get("problem_type"),
-        "problem": prob.get("problem", "")[:300],
-        "root_cause": prob.get("root_cause", "")[:300],
-        "affected_files": prob.get("affected_files", [])[:10]
-    } for idx, prob in enumerate(problems, 1)], indent=2))
+    problems_json_size = len(
+        json.dumps(
+            [
+                {
+                    'id': idx,
+                    'validation_order': prob.get('validation_order'),
+                    'validation_cmd': prob.get('validation_cmd'),
+                    'problem_type': prob.get('problem_type'),
+                    'problem': prob.get('problem', '')[:300],
+                    'root_cause': prob.get('root_cause', '')[:300],
+                    'affected_files': prob.get('affected_files', [])[:10],
+                }
+                for idx, prob in enumerate(problems, 1)
+            ],
+            indent=2,
+        )
+    )
 
     if problems_json_size < 20000 and len(problems) <= 20:
         # Small data - try full LLM
-        print(f"  Dependencies: Full LLM approach ({problems_json_size} chars, {len(problems)} problems)")
+        print(
+            f'  Dependencies: Full LLM approach ({problems_json_size} chars, {len(problems)} problems)'
+        )
         return _stage2_dependencies_full_llm(problems, llm)
     else:
         # Large data - use grouped approach
-        print(f"  Dependencies: Data too large ({problems_json_size} chars, {len(problems)} problems)")
-        print(f"  Using grouped LLM approach...")
+        print(
+            f'  Dependencies: Data too large ({problems_json_size} chars, {len(problems)} problems)'
+        )
+        print('  Using grouped LLM approach...')
         return _stage2_dependencies_grouped_llm(problems, llm)
 
 
-def _stage2_dependencies_full_llm(problems: List[Dict], llm) -> Dict:
+def _stage2_dependencies_full_llm(problems: list[dict], llm) -> dict:
     """Full LLM dependency analysis for small/normal data."""
 
     # Prepare FULL context for LLM (not just summary)
     problems_summary = []
     for idx, prob in enumerate(problems, 1):
-        problems_summary.append({
-            "id": idx,
-            "validation_order": prob.get("validation_order", "unknown"),
-            "validation_cmd": prob.get("validation_cmd", "unknown"),
-            "problem_type": prob.get("problem_type", "unknown"),
-            "failure_type": prob.get("failure_type", "unknown"),
-            "problem": prob.get("problem", "")[:300],
-            "root_cause": prob.get("root_cause", "")[:300],
-            "how_fixed": prob.get("how_fixed", "")[:300],
-            "why_fix_works": prob.get("why_fix_works", "")[:300],
-            "affected_files": prob.get("affected_files", [])[:10],
-            "files_count": len(prob.get("affected_files", []))
-        })
+        problems_summary.append(
+            {
+                'id': idx,
+                'validation_order': prob.get('validation_order', 'unknown'),
+                'validation_cmd': prob.get('validation_cmd', 'unknown'),
+                'problem_type': prob.get('problem_type', 'unknown'),
+                'failure_type': prob.get('failure_type', 'unknown'),
+                'problem': prob.get('problem', '')[:300],
+                'root_cause': prob.get('root_cause', '')[:300],
+                'how_fixed': prob.get('how_fixed', '')[:300],
+                'why_fix_works': prob.get('why_fix_works', '')[:300],
+                'affected_files': prob.get('affected_files', [])[:10],
+                'files_count': len(prob.get('affected_files', [])),
+            }
+        )
 
     prompt = f"""Deep analysis of problem interdependencies and relationships.
 
@@ -3193,14 +3551,14 @@ IMPORTANT:
         if isinstance(response, dict):
             return response
         else:
-            print(f"  WARNING: LLM returned non-dict, using grouped fallback")
+            print('  WARNING: LLM returned non-dict, using grouped fallback')
             return _stage2_dependencies_grouped_llm(problems, llm)
     except Exception as e:
-        print(f"  ERROR in full LLM dependency detection: {e}")
+        print(f'  ERROR in full LLM dependency detection: {e}')
         return _stage2_dependencies_grouped_llm(problems, llm)
 
 
-def _stage2_dependencies_grouped_llm(problems: List[Dict], llm) -> Dict:
+def _stage2_dependencies_grouped_llm(problems: list[dict], llm) -> dict:
     """
     Grouped LLM dependency detection for large data.
 
@@ -3210,67 +3568,59 @@ def _stage2_dependencies_grouped_llm(problems: List[Dict], llm) -> Dict:
     3. Combine all dependencies
     4. Generate repair order
     """
-    print("  Using validation-grouped dependency detection...")
+    print('  Using validation-grouped dependency detection...')
 
     # Step 1: Group by validation_cmd
     validation_groups = {}
     for idx, prob in enumerate(problems, 1):
-        cmd = prob.get("validation_cmd", "unknown")
+        cmd = prob.get('validation_cmd', 'unknown')
         if cmd not in validation_groups:
             validation_groups[cmd] = []
-        validation_groups[cmd].append({
-            "idx": idx,
-            "problem": prob
-        })
+        validation_groups[cmd].append({'idx': idx, 'problem': prob})
 
-    print(f"  Grouped into {len(validation_groups)} validation groups")
+    print(f'  Grouped into {len(validation_groups)} validation groups')
 
     # Step 2: Analyze dependencies within each validation group
     all_edges = []
 
     for validation_cmd, group in validation_groups.items():
-        print(f"  Analyzing: {validation_cmd} ({len(group)} problems)")
+        print(f'  Analyzing: {validation_cmd} ({len(group)} problems)')
 
         if len(group) == 1:
             # Single problem - no dependencies
-            print(f"    → Single problem, no dependencies")
+            print('    → Single problem, no dependencies')
             continue
 
         try:
             # LLM analyzes this validation group
             group_edges = _analyze_validation_dependencies_llm(
-                validation_cmd=validation_cmd,
-                group=group,
-                llm=llm
+                validation_cmd=validation_cmd, group=group, llm=llm
             )
             all_edges.extend(group_edges)
-            print(f"    → Found {len(group_edges)} dependencies")
+            print(f'    → Found {len(group_edges)} dependencies')
 
         except Exception as e:
-            print(f"    → LLM failed: {e}, using mechanical heuristics")
+            print(f'    → LLM failed: {e}, using mechanical heuristics')
             # Fallback to mechanical for this group
             group_edges = _detect_within_validation_dependencies_mechanical(group)
             all_edges.extend(group_edges)
-            print(f"    → Mechanical: {len(group_edges)} dependencies")
+            print(f'    → Mechanical: {len(group_edges)} dependencies')
 
     # Step 3: Generate repair order
     repair_order = _compute_repair_order_from_edges(
-        problems=problems,
-        dependency_edges=all_edges
+        problems=problems, dependency_edges=all_edges
     )
 
     return {
-        "dependency_edges": all_edges,
-        "repair_order": repair_order,
-        "reasoning": "Grouped LLM per validation + topological sort"
+        'dependency_edges': all_edges,
+        'repair_order': repair_order,
+        'reasoning': 'Grouped LLM per validation + topological sort',
     }
 
 
 def _analyze_validation_dependencies_llm(
-    validation_cmd: str,
-    group: List[Dict],
-    llm
-) -> List[Dict]:
+    validation_cmd: str, group: list[dict], llm
+) -> list[dict]:
     """
     Use LLM to analyze dependencies within a validation group.
 
@@ -3283,18 +3633,20 @@ def _analyze_validation_dependencies_llm(
     # Prepare problem summaries for LLM
     problems_data = []
     for item in group:
-        prob = item["problem"]
-        problems_data.append({
-            "id": item["idx"],
-            "validation_cmd": validation_cmd,
-            "validation_order": prob.get("validation_order"),
-            "problem_type": prob.get("problem_type", "unknown"),
-            "problem": prob.get("problem", "")[:250],
-            "root_cause": prob.get("root_cause", "")[:250],
-            "how_fixed": prob.get("how_fixed", "")[:250],
-            "affected_files": prob.get("affected_files", []),
-            "file_count": len(prob.get("affected_files", []))
-        })
+        prob = item['problem']
+        problems_data.append(
+            {
+                'id': item['idx'],
+                'validation_cmd': validation_cmd,
+                'validation_order': prob.get('validation_order'),
+                'problem_type': prob.get('problem_type', 'unknown'),
+                'problem': prob.get('problem', '')[:250],
+                'root_cause': prob.get('root_cause', '')[:250],
+                'how_fixed': prob.get('how_fixed', '')[:250],
+                'affected_files': prob.get('affected_files', []),
+                'file_count': len(prob.get('affected_files', [])),
+            }
+        )
 
     prompt = f"""Analyze dependencies within this validation group.
 
@@ -3354,26 +3706,28 @@ Rules:
 
     # Check if response is valid dict
     if not isinstance(response, dict):
-        raise ValueError(f"LLM returned invalid response type: {type(response)}")
+        raise ValueError(f'LLM returned invalid response type: {type(response)}')
 
-    dependencies = response.get("dependencies", [])
+    dependencies = response.get('dependencies', [])
 
     # Convert to edge format
     edges = []
     for dep in dependencies:
-        edges.append({
-            "from": dep.get("from"),
-            "to": dep.get("to"),
-            "type": dep.get("type", "affects"),
-            "reason": dep.get("reason", ""),
-            "file_link": dep.get("file_link", ""),
-            "strength": dep.get("strength", "medium")
-        })
+        edges.append(
+            {
+                'from': dep.get('from'),
+                'to': dep.get('to'),
+                'type': dep.get('type', 'affects'),
+                'reason': dep.get('reason', ''),
+                'file_link': dep.get('file_link', ''),
+                'strength': dep.get('strength', 'medium'),
+            }
+        )
 
     return edges
 
 
-def _detect_within_validation_dependencies_mechanical(group: List[Dict]) -> List[Dict]:
+def _detect_within_validation_dependencies_mechanical(group: list[dict]) -> list[dict]:
     """
     Mechanical dependency detection within a validation group (no LLM).
 
@@ -3386,9 +3740,9 @@ def _detect_within_validation_dependencies_mechanical(group: List[Dict]) -> List
     edges = []
 
     for i, item_a in enumerate(group):
-        prob_a = item_a["problem"]
-        idx_a = item_a["idx"]
-        files_a = set(prob_a.get("affected_files", []))
+        prob_a = item_a['problem']
+        idx_a = item_a['idx']
+        files_a = set(prob_a.get('affected_files', []))
 
         if not files_a:
             continue
@@ -3397,22 +3751,24 @@ def _detect_within_validation_dependencies_mechanical(group: List[Dict]) -> List
             if i >= j:  # Skip self and already compared
                 continue
 
-            prob_b = item_b["problem"]
-            idx_b = item_b["idx"]
-            files_b = set(prob_b.get("affected_files", []))
+            prob_b = item_b['problem']
+            idx_b = item_b['idx']
+            files_b = set(prob_b.get('affected_files', []))
 
             if not files_b:
                 continue
 
             # Rule 1: Config files affect others
             if _is_config_problem(prob_a) and not _is_config_problem(prob_b):
-                edges.append({
-                    "from": idx_a,
-                    "to": idx_b,
-                    "type": "enables",
-                    "reason": "Config change may affect validation behavior",
-                    "strength": "medium"
-                })
+                edges.append(
+                    {
+                        'from': idx_a,
+                        'to': idx_b,
+                        'type': 'enables',
+                        'reason': 'Config change may affect validation behavior',
+                        'strength': 'medium',
+                    }
+                )
                 continue
 
             # Rule 2: File overlap
@@ -3422,51 +3778,57 @@ def _detect_within_validation_dependencies_mechanical(group: List[Dict]) -> List
 
                 if overlap_ratio > 0.5:
                     # Significant overlap
-                    edges.append({
-                        "from": idx_a,
-                        "to": idx_b,
-                        "type": "affects",
-                        "reason": f"Shares {len(overlap)} files ({int(overlap_ratio*100)}% overlap)",
-                        "strength": "strong" if overlap_ratio > 0.8 else "medium"
-                    })
+                    edges.append(
+                        {
+                            'from': idx_a,
+                            'to': idx_b,
+                            'type': 'affects',
+                            'reason': f'Shares {len(overlap)} files ({int(overlap_ratio * 100)}% overlap)',
+                            'strength': 'strong' if overlap_ratio > 0.8 else 'medium',
+                        }
+                    )
                 elif overlap_ratio > 0.2:
                     # Some overlap
-                    edges.append({
-                        "from": idx_a,
-                        "to": idx_b,
-                        "type": "affects",
-                        "reason": f"Shares {len(overlap)} files",
-                        "strength": "weak"
-                    })
+                    edges.append(
+                        {
+                            'from': idx_a,
+                            'to': idx_b,
+                            'type': 'affects',
+                            'reason': f'Shares {len(overlap)} files',
+                            'strength': 'weak',
+                        }
+                    )
 
             # Rule 3: Fewer files before more files (if no other relationship)
             elif len(files_a) < len(files_b) and len(files_a) <= 3:
-                edges.append({
-                    "from": idx_a,
-                    "to": idx_b,
-                    "type": "affects",
-                    "reason": "Simpler fix (fewer files) before complex",
-                    "strength": "weak"
-                })
+                edges.append(
+                    {
+                        'from': idx_a,
+                        'to': idx_b,
+                        'type': 'affects',
+                        'reason': 'Simpler fix (fewer files) before complex',
+                        'strength': 'weak',
+                    }
+                )
 
     return edges
 
 
-def _is_config_problem(problem: Dict) -> bool:
+def _is_config_problem(problem: dict) -> bool:
     """Check if problem involves config file changes."""
-    files = problem.get("affected_files", [])
+    files = problem.get('affected_files', [])
 
     config_patterns = [
-        "pyproject.toml",
-        "setup.py",
-        "setup.cfg",
-        "requirements.txt",
-        ".yml",
-        ".yaml",
-        "Makefile",
-        ".ini",
-        ".cfg",
-        "tox.ini"
+        'pyproject.toml',
+        'setup.py',
+        'setup.cfg',
+        'requirements.txt',
+        '.yml',
+        '.yaml',
+        'Makefile',
+        '.ini',
+        '.cfg',
+        'tox.ini',
     ]
 
     for f in files:
@@ -3478,9 +3840,8 @@ def _is_config_problem(problem: Dict) -> bool:
 
 
 def _compute_repair_order_from_edges(
-    problems: List[Dict],
-    dependency_edges: List[Dict]
-) -> List[int]:
+    problems: list[dict], dependency_edges: list[dict]
+) -> list[int]:
     """
     Compute repair order from dependency edges.
 
@@ -3496,33 +3857,27 @@ def _compute_repair_order_from_edges(
     hidden_indices = []
 
     for idx, prob in enumerate(problems, 1):
-        ptype = prob.get("problem_type", "primary")
-        if ptype == "primary":
+        ptype = prob.get('problem_type', 'primary')
+        if ptype == 'primary':
             primary_indices.append(idx)
         else:
             hidden_indices.append(idx)
 
     # Topological sort each group
     primary_order = _topological_sort_with_validation(
-        indices=primary_indices,
-        problems=problems,
-        edges=dependency_edges
+        indices=primary_indices, problems=problems, edges=dependency_edges
     )
 
     hidden_order = _topological_sort_with_validation(
-        indices=hidden_indices,
-        problems=problems,
-        edges=dependency_edges
+        indices=hidden_indices, problems=problems, edges=dependency_edges
     )
 
     return primary_order + hidden_order
 
 
 def _topological_sort_with_validation(
-    indices: List[int],
-    problems: List[Dict],
-    edges: List[Dict]
-) -> List[int]:
+    indices: list[int], problems: list[dict], edges: list[dict]
+) -> list[int]:
     """
     Topological sort respecting dependencies + validation_order tie-breaker.
     """
@@ -3534,8 +3889,8 @@ def _topological_sort_with_validation(
     in_degree = {idx: 0 for idx in indices}
 
     for edge in edges:
-        from_idx = edge.get("from")
-        to_idx = edge.get("to")
+        from_idx = edge.get('from')
+        to_idx = edge.get('to')
 
         if from_idx in indices and to_idx in indices:
             graph[from_idx].append(to_idx)
@@ -3551,7 +3906,7 @@ def _topological_sort_with_validation(
             queue.append(idx)
 
     # Sort queue by validation_order
-    queue.sort(key=lambda idx: problems[idx-1].get("validation_order", 999))
+    queue.sort(key=lambda idx: problems[idx - 1].get('validation_order', 999))
 
     while queue:
         # Take node with smallest validation_order
@@ -3565,18 +3920,26 @@ def _topological_sort_with_validation(
                 queue.append(neighbor)
 
         # Keep queue sorted by validation_order
-        queue.sort(key=lambda idx: problems[idx-1].get("validation_order", 999))
+        queue.sort(key=lambda idx: problems[idx - 1].get('validation_order', 999))
 
     # If there are remaining nodes (cycle detected), add them sorted by validation_order
     if len(result) < len(indices):
         remaining = [idx for idx in indices if idx not in result]
-        remaining.sort(key=lambda idx: problems[idx-1].get("validation_order", 999))
+        remaining.sort(key=lambda idx: problems[idx - 1].get('validation_order', 999))
         result.extend(remaining)
 
     return result
 
 
-def _stage3_generate_l1_with_llm(deduplicated: List[Dict], dependencies: Dict, decomposed_result: Dict, llm, repo: str, workflow_path: str, issue_id: str) -> List[Dict]:
+def _stage3_generate_l1_with_llm(
+    deduplicated: list[dict],
+    dependencies: dict,
+    decomposed_result: dict,
+    llm,
+    repo: str,
+    workflow_path: str,
+    issue_id: str,
+) -> list[dict]:
     """
     Stage 3: Generate L1 (problem-level) with descriptive IDs.
 
@@ -3605,46 +3968,46 @@ def _stage3_generate_l1_with_llm(deduplicated: List[Dict], dependencies: Dict, d
     ]
     """
 
-    print(f"  Generating L1 (one entry per problem with descriptive IDs)...")
+    print('  Generating L1 (one entry per problem with descriptive IDs)...')
 
     # Extract dependency edges
-    dependency_edges = dependencies.get("dependency_edges", [])
+    dependency_edges = dependencies.get('dependency_edges', [])
 
     # Create L1 entries - ONE per problem
     l1_problems = []
 
     # After clustering, deduplicated contains flattened problems directly
     for prob in deduplicated:
-        problem_id = prob.get("problem_id")
-        files = prob.get("affected_files", [])
-        validation_cmd = prob.get("validation_cmd", "")
+        problem_id = prob.get('problem_id')
+        files = prob.get('affected_files', [])
+        validation_cmd = prob.get('validation_cmd', '')
 
         # Get LLM-generated fields
-        failure_type = prob.get("failure_type", "unknown")
-        issue_type = prob.get("issue_type", "unknown")
+        failure_type = prob.get('failure_type', 'unknown')
+        issue_type = prob.get('issue_type', 'unknown')
 
         # Clean up why_fix
-        why_fix = prob.get("why_fixed_works", "")
-        if why_fix in ["?", "Unknown", ""]:
-            why_fix = f"This fix resolves the validation failure by addressing: {prob.get('root_cause', '')[:150]}"
+        why_fix = prob.get('why_fixed_works', '')
+        if why_fix in ['?', 'Unknown', '']:
+            why_fix = f'This fix resolves the validation failure by addressing: {prob.get("root_cause", "")[:150]}'
 
         # Generate descriptive ID: {repo}_{issue_id}_{problem_id}
-        descriptive_id = f"{repo}_{issue_id}_{problem_id}"
+        descriptive_id = f'{repo}_{issue_id}_{problem_id}'
 
         # Create L1 entry - ONE per problem
         l1_entry = {
-            "id": descriptive_id,  # Descriptive ID (no separate problem_id)
-            "repo": repo,
-            "workflow": workflow_path,
-            "validation_cmd": validation_cmd,
-            "failure_type": failure_type,
-            "issue_type": issue_type,
-            "file": files,  # ARRAY of files (can be multiple)
-            "problem": f"{prob.get('what_broke', 'Validation failed')}. Root cause: {prob.get('root_cause', 'Unknown')}",
-            "fixes": prob.get("how_fixed", "Unknown"),
-            "why_fix": why_fix,
-            "enabled": [],  # Will be filled below
-            "enabled_by": []
+            'id': descriptive_id,  # Descriptive ID (no separate problem_id)
+            'repo': repo,
+            'workflow': workflow_path,
+            'validation_cmd': validation_cmd,
+            'failure_type': failure_type,
+            'issue_type': issue_type,
+            'file': files,  # ARRAY of files (can be multiple)
+            'problem': f'{prob.get("what_broke", "Validation failed")}. Root cause: {prob.get("root_cause", "Unknown")}',
+            'fixes': prob.get('how_fixed', 'Unknown'),
+            'why_fix': why_fix,
+            'enabled': [],  # Will be filled below
+            'enabled_by': [],
         }
 
         l1_problems.append(l1_entry)
@@ -3654,27 +4017,27 @@ def _stage3_generate_l1_with_llm(deduplicated: List[Dict], dependencies: Dict, d
     problem_id_to_descriptive = {}
     for l1_entry in l1_problems:
         # Extract problem_id from descriptive_id (format: repo_issue_problem)
-        parts = l1_entry["id"].split("_")
+        parts = l1_entry['id'].split('_')
         if len(parts) >= 3:
             problem_id = int(parts[-1])  # Last part is problem_id
-            problem_id_to_descriptive[problem_id] = l1_entry["id"]
+            problem_id_to_descriptive[problem_id] = l1_entry['id']
 
     # Add dependencies using descriptive IDs
     for l1_entry in l1_problems:
         # Extract problem_id from descriptive_id
-        parts = l1_entry["id"].split("_")
+        parts = l1_entry['id'].split('_')
         if len(parts) >= 3:
             problem_id = int(parts[-1])
 
             # Find enabled problems
             enabled_problem_ids = [
-                edge.get("to")
+                edge.get('to')
                 for edge in dependency_edges
-                if edge.get("from") == problem_id
+                if edge.get('from') == problem_id
             ]
 
             # Convert to descriptive IDs
-            l1_entry["enabled"] = [
+            l1_entry['enabled'] = [
                 problem_id_to_descriptive.get(pid)
                 for pid in enabled_problem_ids
                 if pid in problem_id_to_descriptive
@@ -3682,35 +4045,35 @@ def _stage3_generate_l1_with_llm(deduplicated: List[Dict], dependencies: Dict, d
 
             # Find enabled_by problems
             enabled_by_problem_ids = [
-                edge.get("from")
+                edge.get('from')
                 for edge in dependency_edges
-                if edge.get("to") == problem_id
+                if edge.get('to') == problem_id
             ]
 
             # Convert to descriptive IDs
-            l1_entry["enabled_by"] = [
+            l1_entry['enabled_by'] = [
                 problem_id_to_descriptive.get(pid)
                 for pid in enabled_by_problem_ids
                 if pid in problem_id_to_descriptive
             ]
 
-    print(f"    Created {len(l1_problems)} L1 entries (one per problem)")
-    print(f"    Total files covered: {sum(len(e['file']) for e in l1_problems)}")
+    print(f'    Created {len(l1_problems)} L1 entries (one per problem)')
+    print(f'    Total files covered: {sum(len(e["file"]) for e in l1_problems)}')
 
     return l1_problems
 
 
-def _find_file_changes(target_file: str, sub_problems: List[Dict]) -> str:
+def _find_file_changes(target_file: str, sub_problems: list[dict]) -> str:
     """Find the specific changes for a target file from sub_problems."""
     for sub_prob in sub_problems:
-        if target_file in sub_prob.get("affected_files", []):
-            return sub_prob.get("how_fixed", "")[:300]
-    return ""
-
-    return l1_problems
+        if target_file in sub_prob.get('affected_files', []):
+            return sub_prob.get('how_fixed', '')[:300]
+    return ''
 
 
-def _stage4_generate_l2_llm(deduplicated: List[Dict], dependencies: Dict, llm, issue_id: str, repo: str) -> Dict:
+def _stage4_generate_l2_llm(
+    deduplicated: list[dict], dependencies: dict, llm, issue_id: str, repo: str
+) -> dict:
     """
     Stage 4: Generate L2 (repair sequence) with Three-Tier Strategy.
 
@@ -3726,69 +4089,81 @@ def _stage4_generate_l2_llm(deduplicated: List[Dict], dependencies: Dict, llm, i
     actual_count = len(flattened_problems)
     prompt_size = len(json.dumps(flattened_problems, indent=2))
 
-    print(f"  L2 Strategy: {actual_count} problems, {prompt_size} chars")
+    print(f'  L2 Strategy: {actual_count} problems, {prompt_size} chars')
 
     # TIER SELECTION
 
     # Tier 1: Small dataset - Single-pass LLM
     if actual_count <= 10 and prompt_size < 20000:
-        print(f"  → Tier 1: Single-pass LLM")
+        print('  → Tier 1: Single-pass LLM')
         try:
-            result = _l2_tier1_single_pass(flattened_problems, dependencies, llm, issue_id, repo)
+            result = _l2_tier1_single_pass(
+                flattened_problems, dependencies, llm, issue_id, repo
+            )
 
             # Validate: check if ALL problems returned
-            if len(result.get("problems", [])) >= actual_count * 0.9:  # 90% threshold
-                print(f"  OK Tier 1 success: {len(result['problems'])} problems")
+            if len(result.get('problems', [])) >= actual_count * 0.9:  # 90% threshold
+                print(f'  OK Tier 1 success: {len(result["problems"])} problems')
                 return result
             else:
-                print(f"  [WARN] Tier 1 incomplete ({len(result.get('problems', []))}/{actual_count})")
+                print(
+                    f'  [WARN] Tier 1 incomplete ({len(result.get("problems", []))}/{actual_count})'
+                )
                 # Fall through to Tier 2
         except Exception as e:
-            print(f"  [WARN] Tier 1 failed: {str(e)[:100]}")
+            print(f'  [WARN] Tier 1 failed: {str(e)[:100]}')
             # Fall through to Tier 2
 
     # Tier 2: Medium dataset - Grouped LLM
     if actual_count <= 20:
-        print(f"  → Tier 2: Grouped LLM per validation")
+        print('  → Tier 2: Grouped LLM per validation')
         try:
-            result = _l2_tier2_grouped_llm(flattened_problems, dependencies, llm, issue_id, repo)
+            result = _l2_tier2_grouped_llm(
+                flattened_problems, dependencies, llm, issue_id, repo
+            )
 
             # Validate
-            if len(result.get("problems", [])) >= actual_count * 0.9:
-                print(f"  OK Tier 2 success: {len(result['problems'])} problems")
+            if len(result.get('problems', [])) >= actual_count * 0.9:
+                print(f'  OK Tier 2 success: {len(result["problems"])} problems')
                 return result
             else:
-                print(f"  [WARN] Tier 2 incomplete ({len(result.get('problems', []))}/{actual_count})")
+                print(
+                    f'  [WARN] Tier 2 incomplete ({len(result.get("problems", []))}/{actual_count})'
+                )
                 # Fall through to Tier 3
         except Exception as e:
-            print(f"  [WARN] Tier 2 failed: {str(e)[:100]}")
+            print(f'  [WARN] Tier 2 failed: {str(e)[:100]}')
             # Fall through to Tier 3
 
     # Tier 3: Large dataset or fallback - Mechanical (guaranteed)
-    print(f"  → Tier 3: Mechanical generation (guaranteed complete)")
+    print('  → Tier 3: Mechanical generation (guaranteed complete)')
     result = _l2_tier3_mechanical(flattened_problems, dependencies, issue_id, repo)
-    print(f"  OK Tier 3 success: {len(result['problems'])} problems")
+    print(f'  OK Tier 3 success: {len(result["problems"])} problems')
 
     return result
 
 
-def _l2_tier1_single_pass(problems: List[Dict], dependencies: Dict, llm, issue_id: str, repo: str) -> Dict:
+def _l2_tier1_single_pass(
+    problems: list[dict], dependencies: dict, llm, issue_id: str, repo: str
+) -> dict:
     """Tier 1: Single-pass LLM for small datasets."""
 
     # Prepare data
     problems_for_llm = []
     for idx, prob in enumerate(problems, 1):
-        problems_for_llm.append({
-            "id": idx,
-            "validation_order": prob.get("validation_order", 999),
-            "validation_cmd": prob.get("validation_cmd", ""),
-            "problem_type": prob.get("problem_type", ""),
-            "what_broke": prob.get("what_broke", ""),
-            "root_cause": prob.get("root_cause", ""),
-            "how_fixed": prob.get("how_fixed", ""),
-            "files": prob.get("affected_files", []),
-            "issue_type": prob.get("issue_type", "")
-        })
+        problems_for_llm.append(
+            {
+                'id': idx,
+                'validation_order': prob.get('validation_order', 999),
+                'validation_cmd': prob.get('validation_cmd', ''),
+                'problem_type': prob.get('problem_type', ''),
+                'what_broke': prob.get('what_broke', ''),
+                'root_cause': prob.get('root_cause', ''),
+                'how_fixed': prob.get('how_fixed', ''),
+                'files': prob.get('affected_files', []),
+                'issue_type': prob.get('issue_type', ''),
+            }
+        )
 
     prompt = f"""Generate L2 REPAIR SEQUENCE for CI failure resolution.
 
@@ -3858,45 +4233,49 @@ OTHER RULES:
         time.sleep(3)  # Rate limiting
         response = _invoke_json(llm, prompt)
 
-        if isinstance(response, dict) and "problems" in response:
+        if isinstance(response, dict) and 'problems' in response:
             return response
         else:
-            raise ValueError("Invalid response from LLM")
+            raise ValueError('Invalid response from LLM')
     except Exception as e:
-        print(f"  Tier 1 error: {str(e)[:100]}")
+        print(f'  Tier 1 error: {str(e)[:100]}')
         raise
 
 
-def _l2_tier2_grouped_llm(problems: List[Dict], dependencies: Dict, llm, issue_id: str, repo: str) -> Dict:
+def _l2_tier2_grouped_llm(
+    problems: list[dict], dependencies: dict, llm, issue_id: str, repo: str
+) -> dict:
     """Tier 2: Grouped LLM per validation for medium datasets."""
 
     # Group by validation_cmd
     validation_groups = defaultdict(list)
     for prob in problems:
-        cmd = prob.get("validation_cmd", "unknown")
+        cmd = prob.get('validation_cmd', 'unknown')
         validation_groups[cmd].append(prob)
 
-    print(f"    Grouped into {len(validation_groups)} validations")
+    print(f'    Grouped into {len(validation_groups)} validations')
 
     all_l2_problems = []
 
     for validation_cmd, group_problems in validation_groups.items():
-        print(f"    Processing {validation_cmd}: {len(group_problems)} problems")
+        print(f'    Processing {validation_cmd}: {len(group_problems)} problems')
 
         # Prepare problems for this validation
         problems_for_llm = []
         for idx, prob in enumerate(group_problems, 1):
-            problems_for_llm.append({
-                "id": idx,
-                "validation_order": prob.get("validation_order", 999),
-                "validation_cmd": prob.get("validation_cmd", ""),
-                "problem_type": prob.get("problem_type", ""),
-                "what_broke": prob.get("what_broke", ""),
-                "root_cause": prob.get("root_cause", ""),
-                "how_fixed": prob.get("how_fixed", ""),
-                "files": prob.get("affected_files", []),
-                "issue_type": prob.get("issue_type", "")
-            })
+            problems_for_llm.append(
+                {
+                    'id': idx,
+                    'validation_order': prob.get('validation_order', 999),
+                    'validation_cmd': prob.get('validation_cmd', ''),
+                    'problem_type': prob.get('problem_type', ''),
+                    'what_broke': prob.get('what_broke', ''),
+                    'root_cause': prob.get('root_cause', ''),
+                    'how_fixed': prob.get('how_fixed', ''),
+                    'files': prob.get('affected_files', []),
+                    'issue_type': prob.get('issue_type', ''),
+                }
+            )
 
         prompt = f"""Organize repair sequence for validation: {validation_cmd}
 
@@ -3936,54 +4315,59 @@ CRITICAL: fix_strategy must combine input data naturally:
             time.sleep(2)
             response = _invoke_json(llm, prompt)
 
-            if isinstance(response, dict) and "problems" in response:
+            if isinstance(response, dict) and 'problems' in response:
                 # Add metadata back to problems
-                for l2_prob in response["problems"]:
-                    orig_prob = group_problems[l2_prob.get("problem_id", 1) - 1]
-                    l2_prob["problem_type"] = orig_prob.get("problem_type")
-                    l2_prob["validation_order"] = orig_prob.get("validation_order", 999)
+                for l2_prob in response['problems']:
+                    orig_prob = group_problems[l2_prob.get('problem_id', 1) - 1]
+                    l2_prob['problem_type'] = orig_prob.get('problem_type')
+                    l2_prob['validation_order'] = orig_prob.get('validation_order', 999)
 
-                all_l2_problems.extend(response["problems"])
+                all_l2_problems.extend(response['problems'])
             else:
                 # Fallback: use mechanical for this validation
-                print(f"      LLM failed for {validation_cmd}, using mechanical")
+                print(f'      LLM failed for {validation_cmd}, using mechanical')
                 for prob in group_problems:
                     all_l2_problems.append(_mechanical_l2_entry(prob))
         except Exception as e:
-            print(f"      Error processing {validation_cmd}: {str(e)[:80]}")
+            print(f'      Error processing {validation_cmd}: {str(e)[:80]}')
             # Fallback: mechanical for this validation
             for prob in group_problems:
                 all_l2_problems.append(_mechanical_l2_entry(prob))
 
     # Final organization: primary → hidden, by validation_order
     # Handle both "primary"/"hidden" and "primary_failure"/"hidden_failure" formats
-    primary = [p for p in all_l2_problems if "primary" in str(p.get("problem_type", "")).lower()]
-    hidden = [p for p in all_l2_problems if "hidden" in str(p.get("problem_type", "")).lower()]
+    primary = [
+        p
+        for p in all_l2_problems
+        if 'primary' in str(p.get('problem_type', '')).lower()
+    ]
+    hidden = [
+        p for p in all_l2_problems if 'hidden' in str(p.get('problem_type', '')).lower()
+    ]
 
-    primary.sort(key=lambda p: p.get("validation_order", 999))
-    hidden.sort(key=lambda p: p.get("validation_order", 999))
+    primary.sort(key=lambda p: p.get('validation_order', 999))
+    hidden.sort(key=lambda p: p.get('validation_order', 999))
 
-    return {
-        "problems": primary + hidden,
-        "total_problems": len(all_l2_problems)
-    }
+    return {'problems': primary + hidden, 'total_problems': len(all_l2_problems)}
 
 
-def _l2_tier3_mechanical(problems: List[Dict], dependencies: Dict, issue_id: str, repo: str) -> Dict:
+def _l2_tier3_mechanical(
+    problems: list[dict], dependencies: dict, issue_id: str, repo: str
+) -> dict:
     """Tier 3: Mechanical generation - guaranteed complete, no LLM."""
 
     # Group by validation for organization
     validation_groups = defaultdict(list)
     for prob in problems:
-        cmd = prob.get("validation_cmd", "unknown")
+        cmd = prob.get('validation_cmd', 'unknown')
         validation_groups[cmd].append(prob)
 
-    print(f"    Processing {len(validation_groups)} validations mechanically")
+    print(f'    Processing {len(validation_groups)} validations mechanically')
 
     all_l2_problems = []
 
     for validation_cmd, group_problems in validation_groups.items():
-        print(f"      {validation_cmd}: {len(group_problems)} problems")
+        print(f'      {validation_cmd}: {len(group_problems)} problems')
 
         for prob in group_problems:
             l2_entry = _mechanical_l2_entry(prob)
@@ -3991,82 +4375,90 @@ def _l2_tier3_mechanical(problems: List[Dict], dependencies: Dict, issue_id: str
 
     # Final organization: primary → hidden, by validation_order
     # Handle both "primary"/"hidden" and "primary_failure"/"hidden_failure" formats
-    primary = [p for p in all_l2_problems if "primary" in str(p.get("problem_type", "")).lower()]
-    hidden = [p for p in all_l2_problems if "hidden" in str(p.get("problem_type", "")).lower()]
+    primary = [
+        p
+        for p in all_l2_problems
+        if 'primary' in str(p.get('problem_type', '')).lower()
+    ]
+    hidden = [
+        p for p in all_l2_problems if 'hidden' in str(p.get('problem_type', '')).lower()
+    ]
 
-    primary.sort(key=lambda p: p.get("validation_order", 999))
-    hidden.sort(key=lambda p: p.get("validation_order", 999))
+    primary.sort(key=lambda p: p.get('validation_order', 999))
+    hidden.sort(key=lambda p: p.get('validation_order', 999))
 
     return {
-        "problems": primary + hidden,
-        "total_problems": len(all_l2_problems),
-        "approach": "mechanical"
+        'problems': primary + hidden,
+        'total_problems': len(all_l2_problems),
+        'approach': 'mechanical',
     }
 
 
-def _mechanical_l2_entry(prob: Dict) -> Dict:
+def _mechanical_l2_entry(prob: dict) -> dict:
     """Generate a single L2 entry mechanically - preserves EXACT decomposition data."""
 
-    files = prob.get("affected_files", [])
-    is_merged = prob.get("is_merged", False)
+    files = prob.get('affected_files', [])
+    is_merged = prob.get('is_merged', False)
 
     # Detect pattern for bulk/merged problems
     pattern = None
     if len(files) > 10 or is_merged:
         pattern = {
-            "type": "bulk_formatting" if len(files) > 10 else "merged_problems",
-            "rule": _detect_pattern_rule(prob),
-            "scope": f"{len(files)} files" if is_merged else f"{len(files)} files"
+            'type': 'bulk_formatting' if len(files) > 10 else 'merged_problems',
+            'rule': _detect_pattern_rule(prob),
+            'scope': f'{len(files)} files' if is_merged else f'{len(files)} files',
         }
 
     # Use EXACT data from decomposition - NO templating
-    how_fixed = prob.get("how_fixed", "")
-    why_fixed_works = prob.get("why_fixed_works", "")
+    how_fixed = prob.get('how_fixed', '')
+    why_fixed_works = prob.get('why_fixed_works', '')
 
     # Create comprehensive fix_strategy: natural paragraph combining how + why
     if how_fixed and why_fixed_works:
         # Combine into single flowing paragraph
-        fix_strategy = f"{how_fixed} {why_fixed_works}"
+        fix_strategy = f'{how_fixed} {why_fixed_works}'
     elif how_fixed:
         fix_strategy = how_fixed
     else:
-        fix_strategy = f"Address the root cause: {prob.get('root_cause', 'See problem description')}"
+        fix_strategy = f'Address the root cause: {prob.get("root_cause", "See problem description")}'
 
     # Estimated time
     time_estimate = _estimate_time_mechanical(len(files))
 
     return {
-        "problem_id": prob.get("problem_id"),
-        "verification_cmd": prob.get("validation_cmd"),
-        "failure_type": prob.get("failure_type", ""),
-        "problem": prob.get("what_broke", "") or prob.get("problem", ""),
-        "root_cause": prob.get("root_cause", ""),
-        "fix_strategy": fix_strategy,  # Combined: how_fixed + why_it_works
-        "pattern_detected": pattern,
-        "files": files,  # ALL files, no limit
-        "estimated_time_minutes": time_estimate,
-        "problem_type": prob.get("problem_type", "unknown"),  # CRITICAL: preserve problem_type
-        "validation_order": prob.get("validation_order", 999)
+        'problem_id': prob.get('problem_id'),
+        'verification_cmd': prob.get('validation_cmd'),
+        'failure_type': prob.get('failure_type', ''),
+        'problem': prob.get('what_broke', '') or prob.get('problem', ''),
+        'root_cause': prob.get('root_cause', ''),
+        'fix_strategy': fix_strategy,  # Combined: how_fixed + why_it_works
+        'pattern_detected': pattern,
+        'files': files,  # ALL files, no limit
+        'estimated_time_minutes': time_estimate,
+        'problem_type': prob.get(
+            'problem_type', 'unknown'
+        ),  # CRITICAL: preserve problem_type
+        'validation_order': prob.get('validation_order', 999),
     }
 
 
-def _detect_pattern_rule(problem: Dict) -> str:
+def _detect_pattern_rule(problem: dict) -> str:
     """Detect pattern rule mechanically based on issue type."""
 
-    issue_type = problem.get("issue_type", "").lower()
-    failure_type = problem.get("failure_type", "").lower()
+    issue_type = problem.get('issue_type', '').lower()
+    failure_type = problem.get('failure_type', '').lower()
 
     # Common patterns
-    if "type" in issue_type and "hint" in issue_type:
-        return "Add type annotations for all untyped parameters"
-    elif "rst" in issue_type or "underline" in issue_type:
-        return "RST section header underline length must match header text exactly"
-    elif "import" in issue_type:
-        return "Import sorting - standard library, third-party, then local imports"
-    elif "formatting" in failure_type or "format" in issue_type:
-        return f"Apply {failure_type} rules consistently"
+    if 'type' in issue_type and 'hint' in issue_type:
+        return 'Add type annotations for all untyped parameters'
+    elif 'rst' in issue_type or 'underline' in issue_type:
+        return 'RST section header underline length must match header text exactly'
+    elif 'import' in issue_type:
+        return 'Import sorting - standard library, third-party, then local imports'
+    elif 'formatting' in failure_type or 'format' in issue_type:
+        return f'Apply {failure_type} rules consistently'
     else:
-        return f"{failure_type}: {issue_type}"
+        return f'{failure_type}: {issue_type}'
 
 
 def _estimate_time_mechanical(file_count: int) -> int:
@@ -4081,7 +4473,9 @@ def _estimate_time_mechanical(file_count: int) -> int:
         return 20
 
 
-def _stage5_generate_l3_llm(l1: List[Dict], l2: Dict, deduplicated: List[Dict], llm) -> List[Dict]:
+def _stage5_generate_l3_llm(
+    l1: list[dict], l2: dict, deduplicated: list[dict], llm
+) -> list[dict]:
     """
     Stage 5: Generate L3 (universal patterns) using LLM.
 
@@ -4094,22 +4488,22 @@ def _stage5_generate_l3_llm(l1: List[Dict], l2: Dict, deduplicated: List[Dict], 
     - LLM fails: Mechanical fallback with pattern detection
     """
 
-    l2_problems = l2.get("problems", [])
+    l2_problems = l2.get('problems', [])
 
     # Check data size
     l2_json_size = len(json.dumps(l2_problems, indent=2))
 
     if l2_json_size < 30000:
         # Small enough - use single-pass approach
-        print(f"  L3: Single-pass approach ({l2_json_size} chars)")
+        print(f'  L3: Single-pass approach ({l2_json_size} chars)')
         return _stage5_l3_single_pass(l2_problems, llm)
     else:
         # Too large - use grouped approach
-        print(f"  L3: Data too large ({l2_json_size} chars), using grouped approach")
+        print(f'  L3: Data too large ({l2_json_size} chars), using grouped approach')
         return _stage5_l3_grouped(l2_problems, deduplicated, llm)
 
 
-def _stage5_l3_single_pass(l2_problems: List[Dict], llm) -> List[Dict]:
+def _stage5_l3_single_pass(l2_problems: list[dict], llm) -> list[dict]:
     """Single-pass L3 generation for small/normal-sized data."""
 
     prompt = f"""Analyze CI failure patterns and extract UNIVERSAL PROBLEM PATTERNS (L3).
@@ -4175,14 +4569,16 @@ Include dependencies ONLY if they actually exist.
         if isinstance(response, list):
             return response
         else:
-            print(f"  WARNING: LLM returned invalid L3, using fallback")
-            return _fallback_l3_intelligent({"problems": l2_problems})
+            print('  WARNING: LLM returned invalid L3, using fallback')
+            return _fallback_l3_intelligent({'problems': l2_problems})
     except Exception as e:
-        print(f"  ERROR in L3 single-pass: {e}")
-        return _fallback_l3_intelligent({"problems": l2_problems})
+        print(f'  ERROR in L3 single-pass: {e}')
+        return _fallback_l3_intelligent({'problems': l2_problems})
 
 
-def _stage5_l3_grouped(l2_problems: List[Dict], deduplicated: List[Dict], llm) -> List[Dict]:
+def _stage5_l3_grouped(
+    l2_problems: list[dict], deduplicated: list[dict], llm
+) -> list[dict]:
     """
     Grouped L3 generation for large data.
 
@@ -4191,52 +4587,58 @@ def _stage5_l3_grouped(l2_problems: List[Dict], deduplicated: List[Dict], llm) -
     2. LLM extracts patterns per validation group (small prompts)
     3. LLM identifies cross-validation dependencies
     """
-    print("  Using validation-grouped L3 approach...")
+    print('  Using validation-grouped L3 approach...')
 
     # Step 1: Group by validation_cmd
     validation_groups = {}
     for prob in l2_problems:
-        cmd = prob.get("validation_cmd", "unknown")
+        cmd = prob.get('validation_cmd', 'unknown')
         if cmd not in validation_groups:
             validation_groups[cmd] = []
         validation_groups[cmd].append(prob)
 
-    print(f"  Grouped into {len(validation_groups)} validation groups")
+    print(f'  Grouped into {len(validation_groups)} validation groups')
 
     # Step 2: Extract patterns per validation group
     all_patterns = []
 
     for validation_cmd, group_problems in validation_groups.items():
-        print(f"  Extracting patterns for: {validation_cmd} ({len(group_problems)} problems)")
+        print(
+            f'  Extracting patterns for: {validation_cmd} ({len(group_problems)} problems)'
+        )
 
         try:
             group_patterns = _extract_patterns_for_validation_group(
-                validation_cmd=validation_cmd,
-                problems=group_problems,
-                llm=llm
+                validation_cmd=validation_cmd, problems=group_problems, llm=llm
             )
             all_patterns.extend(group_patterns)
-            print(f"    → Extracted {len(group_patterns)} patterns")
+            print(f'    → Extracted {len(group_patterns)} patterns')
         except Exception as e:
-            print(f"    → LLM failed for {validation_cmd}: {e}, using mechanical extraction")
+            print(
+                f'    → LLM failed for {validation_cmd}: {e}, using mechanical extraction'
+            )
             # Fallback for this group
-            mechanical_patterns = _extract_patterns_mechanical(validation_cmd, group_problems)
+            mechanical_patterns = _extract_patterns_mechanical(
+                validation_cmd, group_problems
+            )
             all_patterns.extend(mechanical_patterns)
 
     # Step 3: Identify cross-validation dependencies
-    print(f"  Analyzing dependencies across {len(all_patterns)} patterns...")
+    print(f'  Analyzing dependencies across {len(all_patterns)} patterns...')
 
     try:
         final_patterns = _identify_cross_pattern_dependencies(all_patterns, llm)
-        print(f"  → Found dependencies between patterns")
+        print('  → Found dependencies between patterns')
         return final_patterns
     except Exception as e:
-        print(f"  → Dependency analysis failed: {e}, using file-based heuristic")
+        print(f'  → Dependency analysis failed: {e}, using file-based heuristic')
         # Fallback: use file overlap to detect dependencies
         return _detect_file_based_dependencies(all_patterns)
 
 
-def _extract_patterns_for_validation_group(validation_cmd: str, problems: List[Dict], llm) -> List[Dict]:
+def _extract_patterns_for_validation_group(
+    validation_cmd: str, problems: list[dict], llm
+) -> list[dict]:
     """Extract patterns for a single validation group using LLM."""
 
     prompt = f"""Extract universal patterns from this validation group.
@@ -4291,27 +4693,29 @@ IMPORTANT:
     if isinstance(response, list):
         # Add validation_cmd to each pattern
         for pattern in response:
-            pattern["validation_cmd"] = validation_cmd
-            pattern["validation_scope"] = "single_validation"
+            pattern['validation_cmd'] = validation_cmd
+            pattern['validation_scope'] = 'single_validation'
         return response
     else:
-        raise ValueError("Invalid response format")
+        raise ValueError('Invalid response format')
 
 
-def _identify_cross_pattern_dependencies(patterns: List[Dict], llm) -> List[Dict]:
+def _identify_cross_pattern_dependencies(patterns: list[dict], llm) -> list[dict]:
     """Identify dependencies between patterns from different validations using LLM."""
 
     # Create compact pattern summaries for LLM
     pattern_summaries = []
     for p in patterns:
-        pattern_summaries.append({
-            "pattern_id": p.get("pattern_id", "unknown"),
-            "validation_cmd": p.get("validation_cmd", "unknown"),
-            "failure_type": p.get("failure_type", "unknown"),
-            "failure_pattern": p.get("failure_pattern", "")[:150],
-            "files_count": len(p.get("examples", [])),
-            "fix_approach": p.get("universal_fix", {}).get("approach", "")[:100]
-        })
+        pattern_summaries.append(
+            {
+                'pattern_id': p.get('pattern_id', 'unknown'),
+                'validation_cmd': p.get('validation_cmd', 'unknown'),
+                'failure_type': p.get('failure_type', 'unknown'),
+                'failure_pattern': p.get('failure_pattern', '')[:150],
+                'files_count': len(p.get('examples', [])),
+                'fix_approach': p.get('universal_fix', {}).get('approach', '')[:100],
+            }
+        )
 
     prompt = f"""Analyze dependencies between these patterns from different validations.
 
@@ -4347,33 +4751,37 @@ Empty array if no cross-pattern dependencies.
     response = _invoke_json(llm, prompt)
 
     # Add dependencies to patterns
-    dependencies = response.get("dependencies", [])
+    dependencies = response.get('dependencies', [])
 
     for dep in dependencies:
-        from_id = dep.get("from_pattern")
-        to_id = dep.get("to_pattern")
+        from_id = dep.get('from_pattern')
+        to_id = dep.get('to_pattern')
 
         # Find the pattern and add dependency
         for p in patterns:
-            if p.get("pattern_id") == from_id:
-                if "dependent_problems" not in p:
-                    p["dependent_problems"] = []
-                p["dependent_problems"].append({
-                    "pattern_id": to_id,
-                    "relationship": dep.get("relationship", "related"),
-                    "rationale": dep.get("rationale", "")
-                })
+            if p.get('pattern_id') == from_id:
+                if 'dependent_problems' not in p:
+                    p['dependent_problems'] = []
+                p['dependent_problems'].append(
+                    {
+                        'pattern_id': to_id,
+                        'relationship': dep.get('relationship', 'related'),
+                        'rationale': dep.get('rationale', ''),
+                    }
+                )
 
     return patterns
 
 
-def _extract_patterns_mechanical(validation_cmd: str, problems: List[Dict]) -> List[Dict]:
+def _extract_patterns_mechanical(
+    validation_cmd: str, problems: list[dict]
+) -> list[dict]:
     """Mechanical pattern extraction for a validation group (no LLM)."""
 
     # Group by problem_type within validation
     type_groups = {}
     for prob in problems:
-        ptype = prob.get("problem_type", "unknown")
+        ptype = prob.get('problem_type', 'unknown')
         if ptype not in type_groups:
             type_groups[ptype] = []
         type_groups[ptype].append(prob)
@@ -4383,59 +4791,59 @@ def _extract_patterns_mechanical(validation_cmd: str, problems: List[Dict]) -> L
         # Combine all files
         all_files = set()
         for p in group_probs:
-            all_files.update(p.get("files", []))
+            all_files.update(p.get('files', []))
 
         # Create pattern
         pattern = {
-            "pattern_id": f"pattern_{validation_cmd.replace(' ', '_')}_{ptype}",
-            "validation_cmd": validation_cmd,
-            "problem_type": ptype,
-            "failure_type": group_probs[0].get("failure_type", "unknown"),
-            "failure_pattern": f"{len(group_probs)} {ptype} problems in {validation_cmd}",
-            "problem": _combine_problem_descriptions(group_probs),
-            "universal_fix": {
-                "approach": _extract_common_fix_approach(group_probs),
-                "steps": ["Mechanical fallback - see individual problems for details"],
-                "applies_to": [f"{validation_cmd} {ptype} issues"]
+            'pattern_id': f'pattern_{validation_cmd.replace(" ", "_")}_{ptype}',
+            'validation_cmd': validation_cmd,
+            'problem_type': ptype,
+            'failure_type': group_probs[0].get('failure_type', 'unknown'),
+            'failure_pattern': f'{len(group_probs)} {ptype} problems in {validation_cmd}',
+            'problem': _combine_problem_descriptions(group_probs),
+            'universal_fix': {
+                'approach': _extract_common_fix_approach(group_probs),
+                'steps': ['Mechanical fallback - see individual problems for details'],
+                'applies_to': [f'{validation_cmd} {ptype} issues'],
             },
-            "examples": [],
-            "affected_files": list(all_files),
-            "file_count": len(all_files),
-            "dependent_problems": [],
-            "validation_scope": "single_validation"
+            'examples': [],
+            'affected_files': list(all_files),
+            'file_count': len(all_files),
+            'dependent_problems': [],
+            'validation_scope': 'single_validation',
         }
         patterns.append(pattern)
 
     return patterns
 
 
-def _combine_problem_descriptions(problems: List[Dict]) -> str:
+def _combine_problem_descriptions(problems: list[dict]) -> str:
     """Combine problem descriptions from multiple problems."""
     if len(problems) == 1:
-        return problems[0].get("problem", "Unknown problem")
+        return problems[0].get('problem', 'Unknown problem')
 
     # Take common theme
-    first_prob = problems[0].get("problem", "")
+    first_prob = problems[0].get('problem', '')
     if len(first_prob) > 100:
-        return f"{first_prob[:100]}... ({len(problems)} similar problems)"
+        return f'{first_prob[:100]}... ({len(problems)} similar problems)'
     else:
-        return f"Multiple {problems[0].get('failure_type', 'validation')} issues ({len(problems)} problems)"
+        return f'Multiple {problems[0].get("failure_type", "validation")} issues ({len(problems)} problems)'
 
 
-def _extract_common_fix_approach(problems: List[Dict]) -> str:
+def _extract_common_fix_approach(problems: list[dict]) -> str:
     """Extract common fix approach from problems."""
     if len(problems) == 1:
-        return problems[0].get("how_fixed", "Fix validation failure")[:200]
+        return problems[0].get('how_fixed', 'Fix validation failure')[:200]
 
     # Simple heuristic: use first problem's approach
-    return problems[0].get("how_fixed", "Fix validation failures")[:200]
+    return problems[0].get('how_fixed', 'Fix validation failures')[:200]
 
 
-def _detect_file_based_dependencies(patterns: List[Dict]) -> List[Dict]:
+def _detect_file_based_dependencies(patterns: list[dict]) -> list[dict]:
     """Detect dependencies between patterns based on file overlap."""
 
     for i, pattern_a in enumerate(patterns):
-        files_a = set(pattern_a.get("affected_files", []))
+        files_a = set(pattern_a.get('affected_files', []))
         if not files_a:
             continue
 
@@ -4443,7 +4851,7 @@ def _detect_file_based_dependencies(patterns: List[Dict]) -> List[Dict]:
             if i == j:
                 continue
 
-            files_b = set(pattern_b.get("affected_files", []))
+            files_b = set(pattern_b.get('affected_files', []))
             if not files_b:
                 continue
 
@@ -4456,34 +4864,36 @@ def _detect_file_based_dependencies(patterns: List[Dict]) -> List[Dict]:
 
                 if overlap_ratio_a > 0.3 or overlap_ratio_b > 0.3:
                     # Add dependency
-                    if "dependent_problems" not in pattern_a:
-                        pattern_a["dependent_problems"] = []
+                    if 'dependent_problems' not in pattern_a:
+                        pattern_a['dependent_problems'] = []
 
-                    pattern_a["dependent_problems"].append({
-                        "pattern_id": pattern_b.get("pattern_id", "unknown"),
-                        "relationship": "related_files",
-                        "rationale": f"Shares {len(overlap)} files ({int(max(overlap_ratio_a, overlap_ratio_b) * 100)}% overlap)"
-                    })
+                    pattern_a['dependent_problems'].append(
+                        {
+                            'pattern_id': pattern_b.get('pattern_id', 'unknown'),
+                            'relationship': 'related_files',
+                            'rationale': f'Shares {len(overlap)} files ({int(max(overlap_ratio_a, overlap_ratio_b) * 100)}% overlap)',
+                        }
+                    )
 
     return patterns
 
 
-def _fallback_l3_intelligent(l2: Dict) -> List[Dict]:
+def _fallback_l3_intelligent(l2: dict) -> list[dict]:
     """
     Intelligent mechanical fallback for L3 (no LLM).
 
     Groups by (validation_cmd, problem_type) and detects dependencies by file overlap.
     NO truncation - preserves all data.
     """
-    print("  Using intelligent mechanical L3 fallback...")
+    print('  Using intelligent mechanical L3 fallback...')
 
-    problems = l2.get("problems", [])
+    problems = l2.get('problems', [])
 
     # Group by (validation_cmd, problem_type)
     pattern_groups = {}
     for prob in problems:
-        validation = prob.get("validation_cmd", "unknown")
-        prob_type = prob.get("problem_type", "unknown")
+        validation = prob.get('validation_cmd', 'unknown')
+        prob_type = prob.get('problem_type', 'unknown')
         key = (validation, prob_type)
 
         if key not in pattern_groups:
@@ -4496,35 +4906,35 @@ def _fallback_l3_intelligent(l2: Dict) -> List[Dict]:
         # Collect all files
         all_files = set()
         for p in group_probs:
-            all_files.update(p.get("files", []))
+            all_files.update(p.get('files', []))
 
         pattern = {
-            "pattern_id": f"pattern_{validation.replace(' ', '_')}_{prob_type}_{len(patterns)+1}",
-            "validation_cmd": validation,
-            "problem_type": prob_type,
-            "failure_type": group_probs[0].get("failure_type", "unknown"),
-            "failure_pattern": f"{len(group_probs)} {prob_type} problems in {validation}",
-            "problem": _combine_problem_descriptions(group_probs),
-            "universal_fix": {
-                "approach": _extract_common_fix_approach(group_probs),
-                "steps": ["Mechanical fallback - see L2 for detailed steps"],
-                "applies_to": [f"{validation} validation failures"]
+            'pattern_id': f'pattern_{validation.replace(" ", "_")}_{prob_type}_{len(patterns) + 1}',
+            'validation_cmd': validation,
+            'problem_type': prob_type,
+            'failure_type': group_probs[0].get('failure_type', 'unknown'),
+            'failure_pattern': f'{len(group_probs)} {prob_type} problems in {validation}',
+            'problem': _combine_problem_descriptions(group_probs),
+            'universal_fix': {
+                'approach': _extract_common_fix_approach(group_probs),
+                'steps': ['Mechanical fallback - see L2 for detailed steps'],
+                'applies_to': [f'{validation} validation failures'],
             },
-            "examples": [],
-            "affected_files": list(all_files),
-            "file_count": len(all_files),
-            "dependent_problems": []
+            'examples': [],
+            'affected_files': list(all_files),
+            'file_count': len(all_files),
+            'dependent_problems': [],
         }
         patterns.append(pattern)
 
     # Detect dependencies by file overlap
     patterns = _detect_file_based_dependencies(patterns)
 
-    print(f"  Generated {len(patterns)} patterns (mechanical)")
+    print(f'  Generated {len(patterns)} patterns (mechanical)')
     return patterns
 
 
-def convert_to_l2_format(decomposed_result: Dict) -> Dict:
+def convert_to_l2_format(decomposed_result: dict) -> dict:
     """
     Convert decomposed issue to clean L2 format.
 
@@ -4541,20 +4951,20 @@ def convert_to_l2_format(decomposed_result: Dict) -> Dict:
         L2 format dictionary with deduplicated, ordered problems
     """
 
-    if "error" in decomposed_result or not decomposed_result.get("problems"):
+    if 'error' in decomposed_result or not decomposed_result.get('problems'):
         return decomposed_result
 
-    issue_id = decomposed_result.get("original_issue_id", "?")
-    problems = decomposed_result.get("problems", [])
+    issue_id = decomposed_result.get('original_issue_id', '?')
+    problems = decomposed_result.get('problems', [])
 
-    print(f"\n  Converting to L2 format...")
-    print(f"    Input: {len(problems)} problems")
+    print('\n  Converting to L2 format...')
+    print(f'    Input: {len(problems)} problems')
 
     # Group problems by validation command ONLY (not by error type)
     # This merges all problems from same validation into ONE problem
     problem_groups = {}
     for prob in problems:
-        validation = prob.get("validation_cmd", "unknown")
+        validation = prob.get('validation_cmd', 'unknown')
         # Key is just validation command - merge ALL problems from same validation
         key = validation
 
@@ -4576,79 +4986,81 @@ def convert_to_l2_format(decomposed_result: Dict) -> Dict:
         # Collect all affected files
         all_files = []
         for p in group_problems:
-            all_files.extend(p.get("affected_files", []))
+            all_files.extend(p.get('affected_files', []))
         all_files = list(dict.fromkeys(all_files))  # Deduplicate preserving order
 
         # Detect pattern if multiple files with same fix
         pattern_detected = None
         if len(all_files) > 5:  # Bulk operation threshold
             # Extract pattern info
-            issue_type = template.get("issue_type", "")
-            how_fixed = template.get("how_fixed", "")
+            issue_type = template.get('issue_type', '')
+            how_fixed = template.get('how_fixed', '')
 
             # Determine pattern type
-            pattern_type = "bulk_change"
-            if "format" in issue_type.lower() or "format" in how_fixed.lower():
-                pattern_type = "bulk_formatting"
-            elif "config" in issue_type.lower() or "enable" in how_fixed.lower():
-                pattern_type = "config_enablement"
+            pattern_type = 'bulk_change'
+            if 'format' in issue_type.lower() or 'format' in how_fixed.lower():
+                pattern_type = 'bulk_formatting'
+            elif 'config' in issue_type.lower() or 'enable' in how_fixed.lower():
+                pattern_type = 'config_enablement'
 
             # Extract rule from how_fixed
-            rule = how_fixed[:100] if how_fixed else "Pattern not specified"
+            rule = how_fixed[:100] if how_fixed else 'Pattern not specified'
 
             pattern_detected = {
-                "type": pattern_type,
-                "rule": rule,
-                "scope": f"{len(all_files)} files in {template.get('validation_cmd', 'unknown')}"
+                'type': pattern_type,
+                'rule': rule,
+                'scope': f'{len(all_files)} files in {template.get("validation_cmd", "unknown")}',
             }
 
         # Build root cause string (summarize from all problems in group)
         root_causes = set()
         scopes = set()
         for p in group_problems:
-            if p.get("root_cause"):
-                root_causes.add(p["root_cause"][:150])
-            if p.get("what_broke"):
-                scopes.add(p["what_broke"][:80])
+            if p.get('root_cause'):
+                root_causes.add(p['root_cause'][:150])
+            if p.get('what_broke'):
+                scopes.add(p['what_broke'][:80])
 
         root_cause_parts = []
         if root_causes:
             # Take first unique root cause (they're usually similar)
             root_cause_parts.append(list(root_causes)[0])
         if scopes:
-            scope_str = f"Affects {len(all_files)} files"
-            root_cause_parts.append(f"Scope: {scope_str}")
-        root_cause = " ".join(root_cause_parts) if root_cause_parts else "Unknown root cause"
+            scope_str = f'Affects {len(all_files)} files'
+            root_cause_parts.append(f'Scope: {scope_str}')
+        root_cause = (
+            ' '.join(root_cause_parts) if root_cause_parts else 'Unknown root cause'
+        )
 
         # Build fix strategy string
         fix_parts = []
 
         # Approach
-        problem_type = template.get("problem_type", "unknown")
-        if problem_type == "primary":
-            approach = "direct_fix"
-        elif problem_type == "hidden":
-            approach = "consecutive"
-        elif "workaround" in template.get("how_fixed", "").lower():
-            approach = "workaround"
+        problem_type = template.get('problem_type', 'unknown')
+        if problem_type == 'primary':
+            approach = 'direct_fix'
+        elif problem_type == 'hidden':
+            approach = 'consecutive'
+        elif 'workaround' in template.get('how_fixed', '').lower():
+            approach = 'workaround'
         else:
-            approach = "direct_fix"
-        fix_parts.append(f"Approach: {approach}")
+            approach = 'direct_fix'
+        fix_parts.append(f'Approach: {approach}')
 
         # What
-        what_broke = template.get("what_broke", "")
+        what_broke = template.get('what_broke', '')
         if what_broke:
-            fix_parts.append(f"What: {what_broke[:100]}")
+            fix_parts.append(f'What: {what_broke[:100]}')
 
         # How
-        how_fixed = template.get("how_fixed", "")
+        how_fixed = template.get('how_fixed', '')
         if how_fixed:
-            fix_parts.append(f"How: {how_fixed[:200]}")
+            fix_parts.append(f'How: {how_fixed[:200]}')
 
         # Why
-        why_works = template.get("why_fixed_works", "")
+        why_works = template.get('why_fixed_works', '')
         if why_works:
-            fix_parts.append(f"Why: {why_works[:100]}")
+            fix_parts.append(f'Why: {why_works[:100]}')
 
         # Time estimate (rough)
         time_estimate = 5  # default
@@ -4658,30 +5070,30 @@ def convert_to_l2_format(decomposed_result: Dict) -> Dict:
             time_estimate = 15
         elif len(all_files) > 2:
             time_estimate = 10
-        fix_parts.append(f"Time: {time_estimate}min")
+        fix_parts.append(f'Time: {time_estimate}min')
 
-        fix_strategy = " | ".join(fix_parts)
+        fix_strategy = ' | '.join(fix_parts)
 
         # Build problem string (summarize all error types in group)
-        error_types = set(p.get("issue_type", "unknown") for p in group_problems)
+        error_types = set(p.get('issue_type', 'unknown') for p in group_problems)
         if len(error_types) == 1:
             error_code = list(error_types)[0]
         else:
-            error_code = f"{len(error_types)} error types"
+            error_code = f'{len(error_types)} error types'
 
-        what_broke = template.get("what_broke", "Validation failed")
-        problem_str = f"{what_broke} [{error_code}]"
+        what_broke = template.get('what_broke', 'Validation failed')
+        problem_str = f'{what_broke} [{error_code}]'
 
         # Build L2 problem
         l2_problem = {
-            "problem_id": problem_id,
-            "verification_cmd": template.get("validation_cmd", ""),
-            "failure_type": template.get("problem_type", "unknown").replace("_", " "),
-            "problem": problem_str,
-            "root_cause": root_cause,
-            "pattern_detected": pattern_detected,
-            "files": all_files,
-            "fix_strategy": fix_strategy
+            'problem_id': problem_id,
+            'verification_cmd': template.get('validation_cmd', ''),
+            'failure_type': template.get('problem_type', 'unknown').replace('_', ' '),
+            'problem': problem_str,
+            'root_cause': root_cause,
+            'pattern_detected': pattern_detected,
+            'files': all_files,
+            'fix_strategy': fix_strategy,
         }
 
         l2_problems.append(l2_problem)
@@ -4689,10 +5101,10 @@ def convert_to_l2_format(decomposed_result: Dict) -> Dict:
 
     # Sort by problem type (primary first, then enablement, then consecutive)
     def problem_priority(p):
-        failure_type = p.get("failure_type", "")
-        if "primary" in failure_type:
+        failure_type = p.get('failure_type', '')
+        if 'primary' in failure_type:
             return 0
-        elif "enablement" in failure_type:
+        elif 'enablement' in failure_type:
             return 2
         else:
             return 1
@@ -4701,31 +5113,31 @@ def convert_to_l2_format(decomposed_result: Dict) -> Dict:
 
     # Reassign problem IDs after sorting
     for idx, prob in enumerate(l2_problems, 1):
-        prob["problem_id"] = idx
+        prob['problem_id'] = idx
 
     # Calculate total time
     total_time = sum(
-        int(p["fix_strategy"].split("Time: ")[-1].split("min")[0])
+        int(p['fix_strategy'].split('Time: ')[-1].split('min')[0])
         for p in l2_problems
-        if "Time: " in p["fix_strategy"]
+        if 'Time: ' in p['fix_strategy']
     )
 
-    print(f"    Output: {len(l2_problems)} problems (deduplicated)")
-    print(f"    Total time estimate: {total_time} minutes")
+    print(f'    Output: {len(l2_problems)} problems (deduplicated)')
+    print(f'    Total time estimate: {total_time} minutes')
 
     # Build L2 result
     l2_result = {
-        "issue_id": str(issue_id),
-        "repo": decomposed_result.get("repo", "unknown"),
-        "problems": l2_problems,
-        "total_problems": len(l2_problems),
-        "total_time_minutes": total_time
+        'issue_id': str(issue_id),
+        'repo': decomposed_result.get('repo', 'unknown'),
+        'problems': l2_problems,
+        'total_problems': len(l2_problems),
+        'total_time_minutes': total_time,
     }
 
     return l2_result
 
 
-def _save_to_memory_files(results: List[Dict], output_dir: str):
+def _save_to_memory_files(results: list[dict], output_dir: str):
     """
     Save results to 3 memory files:
     1. failure_memory.json - L1 file-level problems (flat array)
@@ -4734,22 +5146,25 @@ def _save_to_memory_files(results: List[Dict], output_dir: str):
     """
 
     from pathlib import Path
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Filter successful results (skip errors)
-    successful = [r for r in results if "l1_file_level" in r or "l2_repair_sequence" in r]
+    successful = [
+        r for r in results if 'l1_file_level' in r or 'l2_repair_sequence' in r
+    ]
 
     # 1. failure_memory.json - Flat array of ALL file-level problems (L1)
     all_l1_problems = []
     for result in successful:
-        l1_problems = result.get("l1_file_level", [])
+        l1_problems = result.get('l1_file_level', [])
         all_l1_problems.extend(l1_problems)
 
     # 2. l2_repair_sequences.json - Simplified format
     l2_sequences = []
     for result in successful:
-        l2_data = result.get("l2_repair_sequence", {})
+        l2_data = result.get('l2_repair_sequence', {})
 
         # Fix failure_type underscores in problems
         l2_problems = []
@@ -4758,40 +5173,42 @@ def _save_to_memory_files(results: List[Dict], output_dir: str):
             l2_problems.append(prob)
 
         # Get workflow path and issue ID
-        workflow_path = result.get("workflow_path", "unknown")
-        issue_id = result.get("original_issue_id") or result.get("issue_id", "unknown")
+        workflow_path = result.get('workflow_path', 'unknown')
+        issue_id = result.get('original_issue_id') or result.get('issue_id', 'unknown')
 
-        l2_sequences.append({
-            "issue_id": issue_id,  # Identify which issue this repair sequence is for
-            "repo": result.get("repo"),
-            "workflow": workflow_path,
-            "problems": l2_problems
-        })
+        l2_sequences.append(
+            {
+                'issue_id': issue_id,  # Identify which issue this repair sequence is for
+                'repo': result.get('repo'),
+                'workflow': workflow_path,
+                'problems': l2_problems,
+            }
+        )
 
     # Save memory files
-    with open(output_dir / "failure_memory.json", "w") as f:
+    with open(output_dir / 'failure_memory.json', 'w') as f:
         json.dump(all_l1_problems, f, indent=2)
 
-    with open(output_dir / "repo_memory.json", "w") as f:
+    with open(output_dir / 'repo_memory.json', 'w') as f:
         json.dump(l2_sequences, f, indent=2)
 
     # L3 analysis - merge all patterns from all issues
     all_l3_patterns = []
     for result in successful:
-        l3_patterns = result.get("l3_analysis", [])
+        l3_patterns = result.get('l3_analysis', [])
         if isinstance(l3_patterns, list):
             all_l3_patterns.extend(l3_patterns)
 
-    with open(output_dir / "cross_memory.json", "w") as f:
+    with open(output_dir / 'cross_memory.json', 'w') as f:
         json.dump(all_l3_patterns, f, indent=2)
 
-    print(f"  -> Saved to {output_dir}/")
-    print(f"     - failure_memory.json ({len(all_l1_problems)} file problems)")
-    print(f"     - repo_memory.json ({len(l2_sequences)} issues)")
-    print(f"     - cross_memory.json ({len(all_l3_patterns)} patterns)")
+    print(f'  -> Saved to {output_dir}/')
+    print(f'     - failure_memory.json ({len(all_l1_problems)} file problems)')
+    print(f'     - repo_memory.json ({len(l2_sequences)} issues)')
+    print(f'     - cross_memory.json ({len(all_l3_patterns)} patterns)')
 
 
-def load_issues_from_huggingface(issue_ids: List[str] = None) -> List[Dict[str, Any]]:
+def load_issues_from_huggingface(issue_ids: list[str] = None) -> list[dict[str, Any]]:
     """
     Load issues directly from HuggingFace dataset.
 
@@ -4801,32 +5218,38 @@ def load_issues_from_huggingface(issue_ids: List[str] = None) -> List[Dict[str, 
     Returns:
         List of issues matching the provided IDs (or all if no IDs specified)
     """
-    print("Loading dataset from HuggingFace: ci-benchmark-user/ci-repair-bench")
+    print('Loading dataset from HuggingFace: ci-benchmark-user/ci-repair-bench')
 
     # Load with verification disabled to bypass feature compatibility issues
     try:
         # Delete cached dataset info to force reload
-        import shutil
         from pathlib import Path
-        cache_dir = Path.home() / ".cache" / "huggingface" / "datasets" / "ci-benchmark-user___ci-repair-bench"
+
+        cache_dir = (
+            Path.home()
+            / '.cache'
+            / 'huggingface'
+            / 'datasets'
+            / 'ci-benchmark-user___ci-repair-bench'
+        )
         if cache_dir.exists():
-            info_file = cache_dir / "default" / "0.0.0" / "dataset_info.json"
+            info_file = cache_dir / 'default' / '0.0.0' / 'dataset_info.json'
             if info_file.exists():
-                print("Removing cached dataset_info.json to force reload...")
+                print('Removing cached dataset_info.json to force reload...')
                 info_file.unlink()
 
         # Load without verification
         ds = load_dataset(
-            "ci-benchmark-user/ci-repair-bench",
-            verification_mode="no_checks",
-            download_mode="reuse_cache_if_exists"
+            'ci-benchmark-user/ci-repair-bench',
+            verification_mode='no_checks',
+            download_mode='reuse_cache_if_exists',
         )
         data = ds['train']
-        print(f"Loaded {len(data)} issues from HuggingFace")
+        print(f'Loaded {len(data)} issues from HuggingFace')
 
     except Exception as e:
-        print(f"Dataset loading failed: {e}")
-        raise RuntimeError(f"Could not load dataset from HuggingFace: {e}")
+        print(f'Dataset loading failed: {e}')
+        raise RuntimeError(f'Could not load dataset from HuggingFace: {e}')
 
     if issue_ids:
         # Convert to set for faster lookup
@@ -4838,50 +5261,72 @@ def load_issues_from_huggingface(issue_ids: List[str] = None) -> List[Dict[str, 
             if str(item.get('id')) in issue_ids_set:
                 issues.append(dict(item))
 
-        print(f"Filtered to {len(issues)} issues matching provided IDs")
+        print(f'Filtered to {len(issues)} issues matching provided IDs')
 
         # Warn about missing IDs
         found_ids = set(str(i.get('id')) for i in issues)
         missing_ids = issue_ids_set - found_ids
         if missing_ids:
-            print(f"WARNING: {len(missing_ids)} IDs not found in dataset: {sorted(missing_ids)}")
+            print(
+                f'WARNING: {len(missing_ids)} IDs not found in dataset: {sorted(missing_ids)}'
+            )
     else:
         # Load all issues
         issues = [dict(item) for item in data]
-        print(f"Loaded all {len(issues)} issues from dataset")
+        print(f'Loaded all {len(issues)} issues from dataset')
 
     return issues
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Reverse engineer CI failures into atomic problems (visible + hidden)"
+        description='Reverse engineer CI failures into atomic problems (visible + hidden)'
     )
-    parser.add_argument("--issue-id", help="Single issue ID to decompose")
-    parser.add_argument("--batch", action="store_true", help="Decompose all memory issues from HuggingFace")
-    parser.add_argument("--use-huggingface", action="store_true", help="Load from HuggingFace instead of local JSON")
-    parser.add_argument("--dataset", help="Path to JSONL dataset file (filtered issues)")
-    parser.add_argument("--eval-issues", default="data/trs/eval_issues.json", help="Path to eval issues (legacy mode)")
-    parser.add_argument("--output-dir", default="data/trs", help="Output directory for memory files")
+    parser.add_argument('--issue-id', help='Single issue ID to decompose')
     parser.add_argument(
-        "--model",
-        default="openrouter/minimax/minimax-m2.5",
-        help="LLM model. Use openrouter/minimax/minimax-m2.5 for MiniMax M2.5 via OpenRouter.",
+        '--batch',
+        action='store_true',
+        help='Decompose all memory issues from HuggingFace',
     )
-    parser.add_argument("--limit", type=int, help="Limit number of issues to process")
-    parser.add_argument("--skip-memory", action="store_true", help="Skip building memory files (L1/L2/L3) - only save decomposed_issues.json. Use this when you plan to do similarity-based split later.")
+    parser.add_argument(
+        '--use-huggingface',
+        action='store_true',
+        help='Load from HuggingFace instead of local JSON',
+    )
+    parser.add_argument(
+        '--dataset', help='Path to JSONL dataset file (filtered issues)'
+    )
+    parser.add_argument(
+        '--eval-issues',
+        default='data/trs/eval_issues.json',
+        help='Path to eval issues (legacy mode)',
+    )
+    parser.add_argument(
+        '--output-dir', default='data/trs', help='Output directory for memory files'
+    )
+    parser.add_argument(
+        '--model',
+        default='openrouter/minimax/minimax-m2.5',
+        help='LLM model. Use openrouter/minimax/minimax-m2.5 for MiniMax M2.5 via OpenRouter.',
+    )
+    parser.add_argument('--limit', type=int, help='Limit number of issues to process')
+    parser.add_argument(
+        '--skip-memory',
+        action='store_true',
+        help='Skip building memory files (L1/L2/L3) - only save decomposed_issues.json. Use this when you plan to do similarity-based split later.',
+    )
     args = parser.parse_args()
 
     # Determine loading mode
     if args.dataset:
         # Load from JSONL file (filtered issues)
-        print(f"\n{'='*80}")
-        print(f"Loading issues from JSONL file: {args.dataset}")
-        print(f"{'='*80}")
+        print(f'\n{"=" * 80}')
+        print(f'Loading issues from JSONL file: {args.dataset}')
+        print(f'{"=" * 80}')
 
         dataset_path = Path(args.dataset)
         if not dataset_path.exists():
-            print(f"ERROR Dataset file not found: {dataset_path}")
+            print(f'ERROR Dataset file not found: {dataset_path}')
             return 1
 
         issues = []
@@ -4890,53 +5335,53 @@ def main():
                 if line.strip():
                     issues.append(json.loads(line))
 
-        print(f"Loaded {len(issues)} issues from {dataset_path}")
+        print(f'Loaded {len(issues)} issues from {dataset_path}')
 
     elif args.batch or args.use_huggingface or args.issue_id:
         # Load from HuggingFace
-        print(f"\n{'='*80}")
-        print("Loading issues from HuggingFace dataset")
-        print(f"{'='*80}")
+        print(f'\n{"=" * 80}')
+        print('Loading issues from HuggingFace dataset')
+        print(f'{"=" * 80}')
 
         if args.batch:
             # Load all memory issues
-            print(f"Using MEMORY_ISSUE_IDS: {MEMORY_ISSUE_IDS}")
+            print(f'Using MEMORY_ISSUE_IDS: {MEMORY_ISSUE_IDS}')
             issues = load_issues_from_huggingface(MEMORY_ISSUE_IDS)
         elif args.issue_id:
             # Load specific issue
             issues = load_issues_from_huggingface([args.issue_id])
             if not issues:
-                print(f"ERROR Issue {args.issue_id} not found in HuggingFace dataset")
+                print(f'ERROR Issue {args.issue_id} not found in HuggingFace dataset')
                 return 1
         else:
             # Load all issues
             issues = load_issues_from_huggingface(None)
     else:
         # Legacy mode: Load from local JSON file
-        print(f"\n{'='*80}")
-        print(f"Loading issues from local file: {args.eval_issues}")
-        print(f"{'='*80}")
+        print(f'\n{"=" * 80}')
+        print(f'Loading issues from local file: {args.eval_issues}')
+        print(f'{"=" * 80}')
 
         eval_path = Path(args.eval_issues)
         if not eval_path.exists():
-            print(f"ERROR Eval issues not found: {eval_path}")
-            print(f"TIP: Use --use-huggingface to load from HuggingFace instead")
+            print(f'ERROR Eval issues not found: {eval_path}')
+            print('TIP: Use --use-huggingface to load from HuggingFace instead')
             return 1
 
         with open(eval_path) as f:
             issues = json.load(f)
 
-        print(f"Loaded {len(issues)} issues from {eval_path}")
+        print(f'Loaded {len(issues)} issues from {eval_path}')
 
     # Limit if requested
     if args.limit:
-        issues = issues[:args.limit]
-        print(f"Limited to first {args.limit} issues")
+        issues = issues[: args.limit]
+        print(f'Limited to first {args.limit} issues')
 
     # Initialize LLM
-    print(f"\n{'='*80}")
-    print(f"Initializing LLM: {args.model}")
-    print(f"{'='*80}")
+    print(f'\n{"=" * 80}')
+    print(f'Initializing LLM: {args.model}')
+    print(f'{"=" * 80}')
     llm = LitellmModel(model_name=args.model)
 
     # Prepare output path
@@ -4947,8 +5392,8 @@ def main():
     results = []
     errors = []
     processed_ids = set()
-    l2_sequences_path = output_dir / "l2_repair_sequences.json"
-    decomposed_issues_path = output_dir / "decomposed_issues.json"
+    l2_sequences_path = output_dir / 'l2_repair_sequences.json'
+    decomposed_issues_path = output_dir / 'decomposed_issues.json'
 
     # Load existing decomposed issues (old format - need L1/L2/L3 conversion)
     decomposed_cache = {}
@@ -4958,11 +5403,15 @@ def main():
                 existing_decomposed = json.load(f)
                 if isinstance(existing_decomposed, list):
                     for item in existing_decomposed:
-                        issue_id = str(item.get("original_issue_id", item.get("issue_id")))
+                        issue_id = str(
+                            item.get('original_issue_id', item.get('issue_id'))
+                        )
                         decomposed_cache[issue_id] = item
-                    print(f"Found {len(decomposed_cache)} decomposed issues (can reuse for L1/L2/L3)")
+                    print(
+                        f'Found {len(decomposed_cache)} decomposed issues (can reuse for L1/L2/L3)'
+                    )
         except Exception as e:
-            print(f"Warning: Could not load decomposed issues: {e}")
+            print(f'Warning: Could not load decomposed issues: {e}')
 
     # Load existing L2 sequences (new format - already has L1/L2/L3)
     if l2_sequences_path.exists():
@@ -4974,30 +5423,36 @@ def main():
                     results = existing
                     # Track already processed issues
                     for r in results:
-                        if "issue_id" in r:
-                            processed_ids.add(str(r["issue_id"]))
-                    print(f"Loaded {len(results)} existing L1/L2/L3 results (will skip)")
+                        if 'issue_id' in r:
+                            processed_ids.add(str(r['issue_id']))
+                    print(
+                        f'Loaded {len(results)} existing L1/L2/L3 results (will skip)'
+                    )
         except Exception as e:
-            print(f"Warning: Could not load existing results: {e}")
+            print(f'Warning: Could not load existing results: {e}')
 
     # Decompose issues with incremental saving
     for i, issue in enumerate(issues, 1):
-        issue_id = str(issue.get("id"))
+        issue_id = str(issue.get('id'))
 
         # Skip if already in L1/L2/L3 format
         if issue_id in processed_ids:
-            print(f"\nProgress: {i}/{len(issues)} - Issue {issue_id} already has L1/L2/L3, skipping")
+            print(
+                f'\nProgress: {i}/{len(issues)} - Issue {issue_id} already has L1/L2/L3, skipping'
+            )
             continue
 
-        print(f"\nProgress: {i}/{len(issues)}")
+        print(f'\nProgress: {i}/{len(issues)}')
 
         # Check if we have decomposed data (can skip decomposition)
         if issue_id in decomposed_cache:
-            print(f"  Found in decomposed_issues.json - Building L1/L2/L3 directly (no decomposition needed)")
+            print(
+                '  Found in decomposed_issues.json - Building L1/L2/L3 directly (no decomposition needed)'
+            )
             decomposed_result = decomposed_cache[issue_id]
         else:
             # Need to decompose from scratch
-            print(f"  Not found in cache - Running full decomposition...")
+            print('  Not found in cache - Running full decomposition...')
             decomposed_result = decompose_issue(issue, llm)
 
             # Save decomposed result to cache immediately
@@ -5005,12 +5460,14 @@ def main():
 
             # Save decomposed_issues.json after each decomposition
             decomposed_list = list(decomposed_cache.values())
-            with open(decomposed_issues_path, "w") as f:
+            with open(decomposed_issues_path, 'w') as f:
                 json.dump(decomposed_list, f, indent=2)
-            print(f"  OK Saved to decomposed_issues.json ({len(decomposed_list)} issues)")
+            print(
+                f'  OK Saved to decomposed_issues.json ({len(decomposed_list)} issues)'
+            )
 
         # Check for errors
-        if "error" in decomposed_result:
+        if 'error' in decomposed_result:
             errors.append(decomposed_result)
             results.append(decomposed_result)
         else:
@@ -5026,66 +5483,72 @@ def main():
         if not args.skip_memory:
             try:
                 _save_to_memory_files(results, args.output_dir)
-                print(f"  OK Saved progress ({len(results)} issues total)")
+                print(f'  OK Saved progress ({len(results)} issues total)')
             except Exception as e:
-                print(f"  WARNING: Could not save progress: {e}")
+                print(f'  WARNING: Could not save progress: {e}')
 
     # Final save - save to 3 memory files (unless --skip-memory)
     if not args.skip_memory:
         _save_to_memory_files(results, args.output_dir)
     else:
-        print(f"\n{'='*80}")
-        print("Skipping memory file generation (--skip-memory flag)")
-        print(f"{'='*80}")
-        print("Only decomposed_issues.json was saved.")
-        print("Use this file with prepare_memory_train_test_split.py for similarity-based split.")
+        print(f'\n{"=" * 80}')
+        print('Skipping memory file generation (--skip-memory flag)')
+        print(f'{"=" * 80}')
+        print('Only decomposed_issues.json was saved.')
+        print(
+            'Use this file with prepare_memory_train_test_split.py for similarity-based split.'
+        )
 
     # Summary statistics
-    print(f"\n{'='*80}")
-    print(f"SUMMARY")
-    print(f"{'='*80}")
-    print(f"Total issues processed: {len(results)}")
-    print(f"Successful: {len(results) - len(errors)}")
-    print(f"Errors: {len(errors)}")
+    print(f'\n{"=" * 80}')
+    print('SUMMARY')
+    print(f'{"=" * 80}')
+    print(f'Total issues processed: {len(results)}')
+    print(f'Successful: {len(results) - len(errors)}')
+    print(f'Errors: {len(errors)}')
 
     # Count problems
-    successful = [r for r in results if "total_problems" in r]
-    total_problems = sum(r.get("total_problems", 0) for r in successful)
+    successful = [r for r in results if 'total_problems' in r]
+    total_problems = sum(r.get('total_problems', 0) for r in successful)
     visible_problems = sum(
-        sum(1 for p in r.get("problems", []) if p.get("visibility") == "visible_in_log")
+        sum(1 for p in r.get('problems', []) if p.get('visibility') == 'visible_in_log')
         for r in successful
     )
     hidden_problems = total_problems - visible_problems
 
-    print(f"\nAtomic problems identified:")
-    print(f"  Total: {total_problems}")
-    print(f"  Visible (in structured CI context): {visible_problems}")
-    print(f"  Hidden (inferred): {hidden_problems}")
+    print('\nAtomic problems identified:')
+    print(f'  Total: {total_problems}')
+    print(f'  Visible (in structured CI context): {visible_problems}')
+    print(f'  Hidden (inferred): {hidden_problems}')
 
     if successful:
         avg_problems = total_problems / len(successful)
-        print(f"  Average per issue: {avg_problems:.1f}")
+        print(f'  Average per issue: {avg_problems:.1f}')
 
     # Problem type distribution
     problem_types = {}
     for r in successful:
-        for p in r.get("problems", []):
-            ptype = p.get("problem_type", "unknown")
+        for p in r.get('problems', []):
+            ptype = p.get('problem_type', 'unknown')
             problem_types[ptype] = problem_types.get(ptype, 0) + 1
 
     if problem_types:
-        print(f"\nProblem type distribution:")
-        for ptype, count in sorted(problem_types.items(), key=lambda x: x[1], reverse=True):
-            print(f"  {ptype}: {count}")
+        print('\nProblem type distribution:')
+        for ptype, count in sorted(
+            problem_types.items(), key=lambda x: x[1], reverse=True
+        ):
+            print(f'  {ptype}: {count}')
 
-    print(f"\nOutput saved to: {output_dir}/")
+    print(f'\nOutput saved to: {output_dir}/')
 
     if errors:
-        print(f"\nWARNING:  {len(errors)} issues had errors")
-        print(f"Issue IDs with errors: {[e.get('original_issue_id') for e in errors[:5]]}")
+        print(f'\nWARNING:  {len(errors)} issues had errors')
+        print(
+            f'Issue IDs with errors: {[e.get("original_issue_id") for e in errors[:5]]}'
+        )
 
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())

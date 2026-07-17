@@ -198,6 +198,7 @@ openhands/.venv/         # OpenHands venv
 
 # Test memory directories
 test_memory/
+/test/
 *_rebuilt/
 data/trs_OLD/
 test_script

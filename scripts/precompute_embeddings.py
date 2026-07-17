@@ -29,17 +29,19 @@ Compatible with:
 """
 
 import argparse
-import json
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Precompute embeddings for memory bank")
-    parser.add_argument("--memory-root", required=True, help="Path to memory directory (e.g., data/trs)")
+    parser = argparse.ArgumentParser(
+        description="Precompute embeddings for memory bank"
+    )
+    parser.add_argument(
+        "--memory-root", required=True, help="Path to memory directory (e.g., data/trs)"
+    )
     parser.add_argument("--verbose", action="store_true", help="Show detailed progress")
     args = parser.parse_args()
 
@@ -52,8 +54,11 @@ def main():
 
     # Load embedding provider
     try:
-        from minisweagent.run.benchmarks.utils.memory_plugin import (
-            MemoryPlugin, _EmbeddingProvider, _load_json_list, _write_json_list
+        from memory_plugin.memory_plugin import (
+            MemoryPlugin,
+            _EmbeddingProvider,
+            _load_json_list,
+            _write_json_list,
         )
     except ImportError as e:
         print(f"Import error: {e}")
@@ -68,14 +73,16 @@ def main():
 
     # Minimal plugin just to use _build_search_document
     config = {
-        "memory_enabled": True, "memory_top_k": 3,
+        "memory_enabled": True,
+        "memory_top_k": 3,
         "memory_ablation_levels": "L1+L2+L3",
-        "memory_backend": "json", "project_result_dir": root,
+        "memory_backend": "json",
+        "project_result_dir": root,
     }
     plugin = MemoryPlugin(config, root)
 
     total_embedded = 0
-    total_skipped  = 0
+    total_skipped = 0
 
     for level, path in paths.items():
         if not os.path.exists(path):
@@ -112,7 +119,7 @@ def main():
                 total_embedded += 1
 
             if (i + 1) % 50 == 0:
-                print(f"  {i+1}/{len(records)} done...")
+                print(f"  {i + 1}/{len(records)} done...")
 
         if changed:
             _write_json_list(path, records)
@@ -120,7 +127,9 @@ def main():
         else:
             print(f"[{level}] No changes needed.")
 
-    print(f"\nDone. Embedded: {total_embedded}  Skipped (already done or empty): {total_skipped}")
+    print(
+        f"\nDone. Embedded: {total_embedded}  Skipped (already done or empty): {total_skipped}"
+    )
     print(f"Memory bank at '{root}' is now ready for fast retrieval.")
 
 

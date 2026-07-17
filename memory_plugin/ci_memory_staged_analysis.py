@@ -11,12 +11,21 @@ Multi-stage pipeline with smart filtering and structure:
 
 import json
 import logging
+import math
 from typing import Any, Dict, List, Tuple
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+
+try:
+    import numpy as np
+except Exception:
+    np = None  # type: ignore
+
+try:
+    from sklearn.metrics.pairwise import cosine_similarity
+except Exception:
+    cosine_similarity = None  # type: ignore
 
 # Import optimal L2 analysis pipeline
-from minisweagent.run.benchmarks.utils.ci_memory_l2_analysis import staged_l2_analysis
+from memory_plugin.ci_memory_l2_analysis import staged_l2_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +37,7 @@ def _call_llm(llm: Any, prompt: str) -> str:
     try:
         try:
             from langchain_core.messages import HumanMessage
+
             result = llm.invoke([HumanMessage(content=prompt)])
             return (getattr(result, "content", None) or "").strip()
         except (ImportError, AttributeError):
@@ -47,10 +57,11 @@ def _call_llm(llm: Any, prompt: str) -> str:
 def _parse_json(response: str, context: str = "") -> Dict:
     """Parse JSON object from LLM response."""
     import re
+
     try:
-        response = re.sub(r'```json\s*', '', response)
-        response = re.sub(r'```\s*', '', response)
-        match = re.search(r'\{.*\}', response, re.DOTALL)
+        response = re.sub(r"```json\s*", "", response)
+        response = re.sub(r"```\s*", "", response)
+        match = re.search(r"\{.*\}", response, re.DOTALL)
         if match:
             return json.loads(match.group())
         return json.loads(response)
@@ -62,10 +73,11 @@ def _parse_json(response: str, context: str = "") -> Dict:
 def _parse_json_array(response: str, context: str = "") -> List[Dict]:
     """Parse JSON array from LLM response."""
     import re
+
     try:
-        response = re.sub(r'```json\s*', '', response)
-        response = re.sub(r'```\s*', '', response)
-        match = re.search(r'\[.*\]', response, re.DOTALL)
+        response = re.sub(r"```json\s*", "", response)
+        response = re.sub(r"```\s*", "", response)
+        match = re.search(r"\[.*\]", response, re.DOTALL)
         if match:
             result = json.loads(match.group())
             if isinstance(result, list):
@@ -79,10 +91,17 @@ def _parse_json_array(response: str, context: str = "") -> List[Dict]:
 def _compute_similarity(vec1: List[float], vec2: List[float]) -> float:
     """Compute cosine similarity between two vectors."""
     try:
+        if cosine_similarity is None or np is None:
+            dot = sum(float(a) * float(b) for a, b in zip(vec1, vec2))
+            norm1 = math.sqrt(sum(float(a) * float(a) for a in vec1))
+            norm2 = math.sqrt(sum(float(b) * float(b) for b in vec2))
+            if norm1 == 0.0 or norm2 == 0.0:
+                return 0.0
+            return dot / (norm1 * norm2)
         v1 = np.array(vec1).reshape(1, -1)
         v2 = np.array(vec2).reshape(1, -1)
         return float(cosine_similarity(v1, v2)[0][0])
-    except:
+    except Exception:
         return 0.0
 
 
@@ -90,11 +109,12 @@ def _compute_similarity(vec1: List[float], vec2: List[float]) -> float:
 # STAGE 0: L1 Analysis - Direct + Dependent Problems
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def stage0_analyze_l1(
     ci_failure: Dict[str, Any],
     l1_memories: List[Dict[str, Any]],
     llm: Any,
-    current_workflow_sequence: List[Dict[str, Any]] = None
+    current_workflow_sequence: List[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     STAGE 0: Analyze L1 memories based on CI failure.
@@ -112,7 +132,9 @@ def stage0_analyze_l1(
         logger.info("[Stage 0] No L1 memories available")
         return []
 
-    logger.info(f"[Stage 0] Analyzing {len(l1_memories)} L1 memories against CI failure")
+    logger.info(
+        f"[Stage 0] Analyzing {len(l1_memories)} L1 memories against CI failure"
+    )
 
     prompt = f"""Analyze L1 file-level failures against current CI failure.
 
@@ -187,18 +209,22 @@ Return ONLY the JSON object:
         response = _call_llm(llm, prompt)
         result = _parse_json(response, "Stage0-L1")
 
-        direct = result.get('direct_problems', [])
-        dependent = result.get('dependent_problems', [])
+        direct = result.get("direct_problems", [])
+        dependent = result.get("dependent_problems", [])
 
         # Fix validation_cmd from current workflow (not L1 memory)
         all_problems = direct + dependent
         if current_workflow_sequence:
             for prob in all_problems:
-                memory_val_cmd = prob.get('validation_cmd', '')
-                correct_val_cmd = _match_validation_cmd_from_workflow(memory_val_cmd, current_workflow_sequence)
-                prob['validation_cmd'] = correct_val_cmd
+                memory_val_cmd = prob.get("validation_cmd", "")
+                correct_val_cmd = _match_validation_cmd_from_workflow(
+                    memory_val_cmd, current_workflow_sequence
+                )
+                prob["validation_cmd"] = correct_val_cmd
 
-        logger.info(f"[Stage 0] L1 Analysis: {len(direct)} direct + {len(dependent)} dependent = {len(all_problems)} total")
+        logger.info(
+            f"[Stage 0] L1 Analysis: {len(direct)} direct + {len(dependent)} dependent = {len(all_problems)} total"
+        )
 
         return all_problems
 
@@ -211,11 +237,12 @@ Return ONLY the JSON object:
 # STAGE 1: L2 Analysis - Common Patterns + Consecutive Failures
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def stage1_phase1_identify_common_patterns(
     ci_failure: Dict[str, Any],
     l2_memories: List[Dict[str, Any]],
     llm: Any,
-    current_workflow_sequence: List[Dict[str, Any]] = None
+    current_workflow_sequence: List[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     STAGE 1 - Phase 1: Identify COMMON failure patterns from L2.
@@ -232,36 +259,42 @@ def stage1_phase1_identify_common_patterns(
         logger.info("[Stage 1.1] No L2 memories available")
         return []
 
-    logger.info(f"[Stage 1.1] Checking common patterns in {len(l2_memories)} L2 trajectories")
+    logger.info(
+        f"[Stage 1.1] Checking common patterns in {len(l2_memories)} L2 trajectories"
+    )
 
     # First, extract validation_cmd + failure_type + issue_type signatures
     signatures = {}
     for mem in l2_memories:
-        trajectory = mem.get('repair_trajectory', [])
+        trajectory = mem.get("repair_trajectory", [])
         for step in trajectory:
-            validation_cmd = step.get('validation_cmd', '')
+            validation_cmd = step.get("validation_cmd", "")
 
             # Get failure types from problems in this step
-            problems = step.get('problems', [])
+            problems = step.get("problems", [])
             for prob in problems:
-                failure_type = prob.get('failure_type', 'unknown')
-                issue_type = prob.get('issue_type', 'unknown')
+                failure_type = prob.get("failure_type", "unknown")
+                issue_type = prob.get("issue_type", "unknown")
 
                 sig = f"{validation_cmd}|{failure_type}|{issue_type}"
 
                 if sig not in signatures:
                     signatures[sig] = []
-                signatures[sig].append({
-                    'step': step,
-                    'problem': prob,
-                    'issue_id': mem.get('issue_id'),
-                    'repo': mem.get('repo')
-                })
+                signatures[sig].append(
+                    {
+                        "step": step,
+                        "problem": prob,
+                        "issue_id": mem.get("issue_id"),
+                        "repo": mem.get("repo"),
+                    }
+                )
 
     # Find common signatures (appear in multiple issues)
     common_sigs = {sig: data for sig, data in signatures.items() if len(data) >= 2}
 
-    logger.info(f"[Stage 1.1] Found {len(common_sigs)} common patterns (appear in >=2 issues)")
+    logger.info(
+        f"[Stage 1.1] Found {len(common_sigs)} common patterns (appear in >=2 issues)"
+    )
 
     if not common_sigs:
         return []
@@ -320,11 +353,15 @@ Return ONLY the JSON array:
         # Fix validation_cmd from current workflow
         if current_workflow_sequence:
             for prob in common_problems:
-                memory_val_cmd = prob.get('validation_cmd', '')
-                correct_val_cmd = _match_validation_cmd_from_workflow(memory_val_cmd, current_workflow_sequence)
-                prob['validation_cmd'] = correct_val_cmd
+                memory_val_cmd = prob.get("validation_cmd", "")
+                correct_val_cmd = _match_validation_cmd_from_workflow(
+                    memory_val_cmd, current_workflow_sequence
+                )
+                prob["validation_cmd"] = correct_val_cmd
 
-        logger.info(f"[Stage 1.1] Identified {len(common_problems)} relevant common patterns")
+        logger.info(
+            f"[Stage 1.1] Identified {len(common_problems)} relevant common patterns"
+        )
 
         return common_problems
 
@@ -337,7 +374,7 @@ def stage1_phase2_identify_consecutive_failures(
     ci_failure: Dict[str, Any],
     l2_memories: List[Dict[str, Any]],
     llm: Any,
-    current_workflow_sequence: List[Dict[str, Any]] = None
+    current_workflow_sequence: List[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     STAGE 1 - Phase 2: Identify CONSECUTIVE failures from L2 trajectories.
@@ -350,7 +387,9 @@ def stage1_phase2_identify_consecutive_failures(
         logger.info("[Stage 1.2] No L2 memories available")
         return []
 
-    logger.info(f"[Stage 1.2] Checking consecutive failures in {len(l2_memories)} L2 trajectories")
+    logger.info(
+        f"[Stage 1.2] Checking consecutive failures in {len(l2_memories)} L2 trajectories"
+    )
 
     prompt = f"""Identify CONSECUTIVE failures that may occur after fixing the primary problem.
 
@@ -412,11 +451,15 @@ Return ONLY the JSON array:
         # Fix validation_cmd from current workflow
         if current_workflow_sequence:
             for prob in consecutive_problems:
-                memory_val_cmd = prob.get('validation_cmd', '')
-                correct_val_cmd = _match_validation_cmd_from_workflow(memory_val_cmd, current_workflow_sequence)
-                prob['validation_cmd'] = correct_val_cmd
+                memory_val_cmd = prob.get("validation_cmd", "")
+                correct_val_cmd = _match_validation_cmd_from_workflow(
+                    memory_val_cmd, current_workflow_sequence
+                )
+                prob["validation_cmd"] = correct_val_cmd
 
-        logger.info(f"[Stage 1.2] Identified {len(consecutive_problems)} consecutive problems")
+        logger.info(
+            f"[Stage 1.2] Identified {len(consecutive_problems)} consecutive problems"
+        )
 
         return consecutive_problems
 
@@ -429,7 +472,7 @@ def stage1_analyze_l2(
     ci_failure: Dict[str, Any],
     l2_memories: List[Dict[str, Any]],
     llm: Any,
-    current_workflow_sequence: List[Dict[str, Any]] = None
+    current_workflow_sequence: List[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     STAGE 1: Complete L2 analysis.
@@ -439,10 +482,14 @@ def stage1_analyze_l2(
     """
 
     # Phase 1: Common patterns
-    common = stage1_phase1_identify_common_patterns(ci_failure, l2_memories, llm, current_workflow_sequence)
+    common = stage1_phase1_identify_common_patterns(
+        ci_failure, l2_memories, llm, current_workflow_sequence
+    )
 
     # Phase 2: Consecutive failures
-    consecutive = stage1_phase2_identify_consecutive_failures(ci_failure, l2_memories, llm, current_workflow_sequence)
+    consecutive = stage1_phase2_identify_consecutive_failures(
+        ci_failure, l2_memories, llm, current_workflow_sequence
+    )
 
     return common, consecutive
 
@@ -451,10 +498,9 @@ def stage1_analyze_l2(
 # STAGE 2: L3 Analysis - Universal Patterns (only if L1/L2 insufficient)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def stage2_analyze_l3(
-    ci_failure: Dict[str, Any],
-    l3_memories: List[Dict[str, Any]],
-    llm: Any
+    ci_failure: Dict[str, Any], l3_memories: List[Dict[str, Any]], llm: Any
 ) -> List[Dict[str, Any]]:
     """
     STAGE 2: Analyze L3 universal patterns.
@@ -533,7 +579,10 @@ Return ONLY the JSON array:
 # STAGE 3: Deduplication
 # ══════════════════════════════════════════════════════════════════════════════
 
-def stage3_deduplicate(all_problems: List[Dict[str, Any]], llm: Any) -> List[Dict[str, Any]]:
+
+def stage3_deduplicate(
+    all_problems: List[Dict[str, Any]], llm: Any
+) -> List[Dict[str, Any]]:
     """
     STAGE 3: Remove duplicate problems.
 
@@ -551,7 +600,7 @@ def stage3_deduplicate(all_problems: List[Dict[str, Any]], llm: Any) -> List[Dic
         seen = {}
         unique = []
         for prob in all_problems:
-            key = prob.get('validation_cmd', '')
+            key = prob.get("validation_cmd", "")
             if key not in seen:
                 seen[key] = prob
                 unique.append(prob)
@@ -592,7 +641,9 @@ Return ONLY the JSON array:
         response = _call_llm(llm, prompt)
         unique_problems = _parse_json_array(response, "Stage3-Dedup")
 
-        logger.info(f"[Stage 3] Deduplicated: {len(all_problems)} → {len(unique_problems)} unique")
+        logger.info(
+            f"[Stage 3] Deduplicated: {len(all_problems)} → {len(unique_problems)} unique"
+        )
 
         return unique_problems[:10]
 
@@ -613,9 +664,8 @@ Return ONLY the JSON array:
 # STAGE 4: Structuring - Proper Format for Agent
 # ══════════════════════════════════════════════════════════════════════════════
 
-def stage4_structure_problems(
-    problems: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+
+def stage4_structure_problems(problems: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     STAGE 4: Structure problems for mini-swe-agent.
 
@@ -674,24 +724,28 @@ def stage4_structure_problems(
             fix_strategy_parts.append(f"Why this works: {why_fix_works}")
         fix_strategy = "\n\n".join(fix_strategy_parts) if fix_strategy_parts else ""
 
-        structured.append({
-            "problem_statement": problem_text,  # cibench expects this field name
-            "root_cause": root_cause,
-            "fix_strategy": fix_strategy,  # Combined how_fixed + why_fix_works
-            "files": prob.get("files", []),
-            # Context fields:
-            "verification_cmd": prob.get("validation_cmd", ""),  # cibench expects this field name
-            "error_type": prob.get("failure_type", ""),
-            "issue_type": prob.get("issue_type", "")
-        })
+        structured.append(
+            {
+                "problem_statement": problem_text,  # cibench expects this field name
+                "root_cause": root_cause,
+                "fix_strategy": fix_strategy,  # Combined how_fixed + why_fix_works
+                "files": prob.get("files", []),
+                # Context fields:
+                "verification_cmd": prob.get(
+                    "validation_cmd", ""
+                ),  # cibench expects this field name
+                "error_type": prob.get("failure_type", ""),
+                "issue_type": prob.get("issue_type", ""),
+            }
+        )
 
     logger.info(f"[Stage 4] Structured {len(structured)} problems")
     return structured
 
+
 # OLD COMPLEX LLM CODE BELOW - REMOVED
 def _match_validation_cmd_from_workflow(
-    memory_validation_cmd: str,
-    current_workflow_sequence: List[Dict[str, Any]]
+    memory_validation_cmd: str, current_workflow_sequence: List[Dict[str, Any]]
 ) -> str:
     """
     Match validation command from memory to current workflow.
@@ -713,8 +767,8 @@ def _match_validation_cmd_from_workflow(
 
     # Try to match by validation_cmd similarity
     for step in current_workflow_sequence:
-        workflow_cmd = step.get('validation_cmd', '')
-        source = step.get('source', '')
+        workflow_cmd = step.get("validation_cmd", "")
+        source = step.get("source", "")
 
         # If memory command is similar to workflow validation_cmd
         if workflow_cmd and memory_validation_cmd:
@@ -723,21 +777,35 @@ def _match_validation_cmd_from_workflow(
             workflow_lower = workflow_cmd.lower()
 
             # Extract key parts (mypy, pytest, mdformat, etc.)
-            key_tools = ['mypy', 'pytest', 'mdformat', 'docformatter', 'docstrfmt',
-                        'ruff', 'pylint', 'black', 'isort', 'flake8']
+            key_tools = [
+                "mypy",
+                "pytest",
+                "mdformat",
+                "docformatter",
+                "docstrfmt",
+                "ruff",
+                "pylint",
+                "black",
+                "isort",
+                "flake8",
+            ]
 
             for tool in key_tools:
                 if tool in memory_lower and tool in workflow_lower:
                     # Match found - return the SOURCE command
                     if source:
-                        logger.info(f"[Validation Match] '{memory_validation_cmd}' → '{source}' (matched on '{tool}')")
+                        logger.info(
+                            f"[Validation Match] '{memory_validation_cmd}' → '{source}' (matched on '{tool}')"
+                        )
                         return source
                     else:
                         # No source, use workflow validation_cmd
                         return workflow_cmd
 
     # No match found, return empty (don't validate)
-    logger.warning(f"[Validation Match] No match for '{memory_validation_cmd}' in current workflow - skipping validation")
+    logger.warning(
+        f"[Validation Match] No match for '{memory_validation_cmd}' in current workflow - skipping validation"
+    )
     return ""  # Empty means don't validate
 
 
@@ -747,7 +815,7 @@ def staged_memory_analysis(
     l2_memories: List[Dict[str, Any]],
     l3_memories: List[Dict[str, Any]],
     llm: Any,
-    current_workflow_sequence: List[Dict[str, Any]] = None
+    current_workflow_sequence: List[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     DEFAULT PIPELINE for consecutive problem extraction.
@@ -776,10 +844,10 @@ def staged_memory_analysis(
         Note: Does NOT include Problem #1 (that's handled separately)
     """
 
-    logger.info("="*80)
+    logger.info("=" * 80)
     logger.info("CONSECUTIVE PROBLEM EXTRACTION PIPELINE")
     logger.info("Priority: CI Failure (Problem #1) → Memory-based Consecutive Problems")
-    logger.info("="*80)
+    logger.info("=" * 80)
 
     all_consecutive = []
 
@@ -789,7 +857,7 @@ def staged_memory_analysis(
         "failure_type": problem_1_primary.get("failure_type", ""),
         "issue_type": problem_1_primary.get("issue_type", ""),
         "description": problem_1_primary.get("description", ""),
-        "files": problem_1_primary.get("files", [])
+        "files": problem_1_primary.get("files", []),
     }
 
     # Extract current workflow sequence (if not passed, try to get from problem_1)
@@ -798,7 +866,9 @@ def staged_memory_analysis(
 
     # ── STAGE 0: L1 Analysis - Find Dependent Problems ──
     logger.info("\n[STAGE 0] Analyzing L1 for dependent problems...")
-    l1_problems = stage0_analyze_l1(ci_failure_context, l1_memories, llm, current_workflow_sequence)
+    l1_problems = stage0_analyze_l1(
+        ci_failure_context, l1_memories, llm, current_workflow_sequence
+    )
     all_consecutive.extend(l1_problems)
     logger.info(f"[STAGE 0] Found {len(l1_problems)} L1 dependent problems")
 
@@ -806,20 +876,24 @@ def staged_memory_analysis(
     logger.info("\n[STAGE 1] Analyzing L2 trajectories with OPTIMAL pipeline...")
     l2_consecutive = staged_l2_analysis(ci_failure_context, l2_memories, llm)
     all_consecutive.extend(l2_consecutive)
-    logger.info(f"[STAGE 1] Found {len(l2_consecutive)} L2 consecutive problems (prioritized by commonality)")
+    logger.info(
+        f"[STAGE 1] Found {len(l2_consecutive)} L2 consecutive problems (prioritized by commonality)"
+    )
 
     # ── STAGE 2: L3 Analysis (universal patterns) ──
     if l3_memories and llm:
-        logger.info(f"\n[STAGE 2] Analyzing {len(l3_memories)} L3 universal patterns...")
+        logger.info(
+            f"\n[STAGE 2] Analyzing {len(l3_memories)} L3 universal patterns..."
+        )
         l3_problems = stage2_analyze_l3(ci_failure_context, l3_memories, llm)
         all_consecutive.extend(l3_problems)
         logger.info(f"[STAGE 2] Found {len(l3_problems)} L3 pattern problems")
     else:
-        logger.info(f"\n[STAGE 2] SKIPPED - No L3 memories or LLM available")
+        logger.info("\n[STAGE 2] SKIPPED - No L3 memories or LLM available")
 
     if not all_consecutive:
         logger.info("\n[PIPELINE] No consecutive problems found in memory")
-        logger.info("="*80)
+        logger.info("=" * 80)
         return []
 
     # ── STAGE 3: Deduplication ──
@@ -832,8 +906,10 @@ def staged_memory_analysis(
     structured_problems = stage4_structure_problems(unique_problems)
     logger.info(f"[STAGE 4] Structured {len(structured_problems)} consecutive problems")
 
-    logger.info("="*80)
-    logger.info(f"PIPELINE COMPLETE: {len(structured_problems)} consecutive problems (Problems #2-{len(structured_problems)+1})")
-    logger.info("="*80)
+    logger.info("=" * 80)
+    logger.info(
+        f"PIPELINE COMPLETE: {len(structured_problems)} consecutive problems (Problems #2-{len(structured_problems) + 1})"
+    )
+    logger.info("=" * 80)
 
     return structured_problems

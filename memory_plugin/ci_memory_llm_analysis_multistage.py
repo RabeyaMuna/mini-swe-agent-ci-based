@@ -27,6 +27,7 @@ def _call_llm(llm: Any, prompt: str) -> str:
     try:
         try:
             from langchain_core.messages import HumanMessage
+
             result = llm.invoke([HumanMessage(content=prompt)])
             return (getattr(result, "content", None) or "").strip()
         except (ImportError, AttributeError):
@@ -54,11 +55,11 @@ def _parse_json_array(response: str, context: str = "") -> List[Dict]:
     """
     try:
         # Remove markdown fences
-        response = re.sub(r'```json\s*', '', response)
-        response = re.sub(r'```\s*', '', response)
+        response = re.sub(r"```json\s*", "", response)
+        response = re.sub(r"```\s*", "", response)
 
         # Find JSON array
-        match = re.search(r'\[.*\]', response, re.DOTALL)
+        match = re.search(r"\[.*\]", response, re.DOTALL)
         if match:
             json_str = match.group()
             result = json.loads(json_str)
@@ -87,7 +88,10 @@ def _parse_json_array(response: str, context: str = "") -> List[Dict]:
 # STAGE 1: Independent Analysis of Each Memory Level
 # ══════════════════════════════════════════════════════════════════════════════
 
-def analyze_l2_trajectories_only(l2_memories: List[Dict[str, Any]], llm: Any) -> List[Dict]:
+
+def analyze_l2_trajectories_only(
+    l2_memories: List[Dict[str, Any]], llm: Any
+) -> List[Dict]:
     """
     STAGE 1.1: Analyze ONLY L2 repair trajectories.
 
@@ -150,14 +154,18 @@ Return ONLY the JSON array:
     try:
         response = _call_llm(llm, prompt)
         problems = _parse_json_array(response, "L2-Analysis")
-        logger.info(f"[L2-Analysis] Extracted {len(problems)} problems from {len(l2_memories)} trajectories")
+        logger.info(
+            f"[L2-Analysis] Extracted {len(problems)} problems from {len(l2_memories)} trajectories"
+        )
         return problems
     except Exception as e:
         logger.warning(f"[L2-Analysis] Failed: {e}")
         return []
 
 
-def analyze_l1_dependencies_only(l1_memories: List[Dict[str, Any]], llm: Any) -> List[Dict]:
+def analyze_l1_dependencies_only(
+    l1_memories: List[Dict[str, Any]], llm: Any
+) -> List[Dict]:
     """
     STAGE 1.2: Analyze ONLY L1 dependency chains.
 
@@ -214,7 +222,9 @@ Return ONLY the JSON array:
         response = _call_llm(llm, prompt)
 
         problems = _parse_json_array(response, "L1-Analysis")
-        logger.info(f"[L1-Analysis] Extracted {len(problems)} dependent problems from {len(l1_memories)} entries")
+        logger.info(
+            f"[L1-Analysis] Extracted {len(problems)} dependent problems from {len(l1_memories)} entries"
+        )
         return problems
     except Exception as e:
         logger.warning(f"[L1-Analysis] Failed: {e}")
@@ -273,7 +283,9 @@ Return ONLY the JSON array:
     try:
         response = _call_llm(llm, prompt)
         problems = _parse_json_array(response, "L3-Analysis")
-        logger.info(f"[L3-Analysis] Extracted {len(problems)} pattern problems from {len(l3_memories)} patterns")
+        logger.info(
+            f"[L3-Analysis] Extracted {len(problems)} pattern problems from {len(l3_memories)} patterns"
+        )
         return problems
     except Exception as e:
         logger.warning(f"[L3-Analysis] Failed: {e}")
@@ -283,6 +295,7 @@ Return ONLY the JSON array:
 # ══════════════════════════════════════════════════════════════════════════════
 # STAGE 2: Combine and Deduplicate
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def deduplicate_and_prioritize(all_problems: List[Dict], llm: Any) -> List[Dict]:
     """
@@ -328,7 +341,9 @@ Return ONLY the JSON array:
     try:
         response = _call_llm(llm, prompt)
         problems = _parse_json_array(response, "Dedup")
-        logger.info(f"[Dedup] Reduced {len(all_problems)} → {len(problems)} unique problems")
+        logger.info(
+            f"[Dedup] Reduced {len(all_problems)} → {len(problems)} unique problems"
+        )
         return problems[:10]  # Safety limit
     except Exception as e:
         logger.warning(f"[Dedup] Failed: {e}, returning all")
@@ -339,13 +354,14 @@ Return ONLY the JSON array:
 # MAIN MULTI-STAGE PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def llm_analyze_consecutive_multistage(
     problem_1: Dict[str, Any],
     l2_memories: List[Dict[str, Any]],
     l1_memories: List[Dict[str, Any]],
     l3_memories: List[Dict[str, Any]],
     validation_sequence: List[Dict[str, Any]],
-    llm: Any
+    llm: Any,
 ) -> List[Dict[str, Any]]:
     """
     Multi-stage pipeline for consecutive problem extraction.
@@ -404,6 +420,8 @@ def llm_analyze_consecutive_multistage(
     logger.info(f"[Stage 2] Deduplicating {len(all_problems)} total problems...")
     final_problems = deduplicate_and_prioritize(all_problems, llm)
 
-    logger.info(f"[Pipeline Complete] {len(final_problems)} unique consecutive problems")
+    logger.info(
+        f"[Pipeline Complete] {len(final_problems)} unique consecutive problems"
+    )
 
     return final_problems

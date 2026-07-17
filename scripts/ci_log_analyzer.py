@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from typing import List, Dict, Any
 import json
 import os
 import re
 import tempfile
 import time
+from typing import Any
 
 # ── Optional third-party dependencies ─────────────────────────────────────────
 try:
     import demjson3  # type: ignore
+
     _DEMJSON3_AVAILABLE = True
 except ImportError:
     demjson3 = None  # type: ignore
@@ -17,6 +18,7 @@ except ImportError:
 
 try:
     import tiktoken  # type: ignore
+
     _TIKTOKEN_AVAILABLE = True
 except ImportError:
     tiktoken = None  # type: ignore
@@ -24,6 +26,7 @@ except ImportError:
 
 try:
     from dotenv import load_dotenv  # type: ignore
+
     load_dotenv()
 except ImportError:
     pass
@@ -41,6 +44,7 @@ except ImportError:
 try:
     from langchain_core.messages import HumanMessage  # type: ignore
 except ImportError:
+
     class HumanMessage:  # type: ignore
         def __init__(self, content: str):
             self.content = content
@@ -93,7 +97,7 @@ def _clean_malformed_json(content: str) -> str:
     # Find matching closing brace/bracket
     end = content.rfind(end_char)
     if end > start:
-        content = content[start:end+1]
+        content = content[start : end + 1]
 
     return content.strip()
 
@@ -101,32 +105,56 @@ def _clean_malformed_json(content: str) -> str:
 # ── Fallbacks for missing 'utilities.*' modules ────────────────────────────────
 
 # utilities.constant.ERROR_KEYWORDS
-ERROR_KEYWORDS: List[str] = [
-    "error", "Error", "ERROR",
-    "errors", "Errors", "ERRORS",
-    "failed", "Failed", "FAILED",
-    "failure", "Failure", "FAILURE",
-    "exception", "Exception", "EXCEPTION",
-    "traceback", "Traceback",
-    "fatal", "Fatal", "FATAL",
-    "critical", "Critical", "CRITICAL",
-    "AssertionError", "ImportError", "ModuleNotFoundError",
-    "SyntaxError", "TypeError", "ValueError", "RuntimeError",
-    "no module named", "not found", "permission denied",
-    "syntax error", "timeout", "timed out",
-    "connection refused",
+ERROR_KEYWORDS: list[str] = [
+    'error',
+    'Error',
+    'ERROR',
+    'errors',
+    'Errors',
+    'ERRORS',
+    'failed',
+    'Failed',
+    'FAILED',
+    'failure',
+    'Failure',
+    'FAILURE',
+    'exception',
+    'Exception',
+    'EXCEPTION',
+    'traceback',
+    'Traceback',
+    'fatal',
+    'Fatal',
+    'FATAL',
+    'critical',
+    'Critical',
+    'CRITICAL',
+    'AssertionError',
+    'ImportError',
+    'ModuleNotFoundError',
+    'SyntaxError',
+    'TypeError',
+    'ValueError',
+    'RuntimeError',
+    'no module named',
+    'not found',
+    'permission denied',
+    'syntax error',
+    'timeout',
+    'timed out',
+    'connection refused',
 ]
 
 
-def load_config() -> Dict[str, Any]:
+def load_config() -> dict[str, Any]:
     """Fallback for utilities.load_config.load_config()."""
     out_folder = os.environ.get(
-        "MEMCI_OUT_FOLDER",
-        os.path.join(tempfile.gettempdir(), "memci_out"),
+        'MEMCI_OUT_FOLDER',
+        os.path.join(tempfile.gettempdir(), 'memci_out'),
     )
     return {
-        "exception_dir": os.path.join(out_folder, "exceptions"),
-        "out_folder":    out_folder,
+        'exception_dir': os.path.join(out_folder, 'exceptions'),
+        'out_folder': out_folder,
     }
 
 
@@ -134,14 +162,14 @@ def chunk_log_by_tokens(
     text: str,
     max_tokens: int = 70000,
     overlap: int = 200,
-    model: str = "",
-) -> List[str]:
+    model: str = '',
+) -> list[str]:
     """Fallback for utilities.chunking_logic.chunk_log_by_tokens()."""
-    chars_per_chunk = max_tokens * 4          # ~1 token ≈ 4 chars
-    overlap_chars   = overlap * 4
+    chars_per_chunk = max_tokens * 4  # ~1 token ≈ 4 chars
+    overlap_chars = overlap * 4
     if len(text) <= chars_per_chunk:
         return [text]
-    chunks: List[str] = []
+    chunks: list[str] = []
     start = 0
     while start < len(text):
         end = min(start + chars_per_chunk, len(text))
@@ -152,21 +180,22 @@ def chunk_log_by_tokens(
     return chunks or [text]
 
 
-def get_chunk_threshold_simple(model_name: str = "") -> int:
+def get_chunk_threshold_simple(model_name: str = '') -> int:
     """Fallback for utilities.model_token_limits.get_chunk_threshold_simple()."""
     return 70_000
+
 
 class CILogAnalyzerLLM:
     def __init__(
         self,
         repo_path: str,
-        ci_log: List[Dict[str, Any]],
+        ci_log: list[dict[str, Any]],
         sha_fail: str,
         workflow: Any,
         workflow_path: str,
         llm: ChatOpenAI,
         model_name: str,
-        task_id: str
+        task_id: str,
     ):
         self.config = load_config()
         self.repo_path = repo_path
@@ -180,35 +209,38 @@ class CILogAnalyzerLLM:
         self.model_name = model_name
         self._encoder = self._get_encoder()
 
-        self.error_details: List[Dict[str, Any]] = []
+        self.error_details: list[dict[str, Any]] = []
 
-    def ci_log_analysis(self) -> List[Dict[str, Any]]:
+    def ci_log_analysis(self) -> list[dict[str, Any]]:
         """
         Analyze CI logs using LLM
         """
-        print("Running Tool: LLM-based CI Log Analysis")
-        results: List[Dict[str, Any]] = []
+        print('Running Tool: LLM-based CI Log Analysis')
+        results: list[dict[str, Any]] = []
         THRESHOLD = get_chunk_threshold_simple(self.model_name)
         chunk_tracker = []
-        
+
         for step in self.ci_log:
-            step_name = step.get("step_name", "unknown_step")
-            log = step.get("log", "")
-            print(f"\nProcessing Step: {step_name}")
+            step_name = step.get('step_name', 'unknown_step')
+            log = step.get('log', '')
+            print(f'\nProcessing Step: {step_name}')
 
             try:
-                log_text = log if isinstance(log, str) else "\n".join(log)
+                log_text = log if isinstance(log, str) else '\n'.join(log)
                 total_tokens = self._estimate_tokens(log_text)
-
 
                 print(f"Token count for '{step_name}': {total_tokens}")
 
                 if total_tokens > THRESHOLD:
-                    raw_chunks = chunk_log_by_tokens(log_text, max_tokens=70000, overlap=200, model=self.model_name)
-                    print(f"Chunking activated: {len(raw_chunks)} chunks created for step '{step_name}'")
-                    
+                    raw_chunks = chunk_log_by_tokens(
+                        log_text, max_tokens=70000, overlap=200, model=self.model_name
+                    )
+                    print(
+                        f"Chunking activated: {len(raw_chunks)} chunks created for step '{step_name}'"
+                    )
+
                     chunk_tracker.append((step_name, len(raw_chunks)))
-                    
+
                     if len(raw_chunks) > 6:
                         chunks = self._filter_chunks(raw_chunks)
                     else:
@@ -216,13 +248,13 @@ class CILogAnalyzerLLM:
                 else:
                     chunks = [log_text]
                     print(f"No chunking needed for '{step_name}'")
-                    
+
                 self._save_chunk_tracker(chunk_tracker)
 
                 step_chunks = []
 
                 for i, chunk in enumerate(chunks):
-                    print(f"Processing chunk {i + 1}/{len(chunks)}...")
+                    print(f'Processing chunk {i + 1}/{len(chunks)}...')
 
                     prompt = f"""
 You are CI Log Analyzer. Analyze the following CI log chunk and extract structured information while staying strictly faithful to the text.
@@ -322,8 +354,6 @@ CI LOG CHUNK
 {chunk}
 """
 
-
-
                     response = self.llm.invoke([HumanMessage(content=prompt)]).content
                     content = self.load_json_maybe_fenced(response)
                     if not content or not content.strip():
@@ -336,19 +366,29 @@ CI LOG CHUNK
                             try:
                                 cleaned_json = demjson3.decode(content)
                             except Exception as dec_err:
-                                print(f"[WARN] demjson3 failed for chunk {i + 1}: {dec_err}")
+                                print(
+                                    f'[WARN] demjson3 failed for chunk {i + 1}: {dec_err}'
+                                )
                                 continue
                         else:
-                            print(f"[WARN] json.loads failed for chunk {i + 1} and demjson3 not installed; skipping.")
+                            print(
+                                f'[WARN] json.loads failed for chunk {i + 1} and demjson3 not installed; skipping.'
+                            )
                             continue
-                        
+
                     # Decide whether to skip this chunk
-                    no_failures = not cleaned_json.get("relevant_failures")   # [] or missing -> True
-                    no_files = not cleaned_json.get("relevant_files")         # [] or missing -> True
-                    empty_summary = not (cleaned_json.get("summary") or "").strip()
+                    no_failures = not cleaned_json.get(
+                        'relevant_failures'
+                    )  # [] or missing -> True
+                    no_files = not cleaned_json.get(
+                        'relevant_files'
+                    )  # [] or missing -> True
+                    empty_summary = not (cleaned_json.get('summary') or '').strip()
 
                     if no_failures and no_files and empty_summary:
-                        print(f"Skipping chunk {i + 1}/{len(chunks)}: no failure evidence found.")
+                        print(
+                            f'Skipping chunk {i + 1}/{len(chunks)}: no failure evidence found.'
+                        )
                         continue
 
                     cleaned_json.update(
@@ -361,37 +401,37 @@ CI LOG CHUNK
                     )
                     step_chunks.append(cleaned_json)
 
-                results.append({
-                    "step_name": step_name,
-                    "chunks": step_chunks,
-                    "step_document": self._build_step_document(step_name, step_chunks),
-                })
+                results.append(
+                    {
+                        'step_name': step_name,
+                        'chunks': step_chunks,
+                        'step_document': self._build_step_document(
+                            step_name, step_chunks
+                        ),
+                    }
+                )
 
             except Exception as e:
                 print(f"[ERROR] Processing step '{step_name}': {str(e)}")
-                results.append({
-                    "step_name": step_name,
-                    "chunks": [],
-                    "error": str(e)
-                })
+                results.append({'step_name': step_name, 'chunks': [], 'error': str(e)})
 
         return results
-   
+
     # ------------------------------------------------------------------
-    def generate_log_summary(self, all_step_outputs) ->  List[Dict[str, Any]]:
+    def generate_log_summary(self, all_step_outputs) -> list[dict[str, Any]]:
         """
         Generate a structured final error summary from error details,
         workflow tools, and validation checks.
         """
-        print(" Running Tool: _generate_summary")
+        print(' Running Tool: _generate_summary')
         log_details = []
         for step in all_step_outputs:
-            step_name = step.get("step_name", "UNKNOWN_STEP")
-            chunks = step.get("chunks", [])
-            
+            step_name = step.get('step_name', 'UNKNOWN_STEP')
+            chunks = step.get('chunks', [])
+
             step_payload = {
-                "step_name": step_name,
-                "chunks": chunks,
+                'step_name': step_name,
+                'chunks': chunks,
             }
             step_payload_json = json.dumps(step_payload, indent=2, ensure_ascii=False)
             prompt = f"""
@@ -490,7 +530,9 @@ of the CI failure for this step using the following STRICT JSON schema
                 content = self.load_json_maybe_fenced(response)
 
                 if not content or not content.strip():
-                    raise ValueError("LLM returned an empty response for generate_log_summary")
+                    raise ValueError(
+                        'LLM returned an empty response for generate_log_summary'
+                    )
 
                 try:
                     summary = json.loads(content)
@@ -506,25 +548,29 @@ of the CI failure for this step using the following STRICT JSON schema
                                 cleaned = _clean_malformed_json(content)
                                 summary = demjson3.decode(cleaned)
                             except Exception as dec_err:
-                                raise ValueError(f"JSON parse failed: {dec_err} | raw: {content[:200]}")
+                                raise ValueError(
+                                    f'JSON parse failed: {dec_err} | raw: {content[:200]}'
+                                )
                         else:
-                            raise ValueError(f"JSON parse failed (demjson3 not installed) | raw: {content[:200]}")
+                            raise ValueError(
+                                f'JSON parse failed (demjson3 not installed) | raw: {content[:200]}'
+                            )
 
                 log_details.append(summary)
             except Exception as e:
                 # If one chunk fails, log and continue
                 self._log_error(
-                    method="generate_log_summary",
+                    method='generate_log_summary',
                     error=e,
-                    step=f"{step_name}",
+                    step=f'{step_name}',
                 )
 
         return log_details
 
     # ------------------------------------------------------------------
     def full_content_summary(
-        self, log_details: List[Dict[str, Any]], workflow_details: Any
-    ) -> Dict[str, Any]:
+        self, log_details: list[dict[str, Any]], workflow_details: Any
+    ) -> dict[str, Any]:
         prompt = f"""
 You are a CI failure summarization agent.
 
@@ -661,7 +707,9 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
             content = self.load_json_maybe_fenced(response)
 
             if not content or not content.strip():
-                raise ValueError("LLM returned an empty response for full_content_summary")
+                raise ValueError(
+                    'LLM returned an empty response for full_content_summary'
+                )
 
             try:
                 summary = json.loads(content)
@@ -677,60 +725,68 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
                             cleaned = _clean_malformed_json(content)
                             summary = demjson3.decode(cleaned)
                         except Exception as dec_err:
-                            raise ValueError(f"JSON parse failed: {dec_err} | raw: {content[:200]}")
+                            raise ValueError(
+                                f'JSON parse failed: {dec_err} | raw: {content[:200]}'
+                            )
                     else:
-                        raise ValueError(f"JSON parse failed (demjson3 not installed) | raw: {content[:200]}")
-            print(" Completed: _generate_summary")
-            
-            summary["sha_fail"] = self.sha_fail
-            summary["id"] = self.task_id
-            
+                        raise ValueError(
+                            f'JSON parse failed (demjson3 not installed) | raw: {content[:200]}'
+                        )
+            print(' Completed: _generate_summary')
+
+            summary['sha_fail'] = self.sha_fail
+            summary['id'] = self.task_id
+
             return summary
 
         except Exception as e:
             error_dir = os.path.join(
-                self.config["exception_dir"], "interrupted_error_log"
+                self.config['exception_dir'], 'interrupted_error_log'
             )
             os.makedirs(error_dir, exist_ok=True)
 
             error_data = {
-                "sha_fail": self.sha_fail,
-                "error": str(e),
-                "tool": "ErrorContextExtractionAgent.run",
+                'sha_fail': self.sha_fail,
+                'error': str(e),
+                'tool': 'ErrorContextExtractionAgent.run',
             }
 
-            error_file = os.path.join(error_dir, f"{self.sha_fail}_error.json")
-            with open(error_file, "w", encoding="utf-8") as f:
+            error_file = os.path.join(error_dir, f'{self.sha_fail}_error.json')
+            with open(error_file, 'w', encoding='utf-8') as f:
                 json.dump(error_data, f, indent=4)
 
-            return {"error": f"Failed to generate summary: {e}"}
+            return {'error': f'Failed to generate summary: {e}'}
 
     # ------------------------------------------------------------------
-    def run(self) -> Dict[str, Any]:
-        print(f"Fully Autonomous Execution for Commit: {self.sha_fail}")
+    def run(self) -> dict[str, Any]:
+        print(f'Fully Autonomous Execution for Commit: {self.sha_fail}')
         selected_logs = self.ci_log_analysis()
         log_details = self.generate_log_summary(selected_logs)
         if not log_details:
             return {
-                "error": "No step summaries produced — all CI log steps failed to parse.",
-                "sha_fail": self.sha_fail,
-                "id": self.task_id,
+                'error': 'No step summaries produced — all CI log steps failed to parse.',
+                'sha_fail': self.sha_fail,
+                'id': self.task_id,
             }
-        generated_summary = self.full_content_summary(log_details, workflow_details=self.workflow)
-        generated_summary["chunk_summaries"] = self._flatten_chunk_summaries(selected_logs)
-        generated_summary["step_documents"] = [
+        generated_summary = self.full_content_summary(
+            log_details, workflow_details=self.workflow
+        )
+        generated_summary['chunk_summaries'] = self._flatten_chunk_summaries(
+            selected_logs
+        )
+        generated_summary['step_documents'] = [
             {
-                "step_name": str(step.get("step_name") or "unknown_step"),
-                "document": str(step.get("step_document") or "").strip(),
+                'step_name': str(step.get('step_name') or 'unknown_step'),
+                'document': str(step.get('step_document') or '').strip(),
             }
             for step in selected_logs
-            if str(step.get("step_document") or "").strip()
+            if str(step.get('step_document') or '').strip()
         ]
-        generated_summary["overall_ci_summary"] = self._build_overall_ci_summary(
+        generated_summary['overall_ci_summary'] = self._build_overall_ci_summary(
             generated_summary,
             log_details,
         )
-        generated_summary["analysis_document"] = self._build_analysis_document(
+        generated_summary['analysis_document'] = self._build_analysis_document(
             generated_summary,
             selected_logs,
             log_details,
@@ -745,7 +801,7 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
         try:
             return tiktoken.encoding_for_model(self.model_name)
         except KeyError:
-            return tiktoken.get_encoding("cl100k_base")
+            return tiktoken.get_encoding('cl100k_base')
 
     def _estimate_tokens(self, text: str) -> int:
         """Estimate tokens for a given text using the cached encoder."""
@@ -755,27 +811,25 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
             return len(text) // 4  # rough estimate: ~1 token per 4 chars
         return len(self._encoder.encode(text))
 
-    def _log_error(self, method: str, error: Exception, step: str = ""):
-        base_dir = os.path.join(
-            self.config["exception_dir"], "interrupted_error_log"
-        )
+    def _log_error(self, method: str, error: Exception, step: str = ''):
+        base_dir = os.path.join(self.config['exception_dir'], 'interrupted_error_log')
         os.makedirs(base_dir, exist_ok=True)
-        file_name = f"{self.sha_fail}_{method}_{int(time.time())}_error.json"
+        file_name = f'{self.sha_fail}_{method}_{int(time.time())}_error.json'
         file_path = os.path.join(base_dir, file_name)
-        with open(file_path, "w", encoding="utf-8") as f:
+        with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(
                 {
-                    "commit": self.sha_fail,
-                    "method": method,
-                    "step": step,
-                    "error": str(error),
+                    'commit': self.sha_fail,
+                    'method': method,
+                    'step': step,
+                    'error': str(error),
                 },
                 f,
                 indent=2,
             )
-        print(f"[ERROR LOGGED] {file_path}")
+        print(f'[ERROR LOGGED] {file_path}')
 
-    def _filter_chunks(self, raw_chunks: List[str]) -> List[str]:
+    def _filter_chunks(self, raw_chunks: list[str]) -> list[str]:
         """
         Keep:
         - All chunks in the first (n-6) that contain any ERROR_KEYWORDS (by word)
@@ -784,7 +838,7 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
         n_chunks = len(raw_chunks)
 
         cutoff = n_chunks - 4
-        filtered_chunks: List[str] = []
+        filtered_chunks: list[str] = []
 
         # 1) Check the first (n-6) chunks and keep only those with error keywords
         for idx, chunk in enumerate(raw_chunks[:cutoff]):
@@ -798,33 +852,32 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
 
         # 2) Append the last 4 chunks unconditionally (preserve serial order)
         filtered_chunks.extend(raw_chunks[cutoff:])
-        
-        if len(filtered_chunks)> 20:
+
+        if len(filtered_chunks) > 20:
             print(
-            f"After filtering, too many chunks ({len(filtered_chunks)}). Truncating to last 12 "
-            f"(checked first {cutoff}, always kept last 4)"
+                f'After filtering, too many chunks ({len(filtered_chunks)}). Truncating to last 12 '
+                f'(checked first {cutoff}, always kept last 4)'
             )
             filtered_chunks = filtered_chunks[-12:]
-            
 
         print(
-            f"Filtered from {n_chunks} -> {len(filtered_chunks)} chunks "
-            f"(checked first {cutoff}, always kept last 4)"
+            f'Filtered from {n_chunks} -> {len(filtered_chunks)} chunks '
+            f'(checked first {cutoff}, always kept last 4)'
         )
 
         return filtered_chunks
-      
-    def _save_chunk_tracker(self, chunk_tracker: List[tuple]):
-        debug_dir = os.path.join(self.config["out_folder"], "chunk_tracking")
+
+    def _save_chunk_tracker(self, chunk_tracker: list[tuple]):
+        debug_dir = os.path.join(self.config['out_folder'], 'chunk_tracking')
         os.makedirs(debug_dir, exist_ok=True)
 
-        file_path = os.path.join(debug_dir, "chunk_tracker.json")
+        file_path = os.path.join(debug_dir, 'chunk_tracker.json')
 
         # Load existing data if file exists
-        existing: List[Dict[str, Any]] = []
+        existing: list[dict[str, Any]] = []
         if os.path.exists(file_path):
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, 'r', encoding='utf-8') as f:
                     existing = json.load(f)
                     if not isinstance(existing, list):
                         existing = []
@@ -832,15 +885,14 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
                 existing = []
 
         # Append this run
-        existing.append({"sha_fail": self.sha_fail, "chunks": chunk_tracker})
+        existing.append({'sha_fail': self.sha_fail, 'chunks': chunk_tracker})
 
         # Write back pretty JSON
-        with open(file_path, "w", encoding="utf-8") as f:
+        with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(existing, f, indent=2)
 
-        print(f"[CHUNK TRACKER SAVED] {file_path}")
-        
-        
+        print(f'[CHUNK TRACKER SAVED] {file_path}')
+
     def is_line_error(self, line: str, keywords) -> list[str]:
         """
         Return list of keywords that appear as separate words or exact phrases.
@@ -853,11 +905,11 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
 
         # Very simple tokenization: split on whitespace, strip basic punctuation
         raw_tokens = line.split()
-        tokens = [tok.strip("[]():,") for tok in raw_tokens]
+        tokens = [tok.strip('[]():,') for tok in raw_tokens]
 
         # 1) Phrase keywords -> use substring
         for kw in keywords:
-            if " " in kw:
+            if ' ' in kw:
                 if kw in line:  # exact phrase, case-sensitive
                     hits.append(kw)
 
@@ -865,14 +917,14 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
         # We also apply the "no error" rule here.
         for idx, tok in enumerate(tokens):
             for kw in keywords:
-                if " " in kw:
+                if ' ' in kw:
                     continue  # phrases already handled
 
                 if tok == kw:
                     # Special: ignore "error"/"errors" if previous token is 'no' (any case)
-                    if kw in ("error", "errors") and idx > 0:
+                    if kw in ('error', 'errors') and idx > 0:
                         prev_tok = tokens[idx - 1]
-                        if prev_tok.lower() == "no":
+                        if prev_tok.lower() == 'no':
                             # e.g. "no error", "No errors" -> not a real error
                             continue
 
@@ -888,17 +940,16 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
 
         return unique_hits
 
-
     def load_json_maybe_fenced(self, text: str) -> str:
         s = text.strip()
-        if s.startswith("```"):
+        if s.startswith('```'):
             lines = s.splitlines()
             # drop opening fence line (``` or ```json)
             lines = lines[1:] if lines else lines
             # drop closing fence line if present
-            if lines and lines[-1].strip() == "```":
+            if lines and lines[-1].strip() == '```':
                 lines = lines[:-1]
-            s = "\n".join(lines).strip()
+            s = '\n'.join(lines).strip()
         return s
 
     def _build_chunk_metadata(
@@ -908,17 +959,17 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
         chunk: str,
         chunk_index: int,
         total_chunks: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         token_count = self._estimate_tokens(chunk)
         token_keywords = self._extract_chunk_keywords(chunk)
         code_context = self._extract_code_context(chunk)
         return {
-            "chunk_index": chunk_index + 1,
-            "chunk_total": total_chunks,
-            "chunk_token_count": token_count,
-            "token_keywords": token_keywords,
-            "code_context": code_context,
-            "chunk_document": self._build_chunk_document(
+            'chunk_index': chunk_index + 1,
+            'chunk_total': total_chunks,
+            'chunk_token_count': token_count,
+            'token_keywords': token_keywords,
+            'code_context': code_context,
+            'chunk_document': self._build_chunk_document(
                 step_name=step_name,
                 chunk_index=chunk_index + 1,
                 total_chunks=total_chunks,
@@ -928,26 +979,34 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
             ),
         }
 
-    def _extract_chunk_keywords(self, chunk: str, limit: int = 12) -> List[str]:
-        candidates: List[str] = []
-        for match in re.finditer(r"[A-Za-z0-9_./:-]{3,}", chunk):
+    def _extract_chunk_keywords(self, chunk: str, limit: int = 12) -> list[str]:
+        candidates: list[str] = []
+        for match in re.finditer(r'[A-Za-z0-9_./:-]{3,}', chunk):
             token = match.group(0).strip()
             lower = token.lower()
-            if lower.startswith(("http://", "https://")):
+            if lower.startswith(('http://', 'https://')):
                 continue
             if token.isdigit():
                 continue
-            if "/" in token or "." in token or "_" in token or "::" in token:
+            if '/' in token or '.' in token or '_' in token or '::' in token:
                 candidates.append(token)
                 continue
             if any(ch.isupper() for ch in token[1:]):
                 candidates.append(token)
                 continue
-            if lower in {"error", "errors", "failed", "failure", "traceback", "exception", "warning"}:
+            if lower in {
+                'error',
+                'errors',
+                'failed',
+                'failure',
+                'traceback',
+                'exception',
+                'warning',
+            }:
                 candidates.append(token)
 
         seen = set()
-        ordered: List[str] = []
+        ordered: list[str] = []
         for token in candidates:
             if token not in seen:
                 seen.add(token)
@@ -956,14 +1015,14 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
                 break
         return ordered
 
-    def _extract_code_context(self, chunk: str, limit: int = 5) -> List[str]:
-        lines: List[str] = []
+    def _extract_code_context(self, chunk: str, limit: int = 5) -> list[str]:
+        lines: list[str] = []
         for raw_line in chunk.splitlines():
             line = raw_line.strip()
             if not line:
                 continue
             if len(line) > 160:
-                line = line[:157] + "..."
+                line = line[:157] + '...'
             if self._looks_like_code_or_trace(line):
                 lines.append(line)
             if len(lines) >= limit:
@@ -972,28 +1031,33 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
 
     def _looks_like_code_or_trace(self, line: str) -> bool:
         code_markers = (
-            "Traceback",
-            "File \"",
-            " line ",
-            "Error:",
-            "Exception",
-            "AssertionError",
-            "FAILED",
-            "E   ",
-            "def ",
-            "class ",
-            "import ",
-            "from ",
-            "return ",
-            "raise ",
-            "pytest",
-            "mypy",
-            "ruff",
-            "flake8",
+            'Traceback',
+            'File "',
+            ' line ',
+            'Error:',
+            'Exception',
+            'AssertionError',
+            'FAILED',
+            'E   ',
+            'def ',
+            'class ',
+            'import ',
+            'from ',
+            'return ',
+            'raise ',
+            'pytest',
+            'mypy',
+            'ruff',
+            'flake8',
         )
         if any(marker in line for marker in code_markers):
             return True
-        return bool(re.search(r"[A-Za-z0-9_./-]+\.(py|js|ts|tsx|jsx|java|go|rb|php|yml|yaml|json|toml|ini|cfg)(:\d+)?", line))
+        return bool(
+            re.search(
+                r'[A-Za-z0-9_./-]+\.(py|js|ts|tsx|jsx|java|go|rb|php|yml|yaml|json|toml|ini|cfg)(:\d+)?',
+                line,
+            )
+        )
 
     def _build_chunk_document(
         self,
@@ -1002,167 +1066,193 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
         chunk_index: int,
         total_chunks: int,
         token_count: int,
-        token_keywords: List[str],
-        code_context: List[str],
+        token_keywords: list[str],
+        code_context: list[str],
     ) -> str:
         parts = [
-            f"step={step_name}",
-            f"chunk={chunk_index}/{total_chunks}",
-            f"tokens={token_count}",
+            f'step={step_name}',
+            f'chunk={chunk_index}/{total_chunks}',
+            f'tokens={token_count}',
         ]
         if token_keywords:
-            parts.append("keywords=" + ", ".join(token_keywords[:8]))
+            parts.append('keywords=' + ', '.join(token_keywords[:8]))
         if code_context:
-            parts.append("code=" + " | ".join(code_context[:3]))
-        return " ; ".join(parts)
+            parts.append('code=' + ' | '.join(code_context[:3]))
+        return ' ; '.join(parts)
 
-    def _build_step_document(self, step_name: str, step_chunks: List[Dict[str, Any]]) -> str:
-        lines = [f"step: {step_name}"]
+    def _build_step_document(
+        self, step_name: str, step_chunks: list[dict[str, Any]]
+    ) -> str:
+        lines = [f'step: {step_name}']
         for chunk in step_chunks:
-            summary = str(chunk.get("summary") or "").strip()
-            failures = chunk.get("relevant_failures") or []
-            files = [str(item.get("file") or "").strip() for item in (chunk.get("relevant_files") or []) if isinstance(item, dict)]
-            doc = str(chunk.get("chunk_document") or "").strip()
+            summary = str(chunk.get('summary') or '').strip()
+            failures = chunk.get('relevant_failures') or []
+            files = [
+                str(item.get('file') or '').strip()
+                for item in (chunk.get('relevant_files') or [])
+                if isinstance(item, dict)
+            ]
+            doc = str(chunk.get('chunk_document') or '').strip()
             if doc:
                 lines.append(doc)
             if summary:
-                lines.append(f"summary: {summary}")
+                lines.append(f'summary: {summary}')
             if failures:
-                lines.append("failures: " + " | ".join(str(item).strip() for item in failures[:3] if str(item).strip()))
+                lines.append(
+                    'failures: '
+                    + ' | '.join(
+                        str(item).strip() for item in failures[:3] if str(item).strip()
+                    )
+                )
             if files:
-                lines.append("files: " + ", ".join(path for path in files[:6] if path))
-        return "\n".join(lines).strip()
+                lines.append('files: ' + ', '.join(path for path in files[:6] if path))
+        return '\n'.join(lines).strip()
 
-    def _flatten_chunk_summaries(self, selected_logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        flattened: List[Dict[str, Any]] = []
+    def _flatten_chunk_summaries(
+        self, selected_logs: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        flattened: list[dict[str, Any]] = []
         for step in selected_logs:
-            step_name = str(step.get("step_name") or "unknown_step")
-            for chunk in step.get("chunks", []) or []:
+            step_name = str(step.get('step_name') or 'unknown_step')
+            for chunk in step.get('chunks', []) or []:
                 if not isinstance(chunk, dict):
                     continue
-                flattened.append({
-                    "step_name": step_name,
-                    "chunk_index": chunk.get("chunk_index"),
-                    "chunk_total": chunk.get("chunk_total"),
-                    "chunk_token_count": chunk.get("chunk_token_count"),
-                    "token_keywords": chunk.get("token_keywords") or [],
-                    "summary": chunk.get("summary") or "",
-                    "relevant_failures": chunk.get("relevant_failures") or [],
-                    "relevant_files": chunk.get("relevant_files") or [],
-                    "code_context": chunk.get("code_context") or [],
-                    "chunk_document": chunk.get("chunk_document") or "",
-                })
+                flattened.append(
+                    {
+                        'step_name': step_name,
+                        'chunk_index': chunk.get('chunk_index'),
+                        'chunk_total': chunk.get('chunk_total'),
+                        'chunk_token_count': chunk.get('chunk_token_count'),
+                        'token_keywords': chunk.get('token_keywords') or [],
+                        'summary': chunk.get('summary') or '',
+                        'relevant_failures': chunk.get('relevant_failures') or [],
+                        'relevant_files': chunk.get('relevant_files') or [],
+                        'code_context': chunk.get('code_context') or [],
+                        'chunk_document': chunk.get('chunk_document') or '',
+                    }
+                )
         return flattened
 
     def _build_analysis_document(
         self,
-        generated_summary: Dict[str, Any],
-        selected_logs: List[Dict[str, Any]],
-        log_details: List[Dict[str, Any]],
+        generated_summary: dict[str, Any],
+        selected_logs: list[dict[str, Any]],
+        log_details: list[dict[str, Any]],
     ) -> str:
         lines = []
-        overall_ci_summary = str(generated_summary.get("overall_ci_summary") or "").strip()
+        overall_ci_summary = str(
+            generated_summary.get('overall_ci_summary') or ''
+        ).strip()
         if overall_ci_summary:
-            lines.append(f"overall_ci_summary: {overall_ci_summary}")
-        error_context = generated_summary.get("error_context") or []
+            lines.append(f'overall_ci_summary: {overall_ci_summary}')
+        error_context = generated_summary.get('error_context') or []
         if error_context:
-            lines.append("overall_error_context:")
-            lines.extend(f"- {str(item).strip()}" for item in error_context[:6] if str(item).strip())
-        error_types = generated_summary.get("error_types") or []
+            lines.append('overall_error_context:')
+            lines.extend(
+                f'- {str(item).strip()}'
+                for item in error_context[:6]
+                if str(item).strip()
+            )
+        error_types = generated_summary.get('error_types') or []
         if error_types:
-            lines.append("error_types:")
+            lines.append('error_types:')
             for item in error_types[:10]:
                 if not isinstance(item, dict):
                     continue
-                category = str(item.get("category") or "").strip()
-                subcategory = str(item.get("subcategory") or "").strip()
-                evidence = str(item.get("evidence") or "").strip()
-                row = " | ".join(x for x in [category, subcategory, evidence] if x)
+                category = str(item.get('category') or '').strip()
+                subcategory = str(item.get('subcategory') or '').strip()
+                evidence = str(item.get('evidence') or '').strip()
+                row = ' | '.join(x for x in [category, subcategory, evidence] if x)
                 if row:
-                    lines.append(f"- {row}")
-        failed_jobs = generated_summary.get("failed_job") or generated_summary.get("failed_jobs") or []
+                    lines.append(f'- {row}')
+        failed_jobs = (
+            generated_summary.get('failed_job')
+            or generated_summary.get('failed_jobs')
+            or []
+        )
         if failed_jobs:
-            lines.append("failed_jobs:")
+            lines.append('failed_jobs:')
             for item in failed_jobs[:10]:
                 if not isinstance(item, dict):
                     continue
-                job = str(item.get("job") or "").strip()
-                step = str(item.get("step") or "").strip()
-                command = str(item.get("command") or "").strip()
-                row = " | ".join(x for x in [job, step, command] if x)
+                job = str(item.get('job') or '').strip()
+                step = str(item.get('step') or '').strip()
+                command = str(item.get('command') or '').strip()
+                row = ' | '.join(x for x in [job, step, command] if x)
                 if row:
-                    lines.append(f"- {row}")
-        relevant_files = generated_summary.get("relevant_files") or []
+                    lines.append(f'- {row}')
+        relevant_files = generated_summary.get('relevant_files') or []
         if relevant_files:
-            lines.append("relevant_files:")
+            lines.append('relevant_files:')
             for item in relevant_files[:12]:
                 if not isinstance(item, dict):
                     continue
-                file_path = str(item.get("file") or "").strip()
-                line_number = str(item.get("line_number") or "").strip()
-                reason = str(item.get("reason") or "").strip()
-                row = " | ".join(x for x in [file_path, line_number, reason] if x)
+                file_path = str(item.get('file') or '').strip()
+                line_number = str(item.get('line_number') or '').strip()
+                reason = str(item.get('reason') or '').strip()
+                row = ' | '.join(x for x in [file_path, line_number, reason] if x)
                 if row:
-                    lines.append(f"- {row}")
+                    lines.append(f'- {row}')
         for step in log_details:
-            step_name = str(step.get("step_name") or "unknown_step")
-            log_content = str(step.get("log_content") or "").strip()
+            step_name = str(step.get('step_name') or 'unknown_step')
+            log_content = str(step.get('log_content') or '').strip()
             if log_content:
-                lines.append(f"step_log_content[{step_name}]: {log_content}")
+                lines.append(f'step_log_content[{step_name}]: {log_content}')
         for step in selected_logs:
-            step_document = str(step.get("step_document") or "").strip()
+            step_document = str(step.get('step_document') or '').strip()
             if step_document:
                 lines.append(step_document)
-        return "\n".join(lines).strip()
+        return '\n'.join(lines).strip()
 
     def _build_overall_ci_summary(
         self,
-        generated_summary: Dict[str, Any],
-        log_details: List[Dict[str, Any]],
+        generated_summary: dict[str, Any],
+        log_details: list[dict[str, Any]],
     ) -> str:
-        parts: List[str] = []
+        parts: list[str] = []
         for step in log_details:
-            step_name = str(step.get("step_name") or "unknown_step").strip()
-            log_content = str(step.get("log_content") or "").strip()
+            step_name = str(step.get('step_name') or 'unknown_step').strip()
+            log_content = str(step.get('log_content') or '').strip()
             if step_name and log_content:
-                parts.append(f"{step_name}: {log_content}")
+                parts.append(f'{step_name}: {log_content}')
         if parts:
-            return " | ".join(parts)
+            return ' | '.join(parts)
         error_context = [
             str(item).strip()
-            for item in (generated_summary.get("error_context") or [])
+            for item in (generated_summary.get('error_context') or [])
             if str(item).strip()
         ]
-        return " | ".join(error_context)
+        return ' | '.join(error_context)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CILogAnalyzer — public adapter used by ci_context.py
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _normalize_logs(logs: Any) -> List[Dict[str, Any]]:
+
+def _normalize_logs(logs: Any) -> list[dict[str, Any]]:
     """
     Normalise raw CI logs to the ``[{step_name, log}]`` format that
     ``CILogAnalyzerLLM`` expects.
     """
     if isinstance(logs, list):
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for i, item in enumerate(logs):
             if isinstance(item, dict):
                 step_name = str(
-                    item.get("step_name") or item.get("name") or f"step_{i + 1}"
+                    item.get('step_name') or item.get('name') or f'step_{i + 1}'
                 )
                 log_text = str(
-                    item.get("log") or item.get("text") or item.get("output") or ""
+                    item.get('log') or item.get('text') or item.get('output') or ''
                 )
             else:
-                step_name = f"step_{i + 1}"
-                log_text  = str(item)
-            out.append({"step_name": step_name, "log": log_text})
+                step_name = f'step_{i + 1}'
+                log_text = str(item)
+            out.append({'step_name': step_name, 'log': log_text})
         return out
 
     # Plain string — treat as a single step
-    return [{"step_name": "ci_log", "log": str(logs or "")}]
+    return [{'step_name': 'ci_log', 'log': str(logs or '')}]
 
 
 def _make_langchain_llm(llm: Any) -> Any:
@@ -1175,15 +1265,11 @@ def _make_langchain_llm(llm: Any) -> Any:
         shim so ``CILogAnalyzerLLM`` can call ``.invoke([HumanMessage(…)])``.
     """
     if llm is None:
-        raise ValueError("llm must not be None for CILogAnalyzerLLM")
+        raise ValueError('llm must not be None for CILogAnalyzerLLM')
 
-    # Test whether it already speaks LangChain
-    try:
-        from langchain_core.messages import HumanMessage as _HM  # type: ignore
-        if callable(getattr(llm, "invoke", None)):
-            return llm
-    except ImportError:
-        pass
+    # Test whether it already speaks LangChain.
+    if callable(getattr(llm, 'invoke', None)):
+        return llm
 
     # Wrap a plain callable
     class _LLMShim:
@@ -1193,17 +1279,17 @@ def _make_langchain_llm(llm: Any) -> Any:
         def invoke(self, messages: Any) -> Any:
             # Extract text from a list of messages or pass through a plain string
             if isinstance(messages, list):
-                content = " ".join(
-                    getattr(m, "content", str(m)) for m in messages
-                )
+                content = ' '.join(getattr(m, 'content', str(m)) for m in messages)
             else:
                 content = str(messages)
             result = self._fn(content)
+
             # Return an object with a .content attribute
             class _Resp:
                 def __init__(self, c: str) -> None:
                     self.content = c
-            return _Resp(str(result) if result is not None else "")
+
+            return _Resp(str(result) if result is not None else '')
 
     return _LLMShim(llm)
 
@@ -1242,14 +1328,14 @@ class CILogAnalyzer:
     ) -> None:
         if llm is None:
             raise RuntimeError(
-                "CILogAnalyzer requires an LLM; llm=None -> using fallback analysis."
+                'CILogAnalyzer requires an LLM; llm=None -> using fallback analysis.'
             )
 
         ci_log = _normalize_logs(logs)
         lc_llm = _make_langchain_llm(llm)
 
         self._inner = CILogAnalyzerLLM(
-            repo_path=".",
+            repo_path='.',
             ci_log=ci_log,
             sha_fail=sha_fail,
             workflow=workflow,
@@ -1259,5 +1345,5 @@ class CILogAnalyzer:
             task_id=task_id,
         )
 
-    def run(self) -> Dict[str, Any]:
+    def run(self) -> dict[str, Any]:
         return self._inner.run()
