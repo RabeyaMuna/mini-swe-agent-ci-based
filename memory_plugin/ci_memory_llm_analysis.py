@@ -8,10 +8,21 @@ Matching criteria: validation_cmd + failure_type + (file OR problem)
 import re
 import json
 import logging
+import signal
 from typing import Any, Dict, List
 from memory_plugin.ci_memory_l2_analysis import staged_l2_analysis
 
 logger = logging.getLogger(__name__)
+
+
+class TimeoutError(Exception):
+    """Raised when an LLM call exceeds timeout."""
+    pass
+
+
+def _timeout_handler(signum, frame):
+    """Signal handler for LLM call timeout."""
+    raise TimeoutError("LLM call timed out")
 
 
 def _json_array_from_text(text: str) -> List[Any]:
@@ -73,28 +84,75 @@ def _parse_l1_selection_ids(response: str) -> List[str]:
     return [str(item) for item in arr if isinstance(item, str)]
 
 
-def _call_llm(llm: Any, prompt: str) -> str:
-    """Universal LLM caller."""
+def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -> str:
+    """
+    Universal LLM caller with timeout and retry logic.
+
+    Args:
+        llm: LLM client (LangChain, callable, or OpenRouter client)
+        prompt: Prompt text
+        timeout: Timeout in seconds (default: 120s = 2 minutes)
+        max_retries: Maximum number of retries on failure (default: 2)
+
+    Returns:
+        str: LLM response, or empty string on failure
+    """
     if llm is None:
         return ""
-    try:
-        try:
-            from langchain_core.messages import HumanMessage
 
-            result = llm.invoke([HumanMessage(content=prompt)])
-            return (getattr(result, "content", None) or "").strip()
-        except (ImportError, AttributeError):
-            pass
-        result = llm.invoke(prompt)
-        if hasattr(result, "content"):
-            return (result.content or "").strip()
-        return str(result).strip()
-    except Exception:
-        pass
-    try:
-        return str(llm(prompt)).strip()
-    except Exception:
-        return ""
+    for attempt in range(max_retries + 1):
+        try:
+            # Set alarm signal for timeout (Unix/Mac only)
+            if hasattr(signal, 'SIGALRM'):
+                signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(timeout)
+
+            try:
+                # Try LangChain interface
+                try:
+                    from langchain_core.messages import HumanMessage
+                    result = llm.invoke([HumanMessage(content=prompt)])
+                    response = (getattr(result, "content", None) or "").strip()
+                    if response:
+                        return response
+                except (ImportError, AttributeError):
+                    pass
+
+                # Try generic invoke
+                result = llm.invoke(prompt)
+                if hasattr(result, "content"):
+                    response = (result.content or "").strip()
+                    if response:
+                        return response
+
+                # Try direct call
+                response = str(result).strip()
+                if response:
+                    return response
+
+            finally:
+                # Cancel alarm
+                if hasattr(signal, 'SIGALRM'):
+                    signal.alarm(0)
+
+            # Fallback: direct callable
+            response = str(llm(prompt)).strip()
+            if response:
+                return response
+
+        except TimeoutError:
+            logger.warning(f"[_call_llm] Timeout on attempt {attempt + 1}/{max_retries + 1}")
+            if attempt < max_retries:
+                continue
+            return ""
+
+        except Exception as e:
+            logger.warning(f"[_call_llm] Error on attempt {attempt + 1}/{max_retries + 1}: {e}")
+            if attempt < max_retries:
+                continue
+            return ""
+
+    return ""
 
 
 def _llm_select_relevant_l1(
@@ -216,7 +274,13 @@ Example: ["L1-0012", "L1-0088"]
 """
 
         try:
-            response = _call_llm(llm, prompt)
+            # Use shorter timeout for selection (60s per attempt, 1 retry = max 2 minutes)
+            response = _call_llm(llm, prompt, timeout=60, max_retries=1)
+
+            if not response or not response.strip():
+                logger.warning(f"  Chunk {chunk_idx}: LLM returned empty response, skipping")
+                continue
+
             chunk_ids = _parse_l1_selection_ids(response)
             all_selected_ids.extend(chunk_ids)
             logger.info(f"  Selected: {len(chunk_ids)} L1s from this chunk")
@@ -559,7 +623,14 @@ def llm_analyze_l1_for_problem_1(
   """
 
     try:
-        response = _call_llm(llm, prompt)
+        # Call LLM with timeout (2 minutes per attempt, 2 retries = max 6 minutes total)
+        response = _call_llm(llm, prompt, timeout=120, max_retries=2)
+
+        # EARLY FALLBACK: If LLM returned empty response after all retries
+        if not response or not response.strip():
+            logger.warning("[L1 Enrich] LLM returned empty response after all retries")
+            logger.warning("[L1 Enrich] Falling back to original CI problem without enrichment")
+            return [ci_problem]  # Return as array
 
         # Log response for debugging
         logger.debug(f"[L1 Enrich] Response length: {len(response)} chars")
@@ -581,6 +652,7 @@ def llm_analyze_l1_for_problem_1(
             else:
                 logger.warning("[L1 Enrich] Failed to parse response completely")
                 logger.warning(f"[L1 Enrich] Response: {response[:500]}")
+                logger.warning("[L1 Enrich] Falling back to original CI problem")
                 return [ci_problem]  # Return as array
 
         if extracted_problems and isinstance(extracted_problems, list):

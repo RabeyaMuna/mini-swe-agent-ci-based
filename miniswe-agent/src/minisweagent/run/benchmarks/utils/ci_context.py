@@ -125,7 +125,18 @@ from scripts.ci_workflow_aware_retrieval import (
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[5]
+
+def _discover_project_root() -> Path:
+    """Find the workspace root that owns shared data/ and memory_plugin/."""
+    current_file = Path(__file__).resolve()
+    for parent in current_file.parents:
+        if (parent / 'data').is_dir() and (parent / 'memory_plugin').is_dir():
+            return parent
+    # Fallback for a standalone mini-swe-agent checkout.
+    return current_file.parents[5]
+
+
+PROJECT_ROOT = _discover_project_root()
 
 # Cache paths - check BOTH locations (user's data/ and internal data/trs/)
 WORKFLOW_VALIDATION_CACHE_PATHS = [
@@ -155,6 +166,15 @@ def _find_cache_file(paths: list) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def _regenerate_missing_cache_entries() -> bool:
+    """Allow opt-in regeneration for cache misses when precomputed caches exist."""
+    return os.getenv('CIBENCH_REGENERATE_MISSING_CACHE', '').lower() in {
+        '1',
+        'true',
+        'yes',
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -533,6 +553,15 @@ def _run_log_analysis(
         )
         return cached
 
+    if _find_cache_file(LOG_ANALYSIS_CACHE_PATHS) and not _regenerate_missing_cache_entries():
+        logger.warning(
+            '[Phase A] Log analysis cache exists but has no entry for %s; '
+            'using raw log fallback instead of regenerating. Set '
+            'CIBENCH_REGENERATE_MISSING_CACHE=1 to regenerate missing entries.',
+            (sha_fail or task_id)[:12],
+        )
+        return _minimal_log_analysis(instance)
+
     workflow = instance.get('workflow') or ''
     workflow_path = str(instance.get('workflow_path') or '')
     logs = instance.get('logs') or instance.get('log') or ''
@@ -733,6 +762,21 @@ def _workflow_profile_from_cache_or_analyzer(
         )
         return _workflow_validation_context_to_profile(cached)
 
+    if _find_cache_file(WORKFLOW_VALIDATION_CACHE_PATHS) and not _regenerate_missing_cache_entries():
+        logger.warning(
+            '[Phase B] Workflow validation cache exists but has no entry for %s; '
+            'skipping workflow LLM regeneration. Set '
+            'CIBENCH_REGENERATE_MISSING_CACHE=1 to regenerate missing entries.',
+            (sha_fail or issue_id)[:12],
+        )
+        return {
+            'installation_cmd': [],
+            'validation_cmd': [],
+            'critical_steps': [],
+            'validation_sequence': [],
+            'dependent_files': [],
+        }
+
     workflow_content = str(instance.get('workflow') or '')
     if not workflow_content.strip() or llm is None:
         return {
@@ -785,10 +829,12 @@ def _workflow_profile_from_cache_or_analyzer(
 
 
 def _load_workflow_validation_cache(*, sha_fail: str, issue_id: str) -> dict[str, Any]:
-    if not WORKFLOW_VALIDATION_CACHE.exists():
+    cache_file = _find_cache_file(WORKFLOW_VALIDATION_CACHE_PATHS)
+    if not cache_file:
         return {}
     try:
-        payload = json.loads(WORKFLOW_VALIDATION_CACHE.read_text(encoding='utf-8'))
+        payload = json.loads(cache_file.read_text(encoding='utf-8'))
+        logger.debug('[Phase B] Loaded workflow validation cache from %s', cache_file)
     except Exception as exc:
         logger.warning('[Phase B] Could not read workflow validation cache: %s', exc)
         return {}

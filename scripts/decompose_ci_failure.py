@@ -53,6 +53,11 @@ from minisweagent.run.benchmarks.utils.ci_context import (  # noqa: E402
 from scripts.ci_workflow_aware_retrieval import (  # noqa: E402
     analyze_workflow_from_benchmark,
 )
+from scripts.model_registry import (  # noqa: E402
+    DEFAULT_MINIMAX_MODEL,
+    configure_model_environment,
+    resolve_model_alias,
+)
 
 try:
     import demjson3  # type: ignore
@@ -110,6 +115,9 @@ class LitellmModel:
 
     @staticmethod
     def _normalize_model_name(model_name: str) -> str:
+        resolved = resolve_model_alias(model_name)
+        if resolved:
+            return resolved
         if (
             model_name.startswith('minimax/')
             and os.getenv('OPENROUTER_API_KEY')
@@ -5306,8 +5314,8 @@ def main():
     )
     parser.add_argument(
         '--model',
-        default='openrouter/minimax/minimax-m2.5',
-        help='LLM model. Use openrouter/minimax/minimax-m2.5 for MiniMax M2.5 via OpenRouter.',
+        default=DEFAULT_MINIMAX_MODEL,
+        help='LLM model or alias. Supported aliases include minimax2.5 and glm5.2.',
     )
     parser.add_argument('--limit', type=int, help='Limit number of issues to process')
     parser.add_argument(
@@ -5380,6 +5388,7 @@ def main():
 
     # Initialize LLM
     print(f'\n{"=" * 80}')
+    args.model = configure_model_environment(args.model) or args.model
     print(f'Initializing LLM: {args.model}')
     print(f'{"=" * 80}')
     llm = LitellmModel(model_name=args.model)

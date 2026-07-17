@@ -89,12 +89,23 @@ from minisweagent.run.benchmarks.utils.patch_merger import (
 from minisweagent.utils.log import add_file_handler, logger
 from minisweagent.utils.project_env import load_project_env
 from minisweagent.utils.serialize import UNSET, recursive_merge
+from scripts.model_registry import configure_model_environment, resolve_model_alias
 
 # ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG_FILE = builtin_config_dir / "benchmarks" / "cibench.yaml"
 _OUTPUT_FILE_LOCK   = threading.Lock()
 app = typer.Typer(rich_markup_mode="rich", add_completion=False)
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
+def _discover_project_root() -> Path:
+    """Find the workspace root that owns shared data/ and memory_plugin/."""
+    current_file = Path(__file__).resolve()
+    for parent in current_file.parents:
+        if (parent / "data").is_dir() and (parent / "memory_plugin").is_dir():
+            return parent
+    # Fallback for a standalone mini-swe-agent checkout.
+    return current_file.parents[4]
+
+
+PROJECT_ROOT = _discover_project_root()
 REPO_CACHE_ROOT = Path(os.getenv("MSWEA_REPO_CACHE_ROOT") or (PROJECT_ROOT / "repo")).resolve()
 
 # Automated fix tools for mechanical/static problems (formatting, linting, style)
@@ -167,7 +178,7 @@ def _make_context_llm(config: Dict[str, Any], context_model: Optional[str] = Non
     models do not expose tool-calling endpoints.
     """
     model_config = config.get("model", {})
-    model_name = context_model or model_config.get("model_name")
+    model_name = resolve_model_alias(context_model or model_config.get("model_name"))
     model_kwargs = dict(model_config.get("model_kwargs") or {})
 
     if not model_name:
@@ -191,7 +202,7 @@ def _make_context_llm(config: Dict[str, Any], context_model: Optional[str] = Non
 
 def _resolve_context_model(context_model: Optional[str], config: Dict[str, Any]) -> str:
     """Use the repair model for every LLM stage unless explicitly overridden."""
-    return context_model or str(config["model"]["model_name"])
+    return str(resolve_model_alias(context_model or str(config["model"]["model_name"])))
 
 
 _HELP_TEXT = """
@@ -645,7 +656,8 @@ def _load_install_commands_from_cache(sha_fail: str) -> list:
     """
     # Try both cache locations
     cache_paths = [
-        PROJECT_ROOT / "data" / "workflow_validation_cache.json"
+        PROJECT_ROOT / "data" / "workflow_validation_cache.json",
+        PROJECT_ROOT / "data" / "trs" / "workflow_validation_cache.json",
     ]
 
     cache_path = None
@@ -2346,6 +2358,8 @@ def main(
     project_env_path = load_project_env()
     if project_env_path:
         logger.info("[CIBench] Loaded project env from %s", project_env_path)
+    model_name = resolve_model_alias(model_name) if model_name else model_name
+    context_model = resolve_model_alias(context_model) if context_model else context_model
 
     # ── Output directory ──────────────────────────────────────────────────────
     if not output:
@@ -2393,6 +2407,9 @@ def main(
         },
     })
     config = recursive_merge(*configs)
+    config["model"]["model_name"] = configure_model_environment(
+        config["model"]["model_name"]
+    )
     resolved_context_model = _resolve_context_model(context_model, config)
     logger.info(
         "[CIBench] Model: %s  class=%s  context_model=%s",

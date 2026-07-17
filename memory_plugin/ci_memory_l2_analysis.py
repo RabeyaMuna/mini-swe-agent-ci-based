@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import signal
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -33,30 +34,85 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def _call_llm(llm: Any, prompt: str) -> str:
-    """Call either a LangChain-style object or a plain callable."""
+class TimeoutError(Exception):
+    """Raised when an LLM call exceeds timeout."""
+    pass
+
+
+def _timeout_handler(signum, frame):
+    """Signal handler for LLM call timeout."""
+    raise TimeoutError("LLM call timed out")
+
+
+def _call_llm(llm: Any, prompt: str, timeout: int = 120, max_retries: int = 2) -> str:
+    """
+    Call either a LangChain-style object or a plain callable with timeout and retry.
+
+    Args:
+        llm: LLM client (LangChain, callable, or OpenRouter client)
+        prompt: Prompt text
+        timeout: Timeout in seconds (default: 120s = 2 minutes)
+        max_retries: Maximum number of retries on failure (default: 2)
+
+    Returns:
+        str: LLM response, or empty string on failure
+    """
     if llm is None:
         return ""
-    try:
+
+    for attempt in range(max_retries + 1):
         try:
-            from langchain_core.messages import HumanMessage
+            # Set alarm signal for timeout (Unix/Mac only)
+            if hasattr(signal, 'SIGALRM'):
+                signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(timeout)
 
-            result = llm.invoke([HumanMessage(content=prompt)])
-            return (getattr(result, "content", None) or "").strip()
-        except (AttributeError, ImportError):
-            pass
+            try:
+                # Try LangChain interface
+                try:
+                    from langchain_core.messages import HumanMessage
+                    result = llm.invoke([HumanMessage(content=prompt)])
+                    response = (getattr(result, "content", None) or "").strip()
+                    if response:
+                        return response
+                except (AttributeError, ImportError):
+                    pass
 
-        result = llm.invoke(prompt)
-        if hasattr(result, "content"):
-            return (result.content or "").strip()
-        return str(result).strip()
-    except Exception:
-        pass
+                # Try generic invoke
+                result = llm.invoke(prompt)
+                if hasattr(result, "content"):
+                    response = (result.content or "").strip()
+                    if response:
+                        return response
 
-    try:
-        return str(llm(prompt)).strip()
-    except Exception:
-        return ""
+                # Try direct call
+                response = str(result).strip()
+                if response:
+                    return response
+
+            finally:
+                # Cancel alarm
+                if hasattr(signal, 'SIGALRM'):
+                    signal.alarm(0)
+
+            # Fallback: direct callable
+            response = str(llm(prompt)).strip()
+            if response:
+                return response
+
+        except TimeoutError:
+            logger.warning(f"[_call_llm] Timeout on attempt {attempt + 1}/{max_retries + 1}")
+            if attempt < max_retries:
+                continue
+            return ""
+
+        except Exception as e:
+            logger.warning(f"[_call_llm] Error on attempt {attempt + 1}/{max_retries + 1}: {e}")
+            if attempt < max_retries:
+                continue
+            return ""
+
+    return ""
 
 
 def _parse_json_array(content: str) -> List[Dict[str, Any]]:
@@ -964,7 +1020,12 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
 ]
 """
 
-    response = _call_llm(llm, prompt)
+    response = _call_llm(llm, prompt, timeout=60, max_retries=1)
+
+    if not response or not response.strip():
+        logger.warning("[L2 Common] LLM returned empty response, returning empty list")
+        return []
+
     selected = _parse_json_array(response)
 
     # Post-process: Add back missing fields (files, frequency, etc.) from candidates
@@ -1143,7 +1204,12 @@ IMPORTANT: Include the "files" field from the candidates - copy the file paths e
 ]
 """
 
-    response = _call_llm(llm, prompt)
+    response = _call_llm(llm, prompt, timeout=60, max_retries=1)
+
+    if not response or not response.strip():
+        logger.warning("[L2 Common] LLM returned empty response, returning empty list")
+        return []
+
     selected = _parse_json_array(response)
 
     # Post-process: Add back missing fields (files, frequency, etc.) from candidates
@@ -1472,7 +1538,12 @@ OUTPUT JSON:
   }}
 ]
 """
-    selected = _parse_json_array(_call_llm(llm, prompt))
+    response = _call_llm(llm, prompt, timeout=60, max_retries=1)
+    if not response or not response.strip():
+        logger.warning("[L2 Group Merge] LLM returned empty response")
+        return None
+
+    selected = _parse_json_array(response)
     if not selected:
         return None
 

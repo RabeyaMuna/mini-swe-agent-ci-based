@@ -12,6 +12,7 @@ REPOS=${1:-""}  # Empty = all repos
 OUTPUT_DIR="data/trs"
 HF_DATASET="ci-benchmark-user/ci-repair-bench"
 MEMORY_RATIO=0.3
+MODEL="${MODEL:-${MEMCI_LLM_MODEL:-minimax2.5}}"
 
 echo "======================================"
 echo "Memory/Eval Split Workflow"
@@ -23,6 +24,7 @@ else
 fi
 echo "Output: $OUTPUT_DIR"
 echo "Memory ratio: ${MEMORY_RATIO} (30%)"
+echo "Model: $MODEL"
 echo ""
 
 # Step 1: Load and filter issues from HuggingFace
@@ -78,6 +80,7 @@ echo ""
 python scripts/decompose_ci_failure.py \
     --dataset "$OUTPUT_DIR/filtered_issues.jsonl" \
     --output-dir "$OUTPUT_DIR" \
+    --model "$MODEL" \
     --skip-memory
 
 echo ""
@@ -101,7 +104,8 @@ echo ""
 
 python scripts/decompose_ci_failure.py \
     --dataset "$OUTPUT_DIR/memory_set.jsonl" \
-    --output-dir "$OUTPUT_DIR"
+    --output-dir "$OUTPUT_DIR" \
+    --model "$MODEL"
 
 echo ""
 echo "L1/L2/L3 memory generation complete!"

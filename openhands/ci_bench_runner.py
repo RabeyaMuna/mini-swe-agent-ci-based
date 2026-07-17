@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Import our modules
 from data_loader import CIBenchDataLoader
 from prompt_formatter import PromptFormatter
+from scripts.model_registry import configure_model_environment, resolve_model_alias
 
 # Shared paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -56,7 +57,7 @@ def _make_analyzer_llm(model: str):
     except ImportError:
         return None
 
-    analyzer_model = model
+    analyzer_model = resolve_model_alias(model) or model
     if (
         analyzer_model.startswith('minimax/')
         and os.getenv('OPENROUTER_API_KEY')
@@ -149,7 +150,7 @@ def run_single_issue(
         Result dictionary
     """
     # Get full issue data
-    data_loader = CIBenchDataLoader(data_root='../data')
+    data_loader = CIBenchDataLoader(data_root=str(DATA_ROOT))
     issue_data = data_loader.get_issue_data(issue, log_details, workflow_cache)
 
     instance_id = issue_data['instance_id']
@@ -203,11 +204,12 @@ def run_batch(
     Args:
         eval_issues_path: Path to eval_set.jsonl
         mode: "baseline" or "memory"
-        model: Model name (e.g., "glm-4-plus")
+        model: Model name or alias (e.g., "glm5.2" or "minimax2.5")
         memory_layers: List of memory layers (e.g., ["L1", "L2", "L3"])
         output_dir: Output directory
         slice_range: Optional slice (e.g., "0:5" for first 5 issues)
     """
+    model = configure_model_environment(model) or model
     print(f'\n{"=" * 80}')
     print('  CI-Bench Evaluation on OpenHands (Shared Memory Plugin)')
     print(f'{"=" * 80}')
@@ -222,7 +224,7 @@ def run_batch(
     results_dir.mkdir(parents=True, exist_ok=True)
 
     # Load data
-    data_loader = CIBenchDataLoader(data_root='../data')
+    data_loader = CIBenchDataLoader(data_root=str(DATA_ROOT))
     eval_issues = data_loader.load_eval_issues(
         eval_issues_path,
         hf_dataset=hf_dataset,
@@ -247,14 +249,14 @@ def run_batch(
     # Initialize SHARED memory engine
     if mode == 'memory':
         memory_engine = OpenHandsMemoryAdapter(
-            memory_root='../data/trs',
+            memory_root=str(SharedPaths.get_memory_root()),
             layers=memory_layers or ['L1', 'L2', 'L3'],
             llm=analyzer_llm,
         )
     else:
         # Baseline mode
         memory_engine = OpenHandsMemoryAdapter(
-            memory_root='../data/trs',
+            memory_root=str(SharedPaths.get_memory_root()),
             layers=None,  # No memory layers
         )
 
@@ -287,7 +289,7 @@ def run_batch(
     print('1. Implement actual OpenHands agent execution')
     print('2. Replace placeholder results with real patches')
     print(
-        f'3. Evaluate with: python ../scripts/evaluate_ablation_preds.py {preds_file}'
+        f'3. Evaluate with: python scripts/evaluate_ablation_preds.py {preds_file}'
     )
 
 
@@ -299,24 +301,24 @@ def main():
 Examples:
   # Baseline mode (no memory)
   python ci_bench_runner.py --eval-issues ../data/trs/eval_set.jsonl \\
-      --mode baseline --model glm-4-plus \\
-      --output ../results/openhands/glm/baseline
+      --mode baseline --model glm5.2 \\
+      --output ../results/openhands/glm-5.2/baseline
 
   # Filter HuggingFace benchmark rows using eval_issues.json
   python ci_bench_runner.py --eval-issues ../data/eval_issues.json \\
       --hf-dataset ci-benchmark-user/ci-repair-bench --split train \\
-      --mode baseline --model glm-4-plus \\
-      --output ../results/openhands/glm/baseline
+      --mode baseline --model glm5.2 \\
+      --output ../results/openhands/glm-5.2/baseline
 
   # Memory mode (L1+L2+L3)
   python ci_bench_runner.py --eval-issues ../data/trs/eval_set.jsonl \\
-      --mode memory --memory-layers L1 L2 L3 --model glm-4-plus \\
-      --output ../results/openhands/glm/L1_L2_L3
+      --mode memory --memory-layers L1 L2 L3 --model glm5.2 \\
+      --output ../results/openhands/glm-5.2/L1_L2_L3
 
   # Test on first 5 issues
   python ci_bench_runner.py --eval-issues ../data/trs/eval_set.jsonl \\
-      --mode baseline --model glm-4-plus --slice 0:5 \\
-      --output ../results/openhands/glm/test
+      --mode baseline --model glm5.2 --slice 0:5 \\
+      --output ../results/openhands/glm-5.2/test
         """,
     )
     parser.add_argument(
@@ -338,8 +340,8 @@ Examples:
     )
     parser.add_argument(
         '--model',
-        default='glm-4-plus',
-        help='Model to use (e.g., glm-4-plus, minimax/minimax-m2.5)',
+        default='glm5.2',
+        help='Model or alias to use (e.g., glm5.2, minimax2.5)',
     )
     parser.add_argument(
         '--memory-layers',

@@ -13,7 +13,7 @@ OUTPUT_DIR="data/trs"
 CACHE_DIR="data"
 HF_DATASET="ci-benchmark-user/ci-repair-bench"
 MEMORY_RATIO=0.3
-MODEL="${MEMCI_LLM_MODEL:-openrouter/minimax/minimax-m2.5}"
+MODEL="${MODEL:-${MEMCI_LLM_MODEL:-minimax2.5}}"
 
 echo "================================================================================"
 echo "CI Memory System - Intelligent Workflow"
