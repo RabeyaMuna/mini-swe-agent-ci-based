@@ -50,13 +50,13 @@ def _extract_model_name_from_llm(llm: Any) -> str | None:
         return None
 
     # Priority 1: Check for memci_model_key (set by utilities.llm_provider)
-    if hasattr(llm, 'memci_model_key'):
-        value = getattr(llm, 'memci_model_key', None)
+    if hasattr(llm, "memci_model_key"):
+        value = getattr(llm, "memci_model_key", None)
         if value and isinstance(value, str):
             return value
 
     # Priority 2: Try common LangChain attribute names
-    for attr in ('model_name', 'model', 'model_id'):
+    for attr in ("model_name", "model", "model_id"):
         if hasattr(llm, attr):
             value = getattr(llm, attr, None)
             if value and isinstance(value, str):

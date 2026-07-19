@@ -90,13 +90,17 @@ def check_pair_similarity(
     id1 = issue1.get("id", "")
     id2 = issue2.get("id", "")
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"SIMILARITY CHECK: Issue {id1} vs Issue {id2}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Find their memories
-    mem1 = next((r for r in l2_records if r.get("sha_fail", "").startswith(sha1[:12])), None)
-    mem2 = next((r for r in l2_records if r.get("sha_fail", "").startswith(sha2[:12])), None)
+    mem1 = next(
+        (r for r in l2_records if r.get("sha_fail", "").startswith(sha1[:12])), None
+    )
+    mem2 = next(
+        (r for r in l2_records if r.get("sha_fail", "").startswith(sha2[:12])), None
+    )
 
     if not mem1:
         print(f"ERROR No L2 memory found for issue {id1} ({sha1[:12]})")
@@ -111,7 +115,7 @@ def check_pair_similarity(
     emb2 = l2_embeddings.get(sha2)
 
     if emb1 is None or emb2 is None:
-        print(f"ERROR No embeddings found, computing on the fly...")
+        print("ERROR No embeddings found, computing on the fly...")
 
         # Build query for issue 2
         query_emb = build_query_embedding(issue2, model)
@@ -135,7 +139,7 @@ def check_pair_similarity(
     print(f"Error Type: {issue2.get('error_type', 'N/A')}")
     print(f"Changed Files: {issue2.get('changed_files', [])[:3]}...")
 
-    print(f"\n### Memory Comparison")
+    print("\n### Memory Comparison")
     print(f"\nIssue {id1} Memory:")
     print(f"  Error: {mem1.get('error_type', 'N/A')}")
     print(f"  Pattern: {mem1.get('failure_pattern', 'N/A')}")
@@ -146,15 +150,15 @@ def check_pair_similarity(
     print(f"  Pattern: {mem2.get('failure_pattern', 'N/A')}")
     print(f"  Changed Files: {mem2.get('changed_files', [])}")
 
-    print(f"\n### Similarity Score")
+    print("\n### Similarity Score")
     print(f"Cosine Similarity: {similarity:.4f}")
 
     if similarity >= 0.70:
-        print(f"OK STRONG MATCH (should retrieve)")
+        print("OK STRONG MATCH (should retrieve)")
     elif similarity >= 0.40:
-        print(f"WARNING:  MEDIUM MATCH (might retrieve)")
+        print("WARNING:  MEDIUM MATCH (might retrieve)")
     else:
-        print(f"ERROR WEAK MATCH (likely won't retrieve)")
+        print("ERROR WEAK MATCH (likely won't retrieve)")
 
     return {
         "issue1_id": id1,
@@ -177,11 +181,11 @@ def check_query_retrieval(
     query_id = query_issue.get("id", "")
     query_sha = query_issue.get("sha_fail", "")
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"RETRIEVAL ANALYSIS: Issue {query_id}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
-    print(f"\n### Query Issue")
+    print("\n### Query Issue")
     print(f"ID: {query_id}")
     print(f"SHA: {query_sha[:12]}")
     print(f"Error: {query_issue.get('error_type', 'N/A')}")
@@ -206,35 +210,41 @@ def check_query_retrieval(
 
         sim = cosine_similarity(query_emb, emb)
 
-        similarities.append({
-            "sha": sha,
-            "repo": record.get("repo_name", record.get("repo", "")),
-            "similarity": sim,
-            "error_type": record.get("error_type", ""),
-            "failure_pattern": record.get("failure_pattern", ""),
-            "changed_files": record.get("changed_files", []),
-        })
+        similarities.append(
+            {
+                "sha": sha,
+                "repo": record.get("repo_name", record.get("repo", "")),
+                "similarity": sim,
+                "error_type": record.get("error_type", ""),
+                "failure_pattern": record.get("failure_pattern", ""),
+                "changed_files": record.get("changed_files", []),
+            }
+        )
 
     # Sort by similarity
     similarities.sort(key=lambda x: x["similarity"], reverse=True)
 
     print(f"\n### Top {top_k} Retrieved Memories")
     print(f"{'Rank':<6} {'Similarity':<12} {'Repo':<15} {'Error Type':<40} {'Files'}")
-    print(f"{'-'*100}")
+    print(f"{'-' * 100}")
 
     for i, match in enumerate(similarities[:top_k], 1):
-        files_str = str(match['changed_files'])[:40]
-        print(f"{i:<6} {match['similarity']:<12.4f} {match['repo']:<15} {str(match['error_type'])[:40]:<40} {files_str}")
+        files_str = str(match["changed_files"])[:40]
+        print(
+            f"{i:<6} {match['similarity']:<12.4f} {match['repo']:<15} {str(match['error_type'])[:40]:<40} {files_str}"
+        )
 
     # Analysis
     strong_matches = [m for m in similarities if m["similarity"] >= 0.70]
     medium_matches = [m for m in similarities if 0.40 <= m["similarity"] < 0.70]
 
-    print(f"\n### Summary")
+    print("\n### Summary")
     print(f"Total memories: {len(similarities)}")
     print(f"Strong matches (>=0.70): {len(strong_matches)}")
     print(f"Medium matches (0.40-0.70): {len(medium_matches)}")
-    print(f"Weak matches (<0.40): {len(similarities) - len(strong_matches) - len(medium_matches)}")
+    print(
+        f"Weak matches (<0.40): {len(similarities) - len(strong_matches) - len(medium_matches)}"
+    )
 
     return similarities[:top_k]
 
@@ -246,9 +256,9 @@ def batch_eval_similarities(
     threshold: float = 0.70,
 ) -> None:
     """Batch check similarities between all pairs in eval set."""
-    print(f"\n{'='*80}")
-    print(f"BATCH SIMILARITY ANALYSIS")
-    print(f"{'='*80}")
+    print(f"\n{'=' * 80}")
+    print("BATCH SIMILARITY ANALYSIS")
+    print(f"{'=' * 80}")
     print(f"Eval issues: {len(eval_issues)}")
     print(f"Similarity threshold: {threshold}")
 
@@ -269,7 +279,7 @@ def batch_eval_similarities(
         if not emb1:
             continue
 
-        for issue2 in eval_issues[i+1:]:
+        for issue2 in eval_issues[i + 1 :]:
             sha2 = issue2.get("sha_fail", "")
             emb2 = l2_embeddings.get(sha2)
 
@@ -279,37 +289,58 @@ def batch_eval_similarities(
             sim = cosine_similarity(emb1, emb2)
 
             if sim >= threshold:
-                results.append({
-                    "issue1": issue1.get("id", ""),
-                    "issue2": issue2.get("id", ""),
-                    "repo1": issue1.get("repo_name", ""),
-                    "repo2": issue2.get("repo_name", ""),
-                    "similarity": sim,
-                })
+                results.append(
+                    {
+                        "issue1": issue1.get("id", ""),
+                        "issue2": issue2.get("id", ""),
+                        "repo1": issue1.get("repo_name", ""),
+                        "repo2": issue2.get("repo_name", ""),
+                        "similarity": sim,
+                    }
+                )
 
     # Sort by similarity
     results.sort(key=lambda x: x["similarity"], reverse=True)
 
     print(f"\n### Strong Matches (>={threshold})")
-    print(f"{'Issue 1':<10} {'Issue 2':<10} {'Repo 1':<15} {'Repo 2':<15} {'Similarity'}")
-    print(f"{'-'*70}")
+    print(
+        f"{'Issue 1':<10} {'Issue 2':<10} {'Repo 1':<15} {'Repo 2':<15} {'Similarity'}"
+    )
+    print(f"{'-' * 70}")
 
     for match in results:
-        print(f"{match['issue1']:<10} {match['issue2']:<10} {match['repo1']:<15} {match['repo2']:<15} {match['similarity']:.4f}")
+        print(
+            f"{match['issue1']:<10} {match['issue2']:<10} {match['repo1']:<15} {match['repo2']:<15} {match['similarity']:.4f}"
+        )
 
     print(f"\nTotal strong matches: {len(results)}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Check memory similarity")
-    parser.add_argument("--eval-issues", default="data/trs/eval_issues.json", help="Path to eval issues")
-    parser.add_argument("--memory-root", default="data/trs", help="Path to memory directory")
+    parser.add_argument(
+        "--eval-issues", default="data/trs/eval_issues.json", help="Path to eval issues"
+    )
+    parser.add_argument(
+        "--memory-root", default="data/trs", help="Path to memory directory"
+    )
     parser.add_argument("--issue-1", help="First issue ID to compare")
     parser.add_argument("--issue-2", help="Second issue ID to compare")
-    parser.add_argument("--query-issue", help="Issue ID to query (find similar memories)")
-    parser.add_argument("--top-k", type=int, default=5, help="Top K results for query mode")
-    parser.add_argument("--batch-eval", action="store_true", help="Batch check all pairs")
-    parser.add_argument("--threshold", type=float, default=0.70, help="Similarity threshold for strong match")
+    parser.add_argument(
+        "--query-issue", help="Issue ID to query (find similar memories)"
+    )
+    parser.add_argument(
+        "--top-k", type=int, default=5, help="Top K results for query mode"
+    )
+    parser.add_argument(
+        "--batch-eval", action="store_true", help="Batch check all pairs"
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.70,
+        help="Similarity threshold for strong match",
+    )
     args = parser.parse_args()
 
     # Load eval issues
@@ -330,22 +361,29 @@ def main():
         return 1
 
     if not l2_embeddings:
-        print(f"WARNING:  No embeddings found, will compute on the fly")
-        print(f"   Run: python scripts/precompute_embeddings.py --memory-root {memory_root}")
+        print("WARNING:  No embeddings found, will compute on the fly")
+        print(
+            f"   Run: python scripts/precompute_embeddings.py --memory-root {memory_root}"
+        )
 
     # Initialize embedding model
     try:
         from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+
+        model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     except ImportError:
-        print(f"ERROR sentence-transformers not installed")
-        print(f"   Run: pip install sentence-transformers")
+        print("ERROR sentence-transformers not installed")
+        print("   Run: pip install sentence-transformers")
         return 1
 
     # Mode: pair comparison
     if args.issue_1 and args.issue_2:
-        issue1 = next((i for i in eval_issues if str(i.get("id")) == args.issue_1), None)
-        issue2 = next((i for i in eval_issues if str(i.get("id")) == args.issue_2), None)
+        issue1 = next(
+            (i for i in eval_issues if str(i.get("id")) == args.issue_1), None
+        )
+        issue2 = next(
+            (i for i in eval_issues if str(i.get("id")) == args.issue_2), None
+        )
 
         if not issue1:
             print(f"ERROR Issue {args.issue_1} not found")
@@ -358,13 +396,17 @@ def main():
 
     # Mode: query retrieval
     elif args.query_issue:
-        query_issue = next((i for i in eval_issues if str(i.get("id")) == args.query_issue), None)
+        query_issue = next(
+            (i for i in eval_issues if str(i.get("id")) == args.query_issue), None
+        )
 
         if not query_issue:
             print(f"ERROR Issue {args.query_issue} not found")
             return 1
 
-        check_query_retrieval(query_issue, eval_issues, l2_records, l2_embeddings, model, args.top_k)
+        check_query_retrieval(
+            query_issue, eval_issues, l2_records, l2_embeddings, model, args.top_k
+        )
 
     # Mode: batch eval
     elif args.batch_eval:

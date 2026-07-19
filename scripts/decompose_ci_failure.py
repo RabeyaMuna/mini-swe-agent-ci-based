@@ -118,14 +118,15 @@ def _get_model_aware_limits(model_name: str | None = None) -> dict[str, int]:
             "diff_chunk_chars": config["input_chunk_chars"] // 2,
             "findings_inline_chars": int(config["input_chunk_chars"] * 0.4),
             "findings_batch_chars": int(config["input_chunk_chars"] * 0.3),
-
             # File and change counts for structured processing
             "max_files_per_chunk": config["decompose_max_files_per_chunk"],
             "max_changes_per_chunk": config["decompose_max_changes_per_chunk"],
             "output_safe_tokens": config["output_safe_tokens"],
         }
     except Exception as e:
-        LOGGER.warning(f"Could not get model-aware limits: {e}, using conservative defaults")
+        LOGGER.warning(
+            f"Could not get model-aware limits: {e}, using conservative defaults"
+        )
         # Fallback to conservative defaults
         return {
             "diff_chunk_chars": 30000,
@@ -135,6 +136,7 @@ def _get_model_aware_limits(model_name: str | None = None) -> dict[str, int]:
             "max_changes_per_chunk": 400,
             "output_safe_tokens": 7000,
         }
+
 
 LOGGER = logging.getLogger(__name__)
 STRICT_JSON_RULES = """### Output Rules (STRICT) - CRITICAL FOR PARSING
@@ -219,8 +221,11 @@ class LitellmModel:
             if max_tokens is None:
                 try:
                     from scripts.model_token_config import get_output_safe_tokens
+
                     max_tokens = get_output_safe_tokens(self.model_name)
-                    LOGGER.debug(f"Auto-detected max_tokens={max_tokens} for model={self.model_name}")
+                    LOGGER.debug(
+                        f"Auto-detected max_tokens={max_tokens} for model={self.model_name}"
+                    )
                 except Exception:
                     max_tokens = 16000  # Fallback
             if str(self.model_name).lower().startswith("zai/"):
@@ -805,10 +810,7 @@ def merge_chunks_by_validation(
                 "unknown",
             ):
                 seq_item = sequence_by_order.get(str(val_order), {})
-                val_cmd = str(
-                    seq_item.get("validation_cmd")
-                    or ""
-                ).strip()
+                val_cmd = str(seq_item.get("validation_cmd") or "").strip()
                 val_entry["validation_cmd"] = val_cmd
             if val_order in (None, "unknown") or not val_cmd or val_cmd == "unknown":
                 continue
@@ -950,7 +952,7 @@ def merge_chunks_by_validation(
 def _chunk_validation_changes(
     val_group: dict[str, Any],
     max_changes_per_chunk: int | None = None,
-    model_name: str | None = None
+    model_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Chunk a single validation if it has too many changes.
@@ -1500,7 +1502,9 @@ def _reorder_by_repair_trajectory(
         config_rank = (
             0
             if any(
-                str(file_path).endswith((".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock"))
+                str(file_path).endswith(
+                    (".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock")
+                )
                 for file_path in files
             )
             else 1
@@ -1611,9 +1615,7 @@ def _build_atomic_prompt(
     }.get(change_type, "")
 
     effective_validation_cmd = (
-        val_info.get("validation_cmd")
-        or chunk.get("validation_cmd")
-        or ""
+        val_info.get("validation_cmd") or chunk.get("validation_cmd") or ""
     )
 
     return f"""Analyze this validation group and create atomic CI repair problems.
@@ -1842,14 +1844,18 @@ def _analyze_split_atomic_chunk(
 ) -> list[dict[str, Any]]:
     changes = chunk.get("all_changes", [])
     if len(changes) <= min_changes_to_split:
-        print(f"      WARNING: Chunk too small to split further ({len(changes)} changes)")
+        print(
+            f"      WARNING: Chunk too small to split further ({len(changes)} changes)"
+        )
         print("        Returning empty to avoid infinite recursion")
         return []
 
     max_recursion_depth = 5
     if depth >= max_recursion_depth:
         print(f"      WARNING: Max recursion depth ({max_recursion_depth}) reached")
-        print(f"        Chunk {chunk_label} with {len(changes)} changes cannot be processed")
+        print(
+            f"        Chunk {chunk_label} with {len(changes)} changes cannot be processed"
+        )
         return []
 
     prompt = _build_atomic_prompt(
@@ -1905,7 +1911,9 @@ def _analyze_split_atomic_chunk(
         if not sub_problems:
             print(f"      {indent}  [WARN] Sub-chunk {sub_idx} returned 0 problems")
         else:
-            print(f"      {indent}  OK Sub-chunk {sub_idx} returned {len(sub_problems)} problems")
+            print(
+                f"      {indent}  OK Sub-chunk {sub_idx} returned {len(sub_problems)} problems"
+            )
         split_problems.extend(sub_problems)
 
         sleep_time = min(2**depth, 8)
@@ -1947,7 +1955,9 @@ def _analyze_atomic_chunk(
         if len(prompt) > ATOMIC_ANALYSIS_MAX_PROMPT_CHARS:
             print(f"        Proactive split: prompt too large ({len(prompt)} chars)")
         else:
-            print(f"        Proactive split: too many changes ({len(changes)} changes, max 200)")
+            print(
+                f"        Proactive split: too many changes ({len(changes)} changes, max 200)"
+            )
         result = "SPLIT_REQUIRED"
     else:
         result = _invoke_json(llm, prompt, max_tokens=ATOMIC_ANALYSIS_MAX_OUTPUT_TOKENS)
@@ -1994,7 +2004,9 @@ def _retry_empty_atomic_chunk(
     depth: int,
 ) -> list[dict[str, Any]]:
     changes = chunk.get("all_changes", [])
-    print(f"      WARNING {chunk_label} has {len(changes)} changes but returned 0 problems")
+    print(
+        f"      WARNING {chunk_label} has {len(changes)} changes but returned 0 problems"
+    )
 
     debug_file = (
         PROJECT_ROOT
@@ -2008,10 +2020,14 @@ def _retry_empty_atomic_chunk(
 
     if len(changes) <= 5 or depth >= 5:
         if len(changes) <= 5:
-            print(f"      WARNING: Chunk too small to split further ({len(changes)} changes)")
+            print(
+                f"      WARNING: Chunk too small to split further ({len(changes)} changes)"
+            )
         return []
 
-    print(f"      {'  ' * depth}RETRY: Malformed response, applying smart split strategy")
+    print(
+        f"      {'  ' * depth}RETRY: Malformed response, applying smart split strategy"
+    )
     return _analyze_split_atomic_chunk(
         chunk=chunk,
         chunk_label=f"{chunk_label}.retry",
@@ -2019,10 +2035,10 @@ def _retry_empty_atomic_chunk(
         val_info=val_info,
         ci_context=ci_context,
         failed_validation_order=failed_validation_order,
-            llm=llm,
-            depth=depth,
-            reason="RETRY",
-            min_changes_to_split=5,
+        llm=llm,
+        depth=depth,
+        reason="RETRY",
+        min_changes_to_split=5,
     )
 
 
@@ -2039,14 +2055,14 @@ def _normalize_problem_defaults(
     problem["failure_type"] = problem.get("failure_type") or val_group.get(
         "failure_type", ""
     )
-    problem["issue_type"] = problem.get("issue_type") or val_group.get(
-        "issue_type", ""
-    )
+    problem["issue_type"] = problem.get("issue_type") or val_group.get("issue_type", "")
     if not isinstance(problem.get("affected_files"), list):
         problem["affected_files"] = []
     problem["affected_files"] = list(
         dict.fromkeys(
-            str(file_path) for file_path in problem.get("affected_files", []) if file_path
+            str(file_path)
+            for file_path in problem.get("affected_files", [])
+            if file_path
         )
     )
     for key in ["problem", "root_cause", "how_fixed", "why_fix_works"]:
@@ -2054,7 +2070,9 @@ def _normalize_problem_defaults(
     return problem
 
 
-def _problem_merge_summaries(problems: list[dict[str, Any]], val_group: dict[str, Any]) -> list[dict[str, Any]]:
+def _problem_merge_summaries(
+    problems: list[dict[str, Any]], val_group: dict[str, Any]
+) -> list[dict[str, Any]]:
     return [
         {
             "local_id": idx,
@@ -2219,7 +2237,9 @@ def _merge_validation_problems(
         val_group=val_group,
     )
     if len(prompt) > VALIDATION_MERGE_MAX_PROMPT_CHARS:
-        print("      WARNING Validation merge prompt too large; using chunk-level problems")
+        print(
+            "      WARNING Validation merge prompt too large; using chunk-level problems"
+        )
         return problems
 
     result = _invoke_json(llm, prompt, max_tokens=VALIDATION_MERGE_MAX_OUTPUT_TOKENS)
@@ -2235,8 +2255,14 @@ def _merge_validation_problems(
     return merged
 
 
-def _group_changes_by_type(changes: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    groups: dict[str, list[dict[str, Any]]] = {"config": [], "dependency": [], "code": []}
+def _group_changes_by_type(
+    changes: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {
+        "config": [],
+        "dependency": [],
+        "code": [],
+    }
     for change in changes:
         file_path = change.get("file", "")
         before = str(change.get("before", "")).lower()
@@ -2262,8 +2288,14 @@ def _analyze_change_type_group(
     failed_validation_order: Any,
     llm: Any,
 ) -> list[dict[str, Any]]:
-    print(f"      Processing {change_type.upper()} group ({len(group_changes)} changes)...")
-    group_chunk = {**val_group, "all_changes": group_changes, "change_type": change_type}
+    print(
+        f"      Processing {change_type.upper()} group ({len(group_changes)} changes)..."
+    )
+    group_chunk = {
+        **val_group,
+        "all_changes": group_changes,
+        "change_type": change_type,
+    }
     test_prompt = _build_atomic_prompt(
         ci_context=ci_context,
         failed_validation_order=failed_validation_order,
@@ -2403,7 +2435,9 @@ def analyze_validation_groups_with_reasoning(
 
     all_problems = []
     next_id = 1
-    for val_order, val_group in sorted(groups_data.items(), key=_validation_group_sort_key):
+    for val_order, val_group in sorted(
+        groups_data.items(), key=_validation_group_sort_key
+    ):
         validation_problems = _analyze_one_validation_group(
             val_order=val_order,
             val_group=val_group,
@@ -2475,7 +2509,10 @@ def _normalize_classification_validations(
             val_cmd = str(validation.get("validation_cmd", "")).strip()
             for seq_item in validation_sequence:
                 effective_cmd = _effective_validation_cmd(seq_item)
-                if seq_item.get("validation_cmd") == val_cmd or effective_cmd == val_cmd:
+                if (
+                    seq_item.get("validation_cmd") == val_cmd
+                    or effective_cmd == val_cmd
+                ):
                     validation["validation_order"] = seq_item.get("order")
                     break
 
@@ -2558,7 +2595,9 @@ def _add_missing_file_fallbacks(
     return valid
 
 
-def _split_structured_chunk(chunk: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _split_structured_chunk(
+    chunk: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     files = chunk.get("files", [])
     files_list = list(files.items()) if isinstance(files, dict) else list(files)
     half = len(files_list) // 2
@@ -2571,7 +2610,9 @@ def _split_structured_chunk(chunk: dict[str, Any]) -> tuple[dict[str, Any], dict
         chunk2_files = files_list[half:]
 
     def change_count(file_records: Any) -> int:
-        records = file_records.values() if isinstance(file_records, dict) else file_records
+        records = (
+            file_records.values() if isinstance(file_records, dict) else file_records
+        )
         return sum(len(file_info.get("changes", [])) for file_info in records)
 
     return (
@@ -2760,9 +2801,7 @@ REQUIREMENTS:
 """
 
     try:
-        model_limits = _get_model_aware_limits(
-            getattr(llm, "model_name", None)
-        )
+        model_limits = _get_model_aware_limits(getattr(llm, "model_name", None))
         output_safe_tokens = model_limits["output_safe_tokens"]
 
         # Try classification. The output token budget uses the selected model's
@@ -2878,7 +2917,7 @@ def analyze_diff_chunks(
     chunks = chunk_structured_diff(
         structured_diff,
         max_files_per_chunk=max_files,
-        dependency_graph=dependency_graph  # NEW: Pass dependency graph
+        dependency_graph=dependency_graph,  # NEW: Pass dependency graph
     )
     print(f"    Using model-aware chunking: max {max_files} files per chunk")
     if not chunks:

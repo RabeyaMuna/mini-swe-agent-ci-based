@@ -4,7 +4,7 @@ import inspect
 import os
 from pathlib import Path
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
@@ -25,12 +25,13 @@ GLM_MODEL_NAME = os.getenv("GLM_MODEL_NAME", "glm-5.2")
 @dataclass
 class LLMInfo:
     """Configuration for one logical LLM."""
+
     provider: str
     model_name: str
     temperature: float = 0.0
     base_url: str | None = None
     api_key_env: str | None = None  # which env var holds the key
-    api_key: str | None = None      # direct key value (optional)
+    api_key: str | None = None  # direct key value (optional)
 
 
 # Registry of models (MiniMax-M2.5 and GLM-5.2)
@@ -57,7 +58,6 @@ LLM_REGISTRY: Dict[str, LLMInfo] = {
         base_url=OPENROUTER_BASE_URL,
         api_key=OPENROUTER_API_KEY,
     ),
-
     # GLM-5.2 via native Z.ai-compatible endpoint
     "glm-5.2": LLMInfo(
         provider="zai",
@@ -249,9 +249,15 @@ def get_llm(model_key: str) -> ChatOpenAI:
     base_url = info.base_url
     if info.provider == "openrouter":
         if "minimax" in model_key.lower():
-            base_url = os.getenv("OPENROUTER_BASE_URL") or base_url or "https://openrouter.ai/api/v1"
+            base_url = (
+                os.getenv("OPENROUTER_BASE_URL")
+                or base_url
+                or "https://openrouter.ai/api/v1"
+            )
     elif info.provider == "zai":
-        base_url = os.getenv("GLM_BASE_URL") or base_url or "https://api.z.ai/api/paas/v4"
+        base_url = (
+            os.getenv("GLM_BASE_URL") or base_url or "https://api.z.ai/api/paas/v4"
+        )
 
     if base_url:
         kwargs["base_url"] = base_url
@@ -282,4 +288,6 @@ def get_tracked_llm(
     extracting the model name.
     """
     llm = get_llm(model_key)
-    return TrackedLLM(llm=llm, tracker=tracker, agent_name=agent_name, model_key=model_key)
+    return TrackedLLM(
+        llm=llm, tracker=tracker, agent_name=agent_name, model_key=model_key
+    )

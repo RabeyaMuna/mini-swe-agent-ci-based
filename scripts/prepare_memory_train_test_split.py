@@ -53,21 +53,21 @@ def _matches_repo_filter(issue: Dict[str, Any], repo_filter: List[str]) -> bool:
     repo_full = str(issue.get("repo") or "").lower()
 
     return any(
-        filter_repo in repo_name
-        or filter_repo in repo_key
-        or filter_repo in repo_full
+        filter_repo in repo_name or filter_repo in repo_key or filter_repo in repo_full
         for filter_repo in repo_filter
     )
 
 
-def _load_from_huggingface(dataset_name: str = "ci-benchmark-user/ci-repair-bench") -> List[Dict[str, Any]]:
+def _load_from_huggingface(
+    dataset_name: str = "ci-benchmark-user/ci-repair-bench",
+) -> List[Dict[str, Any]]:
     """Load issues from HuggingFace dataset."""
     console.print(f"[cyan]Loading dataset from HuggingFace: {dataset_name}[/cyan]")
 
     try:
         # Direct load from HuggingFace
         ds = load_dataset(dataset_name)
-        data = ds['train']
+        data = ds["train"]
         console.print(f"[green]Loaded {len(data)} issues from HuggingFace[/green]")
 
         # Convert to list of dicts
@@ -94,7 +94,7 @@ def _load_from_jsonl(dataset_path: Path) -> List[Dict[str, Any]]:
 def _load_or_create_decomposed_issues(
     issues: List[Dict[str, Any]],
     decomposed_cache_path: Path,
-    force_recompute: bool = False
+    force_recompute: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Load decomposed issues from cache or create if not exists.
@@ -103,18 +103,26 @@ def _load_or_create_decomposed_issues(
     """
     # Check cache
     if decomposed_cache_path.exists() and not force_recompute:
-        console.print(f"[green]Loading decomposed issues from cache: {decomposed_cache_path}[/green]")
+        console.print(
+            f"[green]Loading decomposed issues from cache: {decomposed_cache_path}[/green]"
+        )
         with open(decomposed_cache_path, "r") as f:
             decomposed_cache = json.load(f)
 
         # Convert to dict keyed by issue_id
         decomposed_dict = {}
-        for item in decomposed_cache if isinstance(decomposed_cache, list) else [decomposed_cache]:
+        for item in (
+            decomposed_cache
+            if isinstance(decomposed_cache, list)
+            else [decomposed_cache]
+        ):
             issue_id = _issue_id(item)
             if issue_id:
                 decomposed_dict[issue_id] = item
 
-        console.print(f"[green]Found {len(decomposed_dict)} decomposed issues in cache[/green]")
+        console.print(
+            f"[green]Found {len(decomposed_dict)} decomposed issues in cache[/green]"
+        )
 
         # Check if all issues are in cache
         missing_ids = []
@@ -124,7 +132,9 @@ def _load_or_create_decomposed_issues(
                 missing_ids.append(issue_id)
 
         if missing_ids:
-            console.print(f"[yellow]Warning: {len(missing_ids)} issues not in cache:[/yellow]")
+            console.print(
+                f"[yellow]Warning: {len(missing_ids)} issues not in cache:[/yellow]"
+            )
             for mid in missing_ids[:5]:
                 console.print(f"  - {mid}")
             if len(missing_ids) > 5:
@@ -133,10 +143,12 @@ def _load_or_create_decomposed_issues(
         return decomposed_dict
 
     # Need to create decomposition
-    console.print(f"[yellow]Decomposed cache not found at {decomposed_cache_path}[/yellow]")
-    console.print(f"[yellow]You need to run decomposition first using:[/yellow]")
-    console.print(f"[cyan]python scripts/decompose_ci_failure.py --batch[/cyan]")
-    console.print(f"[yellow]Or provide an existing decomposed_issues.json path[/yellow]")
+    console.print(
+        f"[yellow]Decomposed cache not found at {decomposed_cache_path}[/yellow]"
+    )
+    console.print("[yellow]You need to run decomposition first using:[/yellow]")
+    console.print("[cyan]python scripts/decompose_ci_failure.py --batch[/cyan]")
+    console.print("[yellow]Or provide an existing decomposed_issues.json path[/yellow]")
 
     return {}
 
@@ -157,7 +169,8 @@ def _extract_diff_patterns(diff: str) -> str:
 
     # Extract changed files and their extensions
     import re
-    file_headers = re.findall(r'(?:---|\+\+\+) [ab]/(.*?)(?:\s|$)', diff)
+
+    file_headers = re.findall(r"(?:---|\+\+\+) [ab]/(.*?)(?:\s|$)", diff)
     extensions = set()
     for file_path in file_headers:
         if "." in file_path:
@@ -168,18 +181,18 @@ def _extract_diff_patterns(diff: str) -> str:
         patterns.append(f"Changed: {', '.join(sorted(extensions))}")
 
     # Detect change patterns
-    if re.search(r'^\+import |^\+from .* import', diff, re.MULTILINE):
+    if re.search(r"^\+import |^\+from .* import", diff, re.MULTILINE):
         patterns.append("Pattern: import changes")
     if re.search(r'^\+\s*".*":|^\+\s*[a-z_]+\s*=', diff, re.MULTILINE):
         patterns.append("Pattern: config/value changes")
-    if re.search(r'^\+def |^\+class |^\+async def', diff, re.MULTILINE):
+    if re.search(r"^\+def |^\+class |^\+async def", diff, re.MULTILINE):
         patterns.append("Pattern: new functions/classes")
-    if re.search(r'===+|---+|\*\*\*', diff, re.MULTILINE):
+    if re.search(r"===+|---+|\*\*\*", diff, re.MULTILINE):
         patterns.append("Pattern: RST/doc formatting")
 
     # Count additions vs deletions
-    additions = len(re.findall(r'^\+[^+]', diff, re.MULTILINE))
-    deletions = len(re.findall(r'^-[^-]', diff, re.MULTILINE))
+    additions = len(re.findall(r"^\+[^+]", diff, re.MULTILINE))
+    deletions = len(re.findall(r"^-[^-]", diff, re.MULTILINE))
 
     if additions > deletions * 2:
         patterns.append("Type: mostly additions")
@@ -192,8 +205,7 @@ def _extract_diff_patterns(diff: str) -> str:
 
 
 def _build_issue_text_from_decomposed(
-    issue: Dict[str, Any],
-    decomposed: Optional[Dict[str, Any]] = None
+    issue: Dict[str, Any], decomposed: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     Build text representation using EXISTING decomposition if available.
@@ -308,7 +320,7 @@ def _build_issue_text_from_decomposed(
 def _compute_embeddings(
     issues: List[Dict[str, Any]],
     decomposed_dict: Dict[str, Dict[str, Any]],
-    model_name: str = "all-MiniLM-L6-v2"
+    model_name: str = "all-MiniLM-L6-v2",
 ) -> Tuple[np.ndarray, SentenceTransformer]:
     """
     Compute embeddings for all issues using decomposed data if available.
@@ -342,9 +354,13 @@ def _compute_embeddings(
         text = _build_issue_text_from_decomposed(issue, decomposed)
         texts.append(text)
 
-    console.print(f"[green]Using decomposed data: {decomposed_count}/{len(issues)} issues[/green]")
+    console.print(
+        f"[green]Using decomposed data: {decomposed_count}/{len(issues)} issues[/green]"
+    )
     if raw_count > 0:
-        console.print(f"[yellow]Using raw data: {raw_count}/{len(issues)} issues[/yellow]")
+        console.print(
+            f"[yellow]Using raw data: {raw_count}/{len(issues)} issues[/yellow]"
+        )
 
     # Compute embeddings
     console.print("[cyan]Computing embeddings...[/cyan]")
@@ -376,8 +392,7 @@ def _group_by_repo(issues: List[Dict[str, Any]]) -> Dict[str, List[int]]:
 
 
 def _compute_similarity_within_repo(
-    embeddings: np.ndarray,
-    repo_indices: List[int]
+    embeddings: np.ndarray, repo_indices: List[int]
 ) -> np.ndarray:
     """
     Compute pairwise cosine similarity for issues within a repo.
@@ -391,9 +406,7 @@ def _compute_similarity_within_repo(
 
 
 def _select_representative_issues(
-    similarity_matrix: np.ndarray,
-    repo_indices: List[int],
-    memory_ratio: float = 0.3
+    similarity_matrix: np.ndarray, repo_indices: List[int], memory_ratio: float = 0.3
 ) -> Tuple[List[int], List[int]]:
     """
     Select most representative issues for memory set.
@@ -431,7 +444,7 @@ def _save_split_datasets(
     issues: List[Dict[str, Any]],
     memory_indices: List[int],
     eval_indices: List[int],
-    output_dir: Path
+    output_dir: Path,
 ):
     """Save memory and evaluation datasets (both full issues and ID lists)."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -471,7 +484,7 @@ def _save_split_datasets(
         "eval_set_size": len(eval_indices),
         "memory_ratio": len(memory_indices) / len(issues),
         "split_by_repo": True,
-        "selection_strategy": "highest_avg_similarity"
+        "selection_strategy": "highest_avg_similarity",
     }
     metadata_path = output_dir / "split_metadata.json"
     with open(metadata_path, "w") as f:
@@ -485,12 +498,10 @@ def _save_similarity_analysis(
     repo_groups: Dict[str, List[int]],
     memory_indices: List[int],
     eval_indices: List[int],
-    output_dir: Path
+    output_dir: Path,
 ):
     """Save similarity analysis for inspection."""
-    analysis = {
-        "repositories": {}
-    }
+    analysis = {"repositories": {}}
 
     for repo_key, repo_indices in repo_groups.items():
         similarity_matrix = _compute_similarity_within_repo(embeddings, repo_indices)
@@ -499,7 +510,9 @@ def _save_similarity_analysis(
         avg_sim = similarity_matrix.mean()
         max_sim = similarity_matrix.max()
         upper_triangle = similarity_matrix[np.triu_indices_from(similarity_matrix, k=1)]
-        min_sim = upper_triangle.min() if upper_triangle.size else similarity_matrix.min()
+        min_sim = (
+            upper_triangle.min() if upper_triangle.size else similarity_matrix.min()
+        )
 
         # Count memory vs eval
         memory_count = sum(1 for idx in repo_indices if idx in memory_indices)
@@ -511,7 +524,7 @@ def _save_similarity_analysis(
             "eval_set": eval_count,
             "avg_similarity": float(avg_sim),
             "max_similarity": float(max_sim),
-            "min_similarity": float(min_sim)
+            "min_similarity": float(min_sim),
         }
 
     analysis_path = output_dir / "similarity_analysis.json"
@@ -522,13 +535,30 @@ def _save_similarity_analysis(
 
 @app.command()
 def main(
-    dataset: Optional[Path] = typer.Option(None, help="Path to local dataset JSONL file (optional, uses HuggingFace if not provided)"),
-    output_dir: Path = typer.Option("data/trs", help="Output directory for all memory-related data"),
-    memory_ratio: float = typer.Option(0.3, help="Ratio of issues to use for memory (0.0-1.0)"),
-    similarity_threshold: float = typer.Option(0.5, help="Minimum similarity for grouping (unused for now)"),
-    embedding_model: str = typer.Option("all-MiniLM-L6-v2", help="Sentence transformer model"),
-    repos: str = typer.Option(None, help="Filter by repo names (comma-separated, e.g., 'flower,agno'). If not specified, processes all repos."),
-    hf_dataset: str = typer.Option("ci-benchmark-user/ci-repair-bench", help="HuggingFace dataset name (used if --dataset not provided)"),
+    dataset: Optional[Path] = typer.Option(
+        None,
+        help="Path to local dataset JSONL file (optional, uses HuggingFace if not provided)",
+    ),
+    output_dir: Path = typer.Option(
+        "data/trs", help="Output directory for all memory-related data"
+    ),
+    memory_ratio: float = typer.Option(
+        0.3, help="Ratio of issues to use for memory (0.0-1.0)"
+    ),
+    similarity_threshold: float = typer.Option(
+        0.5, help="Minimum similarity for grouping (unused for now)"
+    ),
+    embedding_model: str = typer.Option(
+        "all-MiniLM-L6-v2", help="Sentence transformer model"
+    ),
+    repos: str = typer.Option(
+        None,
+        help="Filter by repo names (comma-separated, e.g., 'flower,agno'). If not specified, processes all repos.",
+    ),
+    hf_dataset: str = typer.Option(
+        "ci-benchmark-user/ci-repair-bench",
+        help="HuggingFace dataset name (used if --dataset not provided)",
+    ),
 ):
     """
     Analyze CI repair dataset and split into memory/evaluation sets based on similarity.
@@ -557,11 +587,9 @@ def main(
 
     # 1.5. Load decomposed issues (REUSE existing decomposition!)
     decomposed_cache_path = output_dir / "decomposed_issues.json"
-    console.print(f"\n[cyan]Checking for decomposed issues...[/cyan]")
+    console.print("\n[cyan]Checking for decomposed issues...[/cyan]")
     decomposed_dict = _load_or_create_decomposed_issues(
-        all_issues,
-        decomposed_cache_path,
-        force_recompute=False
+        all_issues, decomposed_cache_path, force_recompute=False
     )
 
     # Filter by repos if specified
@@ -574,11 +602,15 @@ def main(
             if _matches_repo_filter(issue, repo_filter):
                 issues.append(issue)
 
-        console.print(f"[green]Filtered: {len(issues)} issues (from {len(all_issues)} total)[/green]\n")
+        console.print(
+            f"[green]Filtered: {len(issues)} issues (from {len(all_issues)} total)[/green]\n"
+        )
 
         if len(issues) == 0:
-            console.print("[bold red]No issues found matching the repo filter![/bold red]")
-            console.print(f"Available repos in dataset:")
+            console.print(
+                "[bold red]No issues found matching the repo filter![/bold red]"
+            )
+            console.print("Available repos in dataset:")
             repos_in_dataset = set()
             for issue in all_issues:
                 repo_owner = issue.get("repo_owner", "unknown")
@@ -607,9 +639,7 @@ def main(
 
         # Select memory vs eval
         memory_indices, eval_indices = _select_representative_issues(
-            similarity_matrix,
-            repo_indices,
-            memory_ratio
+            similarity_matrix, repo_indices, memory_ratio
         )
 
         all_memory_indices.extend(memory_indices)
@@ -633,18 +663,22 @@ def main(
         repo_groups,
         set(all_memory_indices),
         set(all_eval_indices),
-        output_dir
+        output_dir,
     )
 
     # Summary
     console.print("\n[bold green]Split Complete![/bold green]")
     console.print(f"Total issues: {len(issues)}")
-    console.print(f"Memory set: {len(all_memory_indices)} ({len(all_memory_indices)/len(issues):.1%})")
-    console.print(f"Eval set: {len(all_eval_indices)} ({len(all_eval_indices)/len(issues):.1%})")
-    console.print(f"\nNext steps:")
-    console.print(f"1. Run memory set through agent to generate L2 trajectories")
-    console.print(f"2. Save L2 trajectories to memory system")
-    console.print(f"3. Evaluate on eval set using memory from step 2")
+    console.print(
+        f"Memory set: {len(all_memory_indices)} ({len(all_memory_indices) / len(issues):.1%})"
+    )
+    console.print(
+        f"Eval set: {len(all_eval_indices)} ({len(all_eval_indices) / len(issues):.1%})"
+    )
+    console.print("\nNext steps:")
+    console.print("1. Run memory set through agent to generate L2 trajectories")
+    console.print("2. Save L2 trajectories to memory system")
+    console.print("3. Evaluate on eval set using memory from step 2")
 
 
 if __name__ == "__main__":

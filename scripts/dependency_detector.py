@@ -9,7 +9,6 @@ dependency-aware chunking and analysis.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Any
 
 
@@ -54,28 +53,17 @@ def build_dependency_graph(structured_diff: dict[str, Any]) -> dict[str, Any]:
         # Extract dependencies
         deps = _extract_dependencies(file_path, changes)
 
-        nodes[file_path] = {
-            "type": file_type,
-            **deps
-        }
+        nodes[file_path] = {"type": file_type, **deps}
 
         # Create edges
         for dep_type in ["imports", "reads", "tests", "configures"]:
             for dep_file in deps.get(dep_type, []):
-                edges.append({
-                    "from": file_path,
-                    "to": dep_file,
-                    "type": dep_type
-                })
+                edges.append({"from": file_path, "to": dep_file, "type": dep_type})
 
     # Step 2: Build dependency clusters
     clusters = _build_dependency_clusters(nodes, edges)
 
-    return {
-        "nodes": nodes,
-        "edges": edges,
-        "clusters": clusters
-    }
+    return {"nodes": nodes, "edges": edges, "clusters": clusters}
 
 
 def _classify_file_type(file_path: str) -> str:
@@ -104,19 +92,12 @@ def _extract_dependencies(file_path: str, changes: list[dict]) -> dict[str, list
             "configures": ["*.py"]          # Files this config affects
         }
     """
-    deps = {
-        "imports": [],
-        "reads": [],
-        "tests": [],
-        "configures": []
-    }
+    deps = {"imports": [], "reads": [], "tests": [], "configures": []}
 
     # Combine all changes into single text for analysis
-    all_code = "\n".join([
-        change.get("after", "")
-        for change in changes
-        if change.get("after")
-    ])
+    all_code = "\n".join(
+        [change.get("after", "") for change in changes if change.get("after")]
+    )
 
     # Detect imports
     if file_path.endswith(".py"):
@@ -142,8 +123,8 @@ def _extract_python_imports(code: str) -> list[str]:
 
     # Match: from X import Y, import X
     patterns = [
-        r'from\s+([\w.]+)\s+import',  # from module import
-        r'import\s+([\w.]+)',          # import module
+        r"from\s+([\w.]+)\s+import",  # from module import
+        r"import\s+([\w.]+)",  # import module
     ]
 
     for pattern in patterns:
@@ -214,8 +195,7 @@ def _infer_config_affects(config_path: str, content: str) -> list[str]:
 
 
 def _build_dependency_clusters(
-    nodes: dict[str, dict],
-    edges: list[dict]
+    nodes: dict[str, dict], edges: list[dict]
 ) -> list[list[str]]:
     """
     Build dependency clusters - groups of files that should be analyzed together.
@@ -263,6 +243,7 @@ def _build_dependency_clusters(
 def expand_glob_patterns(pattern: str, all_files: list[str]) -> list[str]:
     """Expand glob pattern against list of actual files."""
     import fnmatch
+
     matched = []
 
     for file_path in all_files:
@@ -273,8 +254,7 @@ def expand_glob_patterns(pattern: str, all_files: list[str]) -> list[str]:
 
 
 def get_dependency_cluster_for_file(
-    file_path: str,
-    dependency_graph: dict[str, Any]
+    file_path: str, dependency_graph: dict[str, Any]
 ) -> list[str]:
     """Get the dependency cluster containing this file."""
     for cluster in dependency_graph.get("clusters", []):
@@ -283,10 +263,7 @@ def get_dependency_cluster_for_file(
     return [file_path]  # Singleton cluster
 
 
-def explain_dependencies(
-    cluster: list[str],
-    dependency_graph: dict[str, Any]
-) -> str:
+def explain_dependencies(cluster: list[str], dependency_graph: dict[str, Any]) -> str:
     """
     Generate human-readable explanation of dependencies in a cluster.
 
@@ -295,7 +272,7 @@ def explain_dependencies(
     "config.toml CONFIGURES all Python files"
     """
     edges = dependency_graph.get("edges", [])
-    nodes = dependency_graph.get("nodes", {})
+    dependency_graph.get("nodes", {})
 
     explanations = []
 
@@ -318,14 +295,9 @@ if __name__ == "__main__":
         "files": [
             {
                 "path": "exit_code_test.py",
-                "changes": [
-                    {"after": 'Path("ref-exit-codes/").glob("*.rst")'}
-                ]
+                "changes": [{"after": 'Path("ref-exit-codes/").glob("*.rst")'}],
             },
-            {
-                "path": "ref-exit-codes/000.rst",
-                "changes": [{"after": "##### heading"}]
-            }
+            {"path": "ref-exit-codes/000.rst", "changes": [{"after": "##### heading"}]},
         ]
     }
 

@@ -246,9 +246,9 @@ def should_chunk_input(text: str, model_name: str | None = None) -> tuple[bool, 
 if __name__ == "__main__":
     from scripts.model_token_config import get_model_config
 
-    print("="*80)
+    print("=" * 80)
     print("ADAPTIVE CHUNKING STRATEGY")
-    print("="*80)
+    print("=" * 80)
     print()
 
     for model_name in ["minimax-m2.5", "glm-5.2"]:
@@ -259,20 +259,21 @@ if __name__ == "__main__":
         print()
 
         # Simulate fallback
-        current_size = config['input_chunk_tokens']
+        current_size = config["input_chunk_tokens"]
         print("  Fallback sequence:")
         for i in range(5):
             from scripts.model_token_config import get_fallback_chunk_size
+
             current_size = get_fallback_chunk_size(current_size, model_name)
-            print(f"    Attempt {i+2}: {current_size:,} tokens")
+            print(f"    Attempt {i + 2}: {current_size:,} tokens")
 
         print()
-        print("-"*80)
+        print("-" * 80)
         print()
 
     # Test validation
     print("\nINPUT/OUTPUT VALIDATION:")
-    print("-"*80)
+    print("-" * 80)
 
     from scripts.model_token_config import validate_input_output_fit
 
@@ -280,12 +281,14 @@ if __name__ == "__main__":
         ("minimax-m2.5", 150_000, 16_000),
         ("minimax-m2.5", 200_000, 16_000),  # Should fail
         ("glm-5.2", 200_000, 280_000),
-        ("glm-5.2", 700_000, 280_000),      # Should fail
+        ("glm-5.2", 700_000, 280_000),  # Should fail
     ]
 
     for model, input_tokens, output_tokens in test_cases:
         fits, message = validate_input_output_fit(input_tokens, output_tokens, model)
         status = "OK" if fits else "FAIL"
-        print(f"{status} {model:15} | Input: {input_tokens:>7,} | Output: {output_tokens:>7,}")
+        print(
+            f"{status} {model:15} | Input: {input_tokens:>7,} | Output: {output_tokens:>7,}"
+        )
         print(f"   {message}")
         print()

@@ -21,62 +21,62 @@ class ModelConfig(TypedDict):
     """Model configuration for token limits and chunking."""
 
     # Input limits
-    input_context_window: int        # Total context window
-    input_chunk_tokens: int          # Recommended chunk size for processing
-    input_chunk_chars: int           # Approximate characters per chunk
+    input_context_window: int  # Total context window
+    input_chunk_tokens: int  # Recommended chunk size for processing
+    input_chunk_chars: int  # Approximate characters per chunk
 
     # Output limits
-    output_max_tokens: int           # Maximum output tokens
-    output_safe_tokens: int          # Safe output limit (with buffer)
+    output_max_tokens: int  # Maximum output tokens
+    output_safe_tokens: int  # Safe output limit (with buffer)
 
     # L1/L2/L3 analysis limits
-    l1_chunk_size: int               # Number of L1 memories per chunk
-    l1_max_total: int                # Maximum L1s to process (safety limit)
-    l2_batch_size: int               # Number of L2 trajectories per batch
-    l2_common_candidates: int        # L2 common problem candidates
-    l2_consecutive_candidates: int   # L2 consecutive problem candidates
+    l1_chunk_size: int  # Number of L1 memories per chunk
+    l1_max_total: int  # Maximum L1s to process (safety limit)
+    l2_batch_size: int  # Number of L2 trajectories per batch
+    l2_common_candidates: int  # L2 common problem candidates
+    l2_consecutive_candidates: int  # L2 consecutive problem candidates
     decompose_max_files_per_chunk: int
     decompose_max_changes_per_chunk: int
 
     # Multi-stage flags
-    requires_multi_stage: bool       # Whether output limit requires splitting
-    supports_large_output: bool      # Can handle 100k+ token outputs
+    requires_multi_stage: bool  # Whether output limit requires splitting
+    supports_large_output: bool  # Can handle 100k+ token outputs
 
 
 # Model configurations based on OpenRouter specs
 # IMPORTANT: input_chunk_tokens + output_max_tokens + prompt_overhead MUST be <= input_context_window
 MODEL_CONFIGS: dict[str, ModelConfig] = {
     "minimax-m2.5": {
-        "input_context_window": 196_608,    # Actual limit from litellm (was 245k, corrected)
-        "input_chunk_tokens": 100_000,      # Safe: 100k input + 65k output + 10k prompt = 175k <= 197k OK
-        "input_chunk_chars": 400_000,       # ~4 chars per token
-        "output_max_tokens": 65_536,        # ACTUAL limit from litellm (was 16k - WRONG!)
-        "output_safe_tokens": 60_000,       # Safe limit with buffer (~92% of max)
-        "l1_chunk_size": 15,                # L1s per chunk (was 5)
-        "l1_max_total": 60,                 # Max total L1s to process (CONSERVATIVE: 4x increase from 15)
-        "l2_batch_size": 20,                # Larger batch size (was 10)
-        "l2_common_candidates": 120,        # Common problem candidates (CONSERVATIVE: 4x from 30)
-        "l2_consecutive_candidates": 160,   # Consecutive candidates (CONSERVATIVE: 4x from 40)
+        "input_context_window": 196_608,  # Actual limit from litellm (was 245k, corrected)
+        "input_chunk_tokens": 100_000,  # Safe: 100k input + 65k output + 10k prompt = 175k <= 197k OK
+        "input_chunk_chars": 400_000,  # ~4 chars per token
+        "output_max_tokens": 65_536,  # ACTUAL limit from litellm (was 16k - WRONG!)
+        "output_safe_tokens": 60_000,  # Safe limit with buffer (~92% of max)
+        "l1_chunk_size": 15,  # L1s per chunk (was 5)
+        "l1_max_total": 60,  # Max total L1s to process (CONSERVATIVE: 4x increase from 15)
+        "l2_batch_size": 20,  # Larger batch size (was 10)
+        "l2_common_candidates": 120,  # Common problem candidates (CONSERVATIVE: 4x from 30)
+        "l2_consecutive_candidates": 160,  # Consecutive candidates (CONSERVATIVE: 4x from 40)
         "decompose_max_files_per_chunk": 80,
         "decompose_max_changes_per_chunk": 400,
-        "requires_multi_stage": False,      # Single-stage for most cases now! (was True)
-        "supports_large_output": True,      # YES! 65k is large (was False)
+        "requires_multi_stage": False,  # Single-stage for most cases now! (was True)
+        "supports_large_output": True,  # YES! 65k is large (was False)
     },
     "glm-5.2": {
         "input_context_window": 1_000_000,  # 1M tokens - HUGE!
-        "input_chunk_tokens": 800_000,      # OPTIMIZED: 800k input + 131k output + 20k overhead = 951k <= 1M OK
-        "input_chunk_chars": 3_200_000,     # ~4 chars per token (800k tokens)
-        "output_max_tokens": 131_072,       # Native Z.ai provider limit (128k)
-        "output_safe_tokens": 120_000,      # Safe limit with buffer (~92% of max)
-        "l1_chunk_size": 80,                # OPTIMIZED: 80 L1s per chunk (was 15)
-        "l1_max_total": 400,                # OPTIMIZED: Max 400 L1s total (was 150)
-        "l2_batch_size": 100,               # OPTIMIZED: 100 trajectories per batch (was 25)
-        "l2_common_candidates": 1200,       # OPTIMIZED: 1200 common candidates (was 240)
+        "input_chunk_tokens": 800_000,  # OPTIMIZED: 800k input + 131k output + 20k overhead = 951k <= 1M OK
+        "input_chunk_chars": 3_200_000,  # ~4 chars per token (800k tokens)
+        "output_max_tokens": 131_072,  # Native Z.ai provider limit (128k)
+        "output_safe_tokens": 120_000,  # Safe limit with buffer (~92% of max)
+        "l1_chunk_size": 80,  # OPTIMIZED: 80 L1s per chunk (was 15)
+        "l1_max_total": 400,  # OPTIMIZED: Max 400 L1s total (was 150)
+        "l2_batch_size": 100,  # OPTIMIZED: 100 trajectories per batch (was 25)
+        "l2_common_candidates": 1200,  # OPTIMIZED: 1200 common candidates (was 240)
         "l2_consecutive_candidates": 1600,  # OPTIMIZED: 1600 consecutive (was 320)
-        "decompose_max_files_per_chunk": 600, # OPTIMIZED: 600 files per chunk (was 150)
-        "decompose_max_changes_per_chunk": 3200, # OPTIMIZED: 3200 changes (was 800)
-        "requires_multi_stage": False,      # Can do single-stage analysis
-        "supports_large_output": True,      # Supports 100k+ outputs
+        "decompose_max_files_per_chunk": 600,  # OPTIMIZED: 600 files per chunk (was 150)
+        "decompose_max_changes_per_chunk": 3200,  # OPTIMIZED: 3200 changes (was 800)
+        "requires_multi_stage": False,  # Can do single-stage analysis
+        "supports_large_output": True,  # Supports 100k+ outputs
     },
     # Fallback/default configuration
     "default": {
@@ -128,7 +128,12 @@ def get_model_config(model_name: str | None) -> ModelConfig:
         normalized = normalized.replace(prefix, "")
 
     # Match to configuration
-    if "glm" in normalized or "gml" in normalized or "5.2" in normalized or "glm-5" in normalized:
+    if (
+        "glm" in normalized
+        or "gml" in normalized
+        or "5.2" in normalized
+        or "glm-5" in normalized
+    ):
         return MODEL_CONFIGS["glm-5.2"]
 
     if "minimax" in normalized or "m2.5" in normalized or "2.5" in normalized:
@@ -193,7 +198,9 @@ def requires_multi_stage(model_name: str | None) -> bool:
     return get_model_config(model_name)["requires_multi_stage"]
 
 
-def calculate_safe_input_limit(model_name: str | None, desired_output_tokens: int | None = None) -> int:
+def calculate_safe_input_limit(
+    model_name: str | None, desired_output_tokens: int | None = None
+) -> int:
     """
     Calculate safe input limit ensuring: input + output + overhead <= context window.
 
@@ -218,7 +225,9 @@ def calculate_safe_input_limit(model_name: str | None, desired_output_tokens: in
     return max(0, max_safe_input)
 
 
-def get_fallback_chunk_size(current_chunk_tokens: int, model_name: str | None = None) -> int:
+def get_fallback_chunk_size(
+    current_chunk_tokens: int, model_name: str | None = None
+) -> int:
     """
     Get fallback chunk size when hitting token limits.
 
@@ -242,9 +251,7 @@ def get_fallback_chunk_size(current_chunk_tokens: int, model_name: str | None = 
 
 
 def validate_input_output_fit(
-    input_tokens: int,
-    output_tokens: int,
-    model_name: str | None
+    input_tokens: int, output_tokens: int, model_name: str | None
 ) -> tuple[bool, str]:
     """
     Validate that input + output + overhead fits in context window.
@@ -265,18 +272,24 @@ def validate_input_output_fit(
 
     if total_needed <= context_window:
         headroom = context_window - total_needed
-        return True, f"OK Fits: {total_needed:,} <= {context_window:,} (headroom: {headroom:,})"
+        return (
+            True,
+            f"OK Fits: {total_needed:,} <= {context_window:,} (headroom: {headroom:,})",
+        )
     else:
         overflow = total_needed - context_window
-        return False, f"NO Overflow: {total_needed:,} > {context_window:,} (over by: {overflow:,})"
+        return (
+            False,
+            f"NO Overflow: {total_needed:,} > {context_window:,} (over by: {overflow:,})",
+        )
 
 
 # Convenience function to print model comparison
 def print_model_comparison():
     """Print comparison table of model configurations."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("MODEL TOKEN CONFIGURATION COMPARISON")
-    print("="*80)
+    print("=" * 80)
 
     headers = ["Model", "Input Chunk", "Output Max", "L1 Chunk", "Large Output"]
     col_widths = [15, 15, 15, 12, 15]
@@ -293,12 +306,12 @@ def print_model_comparison():
             model_key,
             f"{config['input_chunk_tokens']:,}",
             f"{config['output_max_tokens']:,}",
-            str(config['l1_chunk_size']),
-            "OK" if config['supports_large_output'] else "NO",
+            str(config["l1_chunk_size"]),
+            "OK" if config["supports_large_output"] else "NO",
         ]
         print(" | ".join(val.ljust(w) for val, w in zip(row, col_widths)))
 
-    print("="*80)
+    print("=" * 80)
     print()
 
 
@@ -319,4 +332,6 @@ if __name__ == "__main__":
     print("-" * 80)
     for model in test_models:
         config = get_model_config(model)
-        print(f"{model:40} -> Input: {config['input_chunk_tokens']:>8,} | Output: {config['output_max_tokens']:>8,}")
+        print(
+            f"{model:40} -> Input: {config['input_chunk_tokens']:>8,} | Output: {config['output_max_tokens']:>8,}"
+        )

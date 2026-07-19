@@ -54,20 +54,20 @@ def parse_diff_to_structured(diff: str) -> Dict[str, Any]:
     current_file = None
     current_hunk_start = 0
 
-    lines = diff.split('\n')
+    lines = diff.split("\n")
     i = 0
 
     while i < len(lines):
         line = lines[i]
 
         # New file header
-        if line.startswith('diff --git'):
+        if line.startswith("diff --git"):
             # Save previous file if exists
             if current_file:
                 files.append(current_file)
 
             # Extract file path
-            match = re.search(r'diff --git a/(.*?) b/', line)
+            match = re.search(r"diff --git a/(.*?) b/", line)
             if match:
                 file_path = match.group(1)
                 file_type = _get_file_extension(file_path)
@@ -75,55 +75,65 @@ def parse_diff_to_structured(diff: str) -> Dict[str, Any]:
                     "path": file_path,
                     "file_type": file_type,
                     "changes": [],
-                    "total_changes": 0
+                    "total_changes": 0,
                 }
 
         # Hunk header (@@ -X,Y +A,B @@)
-        elif line.startswith('@@'):
-            match = re.match(r'@@ -(\d+),?\d* \+(\d+),?\d* @@', line)
+        elif line.startswith("@@"):
+            match = re.match(r"@@ -(\d+),?\d* \+(\d+),?\d* @@", line)
             if match:
                 current_hunk_start = int(match.group(2))  # New line number
 
         # Changed lines
         elif current_file:
-            if line.startswith('-') and not line.startswith('---'):
+            if line.startswith("-") and not line.startswith("---"):
                 # Deletion
                 before_code = line[1:]  # Remove '-' prefix
 
                 # Check if next line is addition (modification)
-                if i + 1 < len(lines) and lines[i + 1].startswith('+') and not lines[i + 1].startswith('+++'):
+                if (
+                    i + 1 < len(lines)
+                    and lines[i + 1].startswith("+")
+                    and not lines[i + 1].startswith("+++")
+                ):
                     after_code = lines[i + 1][1:]  # Remove '+' prefix
-                    current_file["changes"].append({
-                        "line": current_hunk_start,
-                        "before": before_code,
-                        "after": after_code,
-                        "change_type": "modified"
-                    })
+                    current_file["changes"].append(
+                        {
+                            "line": current_hunk_start,
+                            "before": before_code,
+                            "after": after_code,
+                            "change_type": "modified",
+                        }
+                    )
                     current_file["total_changes"] += 1
                     i += 1  # Skip next line since we processed it
                 else:
                     # Pure deletion
-                    current_file["changes"].append({
-                        "line": current_hunk_start,
-                        "before": before_code,
-                        "after": "",
-                        "change_type": "deleted"
-                    })
+                    current_file["changes"].append(
+                        {
+                            "line": current_hunk_start,
+                            "before": before_code,
+                            "after": "",
+                            "change_type": "deleted",
+                        }
+                    )
                     current_file["total_changes"] += 1
 
-            elif line.startswith('+') and not line.startswith('+++'):
+            elif line.startswith("+") and not line.startswith("+++"):
                 # Addition (not paired with deletion above)
                 after_code = line[1:]
-                current_file["changes"].append({
-                    "line": current_hunk_start,
-                    "before": "",
-                    "after": after_code,
-                    "change_type": "added"
-                })
+                current_file["changes"].append(
+                    {
+                        "line": current_hunk_start,
+                        "before": "",
+                        "after": after_code,
+                        "change_type": "added",
+                    }
+                )
                 current_file["total_changes"] += 1
                 current_hunk_start += 1
 
-            elif not line.startswith(('-', '+', '@', 'diff', 'index', '---', '+++')):
+            elif not line.startswith(("-", "+", "@", "diff", "index", "---", "+++")):
                 # Context line (unchanged)
                 current_hunk_start += 1
 
@@ -135,24 +145,20 @@ def parse_diff_to_structured(diff: str) -> Dict[str, Any]:
 
     total_changes = sum(f["total_changes"] for f in files)
 
-    return {
-        "files": files,
-        "total_files": len(files),
-        "total_changes": total_changes
-    }
+    return {"files": files, "total_files": len(files), "total_changes": total_changes}
 
 
 def _get_file_extension(file_path: str) -> str:
     """Extract file extension."""
-    if '.' in file_path:
-        return '.' + file_path.rsplit('.', 1)[1]
+    if "." in file_path:
+        return "." + file_path.rsplit(".", 1)[1]
     return ""
 
 
 def chunk_structured_diff(
     structured: Dict[str, Any],
     max_files_per_chunk: int = 10,
-    dependency_graph: Dict[str, Any] = None
+    dependency_graph: Dict[str, Any] = None,
 ) -> List[Dict[str, Any]]:
     """
     Split structured diff into chunks.
@@ -180,38 +186,39 @@ def chunk_structured_diff(
     # Use dependency-aware chunking if graph provided
     if dependency_graph and dependency_graph.get("clusters"):
         return _chunk_by_dependency_clusters(
-            files,
-            dependency_graph,
-            max_files_per_chunk
+            files, dependency_graph, max_files_per_chunk
         )
 
     # Fall back to simple chunking
     return _chunk_by_file_count(files, max_files_per_chunk)
 
 
-def _chunk_by_file_count(files: List[Dict], max_files_per_chunk: int) -> List[Dict[str, Any]]:
+def _chunk_by_file_count(
+    files: List[Dict], max_files_per_chunk: int
+) -> List[Dict[str, Any]]:
     """Simple chunking by file count (original logic)."""
     chunks = []
 
     for i in range(0, len(files), max_files_per_chunk):
-        chunk_files = files[i:i + max_files_per_chunk]
+        chunk_files = files[i : i + max_files_per_chunk]
         chunk_total_changes = sum(f["total_changes"] for f in chunk_files)
 
-        chunks.append({
-            "files": chunk_files,
-            "total_files": len(chunk_files),
-            "total_changes": chunk_total_changes,
-            "chunk_index": len(chunks) + 1,
-            "total_chunks": (len(files) + max_files_per_chunk - 1) // max_files_per_chunk
-        })
+        chunks.append(
+            {
+                "files": chunk_files,
+                "total_files": len(chunk_files),
+                "total_changes": chunk_total_changes,
+                "chunk_index": len(chunks) + 1,
+                "total_chunks": (len(files) + max_files_per_chunk - 1)
+                // max_files_per_chunk,
+            }
+        )
 
     return chunks
 
 
 def _chunk_by_dependency_clusters(
-    files: List[Dict],
-    dependency_graph: Dict[str, Any],
-    max_files_per_chunk: int
+    files: List[Dict], dependency_graph: Dict[str, Any], max_files_per_chunk: int
 ) -> List[Dict[str, Any]]:
     """
     Dependency-aware chunking - keep related files together.
@@ -230,9 +237,7 @@ def _chunk_by_dependency_clusters(
     for cluster in dependency_graph.get("clusters", []):
         # Get file info for files in this cluster
         cluster_files = [
-            file_path_to_info[path]
-            for path in cluster
-            if path in file_path_to_info
+            file_path_to_info[path] for path in cluster if path in file_path_to_info
         ]
 
         if not cluster_files:
@@ -242,29 +247,35 @@ def _chunk_by_dependency_clusters(
         if len(cluster_files) <= max_files_per_chunk:
             chunk_total_changes = sum(f["total_changes"] for f in cluster_files)
 
-            chunks.append({
-                "files": cluster_files,
-                "total_files": len(cluster_files),
-                "total_changes": chunk_total_changes,
-                "chunk_index": len(chunks) + 1,
-                "dependency_cluster": cluster,
-                "dependency_explanation": explain_dependencies(cluster, dependency_graph),
-            })
-        else:
-            # Cluster too large - split it (but keep track it's from same cluster)
-            for i in range(0, len(cluster_files), max_files_per_chunk):
-                sub_chunk_files = cluster_files[i:i + max_files_per_chunk]
-                chunk_total_changes = sum(f["total_changes"] for f in sub_chunk_files)
-
-                chunks.append({
-                    "files": sub_chunk_files,
-                    "total_files": len(sub_chunk_files),
+            chunks.append(
+                {
+                    "files": cluster_files,
+                    "total_files": len(cluster_files),
                     "total_changes": chunk_total_changes,
                     "chunk_index": len(chunks) + 1,
                     "dependency_cluster": cluster,
-                    "dependency_explanation": f"Part of larger cluster: {explain_dependencies(cluster, dependency_graph)}",
-                    "is_partial_cluster": True,
-                })
+                    "dependency_explanation": explain_dependencies(
+                        cluster, dependency_graph
+                    ),
+                }
+            )
+        else:
+            # Cluster too large - split it (but keep track it's from same cluster)
+            for i in range(0, len(cluster_files), max_files_per_chunk):
+                sub_chunk_files = cluster_files[i : i + max_files_per_chunk]
+                chunk_total_changes = sum(f["total_changes"] for f in sub_chunk_files)
+
+                chunks.append(
+                    {
+                        "files": sub_chunk_files,
+                        "total_files": len(sub_chunk_files),
+                        "total_changes": chunk_total_changes,
+                        "chunk_index": len(chunks) + 1,
+                        "dependency_cluster": cluster,
+                        "dependency_explanation": f"Part of larger cluster: {explain_dependencies(cluster, dependency_graph)}",
+                        "is_partial_cluster": True,
+                    }
+                )
 
     # Add total_chunks to all
     total_chunks = len(chunks)
@@ -296,7 +307,9 @@ def format_structured_for_llm(chunk: Dict[str, Any]) -> str:
         deleted = sum(1 for c in changes if c["change_type"] == "deleted")
 
         # File header with counts
-        lines.append(f"{file_path}: {len(changes)} changes ({modified}M, {added}A, {deleted}D)")
+        lines.append(
+            f"{file_path}: {len(changes)} changes ({modified}M, {added}A, {deleted}D)"
+        )
 
         # Show up to 3 example changes (helps LLM understand change type)
         examples = changes[:3]
@@ -342,13 +355,14 @@ index abc123..def456 100644
 """
 
     import json
+
     structured = parse_diff_to_structured(sample_diff)
     print("Structured diff:")
     print(json.dumps(structured, indent=2))
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("LLM-friendly format:")
-    print("="*80)
+    print("=" * 80)
     chunks = chunk_structured_diff(structured, max_files_per_chunk=5)
     for chunk in chunks:
         print(format_structured_for_llm(chunk))

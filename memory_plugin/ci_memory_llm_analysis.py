@@ -189,13 +189,18 @@ def _llm_select_relevant_l1(
     if chunk_size is None:
         try:
             from scripts.model_token_config import get_l1_chunk_size
+
             # Try to get model name from environment or llm object
             if model_name is None:
                 model_name = os.environ.get("MEMCI_LLM_MODEL", "")
             chunk_size = get_l1_chunk_size(model_name)
-            logger.info(f"[L1 Chunk] Auto-detected chunk_size={chunk_size} for model={model_name}")
+            logger.info(
+                f"[L1 Chunk] Auto-detected chunk_size={chunk_size} for model={model_name}"
+            )
         except Exception as e:
-            logger.warning(f"[L1 Chunk] Could not auto-detect chunk size: {e}, using default=5")
+            logger.warning(
+                f"[L1 Chunk] Could not auto-detect chunk size: {e}, using default=5"
+            )
             chunk_size = 5
 
     if not l1_memories:

@@ -53,9 +53,7 @@ def _matches_repo_filter(record: dict, repos: str | None) -> bool:
     repo_full = str(record.get("repo") or "").lower()
 
     return any(
-        repo_filter in repo_name
-        or repo_filter in repo_key
-        or repo_filter in repo_full
+        repo_filter in repo_name or repo_filter in repo_key or repo_filter in repo_full
         for repo_filter in repo_filters
     )
 
@@ -64,10 +62,15 @@ def fetch(split: str, output_path: Path, repos: str | None = None) -> None:
     try:
         from datasets import load_dataset  # type: ignore
     except ImportError:
-        print("ERROR: 'datasets' package not installed. Run:  pip install datasets huggingface_hub", file=sys.stderr)
+        print(
+            "ERROR: 'datasets' package not installed. Run:  pip install datasets huggingface_hub",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    print(f"[fetch_dataset] Loading '{HF_DATASET}' split='{split}' from HuggingFace ...")
+    print(
+        f"[fetch_dataset] Loading '{HF_DATASET}' split='{split}' from HuggingFace ..."
+    )
     ds = load_dataset(HF_DATASET, split=split)
     total = len(ds)
     print(f"[fetch_dataset] Downloaded {total} instances.")
@@ -105,13 +108,19 @@ def fetch(split: str, output_path: Path, repos: str | None = None) -> None:
         sys.exit(1)
     print()
     print("Run the benchmark with:")
-    print(f"  mini-swe-agent cibench --dataset {output_path} --output results/baseline --no-memory-enabled")
-    print(f"  mini-swe-agent cibench --dataset {output_path} --output results/l1_l2_l3 \\")
-    print( "      --memory-enabled --memory-root data/trs --memory-ablation L1+L2+L3")
+    print(
+        f"  mini-swe-agent cibench --dataset {output_path} --output results/baseline --no-memory-enabled"
+    )
+    print(
+        f"  mini-swe-agent cibench --dataset {output_path} --output results/l1_l2_l3 \\"
+    )
+    print("      --memory-enabled --memory-root data/trs --memory-ablation L1+L2+L3")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Download CI-REPAIR-BENCH from HuggingFace.")
+    parser = argparse.ArgumentParser(
+        description="Download CI-REPAIR-BENCH from HuggingFace."
+    )
     parser.add_argument(
         "--split",
         default="train",
@@ -133,6 +142,7 @@ def main() -> None:
     out_path = Path(args.out)
     if args.split == "all":
         from datasets import load_dataset, get_dataset_split_names  # type: ignore
+
         splits = get_dataset_split_names(HF_DATASET)
         print(f"[fetch_dataset] Fetching all splits: {splits}")
         out_path.parent.mkdir(parents=True, exist_ok=True)
