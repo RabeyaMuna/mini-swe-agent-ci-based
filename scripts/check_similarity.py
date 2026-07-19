@@ -232,7 +232,7 @@ def check_query_retrieval(
 
     print(f"\n### Summary")
     print(f"Total memories: {len(similarities)}")
-    print(f"Strong matches (≥0.70): {len(strong_matches)}")
+    print(f"Strong matches (>=0.70): {len(strong_matches)}")
     print(f"Medium matches (0.40-0.70): {len(medium_matches)}")
     print(f"Weak matches (<0.40): {len(similarities) - len(strong_matches) - len(medium_matches)}")
 
@@ -290,7 +290,7 @@ def batch_eval_similarities(
     # Sort by similarity
     results.sort(key=lambda x: x["similarity"], reverse=True)
 
-    print(f"\n### Strong Matches (≥{threshold})")
+    print(f"\n### Strong Matches (>={threshold})")
     print(f"{'Issue 1':<10} {'Issue 2':<10} {'Repo 1':<15} {'Repo 2':<15} {'Similarity'}")
     print(f"{'-'*70}")
 

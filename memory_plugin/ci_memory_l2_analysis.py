@@ -14,6 +14,8 @@ import re
 import signal
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from scripts.model_token_config import get_l2_common_candidates
+from scripts.model_token_config import get_l2_consecutive_candidates
 
 try:
     import numpy as np
@@ -32,6 +34,35 @@ except ImportError:
     _EMBEDDING_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_model_name_from_llm(llm: Any) -> str | None:
+    """
+    Extract model name from LLM object.
+
+    Priority order:
+    1. memci_model_key (set by utilities.llm_provider.get_llm)
+    2. model_name, model, model_id (LangChain attributes)
+
+    Returns None if not found.
+    """
+    if llm is None:
+        return None
+
+    # Priority 1: Check for memci_model_key (set by utilities.llm_provider)
+    if hasattr(llm, 'memci_model_key'):
+        value = getattr(llm, 'memci_model_key', None)
+        if value and isinstance(value, str):
+            return value
+
+    # Priority 2: Try common LangChain attribute names
+    for attr in ('model_name', 'model', 'model_id'):
+        if hasattr(llm, attr):
+            value = getattr(llm, attr, None)
+            if value and isinstance(value, str):
+                return value
+
+    return None
 
 
 class TimeoutError(Exception):
@@ -972,11 +1003,17 @@ def _validate_file_frequency_coverage(
 def _llm_select_common_problems(
     common_candidates: List[Dict[str, Any]],
     llm: Any,
+    model_name: str | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Select COMMON problems: problems that appear repeatedly across multiple trajectories.
 
     Criteria: Repetition-based (appears in 2+ trajectories)
+
+    Args:
+        common_candidates: List of common problem candidates
+        llm: LLM client for selection
+        model_name: Model name for determining candidate limits (None = use default)
     """
     if not common_candidates:
         return []
@@ -985,11 +1022,17 @@ def _llm_select_common_problems(
     file_analysis = _analyze_file_frequency(common_candidates)
     file_freq_section = _format_file_frequency_for_prompt(file_analysis)
 
+    # Get model-aware limit for common problems
+    try:
+        common_limit = get_l2_common_candidates(model_name)
+    except Exception:
+        common_limit = 30  # Fallback
+
     prompt = f"""Select COMMON problems from L2 trajectories.
 
 {file_freq_section}
 COMMON CANDIDATES (grouped by similarity):
-{json.dumps(_limit_candidates(common_candidates, 30), indent=2)}
+{json.dumps(_limit_candidates(common_candidates, common_limit), indent=2)}
 
 TASK:
 Select problems that appear REPEATEDLY across multiple trajectories (at least 2+ issues).
@@ -1153,11 +1196,18 @@ def _llm_select_consecutive_problems(
     problem_1: Dict[str, Any],
     consecutive_candidates: List[Dict[str, Any]],
     llm: Any,
+    model_name: str | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Select CONSECUTIVE problems: problems that appear AFTER fixing the primary CI failure.
 
     Criteria: Dependency-based (revealed after fixing primary)
+
+    Args:
+        problem_1: Current CI failure (primary problem)
+        consecutive_candidates: List of consecutive problem candidates
+        llm: LLM client for selection
+        model_name: Model name for determining candidate limits (None = use default)
     """
     if not consecutive_candidates:
         return []
@@ -1165,6 +1215,12 @@ def _llm_select_consecutive_problems(
     # Analyze file frequency to identify high-priority targets
     file_analysis = _analyze_file_frequency(consecutive_candidates)
     file_freq_section = _format_file_frequency_for_prompt(file_analysis)
+
+    # Get model-aware limit for consecutive problems
+    try:
+        consecutive_limit = get_l2_consecutive_candidates(model_name)
+    except Exception:
+        consecutive_limit = 40  # Fallback
 
     current_problem = _compact_problem(problem_1)
     prompt = f"""Select CONSECUTIVE problems that may appear after fixing the primary CI failure.
@@ -1174,7 +1230,7 @@ CURRENT CI FAILURE (PRIMARY):
 
 {file_freq_section}
 CONSECUTIVE CANDIDATES (non-primary problems from trajectories):
-{json.dumps(_limit_candidates(consecutive_candidates, 40), indent=2)}
+{json.dumps(_limit_candidates(consecutive_candidates, consecutive_limit), indent=2)}
 
 TASK:
 Select problems that can REASONABLY appear AFTER fixing the current CI failure.
@@ -1860,6 +1916,7 @@ def staged_l2_analysis(
     problem_1: Dict[str, Any],
     l2_memories: List[Dict[str, Any]],
     llm: Any,
+    model_name: str | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Analyze fetched L2 trajectories using embedding-based clustering.
@@ -1874,10 +1931,22 @@ def staged_l2_analysis(
     Frequency is L2-based: counts how many unique L2 records contain the problem,
     not total problem instances. This identifies problems that appear across
     multiple different CI issues.
+
+    Args:
+        problem_1: Current CI failure
+        l2_memories: List of L2 trajectory memories
+        llm: LLM client for selection
+        model_name: Model name for determining candidate limits (None = auto-detect from llm)
     """
     if not l2_memories:
         logger.info("[L2] No L2 memories provided")
         return []
+
+    # Auto-detect model_name from llm if not provided
+    if model_name is None:
+        model_name = _extract_model_name_from_llm(llm)
+        if model_name:
+            logger.info(f"[L2] Auto-detected model_name='{model_name}' from LLM object")
 
     # Extract ALL problems for common selection (from ALL L2 records)
     all_rows, total_trajectories = _flatten_l2(l2_memories)
@@ -1935,9 +2004,9 @@ def staged_l2_analysis(
     )
 
     # Select common and consecutive problems SEPARATELY
-    common_problems = _llm_select_common_problems(common_candidates, llm)
+    common_problems = _llm_select_common_problems(common_candidates, llm, model_name)
     consecutive_problems = _llm_select_consecutive_problems(
-        problem_1, consecutive_candidates, llm
+        problem_1, consecutive_candidates, llm, model_name
     )
 
     # Merge and deduplicate

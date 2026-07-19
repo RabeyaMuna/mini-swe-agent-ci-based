@@ -149,19 +149,49 @@ def _get_file_extension(file_path: str) -> str:
     return ""
 
 
-def chunk_structured_diff(structured: Dict[str, Any], max_files_per_chunk: int = 10) -> List[Dict[str, Any]]:
+def chunk_structured_diff(
+    structured: Dict[str, Any],
+    max_files_per_chunk: int = 10,
+    dependency_graph: Dict[str, Any] = None
+) -> List[Dict[str, Any]]:
     """
-    Split structured diff into chunks by file count.
+    Split structured diff into chunks.
+
+    Strategy:
+    1. If dependency_graph provided, use dependency-aware chunking (keep related files together)
+    2. Otherwise, fall back to simple file-count chunking
 
     Args:
         structured: Output from parse_diff_to_structured()
         max_files_per_chunk: Maximum files per chunk
+        dependency_graph: Optional dependency graph from dependency_detector.build_dependency_graph()
 
     Returns:
-        List of chunks, each with same structure as structured
+        List of chunks, each with:
+        - files: List of file info dicts
+        - total_files: Count
+        - total_changes: Sum of changes
+        - chunk_index: 1-indexed
+        - dependency_cluster: List of file paths in this cluster (if using dependencies)
+        - dependency_explanation: Human-readable dependency info (if using dependencies)
     """
-    chunks = []
     files = structured["files"]
+
+    # Use dependency-aware chunking if graph provided
+    if dependency_graph and dependency_graph.get("clusters"):
+        return _chunk_by_dependency_clusters(
+            files,
+            dependency_graph,
+            max_files_per_chunk
+        )
+
+    # Fall back to simple chunking
+    return _chunk_by_file_count(files, max_files_per_chunk)
+
+
+def _chunk_by_file_count(files: List[Dict], max_files_per_chunk: int) -> List[Dict[str, Any]]:
+    """Simple chunking by file count (original logic)."""
+    chunks = []
 
     for i in range(0, len(files), max_files_per_chunk):
         chunk_files = files[i:i + max_files_per_chunk]
@@ -174,6 +204,72 @@ def chunk_structured_diff(structured: Dict[str, Any], max_files_per_chunk: int =
             "chunk_index": len(chunks) + 1,
             "total_chunks": (len(files) + max_files_per_chunk - 1) // max_files_per_chunk
         })
+
+    return chunks
+
+
+def _chunk_by_dependency_clusters(
+    files: List[Dict],
+    dependency_graph: Dict[str, Any],
+    max_files_per_chunk: int
+) -> List[Dict[str, Any]]:
+    """
+    Dependency-aware chunking - keep related files together.
+
+    Strategy:
+    1. Group files by dependency cluster
+    2. If cluster > max_files, split it (but warn)
+    3. Keep dependencies within same chunk when possible
+    """
+    from dependency_detector import explain_dependencies
+
+    chunks = []
+    file_path_to_info = {f["path"]: f for f in files}
+
+    # Process each dependency cluster
+    for cluster in dependency_graph.get("clusters", []):
+        # Get file info for files in this cluster
+        cluster_files = [
+            file_path_to_info[path]
+            for path in cluster
+            if path in file_path_to_info
+        ]
+
+        if not cluster_files:
+            continue
+
+        # If cluster fits in one chunk, keep it together
+        if len(cluster_files) <= max_files_per_chunk:
+            chunk_total_changes = sum(f["total_changes"] for f in cluster_files)
+
+            chunks.append({
+                "files": cluster_files,
+                "total_files": len(cluster_files),
+                "total_changes": chunk_total_changes,
+                "chunk_index": len(chunks) + 1,
+                "dependency_cluster": cluster,
+                "dependency_explanation": explain_dependencies(cluster, dependency_graph),
+            })
+        else:
+            # Cluster too large - split it (but keep track it's from same cluster)
+            for i in range(0, len(cluster_files), max_files_per_chunk):
+                sub_chunk_files = cluster_files[i:i + max_files_per_chunk]
+                chunk_total_changes = sum(f["total_changes"] for f in sub_chunk_files)
+
+                chunks.append({
+                    "files": sub_chunk_files,
+                    "total_files": len(sub_chunk_files),
+                    "total_changes": chunk_total_changes,
+                    "chunk_index": len(chunks) + 1,
+                    "dependency_cluster": cluster,
+                    "dependency_explanation": f"Part of larger cluster: {explain_dependencies(cluster, dependency_graph)}",
+                    "is_partial_cluster": True,
+                })
+
+    # Add total_chunks to all
+    total_chunks = len(chunks)
+    for chunk in chunks:
+        chunk["total_chunks"] = total_chunks
 
     return chunks
 

@@ -6,6 +6,7 @@ import re
 import tempfile
 import time
 from typing import Any
+from scripts.model_token_config import get_input_chunk_tokens
 
 # ── Optional third-party dependencies ─────────────────────────────────────────
 try:
@@ -160,11 +161,22 @@ def load_config() -> dict[str, Any]:
 
 def chunk_log_by_tokens(
     text: str,
-    max_tokens: int = 70000,
+    max_tokens: int | None = None,
     overlap: int = 200,
     model: str = '',
 ) -> list[str]:
-    """Fallback for utilities.chunking_logic.chunk_log_by_tokens()."""
+    """
+    Fallback for utilities.chunking_logic.chunk_log_by_tokens().
+
+    Now model-aware: uses model-specific token limits if model is specified.
+    """
+    # Auto-detect max_tokens from model if not specified
+    if max_tokens is None:
+        try:
+            max_tokens = get_input_chunk_tokens(model)
+        except Exception:
+            max_tokens = 70_000  # Fallback
+
     chars_per_chunk = max_tokens * 4  # ~1 token ≈ 4 chars
     overlap_chars = overlap * 4
     if len(text) <= chars_per_chunk:
@@ -181,8 +193,15 @@ def chunk_log_by_tokens(
 
 
 def get_chunk_threshold_simple(model_name: str = '') -> int:
-    """Fallback for utilities.model_token_limits.get_chunk_threshold_simple()."""
-    return 70_000
+    """
+    Fallback for utilities.model_token_limits.get_chunk_threshold_simple().
+
+    Now model-aware: returns model-specific threshold.
+    """
+    try:
+        return get_input_chunk_tokens(model_name)
+    except Exception:
+        return 70_000  # Fallback
 
 
 class CILogAnalyzerLLM:
@@ -233,7 +252,7 @@ class CILogAnalyzerLLM:
 
                 if total_tokens > THRESHOLD:
                     raw_chunks = chunk_log_by_tokens(
-                        log_text, max_tokens=70000, overlap=200, model=self.model_name
+                        log_text, max_tokens=None, overlap=200, model=self.model_name
                     )
                     print(
                         f"Chunking activated: {len(raw_chunks)} chunks created for step '{step_name}'"

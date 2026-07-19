@@ -9,7 +9,7 @@
 #     -c src/minisweagent/config/benchmarks/cibench_multi_model_example.yaml
 #
 # This uses RouletteModel to choose one model per agent turn.
-# Replace YOUR_MINIMAX_API_KEY before use.
+# Replace YOUR_OPENROUTER_API_KEY before use.
 ################################################################################
 
 model:
@@ -32,7 +32,7 @@ model:
       model_kwargs:
         custom_llm_provider: "openai"
         api_base: "https://api.minimax.io/v1"
-        api_key: "YOUR_MINIMAX_API_KEY"
+        api_key: "YOUR_OPENROUTER_API_KEY"
         temperature: 0.0
         parallel_tool_calls: true
         drop_params: true

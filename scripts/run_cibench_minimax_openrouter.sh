@@ -10,7 +10,11 @@ else
     PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fi
 
-MODEL_INPUT="${MODEL:-minimax2.5}"
+MODEL_INPUT="${MODEL:-}"
+if [ -z "$MODEL_INPUT" ]; then
+    echo "ERROR: MODEL is required. Use MODEL=minimax2.5 for this MiniMax runner."
+    exit 1
+fi
 MODEL="$(
     MODEL_INPUT="$MODEL_INPUT" PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}" python3 -c \
         'from scripts.model_registry import resolve_model_alias; import os; print(resolve_model_alias(os.environ["MODEL_INPUT"]))' \

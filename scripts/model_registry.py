@@ -10,29 +10,42 @@ import os
 import re
 
 
-DEFAULT_MINIMAX_MODEL = "openrouter/minimax/minimax-m2.5"
-DEFAULT_GLM_MODEL = "openrouter/z-ai/glm-5.2"
+CANONICAL_MINIMAX_MODEL = "openrouter/minimax/minimax-m2.5"
+CANONICAL_ZAI_GLM_MODEL = "zai/glm-5.2"
+LEGACY_GLM_MODEL = "glm-4-plus"
+
+MINIMAX_ALIASES = {
+    "minimax",
+    "minimax2.5",
+    "minimax-2.5",
+    "minimaxm2.5",
+    "minimax-m2.5",
+    "minimax_m2.5",
+}
+
+GLM_ALIASES = {
+    "glm",
+    "gml",
+    "gml5.2",
+    "gml-5.2",
+    "glm5.2",
+    "glm-5.2",
+    "glm_5.2",
+    "glm_5_2",
+    "glm-5-2",
+}
 
 
 _ALIASES = {
-    "minimax": DEFAULT_MINIMAX_MODEL,
-    "minimax2.5": DEFAULT_MINIMAX_MODEL,
-    "minimax-2.5": DEFAULT_MINIMAX_MODEL,
-    "minimaxm2.5": DEFAULT_MINIMAX_MODEL,
-    "minimax-m2.5": DEFAULT_MINIMAX_MODEL,
-    "minimax_m2.5": DEFAULT_MINIMAX_MODEL,
-    "minimax/minimax-m2.5": DEFAULT_MINIMAX_MODEL,
-    "openrouter/minimax/minimax-m2.5": DEFAULT_MINIMAX_MODEL,
-    "glm": DEFAULT_GLM_MODEL,
-    "glm5.2": DEFAULT_GLM_MODEL,
-    "glm-5.2": DEFAULT_GLM_MODEL,
-    "glm_5.2": DEFAULT_GLM_MODEL,
-    "glm_5_2": DEFAULT_GLM_MODEL,
-    "glm-5-2": DEFAULT_GLM_MODEL,
-    "z-ai/glm-5.2": DEFAULT_GLM_MODEL,
-    "openrouter/z-ai/glm-5.2": DEFAULT_GLM_MODEL,
+    **{alias: CANONICAL_MINIMAX_MODEL for alias in MINIMAX_ALIASES},
+    "minimax/minimax-m2.5": CANONICAL_MINIMAX_MODEL,
+    "openrouter/minimax/minimax-m2.5": CANONICAL_MINIMAX_MODEL,
+    **{alias: CANONICAL_ZAI_GLM_MODEL for alias in GLM_ALIASES},
+    "z-ai/glm-5.2": CANONICAL_ZAI_GLM_MODEL,
+    "zai/glm-5.2": CANONICAL_ZAI_GLM_MODEL,
+    "openrouter/z-ai/glm-5.2": CANONICAL_ZAI_GLM_MODEL,
     # Keep the old GLM value valid for existing experiments.
-    "glm-4-plus": "glm-4-plus",
+    LEGACY_GLM_MODEL: LEGACY_GLM_MODEL,
 }
 
 
@@ -47,14 +60,22 @@ def resolve_model_alias(model_name: str | None) -> str | None:
 
     lowered = raw.lower()
 
+    if lowered in GLM_ALIASES:
+        if os.getenv("GLM_MODEL_NAME"):
+            return os.getenv("GLM_MODEL_NAME", "").strip()
+        return CANONICAL_ZAI_GLM_MODEL
+
+    if lowered in MINIMAX_ALIASES and os.getenv("MINIMAX_MODEL_NAME"):
+        return os.getenv("MINIMAX_MODEL_NAME", "").strip()
+
     if lowered in _ALIASES:
         return _ALIASES[lowered]
 
     if lowered.startswith("minimax/"):
         return f"openrouter/{raw}"
 
-    if lowered.startswith("z-ai/"):
-        return f"openrouter/{raw}"
+    if lowered.startswith(("z-ai/", "zai/")):
+        return raw
 
     return raw
 
@@ -63,12 +84,12 @@ def model_output_name(model_name: str | None) -> str:
     """Return a stable, filesystem-friendly folder name for result paths."""
     resolved = resolve_model_alias(model_name) or "unknown-model"
 
-    if resolved == DEFAULT_MINIMAX_MODEL:
+    if resolved == CANONICAL_MINIMAX_MODEL:
         return "minimax-m2.5"
-    if resolved == DEFAULT_GLM_MODEL:
+    if resolved == CANONICAL_ZAI_GLM_MODEL:
         return "glm-5.2"
-    if resolved == "glm-4-plus":
-        return "glm-4-plus"
+    if resolved == LEGACY_GLM_MODEL:
+        return LEGACY_GLM_MODEL
 
     name = resolved
     if name.startswith("openrouter/"):

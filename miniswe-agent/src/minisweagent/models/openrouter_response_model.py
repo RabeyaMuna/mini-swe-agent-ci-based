@@ -40,7 +40,7 @@ class OpenRouterResponseModel(OpenRouterModel):
         self.config = OpenRouterResponseModelConfig(**kwargs)
         api_base = (
             os.getenv("OPENROUTER_BASE_URL")
-            or os.getenv("MINIMAX_BASE_URL")
+            or os.getenv("OPENROUTER_BASE_URL")
             or "https://openrouter.ai/api/v1"
         ).rstrip("/")
         self._api_url = f"{api_base}/responses"

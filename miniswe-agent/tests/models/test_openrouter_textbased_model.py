@@ -51,10 +51,10 @@ def mock_response_no_cost():
     }
 
 
-def test_openrouter_model_accepts_minimax_api_key():
+def test_openrouter_model_accepts_OPENROUTER_API_KEY():
     with patch.dict(
         os.environ,
-        {"MINIMAX_API_KEY": "minimax-key"},
+        {"OPENROUTER_API_KEY": "minimax-key"},
         clear=True,
     ):
         model = OpenRouterTextbasedModel(model_name="minimax/minimax-m2.5")

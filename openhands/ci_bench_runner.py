@@ -63,7 +63,7 @@ def _make_analyzer_llm(model: str):
         and os.getenv('OPENROUTER_API_KEY')
         and (
             'openrouter.ai' in os.getenv('OPENROUTER_BASE_URL', '')
-            or 'openrouter.ai' in os.getenv('MINIMAX_BASE_URL', '')
+            or 'openrouter.ai' in os.getenv('OPENROUTER_BASE_URL', '')
         )
     ):
         analyzer_model = f'openrouter/{analyzer_model}'

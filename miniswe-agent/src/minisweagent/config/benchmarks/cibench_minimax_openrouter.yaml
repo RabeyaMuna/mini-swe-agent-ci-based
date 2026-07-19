@@ -2,8 +2,8 @@
 # MiniMax M2.5 via OpenRouter for CI repair benchmarking.
 #
 # Expected environment:
-#   MINIMAX_API_KEY=...
-#   MINIMAX_BASE_URL=https://openrouter.ai/api/v1
+#   OPENROUTER_API_KEY=...
+#   OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 #   MEMCI_LLM_MODEL=minimax/minimax-m2.5
 #
 # Usage:

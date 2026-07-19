@@ -2,7 +2,7 @@
 prepare_memory_train_test_split.py
 ===================================
 Analyze entire CI repair dataset, compute similarity, and split into:
-- 30% memory set (most representative issues → saved as L2 memory)
+- 30% memory set (most representative issues -> saved as L2 memory)
 - 70% evaluation set (testing issues that will use the 30% as PREVIOUS EXPERIENCE)
 
 Usage:
@@ -34,6 +34,30 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 app = typer.Typer()
+
+
+def _issue_id(issue: Dict[str, Any]) -> str:
+    return str(
+        issue.get("id")
+        or issue.get("instance_id")
+        or issue.get("issue_id")
+        or issue.get("original_issue_id")
+        or ""
+    )
+
+
+def _matches_repo_filter(issue: Dict[str, Any], repo_filter: List[str]) -> bool:
+    repo_owner = str(issue.get("repo_owner") or "").lower()
+    repo_name = str(issue.get("repo_name") or "").lower()
+    repo_key = f"{repo_owner}/{repo_name}".strip("/")
+    repo_full = str(issue.get("repo") or "").lower()
+
+    return any(
+        filter_repo in repo_name
+        or filter_repo in repo_key
+        or filter_repo in repo_full
+        for filter_repo in repo_filter
+    )
 
 
 def _load_from_huggingface(dataset_name: str = "ci-benchmark-user/ci-repair-bench") -> List[Dict[str, Any]]:
@@ -86,7 +110,7 @@ def _load_or_create_decomposed_issues(
         # Convert to dict keyed by issue_id
         decomposed_dict = {}
         for item in decomposed_cache if isinstance(decomposed_cache, list) else [decomposed_cache]:
-            issue_id = str(item.get("original_issue_id") or item.get("id") or "")
+            issue_id = _issue_id(item)
             if issue_id:
                 decomposed_dict[issue_id] = item
 
@@ -95,7 +119,7 @@ def _load_or_create_decomposed_issues(
         # Check if all issues are in cache
         missing_ids = []
         for issue in issues:
-            issue_id = str(issue.get("instance_id") or issue.get("id") or "")
+            issue_id = _issue_id(issue)
             if issue_id and issue_id not in decomposed_dict:
                 missing_ids.append(issue_id)
 
@@ -307,7 +331,7 @@ def _compute_embeddings(
     raw_count = 0
 
     for issue in track(issues, description="Building issue texts"):
-        issue_id = str(issue.get("instance_id") or issue.get("id") or "")
+        issue_id = _issue_id(issue)
         decomposed = decomposed_dict.get(issue_id) if issue_id else None
 
         if decomposed:
@@ -420,7 +444,7 @@ def _save_split_datasets(
     logger.info(f"Saved {len(memory_indices)} issues to {memory_path}")
 
     # Memory set - IDs only (for building memory later)
-    memory_ids = [issues[idx].get("instance_id") or issues[idx].get("id") for idx in memory_indices]
+    memory_ids = [_issue_id(issues[idx]) for idx in memory_indices]
     memory_ids_path = output_dir / "memory_issue_ids.json"
     with open(memory_ids_path, "w") as f:
         json.dump(memory_ids, f, indent=2)
@@ -434,7 +458,7 @@ def _save_split_datasets(
     logger.info(f"Saved {len(eval_indices)} issues to {eval_path}")
 
     # Evaluation set - IDs only
-    eval_ids = [issues[idx].get("instance_id") or issues[idx].get("id") for idx in eval_indices]
+    eval_ids = [_issue_id(issues[idx]) for idx in eval_indices]
     eval_ids_path = output_dir / "eval_issue_ids.json"
     with open(eval_ids_path, "w") as f:
         json.dump(eval_ids, f, indent=2)
@@ -474,7 +498,8 @@ def _save_similarity_analysis(
         # Compute stats
         avg_sim = similarity_matrix.mean()
         max_sim = similarity_matrix.max()
-        min_sim = similarity_matrix[np.triu_indices_from(similarity_matrix, k=1)].min()
+        upper_triangle = similarity_matrix[np.triu_indices_from(similarity_matrix, k=1)]
+        min_sim = upper_triangle.min() if upper_triangle.size else similarity_matrix.min()
 
         # Count memory vs eval
         memory_count = sum(1 for idx in repo_indices if idx in memory_indices)
@@ -546,12 +571,7 @@ def main(
 
         issues = []
         for issue in all_issues:
-            repo_owner = issue.get("repo_owner", "").lower()
-            repo_name = issue.get("repo_name", "").lower()
-            repo_key = f"{repo_owner}/{repo_name}"
-
-            # Check if repo_name matches any filter (partial match)
-            if any(filter_repo in repo_name or filter_repo in repo_key for filter_repo in repo_filter):
+            if _matches_repo_filter(issue, repo_filter):
                 issues.append(issue)
 
         console.print(f"[green]Filtered: {len(issues)} issues (from {len(all_issues)} total)[/green]\n")

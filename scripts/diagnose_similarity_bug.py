@@ -176,13 +176,13 @@ if __name__ == "__main__":
     print("""
 If the bug is:
 1. Stored records have NO similarity_score field
-   → Fix: Records in cross_memory.json need similarity_score added
+   -> Fix: Records in cross_memory.json need similarity_score added
 
 2. Retrieved records have similarity_score but it's zeroed later
-   → Fix: Find where scores are lost in the pipeline
+   -> Fix: Find where scores are lost in the pipeline
 
 3. Similarity calculation returns 0.0 for all records
-   → Fix: Check embedding similarity calculation
+   -> Fix: Check embedding similarity calculation
 
 Run this script to identify which case it is.
     """)

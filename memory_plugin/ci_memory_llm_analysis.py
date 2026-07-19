@@ -5,6 +5,7 @@ Clean version: Selects relevant L1 memories based on CURRENT CI problems.
 Matching criteria: validation_cmd + failure_type + (file OR problem)
 """
 
+import os
 import re
 import json
 import logging
@@ -165,7 +166,8 @@ def _llm_select_relevant_l1(
     ci_problem: Dict[str, Any],
     l1_memories: List[Dict[str, Any]],
     llm: Any,
-    chunk_size: int = 5,
+    chunk_size: int | None = None,
+    model_name: str | None = None,
 ) -> List[str]:
     """
     Select L1s that match CI problem by processing in chunks.
@@ -177,10 +179,24 @@ def _llm_select_relevant_l1(
       ci_problem: Current CI failure
       l1_memories: All L1 memories
       llm: LLM instance
-      chunk_size: L1s per chunk (default: 5)
+      chunk_size: L1s per chunk (None = auto-detect from model)
+      model_name: Model name for auto-detecting chunk size
 
     Returns: List of matching L1 IDs
     """
+
+    # Auto-detect chunk size based on model if not specified
+    if chunk_size is None:
+        try:
+            from scripts.model_token_config import get_l1_chunk_size
+            # Try to get model name from environment or llm object
+            if model_name is None:
+                model_name = os.environ.get("MEMCI_LLM_MODEL", "")
+            chunk_size = get_l1_chunk_size(model_name)
+            logger.info(f"[L1 Chunk] Auto-detected chunk_size={chunk_size} for model={model_name}")
+        except Exception as e:
+            logger.warning(f"[L1 Chunk] Could not auto-detect chunk size: {e}, using default=5")
+            chunk_size = 5
 
     if not l1_memories:
         return []
