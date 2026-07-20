@@ -20,7 +20,7 @@ import json
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 import git
 
@@ -44,13 +44,15 @@ def get_pr_commits(repo_path: Path, sha_fail: str, sha_success: str) -> List[Dic
                 diffs = parent.diff(commit)
                 changed_files = [d.a_path or d.b_path for d in diffs]
 
-            commit_data.append({
-                "sha": commit.hexsha,
-                "message": commit.message.strip(),
-                "changed_files": changed_files,
-                "author": str(commit.author),
-                "date": commit.committed_datetime.isoformat(),
-            })
+            commit_data.append(
+                {
+                    "sha": commit.hexsha,
+                    "message": commit.message.strip(),
+                    "changed_files": changed_files,
+                    "author": str(commit.author),
+                    "date": commit.committed_datetime.isoformat(),
+                }
+            )
 
         return commit_data
 
@@ -155,14 +157,16 @@ def decompose_issue_by_commits(issue: Dict, repo_path: Path) -> Dict:
         for commit in group_commits:
             all_files.update(commit["changed_files"])
 
-        group_details.append({
-            "group_id": group_idx,
-            "commit_count": len(group_commits),
-            "commit_shas": [c["sha"] for c in group_commits],
-            "commit_messages": [c["message"] for c in group_commits],
-            "changed_files": sorted(all_files),
-            "file_count": len(all_files),
-        })
+        group_details.append(
+            {
+                "group_id": group_idx,
+                "commit_count": len(group_commits),
+                "commit_shas": [c["sha"] for c in group_commits],
+                "commit_messages": [c["message"] for c in group_commits],
+                "changed_files": sorted(all_files),
+                "file_count": len(all_files),
+            }
+        )
 
     return {
         "decomposition_type": decomposition_type,
@@ -233,13 +237,15 @@ def main():
             stats[decomp_type] += 1
 
         # Store result
-        decomposed.append({
-            "original_issue_id": issue_id,
-            "sha_fail": issue.get("sha_fail", ""),
-            "sha_success": issue.get("sha_success", ""),
-            "repo": f"{repo_owner}/{repo_name}",
-            "decomposition": decomposition,
-        })
+        decomposed.append(
+            {
+                "original_issue_id": issue_id,
+                "sha_fail": issue.get("sha_fail", ""),
+                "sha_success": issue.get("sha_success", ""),
+                "repo": f"{repo_owner}/{repo_name}",
+                "decomposition": decomposition,
+            }
+        )
 
     print("\nDone decomposing!")
 
@@ -257,11 +263,21 @@ def main():
     print("Decomposition Summary:")
     print("=" * 70)
     print(f"Total issues: {stats['total']}")
-    print(f"Single commit: {stats['single_commit']} ({stats['single_commit']/stats['total']*100:.1f}%)")
-    print(f"Independent commits: {stats['independent_commits']} ({stats['independent_commits']/stats['total']*100:.1f}%)")
-    print(f"Fully overlapping: {stats['fully_overlapping']} ({stats['fully_overlapping']/stats['total']*100:.1f}%)")
-    print(f"Partial overlap: {stats['partial_overlap']} ({stats['partial_overlap']/stats['total']*100:.1f}%)")
-    print(f"No commits: {stats['no_commits']} ({stats['no_commits']/stats['total']*100:.1f}%)")
+    print(
+        f"Single commit: {stats['single_commit']} ({stats['single_commit'] / stats['total'] * 100:.1f}%)"
+    )
+    print(
+        f"Independent commits: {stats['independent_commits']} ({stats['independent_commits'] / stats['total'] * 100:.1f}%)"
+    )
+    print(
+        f"Fully overlapping: {stats['fully_overlapping']} ({stats['fully_overlapping'] / stats['total'] * 100:.1f}%)"
+    )
+    print(
+        f"Partial overlap: {stats['partial_overlap']} ({stats['partial_overlap'] / stats['total'] * 100:.1f}%)"
+    )
+    print(
+        f"No commits: {stats['no_commits']} ({stats['no_commits'] / stats['total'] * 100:.1f}%)"
+    )
     print("=" * 70)
 
     # Save stats
@@ -283,7 +299,9 @@ def main():
         print(f"  Groups: {decomp['num_groups']}")
         if decomp.get("groups"):
             for group in decomp["groups"][:2]:  # Show first 2 groups
-                print(f"    Group {group['group_id']}: {group['commit_count']} commit(s), {group['file_count']} file(s)")
+                print(
+                    f"    Group {group['group_id']}: {group['commit_count']} commit(s), {group['file_count']} file(s)"
+                )
 
 
 if __name__ == "__main__":

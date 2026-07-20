@@ -22,7 +22,7 @@ Usage:
 """
 
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 
 def parse_diff_to_structured(diff: str) -> Dict[str, Any]:
@@ -223,9 +223,7 @@ def _chunk_by_file_count(
 
 
 def _chunk_by_dependency_and_tokens(
-    files: List[Dict],
-    dependency_graph: Dict[str, Any],
-    model_name: str
+    files: List[Dict], dependency_graph: Dict[str, Any], model_name: str
 ) -> List[Dict[str, Any]]:
     """
     Token-aware + Dependency-aware chunking.
@@ -253,7 +251,9 @@ def _chunk_by_dependency_and_tokens(
     # Target: Use 50% of context for safety (leaves room for CI context + instructions + output)
     target_chunk_tokens = int(max_input_tokens * 0.5)
 
-    print(f"[Chunking] Model: {model_name}, Target chunk size: {target_chunk_tokens} tokens")
+    print(
+        f"[Chunking] Model: {model_name}, Target chunk size: {target_chunk_tokens} tokens"
+    )
 
     chunks = []
     file_path_to_info = {f["path"]: f for f in files}
@@ -262,7 +262,8 @@ def _chunk_by_dependency_and_tokens(
     # Filter edges: BOTH caller AND callee must be modified
     edges = dependency_graph.get("edges", [])
     filtered_edges = [
-        edge for edge in edges
+        edge
+        for edge in edges
         if edge.get("from") in all_changed_files and edge.get("to") in all_changed_files
     ]
 
@@ -300,7 +301,9 @@ def _chunk_by_dependency_and_tokens(
         chunk = {
             "files": cluster_files,
             "total_files": len(cluster_files),
-            "total_changes": sum(f.get("total_changes", len(f.get("changes", []))) for f in cluster_files),
+            "total_changes": sum(
+                f.get("total_changes", len(f.get("changes", []))) for f in cluster_files
+            ),
             "dependency_cluster": cluster,
             "dependency_contexts": dependency_contexts,
         }
@@ -311,21 +314,29 @@ def _chunk_by_dependency_and_tokens(
 
         if estimated_tokens <= target_chunk_tokens:
             # Fits! Keep entire cluster together ✅
-            print(f"[Chunking] Cluster with {len(cluster_files)} files (~{estimated_tokens} tokens max) fits in one chunk")
-            print(f"[Chunking]   Classification: ~{len(cluster_files) * 50 + 8000} tokens, Deep analysis: ~{chunk.get('total_changes', 0) * 10 + 8500} tokens")
+            print(
+                f"[Chunking] Cluster with {len(cluster_files)} files (~{estimated_tokens} tokens max) fits in one chunk"
+            )
+            print(
+                f"[Chunking]   Classification: ~{len(cluster_files) * 50 + 8000} tokens, Deep analysis: ~{chunk.get('total_changes', 0) * 10 + 8500} tokens"
+            )
             chunk["chunk_index"] = len(chunks) + 1
             chunks.append(chunk)
         else:
             # Too large! Need smart split
-            print(f"[Chunking] WARNING: Cluster with {len(cluster_files)} files (~{estimated_tokens} tokens max) exceeds limit ({target_chunk_tokens}), splitting...")
-            print(f"[Chunking]   Reason: Classification or deep analysis prompt too large")
+            print(
+                f"[Chunking] WARNING: Cluster with {len(cluster_files)} files (~{estimated_tokens} tokens max) exceeds limit ({target_chunk_tokens}), splitting..."
+            )
+            print(
+                "[Chunking]   Reason: Classification or deep analysis prompt too large"
+            )
             sub_chunks = _split_cluster_by_tokens(
                 cluster,
                 cluster_files,
                 dependency_contexts,
                 filtered_edges,
                 file_path_to_info,
-                target_chunk_tokens
+                target_chunk_tokens,
             )
 
             for sub_chunk in sub_chunks:
@@ -384,7 +395,8 @@ def _split_cluster_by_caller_groups(
             continue
 
         direct_callees = [
-            callee for callee in callees
+            callee
+            for callee in callees
             if callee.get("file") in unassigned
             and callee.get("file") in file_path_to_info
         ]
@@ -395,7 +407,7 @@ def _split_cluster_by_caller_groups(
 
         batch_size = max(1, max_files_per_chunk - 1)
         callee_batches = [
-            direct_callees[index:index + batch_size]
+            direct_callees[index : index + batch_size]
             for index in range(0, len(direct_callees), batch_size)
         ] or [[]]
 
@@ -414,8 +426,7 @@ def _split_cluster_by_caller_groups(
 
             chunk_files = [file_path_to_info[path] for path in chunk_paths]
             chunk_callees = [
-                callee for callee in callee_batch
-                if callee.get("file") in chunk_paths
+                callee for callee in callee_batch if callee.get("file") in chunk_paths
             ]
             chunk = {
                 "files": chunk_files,
@@ -432,11 +443,13 @@ def _split_cluster_by_caller_groups(
                 ),
             }
             if chunk_callees:
-                chunk["dependency_contexts"] = [{
-                    "dependency_type": dep_type,
-                    "caller": caller,
-                    "callees": chunk_callees,
-                }]
+                chunk["dependency_contexts"] = [
+                    {
+                        "dependency_type": dep_type,
+                        "caller": caller,
+                        "callees": chunk_callees,
+                    }
+                ]
             else:
                 chunk["dependency_contexts"] = []
 
@@ -449,17 +462,19 @@ def _split_cluster_by_caller_groups(
         file_info = file_path_to_info.get(path)
         if not file_info:
             continue
-        chunks.append({
-            "files": [file_info],
-            "total_files": 1,
-            "total_changes": file_info.get(
-                "total_changes", len(file_info.get("changes", []))
-            ),
-            "dependency_cluster": [path],
-            "dependency_contexts": [],
-            "is_partial_cluster": True,
-            "chunk_info": "Independent file from dependency cluster",
-        })
+        chunks.append(
+            {
+                "files": [file_info],
+                "total_files": 1,
+                "total_changes": file_info.get(
+                    "total_changes", len(file_info.get("changes", []))
+                ),
+                "dependency_cluster": [path],
+                "dependency_contexts": [],
+                "is_partial_cluster": True,
+                "chunk_info": "Independent file from dependency cluster",
+            }
+        )
         unassigned.remove(path)
 
     return chunks
@@ -491,20 +506,20 @@ def _estimate_chunk_tokens(chunk: Dict[str, Any]) -> int:
 
     # CLASSIFICATION prompt estimate
     classification_tokens = (
-        3000 +  # CI context
-        2000 +  # Validation sequence
-        (total_files * 50) +  # File summaries (1 example per file)
-        (len(dep_contexts) * 50) +  # Dependency contexts
-        3000  # Instructions
+        3000  # CI context
+        + 2000  # Validation sequence
+        + (total_files * 50)  # File summaries (1 example per file)
+        + (len(dep_contexts) * 50)  # Dependency contexts
+        + 3000  # Instructions
     )
 
     # DEEP ANALYSIS prompt estimate
     deep_analysis_tokens = (
-        3000 +  # CI context
-        500 +   # Validation context
-        (total_changes * 10) +  # ALL file changes
-        (len(dep_contexts) * 50) +  # Dependency contexts
-        5000  # Instructions (longer for atomic problem generation)
+        3000  # CI context
+        + 500  # Validation context
+        + (total_changes * 10)  # ALL file changes
+        + (len(dep_contexts) * 50)  # Dependency contexts
+        + 5000  # Instructions (longer for atomic problem generation)
     )
 
     # Return MAXIMUM to ensure BOTH prompts fit
@@ -525,7 +540,7 @@ def _split_cluster_by_tokens(
     dependency_contexts: List[Dict],
     filtered_edges: List[Dict],
     file_path_to_info: Dict[str, Dict],
-    target_tokens: int
+    target_tokens: int,
 ) -> List[Dict[str, Any]]:
     """
     Split large dependency cluster while preserving relationships.
@@ -539,12 +554,20 @@ def _split_cluster_by_tokens(
     chunks = []
 
     # Priority order for dependencies
-    priority_order = {"READS": 1, "TESTS": 1, "CONFIGURES": 2, "IMPORTS": 2, "RELATED_CHANGES": 3}
+    priority_order = {
+        "READS": 1,
+        "TESTS": 1,
+        "CONFIGURES": 2,
+        "IMPORTS": 2,
+        "RELATED_CHANGES": 3,
+    }
 
     # Sort contexts by priority
     sorted_contexts = sorted(
         dependency_contexts,
-        key=lambda ctx: priority_order.get(ctx.get("dependency_type", "RELATED_CHANGES"), 99)
+        key=lambda ctx: priority_order.get(
+            ctx.get("dependency_type", "RELATED_CHANGES"), 99
+        ),
     )
 
     for dep_context in sorted_contexts:
@@ -584,46 +607,70 @@ def _split_cluster_by_tokens(
             else:
                 # Current chunk full, save it
                 if current_chunk_callees:
-                    chunks.append({
-                        "files": current_chunk_files,
-                        "total_files": len(current_chunk_files),
-                        "total_changes": sum(f.get("total_changes", len(f.get("changes", []))) for f in current_chunk_files),
-                        "dependency_contexts": [{
-                            "dependency_type": dep_type,
-                            "caller": caller,
-                            "callees": current_chunk_callees
-                        }],
-                        "estimated_tokens": current_tokens,
-                        "is_partial_cluster": True
-                    })
+                    chunks.append(
+                        {
+                            "files": current_chunk_files,
+                            "total_files": len(current_chunk_files),
+                            "total_changes": sum(
+                                f.get("total_changes", len(f.get("changes", [])))
+                                for f in current_chunk_files
+                            ),
+                            "dependency_contexts": [
+                                {
+                                    "dependency_type": dep_type,
+                                    "caller": caller,
+                                    "callees": current_chunk_callees,
+                                }
+                            ],
+                            "estimated_tokens": current_tokens,
+                            "is_partial_cluster": True,
+                        }
+                    )
 
                 # Start new chunk with same caller
                 current_chunk_files = [caller_file_info, callee_file_info]
                 current_chunk_callees = [callee]
-                current_tokens = _estimate_file_tokens(caller_file_info) + callee_tokens + 5000
+                current_tokens = (
+                    _estimate_file_tokens(caller_file_info) + callee_tokens + 5000
+                )
 
         # Add last chunk
         if current_chunk_callees:
-            chunks.append({
-                "files": current_chunk_files,
-                "total_files": len(current_chunk_files),
-                "total_changes": sum(f.get("total_changes", len(f.get("changes", []))) for f in current_chunk_files),
-                "dependency_contexts": [{
-                    "dependency_type": dep_type,
-                    "caller": caller,
-                    "callees": current_chunk_callees
-                }],
-                "estimated_tokens": current_tokens,
-                "is_partial_cluster": True
-            })
+            chunks.append(
+                {
+                    "files": current_chunk_files,
+                    "total_files": len(current_chunk_files),
+                    "total_changes": sum(
+                        f.get("total_changes", len(f.get("changes", [])))
+                        for f in current_chunk_files
+                    ),
+                    "dependency_contexts": [
+                        {
+                            "dependency_type": dep_type,
+                            "caller": caller,
+                            "callees": current_chunk_callees,
+                        }
+                    ],
+                    "estimated_tokens": current_tokens,
+                    "is_partial_cluster": True,
+                }
+            )
 
-    return chunks if chunks else [{"files": cluster_files, "total_files": len(cluster_files), "total_changes": 0}]
+    return (
+        chunks
+        if chunks
+        else [
+            {
+                "files": cluster_files,
+                "total_files": len(cluster_files),
+                "total_changes": 0,
+            }
+        ]
+    )
 
 
 def _build_caller_callee_contexts_for_chunk(
-    cluster: List[str],
-    filtered_edges: List[Dict],
-    file_path_to_info: Dict[str, Dict]
+    cluster: List[str], filtered_edges: List[Dict], file_path_to_info: Dict[str, Dict]
 ) -> List[Dict]:
     """
     Build caller → callee contexts for a chunk from filtered edges.
@@ -650,11 +697,7 @@ def _build_caller_callee_contexts_for_chunk(
         if caller in cluster_set and callee in cluster_set:
             key = (caller, dep_type)
             if key not in caller_groups:
-                caller_groups[key] = {
-                    "caller": caller,
-                    "type": dep_type,
-                    "callees": []
-                }
+                caller_groups[key] = {"caller": caller, "type": dep_type, "callees": []}
             if callee not in caller_groups[key]["callees"]:
                 caller_groups[key]["callees"].append(callee)
 
@@ -667,7 +710,7 @@ def _build_caller_callee_contexts_for_chunk(
         caller_context = {
             "file": caller,
             "changes": _extract_changes_summary(caller_info),
-            "role": _classify_file_role(caller)
+            "role": _classify_file_role(caller),
         }
 
         # Build callee contexts
@@ -677,16 +720,18 @@ def _build_caller_callee_contexts_for_chunk(
             callee_context = {
                 "file": callee,
                 "changes": _extract_changes_summary(callee_info),
-                "role": _classify_file_role(callee)
+                "role": _classify_file_role(callee),
             }
             callee_contexts.append(callee_context)
 
         # Create structured context
-        contexts.append({
-            "dependency_type": dep_type.upper(),
-            "caller": caller_context,
-            "callees": callee_contexts
-        })
+        contexts.append(
+            {
+                "dependency_type": dep_type.upper(),
+                "caller": caller_context,
+                "callees": callee_contexts,
+            }
+        )
 
     return contexts
 
@@ -697,11 +742,13 @@ def _extract_changes_summary(file_info: Dict) -> List[Dict]:
     summary = []
 
     for change in changes[:3]:  # First 3 changes
-        summary.append({
-            "line": change.get("line"),
-            "before": (change.get("before", "") or "")[:200],  # Limit to 200 chars
-            "after": (change.get("after", "") or "")[:200],
-        })
+        summary.append(
+            {
+                "line": change.get("line"),
+                "before": (change.get("before", "") or "")[:200],  # Limit to 200 chars
+                "after": (change.get("after", "") or "")[:200],
+            }
+        )
 
     return summary
 
@@ -741,7 +788,8 @@ def _chunk_by_dependency_clusters(
     # Filter edges to only include modified files (BOTH caller and callee)
     edges = dependency_graph.get("edges", [])
     filtered_edges = [
-        edge for edge in edges
+        edge
+        for edge in edges
         if edge.get("from") in all_changed_files and edge.get("to") in all_changed_files
     ]
 
@@ -810,7 +858,9 @@ def _chunk_by_dependency_clusters(
     return chunks
 
 
-def format_structured_for_llm(chunk: Dict[str, Any], max_changes_per_file: int = 3) -> str:
+def format_structured_for_llm(
+    chunk: Dict[str, Any], max_changes_per_file: int = 3
+) -> str:
     """
     Format structured chunk for LLM prompt.
 

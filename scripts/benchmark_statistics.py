@@ -18,9 +18,9 @@ Output:
 
 import json
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import git
 
@@ -112,7 +112,9 @@ def collect_benchmark_statistics():
 
     print("\nCollecting statistics...")
     for i, issue in enumerate(eval_issues, 1):
-        print(f"Processing {i}/{len(eval_issues)}: {issue.get('id', 'unknown')}", end="\r")
+        print(
+            f"Processing {i}/{len(eval_issues)}: {issue.get('id', 'unknown')}", end="\r"
+        )
 
         sha_fail = issue.get("sha_fail", "")
         sha_success = issue.get("sha_success", "")
@@ -181,7 +183,14 @@ def compute_summary(stats: Dict) -> Dict:
 
     def summarize(values: List[int], name: str) -> Dict:
         if not values:
-            return {"name": name, "mean": 0, "median": 0, "min": 0, "max": 0, "total": 0}
+            return {
+                "name": name,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "max": 0,
+                "total": 0,
+            }
 
         sorted_vals = sorted(values)
         n = len(sorted_vals)
@@ -233,15 +242,15 @@ def format_comparison_table(summary: Dict) -> str:
     md += "|--------------|-------|\n"
 
     for failure_type, count in sorted(
-        summary['failure_types']['distribution'].items(),
+        summary["failure_types"]["distribution"].items(),
         key=lambda x: x[1],
-        reverse=True
+        reverse=True,
     ):
         md += f"| {failure_type} | {count} |\n"
 
     md += "\n## Why This Is Different From SWE-bench\n\n"
     md += "1. **Multiple Commits per PR**: "
-    if summary['commits']['mean'] > 1:
+    if summary["commits"]["mean"] > 1:
         md += f"Average {summary['commits']['mean']:.1f} commits per PR (SWE-bench: typically 1)\n"
     else:
         md += "Most PRs have single commits, but some have multiple\n"
@@ -249,7 +258,7 @@ def format_comparison_table(summary: Dict) -> str:
     md += f"2. **Multiple Files Changed**: Average {summary['files']['mean']:.1f} files per PR\n"
     md += f"3. **Diverse Failure Types**: {summary['failure_types']['unique']} unique CI failure categories\n"
 
-    if summary['problems']['mean'] > 0:
+    if summary["problems"]["mean"] > 0:
         md += f"4. **Multiple Problems per PR**: Average {summary['problems']['mean']:.1f} distinct problems per PR\n"
 
     md += "5. **Real CI Pipeline**: Multi-stage validation (formatting, linting, type checking, tests)\n"

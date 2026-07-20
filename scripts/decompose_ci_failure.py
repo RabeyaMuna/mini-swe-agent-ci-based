@@ -818,16 +818,15 @@ def _build_caller_callee_contexts(
         # STRICT FILTER: Both caller AND callee must be in:
         # 1. This validation group (group_files)
         # 2. The changed files (file_changes_lookup)
-        if (caller in group_files and callee in group_files and
-            caller in file_changes_lookup and callee in file_changes_lookup):
-
+        if (
+            caller in group_files
+            and callee in group_files
+            and caller in file_changes_lookup
+            and callee in file_changes_lookup
+        ):
             key = (caller, dep_type)
             if key not in caller_groups:
-                caller_groups[key] = {
-                    "caller": caller,
-                    "type": dep_type,
-                    "callees": []
-                }
+                caller_groups[key] = {"caller": caller, "type": dep_type, "callees": []}
             if callee not in caller_groups[key]["callees"]:
                 caller_groups[key]["callees"].append(callee)
 
@@ -838,8 +837,10 @@ def _build_caller_callee_contexts(
         # Build caller info
         caller_info = {
             "file": caller,
-            "changes": _compact_changes(file_changes_lookup.get(caller, []), max_changes=3),
-            "role": _classify_file_type_for_role(caller)
+            "changes": _compact_changes(
+                file_changes_lookup.get(caller, []), max_changes=3
+            ),
+            "role": _classify_file_type_for_role(caller),
         }
 
         # Build callee infos
@@ -847,8 +848,10 @@ def _build_caller_callee_contexts(
         for callee in callees:
             callee_info = {
                 "file": callee,
-                "changes": _compact_changes(file_changes_lookup.get(callee, []), max_changes=3),
-                "role": _classify_file_type_for_role(callee)
+                "changes": _compact_changes(
+                    file_changes_lookup.get(callee, []), max_changes=3
+                ),
+                "role": _classify_file_type_for_role(callee),
             }
             callee_infos.append(callee_info)
 
@@ -857,7 +860,7 @@ def _build_caller_callee_contexts(
             "dependency_type": dep_type.upper(),
             "caller": caller_info,
             "callees": callee_infos,
-            "cascade_explanation": f"Caller ({caller}) {dep_type.upper()} callees ({len(callees)} files)"
+            "cascade_explanation": f"Caller ({caller}) {dep_type.upper()} callees ({len(callees)} files)",
         }
 
         contexts.append(context)
@@ -883,11 +886,13 @@ def _compact_changes(changes: list[dict], max_changes: int = 3) -> list[dict]:
     """Compact changes to first N with truncated before/after."""
     compacted = []
     for change in changes[:max_changes]:
-        compacted.append({
-            "line": change.get("line"),
-            "before": _compact_text(change.get("before", ""), 200),
-            "after": _compact_text(change.get("after", ""), 200),
-        })
+        compacted.append(
+            {
+                "line": change.get("line"),
+                "before": _compact_text(change.get("before", ""), 200),
+                "after": _compact_text(change.get("after", ""), 200),
+            }
+        )
     return compacted
 
 
@@ -920,10 +925,16 @@ def merge_chunks_by_validation(
                 "dependency_cluster": dep_cluster,
                 "dependency_explanation": dep_explanation,
             }
-            if dep_cluster and dep_explanation and dep_explanation != "No dependencies within cluster":
+            if (
+                dep_cluster
+                and dep_explanation
+                and dep_explanation != "No dependencies within cluster"
+            ):
                 all_dependency_contexts.append(dep_context)
                 for file_path in dep_cluster:
-                    chunk_dependency_lookup.setdefault(file_path, []).append(dep_context)
+                    chunk_dependency_lookup.setdefault(file_path, []).append(
+                        dep_context
+                    )
             for caller_context in chunk.get("dependency_contexts") or []:
                 caller = caller_context.get("caller", {})
                 callees = caller_context.get("callees", [])
@@ -1094,11 +1105,14 @@ def merge_chunks_by_validation(
     # CRITICAL FILTER: Only include edges where BOTH caller AND callee are in changed files
     # This ensures we only analyze dependencies between files that actually changed together
     filtered_edges = [
-        edge for edge in dependency_edges
+        edge
+        for edge in dependency_edges
         if edge.get("from") in all_changed_files and edge.get("to") in all_changed_files
     ]
 
-    print(f"[DEBUG] Total edges: {len(dependency_edges)}, Filtered (both modified): {len(filtered_edges)}")
+    print(
+        f"[DEBUG] Total edges: {len(dependency_edges)}, Filtered (both modified): {len(filtered_edges)}"
+    )
 
     # Now attach changes to each validation group
     for val_group in validation_groups.values():
@@ -1235,14 +1249,17 @@ def _chunk_validation_changes(
     for start_idx in range(0, len(all_changes), max_changes_per_chunk):
         chunk_changes = all_changes[start_idx : start_idx + max_changes_per_chunk]
 
-        chunk = _copy_validation_chunk_metadata(val_group, {
-            "validation_cmd": val_group.get("validation_cmd", ""),
-            "failure_type": val_group.get("failure_type", ""),
-            "issue_type": val_group.get("issue_type", ""),
-            "all_files": val_group.get("all_files", []),  # Keep full file list
-            "all_changes": chunk_changes,
-            "chunk_info": f"Changes {start_idx + 1}-{start_idx + len(chunk_changes)} of {len(all_changes)} total",
-        })
+        chunk = _copy_validation_chunk_metadata(
+            val_group,
+            {
+                "validation_cmd": val_group.get("validation_cmd", ""),
+                "failure_type": val_group.get("failure_type", ""),
+                "issue_type": val_group.get("issue_type", ""),
+                "all_files": val_group.get("all_files", []),  # Keep full file list
+                "all_changes": chunk_changes,
+                "chunk_info": f"Changes {start_idx + 1}-{start_idx + len(chunk_changes)} of {len(all_changes)} total",
+            },
+        )
         chunks.append(chunk)
 
     return chunks
@@ -1296,7 +1313,8 @@ def _chunk_by_dependencies(
 
         # Gather all changes for these files
         dep_changes = [
-            change for change in val_group.get("all_changes", [])
+            change
+            for change in val_group.get("all_changes", [])
             if change.get("file") in dep_files
         ]
 
@@ -1305,30 +1323,38 @@ def _chunk_by_dependencies(
 
         # If changes fit in one chunk, create single chunk with dependency context
         if len(dep_changes) <= max_changes_per_chunk:
-            chunk = _copy_validation_chunk_metadata(val_group, {
-                "validation_cmd": val_group.get("validation_cmd", ""),
-                "failure_type": val_group.get("failure_type", ""),
-                "issue_type": val_group.get("issue_type", ""),
-                "all_files": dep_files,
-                "all_changes": dep_changes,
-                "dependency_contexts": [dep_context],  # Attach dependency context
-                "chunk_info": f"Dependency chunk: {caller_file} → {len(callee_files)} callees",
-            })
-            chunks.append(chunk)
-        else:
-            # Too many changes - split callees but keep caller context in each chunk
-            for start_idx in range(0, len(dep_changes), max_changes_per_chunk):
-                chunk_changes = dep_changes[start_idx : start_idx + max_changes_per_chunk]
-
-                chunk = _copy_validation_chunk_metadata(val_group, {
+            chunk = _copy_validation_chunk_metadata(
+                val_group,
+                {
                     "validation_cmd": val_group.get("validation_cmd", ""),
                     "failure_type": val_group.get("failure_type", ""),
                     "issue_type": val_group.get("issue_type", ""),
                     "all_files": dep_files,
-                    "all_changes": chunk_changes,
-                    "dependency_contexts": [dep_context],  # Keep dependency context
-                    "chunk_info": f"Dependency chunk {start_idx // max_changes_per_chunk + 1}: {caller_file} → callees (partial)",
-                })
+                    "all_changes": dep_changes,
+                    "dependency_contexts": [dep_context],  # Attach dependency context
+                    "chunk_info": f"Dependency chunk: {caller_file} → {len(callee_files)} callees",
+                },
+            )
+            chunks.append(chunk)
+        else:
+            # Too many changes - split callees but keep caller context in each chunk
+            for start_idx in range(0, len(dep_changes), max_changes_per_chunk):
+                chunk_changes = dep_changes[
+                    start_idx : start_idx + max_changes_per_chunk
+                ]
+
+                chunk = _copy_validation_chunk_metadata(
+                    val_group,
+                    {
+                        "validation_cmd": val_group.get("validation_cmd", ""),
+                        "failure_type": val_group.get("failure_type", ""),
+                        "issue_type": val_group.get("issue_type", ""),
+                        "all_files": dep_files,
+                        "all_changes": chunk_changes,
+                        "dependency_contexts": [dep_context],  # Keep dependency context
+                        "chunk_info": f"Dependency chunk {start_idx // max_changes_per_chunk + 1}: {caller_file} → callees (partial)",
+                    },
+                )
                 chunks.append(chunk)
 
     # Handle remaining changes not covered by dependencies
@@ -1341,26 +1367,34 @@ def _chunk_by_dependencies(
         all_dep_files.update(callee_files)
 
     remaining_changes = [
-        change for change in val_group.get("all_changes", [])
+        change
+        for change in val_group.get("all_changes", [])
         if change.get("file") not in all_dep_files
     ]
 
     if remaining_changes:
         # Chunk remaining changes without dependency context
         for start_idx in range(0, len(remaining_changes), max_changes_per_chunk):
-            chunk_changes = remaining_changes[start_idx : start_idx + max_changes_per_chunk]
+            chunk_changes = remaining_changes[
+                start_idx : start_idx + max_changes_per_chunk
+            ]
 
-            chunk = _copy_validation_chunk_metadata(val_group, {
-                "validation_cmd": val_group.get("validation_cmd", ""),
-                "failure_type": val_group.get("failure_type", ""),
-                "issue_type": val_group.get("issue_type", ""),
-                "all_files": list(set(ch.get("file") for ch in chunk_changes)),
-                "all_changes": chunk_changes,
-                "chunk_info": f"Non-dependency changes {start_idx + 1}-{start_idx + len(chunk_changes)}",
-            })
+            chunk = _copy_validation_chunk_metadata(
+                val_group,
+                {
+                    "validation_cmd": val_group.get("validation_cmd", ""),
+                    "failure_type": val_group.get("failure_type", ""),
+                    "issue_type": val_group.get("issue_type", ""),
+                    "all_files": list(set(ch.get("file") for ch in chunk_changes)),
+                    "all_changes": chunk_changes,
+                    "chunk_info": f"Non-dependency changes {start_idx + 1}-{start_idx + len(chunk_changes)}",
+                },
+            )
             chunks.append(chunk)
 
-    return chunks if chunks else [val_group]  # Fallback to full group if no chunks created
+    return (
+        chunks if chunks else [val_group]
+    )  # Fallback to full group if no chunks created
 
 
 # DEPRECATED: Use model-aware limits from get_model_config() instead
@@ -1677,9 +1711,7 @@ IMPORTANT: Be CONSERVATIVE. When in doubt, SEPARATE.
                 "how_fixed": merged_prob.get("how_fixed", cluster[0].get("how_fixed")),
                 "why_fix_works": merged_prob.get(
                     "why_fix_works",
-                    merged_prob.get(
-                        "why_fixed_works", cluster[0].get("why_fix_works")
-                    ),
+                    merged_prob.get("why_fixed_works", cluster[0].get("why_fix_works")),
                 ),
                 "failure_type": cluster[0].get("failure_type"),
                 "issue_type": cluster[0].get("issue_type"),
@@ -1902,9 +1934,24 @@ def _reorder_by_repair_trajectory(
             dependency_rank = 0
         elif config_rank == 0:
             dependency_rank = 1
-        elif any(marker in text for marker in ["format", "formatter", "docstrfmt", "lint", "ruff", "black", "mypy", "type"]):
+        elif any(
+            marker in text
+            for marker in [
+                "format",
+                "formatter",
+                "docstrfmt",
+                "lint",
+                "ruff",
+                "black",
+                "mypy",
+                "type",
+            ]
+        ):
             dependency_rank = 2
-        elif problem.get("is_cascading") and str(problem.get("dependency_type", "")).upper():
+        elif (
+            problem.get("is_cascading")
+            and str(problem.get("dependency_type", "")).upper()
+        ):
             dependency_rank = 3
         else:
             dependency_rank = 2
@@ -1937,7 +1984,7 @@ def _reorder_by_repair_trajectory(
 
 
 def _apply_cascading_dependency_order(
-    problems: list[dict[str, Any]]
+    problems: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Move cascading adaptations after likely source/doc/config problems."""
     ordered = list(problems)
@@ -1951,7 +1998,19 @@ def _apply_cascading_dependency_order(
     def _is_adaptation(problem: dict[str, Any]) -> bool:
         files = [str(file_path) for file_path in problem.get("affected_files", [])]
         source_like_file = any(
-            file_path.endswith((".rst", ".md", ".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock"))
+            file_path.endswith(
+                (
+                    ".rst",
+                    ".md",
+                    ".toml",
+                    ".yaml",
+                    ".yml",
+                    ".json",
+                    ".ini",
+                    ".cfg",
+                    ".lock",
+                )
+            )
             for file_path in files
         )
         return (
@@ -1967,7 +2026,15 @@ def _apply_cascading_dependency_order(
         )
         return any(
             marker in text
-            for marker in ["docstrfmt", "rst", "format", "formatter", "config", "dependency", "setup"]
+            for marker in [
+                "docstrfmt",
+                "rst",
+                "format",
+                "formatter",
+                "config",
+                "dependency",
+                "setup",
+            ]
         )
 
     changed = True
@@ -1976,7 +2043,7 @@ def _apply_cascading_dependency_order(
         for idx, problem in enumerate(list(ordered)):
             if not _is_adaptation(problem):
                 continue
-            problem_order = _safe_validation_order(problem)
+            _safe_validation_order(problem)
             source_indices = [
                 source_idx
                 for source_idx, source in enumerate(ordered)
@@ -2178,16 +2245,16 @@ def _caller_callee_context_for_prompt(contexts: list[dict[str, Any]]) -> str:
             "caller": {
                 "file": caller.get("file"),
                 "changes": caller.get("changes", [])[:3],  # First 3 changes
-                "role": caller.get("role", "unknown")
+                "role": caller.get("role", "unknown"),
             },
             "callees": [
                 {
                     "file": callee.get("file"),
                     "changes": callee.get("changes", [])[:3],
-                    "role": callee.get("role", "unknown")
+                    "role": callee.get("role", "unknown"),
                 }
                 for callee in callees[:10]  # Limit to 10 callees
-            ]
+            ],
         }
         compact_contexts.append(context_entry)
 
@@ -2470,6 +2537,7 @@ OUTPUT REQUIREMENTS:
 
   {STRICT_JSON_RULES}
   """
+
 
 def _extract_atomic_problems(result: Any) -> list[dict[str, Any]]:
     if isinstance(result, list):
@@ -2813,9 +2881,7 @@ def _normalize_problem_defaults(
         problem.get("dependency_type", val_group.get("dependency_type", "")) or ""
     )
     problem["cascade_explanation"] = str(
-        problem.get(
-            "cascade_explanation", val_group.get("cascade_explanation", "")
-        )
+        problem.get("cascade_explanation", val_group.get("cascade_explanation", ""))
         or ""
     )
     if not isinstance(problem.get("affected_files"), list):
@@ -3046,7 +3112,7 @@ def _merge_validation_problems(
 
 
 def _deterministic_merge_repeated_problem_candidates(
-    problems: list[dict[str, Any]]
+    problems: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
     Pre-merge obvious repeated chunk artifacts before LLM merge.
@@ -3125,7 +3191,13 @@ def _is_repeated_style_problem(group: list[dict[str, Any]]) -> bool:
 
 
 def _file_scope_summary(files: list[str]) -> str:
-    dirs = sorted({str(file_path).rsplit("/", 1)[0] for file_path in files if "/" in str(file_path)})
+    dirs = sorted(
+        {
+            str(file_path).rsplit("/", 1)[0]
+            for file_path in files
+            if "/" in str(file_path)
+        }
+    )
     if not dirs:
         return "the changed files"
     if len(dirs) == 1:
@@ -3644,7 +3716,9 @@ def classify_chunk_with_fallback(
 
     # Check for caller → callee dependency contexts
     dependency_contexts = chunk.get("dependency_contexts", [])
-    has_caller_callee = any("caller" in ctx and "callees" in ctx for ctx in dependency_contexts)
+    has_caller_callee = any(
+        "caller" in ctx and "callees" in ctx for ctx in dependency_contexts
+    )
 
     # ROUTE TO SPECIALIZED CLASSIFICATION
     if has_caller_callee and dependency_contexts:
@@ -3695,7 +3769,9 @@ def _classify_chunk_with_dependencies(
     formatted_validations = _format_validation_sequence(validation_sequence)
 
     # Format compact dependency context
-    dependency_info = _format_caller_callee_for_dependency_classification(dependency_contexts)
+    dependency_info = _format_caller_callee_for_dependency_classification(
+        dependency_contexts
+    )
 
     prompt = f"""Classify each changed file by the CI step that would catch or require the fixed issue.
 
@@ -3840,14 +3916,23 @@ def _classify_chunk_with_dependencies(
             )
             # Fallback to regular classification if dependency analysis is too large
             return _classify_chunk_regular(
-                chunk, chunk_index, total_chunks, visible_failure_context, validation_sequence, llm
+                chunk,
+                chunk_index,
+                total_chunks,
+                visible_failure_context,
+                validation_sequence,
+                llm,
             )
         else:
-            print(f"    FAIL Chunk {chunk_index} dependency classification failed: {str(e)[:100]}")
+            print(
+                f"    FAIL Chunk {chunk_index} dependency classification failed: {str(e)[:100]}"
+            )
             return []
 
 
-def _format_caller_callee_for_dependency_classification(dependency_contexts: list[dict]) -> str:
+def _format_caller_callee_for_dependency_classification(
+    dependency_contexts: list[dict],
+) -> str:
     """
     Format caller → callee contexts for dependency-focused classification.
 
@@ -3877,15 +3962,21 @@ def _format_caller_callee_for_dependency_classification(dependency_contexts: lis
             ch = caller_changes[0]  # Just first change
             before = _compact_text(ch.get("before", ""), 60)
             after = _compact_text(ch.get("after", ""), 60)
-            caller_change_summary = f'    Sample: Line {ch.get("line")}: "{before}" → "{after}"'
+            caller_change_summary = (
+                f'    Sample: Line {ch.get("line")}: "{before}" → "{after}"'
+            )
 
         # Compact callee list: First 3 files + count
         callee_files_list = []
         for callee in callees[:3]:  # First 3 only
-            callee_files_list.append(f'    - {callee.get("file", "unknown")} ({callee.get("role", "unknown")})')
+            callee_files_list.append(
+                f"    - {callee.get('file', 'unknown')} ({callee.get('role', 'unknown')})"
+            )
 
         if len(callees) > 3:
-            callee_files_list.append(f'    - ... and {len(callees) - 3} more files with similar changes')
+            callee_files_list.append(
+                f"    - ... and {len(callees) - 3} more files with similar changes"
+            )
 
         # Show ONE representative callee change
         callee_change_sample = ""
@@ -3893,7 +3984,9 @@ def _format_caller_callee_for_dependency_classification(dependency_contexts: lis
             ch = callees[0]["changes"][0]
             before = _compact_text(ch.get("before", ""), 60)
             after = _compact_text(ch.get("after", ""), 60)
-            callee_change_sample = f'    Representative: Line {ch.get("line")}: "{before}" → "{after}"'
+            callee_change_sample = (
+                f'    Representative: Line {ch.get("line")}: "{before}" → "{after}"'
+            )
 
         formatted.append(f"""
 DEPENDENCY {idx}: {dep_type}
@@ -4060,7 +4153,7 @@ REQUIREMENTS:
             prompt,
             max_tokens=output_safe_tokens,
         )
-   
+
         valid = _normalize_classification_validations(
             _extract_validation_list(result),
             validation_sequence,

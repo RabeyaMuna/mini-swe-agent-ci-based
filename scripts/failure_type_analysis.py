@@ -17,9 +17,9 @@ Output:
 """
 
 import json
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,8 +58,22 @@ def analyze_failure_types():
     eval_issues = load_eval_set()
     print(f"Loaded {len(eval_issues)} eval issues")
 
-    baseline_path = PROJECT_ROOT / "results" / "miniswe-agent" / "minimax-m2.5" / "baseline" / "preds.json"
-    memory_path = PROJECT_ROOT / "results" / "miniswe-agent" / "minimax-m2.5" / "L1_L2_L3" / "preds.json"
+    baseline_path = (
+        PROJECT_ROOT
+        / "results"
+        / "miniswe-agent"
+        / "minimax-m2.5"
+        / "baseline"
+        / "preds.json"
+    )
+    memory_path = (
+        PROJECT_ROOT
+        / "results"
+        / "miniswe-agent"
+        / "minimax-m2.5"
+        / "L1_L2_L3"
+        / "preds.json"
+    )
 
     if not baseline_path.exists():
         print(f"Error: Baseline predictions not found at {baseline_path}")
@@ -76,16 +90,18 @@ def analyze_failure_types():
     print(f"Loaded {len(memory_preds)} memory predictions")
 
     # Analyze by failure type
-    failure_type_stats = defaultdict(lambda: {
-        "total": 0,
-        "baseline_resolved": 0,
-        "memory_resolved": 0,
-        "baseline_only": 0,  # Resolved by baseline but not memory
-        "memory_only": 0,    # Resolved by memory but not baseline
-        "both_resolved": 0,
-        "neither_resolved": 0,
-        "issues": [],
-    })
+    failure_type_stats = defaultdict(
+        lambda: {
+            "total": 0,
+            "baseline_resolved": 0,
+            "memory_resolved": 0,
+            "baseline_only": 0,  # Resolved by baseline but not memory
+            "memory_only": 0,  # Resolved by memory but not baseline
+            "both_resolved": 0,
+            "neither_resolved": 0,
+            "issues": [],
+        }
+    )
 
     all_failure_types = set()
 
@@ -129,18 +145,24 @@ def analyze_failure_types():
             else:
                 failure_type_stats[ftype]["neither_resolved"] += 1
 
-            failure_type_stats[ftype]["issues"].append({
-                "id": issue_id,
-                "baseline_resolved": baseline_resolved,
-                "memory_resolved": memory_resolved,
-            })
+            failure_type_stats[ftype]["issues"].append(
+                {
+                    "id": issue_id,
+                    "baseline_resolved": baseline_resolved,
+                    "memory_resolved": memory_resolved,
+                }
+            )
 
     # Compute improvement metrics
     results = {
         "summary": {
             "total_failure_types": len(failure_type_stats),
-            "total_baseline_resolved": sum(1 for _, pred in baseline_preds.items() if pred.get("resolved", False)),
-            "total_memory_resolved": sum(1 for _, pred in memory_preds.items() if pred.get("resolved", False)),
+            "total_baseline_resolved": sum(
+                1 for _, pred in baseline_preds.items() if pred.get("resolved", False)
+            ),
+            "total_memory_resolved": sum(
+                1 for _, pred in memory_preds.items() if pred.get("resolved", False)
+            ),
         },
         "by_failure_type": {},
     }
@@ -148,8 +170,16 @@ def analyze_failure_types():
     for ftype in sorted(all_failure_types):
         stats = failure_type_stats[ftype]
 
-        baseline_rate = (stats["baseline_resolved"] / stats["total"] * 100) if stats["total"] > 0 else 0
-        memory_rate = (stats["memory_resolved"] / stats["total"] * 100) if stats["total"] > 0 else 0
+        baseline_rate = (
+            (stats["baseline_resolved"] / stats["total"] * 100)
+            if stats["total"] > 0
+            else 0
+        )
+        memory_rate = (
+            (stats["memory_resolved"] / stats["total"] * 100)
+            if stats["total"] > 0
+            else 0
+        )
         improvement = memory_rate - baseline_rate
 
         results["by_failure_type"][ftype] = {
@@ -195,9 +225,7 @@ def format_analysis_report(results: Dict) -> str:
     # Sort by improvement (descending)
     by_type = results["by_failure_type"]
     sorted_types = sorted(
-        by_type.items(),
-        key=lambda x: x[1]["improvement"]["absolute"],
-        reverse=True
+        by_type.items(), key=lambda x: x[1]["improvement"]["absolute"], reverse=True
     )
 
     for ftype, stats in sorted_types:
@@ -244,10 +272,7 @@ def format_analysis_report(results: Dict) -> str:
             md += f"({stats['improvement']['baseline_only']} issues solved only by baseline)\n"
 
     # Find hardest types
-    hardest = sorted(
-        by_type.items(),
-        key=lambda x: x[1]["memory"]["rate"]
-    )[:3]
+    hardest = sorted(by_type.items(), key=lambda x: x[1]["memory"]["rate"])[:3]
 
     md += "\n### Hardest Failure Types (Low Memory Success Rate):\n\n"
     for ftype, stats in hardest:
@@ -290,7 +315,9 @@ def main():
     print(f"Total Failure Types: {results['summary']['total_failure_types']}")
     print(f"Baseline Resolved: {results['summary']['total_baseline_resolved']}")
     print(f"Memory Resolved: {results['summary']['total_memory_resolved']}")
-    print(f"Net Improvement: +{results['summary']['total_memory_resolved'] - results['summary']['total_baseline_resolved']}")
+    print(
+        f"Net Improvement: +{results['summary']['total_memory_resolved'] - results['summary']['total_baseline_resolved']}"
+    )
     print("=" * 70)
 
 

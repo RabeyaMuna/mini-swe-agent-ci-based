@@ -404,7 +404,9 @@ def analyze_workflow_from_benchmark(
     dependent_file_contents: List[Dict[str, Any]] = []
     for dep in dependent_files:
         # Use sha_fail to read from the exact failing commit
-        content = _read_repo_file_at_commit(repo_path, dep["path"], sha=sha_fail or None)
+        content = _read_repo_file_at_commit(
+            repo_path, dep["path"], sha=sha_fail or None
+        )
 
         found = content is not None
         if sha_fail:

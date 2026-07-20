@@ -199,7 +199,9 @@ def _extract_file_reads(code: str, current_file: str) -> list[str]:
 
     # Pattern 4: quoted path fragments, including chained pathlib expressions
     # like Path(__file__).parents[4] / "docs/source/ref-exit-codes".
-    literal_patterns = re.findall(r'["\']([^"\']*(?:/|\*|\.(?:rst|md|py|txt|json|toml|ya?ml))[^"\']*)["\']', code)
+    literal_patterns = re.findall(
+        r'["\']([^"\']*(?:/|\*|\.(?:rst|md|py|txt|json|toml|ya?ml))[^"\']*)["\']', code
+    )
     reads.extend(literal_patterns)
 
     # Expand glob patterns to actual files (simple heuristic)
@@ -243,7 +245,9 @@ def _infer_config_affects(config_path: str, content: str) -> list[str]:
     if "pyproject.toml" in config_path:
         if any(tool in lowered for tool in ["mdformat", "docformatter", "sphinx"]):
             affects.extend(["*.md", "*.rst"])
-        if any(tool in lowered for tool in ["mypy", "ruff", "pytest", "black", "isort"]):
+        if any(
+            tool in lowered for tool in ["mypy", "ruff", "pytest", "black", "isort"]
+        ):
             affects.append("*.py")
         if not affects:
             affects.append("*.py")
@@ -330,7 +334,9 @@ def _matches_dependency_pattern(
     return False
 
 
-def _resolve_dependency_edges(nodes: dict[str, dict], raw_edges: list[dict]) -> list[dict]:
+def _resolve_dependency_edges(
+    nodes: dict[str, dict], raw_edges: list[dict]
+) -> list[dict]:
     """Resolve raw dependency targets to concrete changed files."""
     changed_files = list(nodes)
     resolved = []

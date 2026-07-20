@@ -33,7 +33,14 @@ else:
     checks.append(("✗", "decomposed_issues.json NOT FOUND"))
 
 # Check 3: Baseline results exist
-baseline_path = PROJECT_ROOT / "results" / "miniswe-agent" / "minimax-m2.5" / "baseline" / "preds.json"
+baseline_path = (
+    PROJECT_ROOT
+    / "results"
+    / "miniswe-agent"
+    / "minimax-m2.5"
+    / "baseline"
+    / "preds.json"
+)
 if baseline_path.exists():
     data = json.load(open(baseline_path))
     checks.append(("✓", f"Baseline preds.json exists ({len(data)} predictions)"))
@@ -41,7 +48,14 @@ else:
     checks.append(("⚠", "Baseline preds.json NOT FOUND - Task 3 will fail"))
 
 # Check 4: Memory results exist
-memory_path = PROJECT_ROOT / "results" / "miniswe-agent" / "minimax-m2.5" / "L1_L2_L3" / "preds.json"
+memory_path = (
+    PROJECT_ROOT
+    / "results"
+    / "miniswe-agent"
+    / "minimax-m2.5"
+    / "L1_L2_L3"
+    / "preds.json"
+)
 if memory_path.exists():
     data = json.load(open(memory_path))
     checks.append(("✓", f"Memory preds.json exists ({len(data)} predictions)"))
@@ -54,11 +68,14 @@ if repo_dir.exists():
     num_repos = len(list(repo_dir.iterdir()))
     checks.append(("✓", f"Repo directory exists ({num_repos} repos)"))
 else:
-    checks.append(("⚠", "Repo directory NOT FOUND - Task 2 commit analysis will be limited"))
+    checks.append(
+        ("⚠", "Repo directory NOT FOUND - Task 2 commit analysis will be limited")
+    )
 
 # Check 6: GitPython installed
 try:
     import git
+
     checks.append(("✓", "gitpython installed"))
 except ImportError:
     checks.append(("⚠", "gitpython NOT installed - run: pip install gitpython"))
