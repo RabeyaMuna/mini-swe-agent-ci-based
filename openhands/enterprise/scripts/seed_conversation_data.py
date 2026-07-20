@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Seed script to populate the database with realistic conversation data for testing.
+"""Seed script to populate the database with realistic conversation data for testing.
 
 Usage:
     # With default settings (assumes local PostgreSQL)
@@ -22,143 +21,143 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 # Configuration
-DEFAULT_DB_URL = 'postgresql://postgres:postgres@localhost:5432/openhands'
+DEFAULT_DB_URL = "postgresql://postgres:postgres@localhost:5432/openhands"
 
 
 # Sample data
 FIRST_NAMES = [
-    'Sarah',
-    'Michael',
-    'Emma',
-    'James',
-    'Olivia',
-    'William',
-    'Sophia',
-    'Benjamin',
-    'Isabella',
-    'Lucas',
-    'Mia',
-    'Henry',
-    'Charlotte',
-    'Alexander',
-    'Amelia',
-    'Daniel',
-    'Harper',
-    'Matthew',
-    'Evelyn',
-    'Sebastian',
-    'Aria',
-    'Jack',
-    'Luna',
-    'Owen',
+    "Sarah",
+    "Michael",
+    "Emma",
+    "James",
+    "Olivia",
+    "William",
+    "Sophia",
+    "Benjamin",
+    "Isabella",
+    "Lucas",
+    "Mia",
+    "Henry",
+    "Charlotte",
+    "Alexander",
+    "Amelia",
+    "Daniel",
+    "Harper",
+    "Matthew",
+    "Evelyn",
+    "Sebastian",
+    "Aria",
+    "Jack",
+    "Luna",
+    "Owen",
 ]
 
 LAST_NAMES = [
-    'Chen',
-    'Williams',
-    'Rodriguez',
-    'Kim',
-    'Patel',
-    'Johnson',
-    'Martinez',
-    'Anderson',
-    'Thompson',
-    'Garcia',
-    'Lee',
-    'Wilson',
-    'Taylor',
-    'Brown',
-    'Davis',
-    'Miller',
-    'Moore',
-    'Jackson',
-    'Martin',
-    'Thompson',
-    'White',
-    'Harris',
-    'Clark',
-    'Lewis',
+    "Chen",
+    "Williams",
+    "Rodriguez",
+    "Kim",
+    "Patel",
+    "Johnson",
+    "Martinez",
+    "Anderson",
+    "Thompson",
+    "Garcia",
+    "Lee",
+    "Wilson",
+    "Taylor",
+    "Brown",
+    "Davis",
+    "Miller",
+    "Moore",
+    "Jackson",
+    "Martin",
+    "Thompson",
+    "White",
+    "Harris",
+    "Clark",
+    "Lewis",
 ]
 
-DOMAINS = ['techcorp.io', 'acme.com', 'startupxyz.com', 'enterprise.net', 'devco.org']
+DOMAINS = ["techcorp.io", "acme.com", "startupxyz.com", "enterprise.net", "devco.org"]
 
 LLM_MODELS = [
-    'claude-sonnet-4-5',
-    'claude-opus-4',
-    'gpt-4o',
-    'gpt-4-turbo',
-    'gemini-1.5-pro',
-    'claude-3-5-sonnet',
-    'gpt-4o-mini',
-    'claude-3-opus',
+    "claude-sonnet-4-5",
+    "claude-opus-4",
+    "gpt-4o",
+    "gpt-4-turbo",
+    "gemini-1.5-pro",
+    "claude-3-5-sonnet",
+    "gpt-4o-mini",
+    "claude-3-opus",
 ]
 
 AGENT_KINDS = [
-    'CodeAgent',
-    'AnalysisAgent',
-    'DebugAgent',
-    'ReviewAgent',
-    'DocumentAgent',
-    'TestAgent',
-    'RefactorAgent',
+    "CodeAgent",
+    "AnalysisAgent",
+    "DebugAgent",
+    "ReviewAgent",
+    "DocumentAgent",
+    "TestAgent",
+    "RefactorAgent",
 ]
 
 REPO_NAMES = [
-    'frontend-app',
-    'backend-api',
-    'mobile-app',
-    'data-pipeline',
-    'ml-service',
-    'auth-service',
-    'payment-gateway',
-    'notification-system',
-    'analytics-dashboard',
-    'admin-portal',
-    'e-commerce-platform',
-    'inventory-management',
+    "frontend-app",
+    "backend-api",
+    "mobile-app",
+    "data-pipeline",
+    "ml-service",
+    "auth-service",
+    "payment-gateway",
+    "notification-system",
+    "analytics-dashboard",
+    "admin-portal",
+    "e-commerce-platform",
+    "inventory-management",
 ]
 
 BRANCHES = [
-    'main',
-    'develop',
-    'feature/user-auth',
-    'bugfix/login-issue',
-    'release/v2.1',
+    "main",
+    "develop",
+    "feature/user-auth",
+    "bugfix/login-issue",
+    "release/v2.1",
 ]
 
-TRIGGERS = ['manual', 'scheduled', 'webhook', 'api', 'cli']
+TRIGGERS = ["manual", "scheduled", "webhook", "api", "cli"]
 
 CONVERSATION_TITLES = [
-    'Fix authentication flow',
-    'Implement new dashboard features',
-    'Code review for PR #234',
-    'Debug memory leak in service',
-    'Add unit tests for auth module',
-    'Refactor database queries',
-    'Setup CI/CD pipeline',
-    'Performance optimization',
-    'Security audit fixes',
-    'Update API documentation',
-    'Migrate to new framework',
-    'Add dark mode support',
-    'Implement search functionality',
-    'Fix responsive layout',
-    'Add user analytics',
-    'Optimize image loading',
-    'Create API endpoints',
-    'Write integration tests',
-    'Fix CSS bugs',
-    'Deploy to staging',
+    "Fix authentication flow",
+    "Implement new dashboard features",
+    "Code review for PR #234",
+    "Debug memory leak in service",
+    "Add unit tests for auth module",
+    "Refactor database queries",
+    "Setup CI/CD pipeline",
+    "Performance optimization",
+    "Security audit fixes",
+    "Update API documentation",
+    "Migrate to new framework",
+    "Add dark mode support",
+    "Implement search functionality",
+    "Fix responsive layout",
+    "Add user analytics",
+    "Optimize image loading",
+    "Create API endpoints",
+    "Write integration tests",
+    "Fix CSS bugs",
+    "Deploy to staging",
 ]
 
-EXECUTIONS_STATUSES = ['running', 'idle', 'paused', 'finished', 'error', 'stuck']
-SANDBOX_STATUSES = ['RUNNING', 'STARTING', 'PAUSED', 'ERROR', 'MISSING']
+EXECUTIONS_STATUSES = ["running", "idle", "paused", "finished", "error", "stuck"]
+SANDBOX_STATUSES = ["RUNNING", "STARTING", "PAUSED", "ERROR", "MISSING"]
 
 
 def random_email(first_name: str, last_name: str) -> str:
     """Generate a random email address."""
     domain = random.choice(DOMAINS)
-    return f'{first_name.lower()}.{last_name.lower()}@{domain}'
+    return f"{first_name.lower()}.{last_name.lower()}@{domain}"
 
 
 def random_datetime(days_back: int = 90) -> datetime:
@@ -187,12 +186,12 @@ def generate_conversation_data(
     sandbox_status = random.choice(SANDBOX_STATUSES)
 
     # Running conversations should have RUNNING sandbox
-    if execution_status == 'running':
-        sandbox_status = 'RUNNING'
+    if execution_status == "running":
+        sandbox_status = "RUNNING"
 
     # Completed conversations typically have finished status
-    if random.random() < 0.7 and execution_status in ['finished', 'error', 'stuck']:
-        sandbox_status = 'MISSING'
+    if random.random() < 0.7 and execution_status in ["finished", "error", "stuck"]:
+        sandbox_status = "MISSING"
 
     prompt_tokens = random.randint(1000, 50000)
     completion_tokens = random.randint(500, 25000)
@@ -207,30 +206,30 @@ def generate_conversation_data(
     ) * cost_per_1k_completion
 
     return {
-        'conversation_id': conversation_id,
-        'conversation_version': 'V1',
-        'title': random.choice(CONVERSATION_TITLES),
-        'llm_model': random.choice(LLM_MODELS),
-        'agent_kind': random.choice(AGENT_KINDS),
-        'user_id': user_id,
-        'created_at': created_at,
-        'last_updated_at': updated_at,
-        'sandbox_id': f'sb-{uuid.uuid4().hex[:12]}',
-        'sandbox_status': sandbox_status,
-        'runtime_url': f'https://runtime-{uuid.uuid4().hex[:8]}.example.com'
-        if sandbox_status == 'RUNNING'
+        "conversation_id": conversation_id,
+        "conversation_version": "V1",
+        "title": random.choice(CONVERSATION_TITLES),
+        "llm_model": random.choice(LLM_MODELS),
+        "agent_kind": random.choice(AGENT_KINDS),
+        "user_id": user_id,
+        "created_at": created_at,
+        "last_updated_at": updated_at,
+        "sandbox_id": f"sb-{uuid.uuid4().hex[:12]}",
+        "sandbox_status": sandbox_status,
+        "runtime_url": f"https://runtime-{uuid.uuid4().hex[:8]}.example.com"
+        if sandbox_status == "RUNNING"
         else None,
-        'execution_status': execution_status,
-        'selected_repository': random.choice(REPO_NAMES),
-        'selected_branch': random.choice(BRANCHES),
-        'trigger': random.choice(TRIGGERS),
-        'accumulated_cost': round(accumulated_cost, 4),
-        'prompt_tokens': prompt_tokens,
-        'completion_tokens': completion_tokens,
-        'total_tokens': prompt_tokens + completion_tokens,
-        'cache_read_tokens': cache_read_tokens,
-        'cache_write_tokens': cache_write_tokens,
-        'org_id': org_id,
+        "execution_status": execution_status,
+        "selected_repository": random.choice(REPO_NAMES),
+        "selected_branch": random.choice(BRANCHES),
+        "trigger": random.choice(TRIGGERS),
+        "accumulated_cost": round(accumulated_cost, 4),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "org_id": org_id,
     }
 
 
@@ -255,16 +254,16 @@ def create_tables_if_not_exist(engine) -> None:
             import subprocess
 
             result = subprocess.run(
-                ['python', '-m', 'alembic', 'upgrade', 'head'],
+                ["python", "-m", "alembic", "upgrade", "head"],
                 capture_output=True,
                 text=True,
             )
             if result.returncode != 0:
-                print(f'Migration failed: {result.stderr}')
-                raise Exception('Failed to run migrations')
-            print('Migrations complete.')
+                print(f"Migration failed: {result.stderr}")
+                raise Exception("Failed to run migrations")
+            print("Migrations complete.")
         else:
-            print('Tables already exist.')
+            print("Tables already exist.")
 
 
 def seed_data(
@@ -277,7 +276,6 @@ def seed_data(
 
     Uses the correct OpenHands schema: org, user, org_member tables.
     """
-
     engine = create_engine(db_url)
     create_tables_if_not_exist(engine)
 
@@ -288,7 +286,7 @@ def seed_data(
         with session.begin():
             # Create orgs
             org_ids = []
-            print(f'Creating {org_count} orgs...')
+            print(f"Creating {org_count} orgs...")
             for i in range(org_count):
                 org_id = str(uuid.uuid4())
                 org_ids.append(org_id)
@@ -300,20 +298,20 @@ def seed_data(
                         ON CONFLICT (id) DO NOTHING
                     """),
                     {
-                        'id': org_id,
-                        'name': f'Test Org {i + 1}',
-                        'created_at': datetime.now(UTC),
-                        'updated_at': datetime.now(UTC),
+                        "id": org_id,
+                        "name": f"Test Org {i + 1}",
+                        "created_at": datetime.now(UTC),
+                        "updated_at": datetime.now(UTC),
                     },
                 )
 
-            print(f'Created {len(org_ids)} orgs')
+            print(f"Created {len(org_ids)} orgs")
 
             # Create users and conversations for each org
             total_conversations = 0
 
             for org_id in org_ids:
-                print(f'Creating users and conversations for org {org_id}...')
+                print(f"Creating users and conversations for org {org_id}...")
 
                 user_ids = []
                 for j in range(users_per_org):
@@ -335,12 +333,12 @@ def seed_data(
                             ON CONFLICT (id) DO NOTHING
                         """),
                         {
-                            'id': user_id,
-                            'current_org_id': org_id,
-                            'role_id': role_id,
-                            'email': email,
-                            'created_at': datetime.now(UTC),
-                            'updated_at': datetime.now(UTC),
+                            "id": user_id,
+                            "current_org_id": org_id,
+                            "role_id": role_id,
+                            "email": email,
+                            "created_at": datetime.now(UTC),
+                            "updated_at": datetime.now(UTC),
                         },
                     )
 
@@ -352,15 +350,15 @@ def seed_data(
                             ON CONFLICT (org_id, user_id) DO NOTHING
                         """),
                         {
-                            'org_id': org_id,
-                            'user_id': user_id,
-                            'role_id': role_id,
-                            'created_at': datetime.now(UTC),
-                            'updated_at': datetime.now(UTC),
+                            "org_id": org_id,
+                            "user_id": user_id,
+                            "role_id": role_id,
+                            "created_at": datetime.now(UTC),
+                            "updated_at": datetime.now(UTC),
                         },
                     )
 
-                print(f'  Created {len(user_ids)} users')
+                print(f"  Created {len(user_ids)} users")
 
                 # Create conversations for this org
                 for k in range(conversations_per_org):
@@ -406,23 +404,23 @@ def seed_data(
                             ON CONFLICT (conversation_id) DO NOTHING
                         """),
                         {
-                            'conversation_id': conversation_id,
-                            'org_id': org_id,
+                            "conversation_id": conversation_id,
+                            "org_id": org_id,
                         },
                     )
 
                 total_conversations += conversations_per_org
-                print(f'  Created {conversations_per_org} conversations')
+                print(f"  Created {conversations_per_org} conversations")
 
-        print('\n Seed complete!')
-        print(f'   Organizations: {org_count}')
-        print(f'   Total users: {org_count * users_per_org}')
-        print(f'   Total conversations: {total_conversations}')
-        print(f'\nDatabase: {db_url}')
+        print("\n Seed complete!")
+        print(f"   Organizations: {org_count}")
+        print(f"   Total users: {org_count * users_per_org}")
+        print(f"   Total conversations: {total_conversations}")
+        print(f"\nDatabase: {db_url}")
 
     except Exception as e:
         session.rollback()
-        print(f' Error seeding data: {e}')
+        print(f" Error seeding data: {e}")
         raise
     finally:
         session.close()
@@ -430,31 +428,31 @@ def seed_data(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Seed database with realistic conversation data for testing.'
+        description="Seed database with realistic conversation data for testing."
     )
     parser.add_argument(
-        '--db-url',
+        "--db-url",
         type=str,
         default=None,
-        help=f'Database URL (default: DATABASE_URL env var or {DEFAULT_DB_URL})',
+        help=f"Database URL (default: DATABASE_URL env var or {DEFAULT_DB_URL})",
     )
     parser.add_argument(
-        '--org-count',
+        "--org-count",
         type=int,
         default=3,
-        help='Number of organizations to create (default: 3)',
+        help="Number of organizations to create (default: 3)",
     )
     parser.add_argument(
-        '--conversations-per-org',
+        "--conversations-per-org",
         type=int,
         default=30,
-        help='Number of conversations per organization (default: 30)',
+        help="Number of conversations per organization (default: 30)",
     )
     parser.add_argument(
-        '--users-per-org',
+        "--users-per-org",
         type=int,
         default=10,
-        help='Number of users per organization (default: 10)',
+        help="Number of users per organization (default: 10)",
     )
 
     args = parser.parse_args()
@@ -462,7 +460,7 @@ def main():
     db_url = args.db_url or DEFAULT_DB_URL
     if not db_url:
         print(
-            'Error: No database URL provided. Set DATABASE_URL env var or use --db-url'
+            "Error: No database URL provided. Set DATABASE_URL env var or use --db-url"
         )
         return 1
 
@@ -476,5 +474,5 @@ def main():
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     exit(main())

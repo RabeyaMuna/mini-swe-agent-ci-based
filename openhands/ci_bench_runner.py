@@ -20,11 +20,10 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import our modules
-from scripts.model_registry import configure_model_environment, resolve_model_alias
-
 from data_loader import CIBenchDataLoader
-from simple_agent import run_simple_agent
 from prompt_formatter import PromptFormatter
+from scripts.model_registry import configure_model_environment, resolve_model_alias
+from simple_agent import run_simple_agent
 
 # Shared paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -183,7 +182,9 @@ def _memory_problems_from_retrieval(memory: dict[str, Any]) -> list[dict[str, An
         seen.add(key)
         problems.append(
             {
-                'source': raw.get('source') or raw.get('memory_level') or 'previous experience',
+                'source': raw.get('source')
+                or raw.get('memory_level')
+                or 'previous experience',
                 'title': f'Previous experience problem {len(problems) + 1}',
                 'description': str(description),
                 'root_cause': str(raw.get('root_cause') or ''),
@@ -250,10 +251,10 @@ def run_single_issue(
     print(f'  Problems to solve: {len(openhands_task["problems"])}')
 
     # Setup repository
-    from pathlib import Path
+    import shutil
     import subprocess
     import tempfile
-    import shutil
+    from pathlib import Path
 
     repo_cache = REPO_ROOT / 'shared_cache' / instance_id.split('_')[0]
 
@@ -261,7 +262,14 @@ def run_single_issue(
     if not repo_cache.exists():
         repo_cache.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            ['git', 'clone', '--depth', '1', openhands_task['repository'], str(repo_cache)],
+            [
+                'git',
+                'clone',
+                '--depth',
+                '1',
+                openhands_task['repository'],
+                str(repo_cache),
+            ],
             check=True,
             capture_output=True,
         )
@@ -272,12 +280,26 @@ def run_single_issue(
 
     # Fetch and checkout specific commit
     try:
-        subprocess.run(['git', 'fetch', 'origin', openhands_task['commit_sha']], cwd=work_dir, check=True, capture_output=True)
-        subprocess.run(['git', 'checkout', openhands_task['commit_sha']], cwd=work_dir, check=True, capture_output=True)
+        subprocess.run(
+            ['git', 'fetch', 'origin', openhands_task['commit_sha']],
+            cwd=work_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ['git', 'checkout', openhands_task['commit_sha']],
+            cwd=work_dir,
+            check=True,
+            capture_output=True,
+        )
     except subprocess.CalledProcessError:
         # Try fetching all
-        subprocess.run(['git', 'fetch', '--unshallow'], cwd=work_dir, capture_output=True)
-        subprocess.run(['git', 'checkout', openhands_task['commit_sha']], cwd=work_dir, check=True)
+        subprocess.run(
+            ['git', 'fetch', '--unshallow'], cwd=work_dir, capture_output=True
+        )
+        subprocess.run(
+            ['git', 'checkout', openhands_task['commit_sha']], cwd=work_dir, check=True
+        )
 
     # Run simple agent
     try:

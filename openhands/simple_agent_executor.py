@@ -7,8 +7,6 @@ Implements a basic LLM-based agent that generates patches for CI failures.
 
 from __future__ import annotations
 
-import json
-import os
 from typing import Any
 
 import litellm
@@ -43,19 +41,19 @@ def execute_agent(
             "total_cost": float,
         }
     """
-    print(f"   Starting agent execution with {model}")
+    print(f'   Starting agent execution with {model}')
 
     # Extract initial_message (already formatted by PromptFormatter)
-    initial_message = task.get("initial_message", "")
-    repository = task.get("repository", "")
+    initial_message = task.get('initial_message', '')
+    task.get('repository', '')
 
     if not initial_message:
-        print("   Error: No initial_message in task")
+        print('   Error: No initial_message in task')
         return {
-            "patch": "",
-            "trajectory": [{"action": "error", "error": "No initial_message in task"}],
-            "status": "failed",
-            "total_cost": 0.0,
+            'patch': '',
+            'trajectory': [{'action': 'error', 'error': 'No initial_message in task'}],
+            'status': 'failed',
+            'total_cost': 0.0,
         }
 
     system_prompt = """You are an expert software engineer. Generate a git patch to fix the CI failure described below.
@@ -107,8 +105,8 @@ diff --git a/example/file.py b/example/file.py
 
     # Execute agent
     trajectory = []
-    patch = ""
-    status = "failed"
+    patch = ''
+    status = 'failed'
     total_cost = 0.0
 
     try:
@@ -116,8 +114,8 @@ diff --git a/example/file.py b/example/file.py
         response = litellm.completion(
             model=model,
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt},
             ],
             temperature=0.0,  # Deterministic for patch generation
             max_tokens=16000,  # Allow larger patches
@@ -127,11 +125,13 @@ diff --git a/example/file.py b/example/file.py
         patch = response.choices[0].message.content.strip()
 
         # Track trajectory
-        trajectory.append({
-            "action": "generate_patch",
-            "input": user_prompt[:500] + "...",
-            "output": patch[:500] + "..." if len(patch) > 500 else patch,
-        })
+        trajectory.append(
+            {
+                'action': 'generate_patch',
+                'input': user_prompt[:500] + '...',
+                'output': patch[:500] + '...' if len(patch) > 500 else patch,
+            }
+        )
 
         # Calculate cost (rough estimate)
         usage = response.usage
@@ -140,28 +140,30 @@ diff --git a/example/file.py b/example/file.py
             total_cost = (usage.total_tokens / 1000) * 0.01
 
         # Validate patch format
-        if patch.startswith("diff --git") or patch.startswith("---"):
-            status = "success"
-            print(f"   Generated patch ({len(patch)} chars)")
+        if patch.startswith('diff --git') or patch.startswith('---'):
+            status = 'success'
+            print(f'   Generated patch ({len(patch)} chars)')
         else:
-            print(f"    Response doesn't look like a patch, treating as failed")
-            patch = f"# Agent output (not a valid patch):\n{patch}"
-            status = "failed"
+            print("    Response doesn't look like a patch, treating as failed")
+            patch = f'# Agent output (not a valid patch):\n{patch}'
+            status = 'failed'
 
     except Exception as e:
-        print(f"   Agent execution failed: {e}")
-        trajectory.append({
-            "action": "error",
-            "error": str(e),
-        })
-        patch = ""
-        status = "failed"
+        print(f'   Agent execution failed: {e}')
+        trajectory.append(
+            {
+                'action': 'error',
+                'error': str(e),
+            }
+        )
+        patch = ''
+        status = 'failed'
 
     return {
-        "patch": patch,
-        "trajectory": trajectory,
-        "status": status,
-        "total_cost": total_cost,
+        'patch': patch,
+        'trajectory': trajectory,
+        'status': status,
+        'total_cost': total_cost,
     }
 
 
@@ -181,7 +183,7 @@ def execute_baseline_agent(
     """
     # Ensure no memory context
     task_copy = task.copy()
-    task_copy["repair_plan"] = None
+    task_copy['repair_plan'] = None
 
     return execute_agent(task_copy, model)
 
@@ -200,22 +202,22 @@ def execute_memory_agent(
     Returns:
         Agent result with patch
     """
-    if not task.get("repair_plan"):
-        print("Warning: Memory agent called but no repair_plan provided")
+    if not task.get('repair_plan'):
+        print('Warning: Memory agent called but no repair_plan provided')
 
     return execute_agent(task, model)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     # Test execution
     test_task = {
-        "repository": "https://github.com/example/repo",
-        "selected_branch": "main",
-        "problem_statement": "CI failed: Ruff linter error F632 at line 389",
-        "repair_plan": None,
+        'repository': 'https://github.com/example/repo',
+        'selected_branch': 'main',
+        'problem_statement': 'CI failed: Ruff linter error F632 at line 389',
+        'repair_plan': None,
     }
 
-    result = execute_baseline_agent(test_task, "zai/glm-5.2")
-    print(f"\nResult: {result['status']}")
-    print(f"Patch length: {len(result['patch'])}")
-    print(f"Cost: ${result['total_cost']:.4f}")
+    result = execute_baseline_agent(test_task, 'zai/glm-5.2')
+    print(f'\nResult: {result["status"]}')
+    print(f'Patch length: {len(result["patch"])}')
+    print(f'Cost: ${result["total_cost"]:.4f}')

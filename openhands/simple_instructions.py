@@ -12,7 +12,7 @@ def build_simple_instruction(
     problem_context: str,
     files_read: list[str],
     files_written: list[str],
-    previous_result: str = "",
+    previous_result: str = '',
 ) -> str:
     """
     Template-guided workflow like mini-swe-agent.
@@ -48,10 +48,10 @@ OUTPUT ONLY THE JSON - NOTHING ELSE
 
     elif files_read and not files_written:
         # STEP 2: COMMAND to write - like mini-swe-agent templates
-        files_list = "\n".join(f"  ✓ {f}" for f in files_read[:5])
+        files_list = '\n'.join(f'  ✓ {f}' for f in files_read[:5])
 
         # Extract the file path from the first file read
-        file_to_fix = files_read[0] if files_read else "file.py"
+        file_to_fix = files_read[0] if files_read else 'file.py'
 
         return f"""{problem_context}
 
@@ -82,7 +82,7 @@ OUTPUT ONLY THE JSON WITH COMPLETE FILE CONTENT
 
     elif files_written:
         # STEP 3: COMMAND to mark done
-        files_list = "\n".join(f" {f}" for f in files_written)
+        files_list = '\n'.join(f' {f}' for f in files_written)
 
         return f"""{problem_context}
 
@@ -102,7 +102,7 @@ OUTPUT ONLY THIS JSON
 """
 
     # Fallback - shouldn't reach here
-    return f"""Continue working.
+    return """Continue working.
 
-OUTPUT: {{"tool": "read_file", "args": {{"file_path": "file.py"}}}}
+OUTPUT: {"tool": "read_file", "args": {"file_path": "file.py"}}
 """

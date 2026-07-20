@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        ## Thank you for reporting a bug! 
+        ## Thank you for reporting a bug!
 
         **Please fill out all required fields.** Issues missing critical information (version, installation method, reproduction steps, etc.) will be delayed or closed until complete details are provided.
 

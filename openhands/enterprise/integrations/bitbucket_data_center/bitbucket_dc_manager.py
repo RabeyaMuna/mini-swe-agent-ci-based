@@ -56,20 +56,20 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
         # agnostic and the variables (pr_number, branch_name, comments,
         # file_location, line_number) match.
         self.jinja_env = Environment(
-            loader=FileSystemLoader(OPENHANDS_RESOLVER_TEMPLATES_DIR + 'bitbucket')
+            loader=FileSystemLoader(OPENHANDS_RESOLVER_TEMPLATES_DIR + "bitbucket")
         )
 
     def _confirm_incoming_source_type(self, message: Message) -> None:
         if message.source != SourceType.BITBUCKET_DATA_CENTER:
-            raise ValueError(f'Unexpected message source {message.source}')
+            raise ValueError(f"Unexpected message source {message.source}")
 
     @staticmethod
     def _extract_repo_identity(message: Message) -> tuple[str, str]:
-        payload = message.message.get('payload') or {}
-        pull_request = payload.get('pullRequest') or {}
-        repository = (pull_request.get('toRef') or {}).get('repository') or {}
-        project = repository.get('project') or {}
-        return project.get('key') or '', repository.get('slug') or ''
+        payload = message.message.get("payload") or {}
+        pull_request = payload.get("pullRequest") or {}
+        repository = (pull_request.get("toRef") or {}).get("repository") or {}
+        project = repository.get("project") or {}
+        return project.get("key") or "", repository.get("slug") or ""
 
     async def _commenter_has_write_access(
         self, message: Message, installer_user_id: str
@@ -85,7 +85,7 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
         )
 
         project_key, repo_slug = self._extract_repo_identity(message)
-        actor = (message.message.get('payload') or {}).get('actor') or {}
+        actor = (message.message.get("payload") or {}).get("actor") or {}
         actor_slug = extract_actor_slug(actor)
         if not actor_slug:
             return False
@@ -97,8 +97,8 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
             )
         except Exception as e:
             logger.warning(
-                f'[Bitbucket DC] permission check failed for '
-                f'{project_key}/{repo_slug}: {e}'
+                f"[Bitbucket DC] permission check failed for "
+                f"{project_key}/{repo_slug}: {e}"
             )
             return False
 
@@ -132,11 +132,11 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
         installs return 404/400 on the reactions endpoint, and a missing
         acknowledgement must never block conversation creation.
         """
-        payload = message.message.get('payload') or {}
-        comment = payload.get('comment') or {}
-        pull_request = payload.get('pullRequest') or {}
-        comment_id = comment.get('id')
-        pr_id = pull_request.get('id')
+        payload = message.message.get("payload") or {}
+        comment = payload.get("comment") or {}
+        pull_request = payload.get("pullRequest") or {}
+        comment_id = comment.get("id")
+        pr_id = pull_request.get("id")
         if comment_id is None or pr_id is None:
             return
 
@@ -147,12 +147,12 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
                 repo_slug=repo_slug,
                 pr_id=int(pr_id),
                 comment_id=int(comment_id),
-                emoticon='eyes',
+                emoticon="eyes",
             )
         except Exception as e:
             logger.info(
-                f'[Bitbucket DC] Could not add eyes reaction on '
-                f'{project_key}/{repo_slug} PR#{pr_id} comment#{comment_id}: {e}'
+                f"[Bitbucket DC] Could not add eyes reaction on "
+                f"{project_key}/{repo_slug} PR#{pr_id} comment#{comment_id}: {e}"
             )
 
     async def _send_user_not_found_message(
@@ -177,8 +177,8 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
             await self.send_message(get_user_not_found_message(mentioner_slug), view)
         except Exception as e:
             logger.warning(
-                f'[Bitbucket DC] Failed to send user-not-found message to '
-                f'{mentioner_slug!r}: {e}'
+                f"[Bitbucket DC] Failed to send user-not-found message to "
+                f"{mentioner_slug!r}: {e}"
             )
 
     async def receive_message(self, message: Message) -> None:
@@ -192,8 +192,8 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
         # the event -- like the Jira DC service-account gate.
         if not (BITBUCKET_DATA_CENTER_BOT_TOKEN and BITBUCKET_DATA_CENTER_BOT_USERNAME):
             logger.error(
-                '[Bitbucket DC] BITBUCKET_DATA_CENTER_BOT_TOKEN and '
-                'BITBUCKET_DATA_CENTER_BOT_USERNAME are both required; skipping event'
+                "[Bitbucket DC] BITBUCKET_DATA_CENTER_BOT_TOKEN and "
+                "BITBUCKET_DATA_CENTER_BOT_USERNAME are both required; skipping event"
             )
             return
 
@@ -201,35 +201,35 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
         # the bot PAT and can contain "@openhands"; without this guard it would
         # re-trigger a second job. Mirrors the Jira DC service-account guard;
         # BBDC's stable author id is the (lowercased) slug.
-        actor = (message.message.get('payload') or {}).get('actor') or {}
+        actor = (message.message.get("payload") or {}).get("actor") or {}
         if (
             extract_actor_slug(actor).lower()
             == BITBUCKET_DATA_CENTER_BOT_USERNAME.lower()
         ):
             logger.info(
-                '[Bitbucket DC] Ignoring event authored by the bot account '
-                f'{BITBUCKET_DATA_CENTER_BOT_USERNAME!r}'
+                "[Bitbucket DC] Ignoring event authored by the bot account "
+                f"{BITBUCKET_DATA_CENTER_BOT_USERNAME!r}"
             )
             return
 
         project_key, repo_slug = self._extract_repo_identity(message)
-        installer_user_id = message.message.get('installer_user_id')
+        installer_user_id = message.message.get("installer_user_id")
         if not installer_user_id:
             installer_user_id = await self.webhook_store.get_webhook_user_id(
                 project_key=project_key, repo_slug=repo_slug
             )
         if not installer_user_id:
             logger.warning(
-                f'[Bitbucket DC] No installer recorded for {project_key}/{repo_slug}'
+                f"[Bitbucket DC] No installer recorded for {project_key}/{repo_slug}"
             )
             return
 
         if not await self._commenter_has_write_access(message, installer_user_id):
-            payload = message.message.get('payload') or {}
-            actor = payload.get('actor') or {}
+            payload = message.message.get("payload") or {}
+            actor = payload.get("actor") or {}
             logger.info(
-                f'[Bitbucket DC] {actor.get("displayName", "?")} lacks write '
-                f'access to {project_key}/{repo_slug}; ignoring.'
+                f"[Bitbucket DC] {actor.get('displayName', '?')} lacks write "
+                f"access to {project_key}/{repo_slug}; ignoring."
             )
             return
 
@@ -246,10 +246,10 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
         # `actor['id']` (numeric), not by the slug; looking up by slug never
         # matches and silently falls back to the installer. The slug is kept
         # only for human-readable logging.
-        payload = message.message.get('payload') or {}
-        actor = payload.get('actor') or {}
+        payload = message.message.get("payload") or {}
+        actor = payload.get("actor") or {}
         mentioner_slug = extract_actor_slug(actor)
-        mentioner_idp_id = str(actor.get('id') or '')
+        mentioner_idp_id = str(actor.get("id") or "")
         mentioner_keycloak_id: str | None = None
         lookup_failed = False
         if mentioner_idp_id:
@@ -262,8 +262,8 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
             except Exception as e:
                 lookup_failed = True
                 logger.warning(
-                    f'[Bitbucket DC] Keycloak lookup for mentioner '
-                    f'{mentioner_slug!r} (id {mentioner_idp_id}) failed: {e}'
+                    f"[Bitbucket DC] Keycloak lookup for mentioner "
+                    f"{mentioner_slug!r} (id {mentioner_idp_id}) failed: {e}"
                 )
 
         # A transient Keycloak error leaves us unsure whether the mentioner is
@@ -272,8 +272,8 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
         # sign up.
         if lookup_failed:
             logger.info(
-                f'[Bitbucket DC] Dropping event for {mentioner_slug!r}: Keycloak '
-                f'lookup failed, enrollment status unknown'
+                f"[Bitbucket DC] Dropping event for {mentioner_slug!r}: Keycloak "
+                f"lookup failed, enrollment status unknown"
             )
             return
 
@@ -283,9 +283,9 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
         # correct git attribution.
         if not mentioner_keycloak_id:
             logger.info(
-                f'[Bitbucket DC] Mentioner {mentioner_slug!r} (id '
-                f'{mentioner_idp_id}) has no OHE account; asking them to sign '
-                f'up instead of starting a job'
+                f"[Bitbucket DC] Mentioner {mentioner_slug!r} (id "
+                f"{mentioner_idp_id}) has no OHE account; asking them to sign "
+                f"up instead of starting a job"
             )
             await self._send_user_not_found_message(
                 message, installer_user_id, mentioner_slug
@@ -294,9 +294,9 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
 
         if mentioner_keycloak_id != installer_user_id:
             logger.info(
-                f'[Bitbucket DC] Running job as mentioner {mentioner_slug!r} '
-                f'(id {mentioner_idp_id}, keycloak {mentioner_keycloak_id}) '
-                f'instead of installer ({installer_user_id})'
+                f"[Bitbucket DC] Running job as mentioner {mentioner_slug!r} "
+                f"(id {mentioner_idp_id}, keycloak {mentioner_keycloak_id}) "
+                f"instead of installer ({installer_user_id})"
             )
 
         # Acknowledge receipt with a  reaction on the triggering comment,
@@ -311,8 +311,8 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
             installer_keycloak_user_id=installer_user_id,
         )
         logger.info(
-            f'[Bitbucket DC] Creating job for {bitbucket_view.user_info.username} '
-            f'in {bitbucket_view.full_repo_name}#{bitbucket_view.issue_number}'
+            f"[Bitbucket DC] Creating job for {bitbucket_view.user_info.username} "
+            f"in {bitbucket_view.full_repo_name}#{bitbucket_view.issue_number}"
         )
         await self.start_job(bitbucket_view)
 
@@ -335,10 +335,10 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
                 body=message,
                 parent_comment_id=bitbucket_view.parent_comment_id,
                 anchor={
-                    'path': bitbucket_view.file_location,
-                    'line': bitbucket_view.line_number,
-                    'lineType': bitbucket_view.line_type,
-                    'fileType': bitbucket_view.file_type,
+                    "path": bitbucket_view.file_location,
+                    "line": bitbucket_view.line_number,
+                    "lineType": bitbucket_view.line_type,
+                    "fileType": bitbucket_view.file_type,
                 },
             )
         elif isinstance(bitbucket_view, BitbucketDCPRComment):
@@ -351,7 +351,7 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
             )
         else:
             logger.warning(
-                f'[Bitbucket DC] Unsupported view type: {type(bitbucket_view).__name__}'
+                f"[Bitbucket DC] Unsupported view type: {type(bitbucket_view).__name__}"
             )
 
     async def start_job(self, bitbucket_view: BitbucketDCViewType) -> None:
@@ -359,8 +359,8 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
             user_info = bitbucket_view.user_info
             try:
                 logger.info(
-                    f'[Bitbucket DC] Starting job for {user_info.username} '
-                    f'in {bitbucket_view.full_repo_name}#{bitbucket_view.issue_number}'
+                    f"[Bitbucket DC] Starting job for {user_info.username} "
+                    f"in {bitbucket_view.full_repo_name}#{bitbucket_view.issue_number}"
                 )
 
                 offline_token = await self.token_manager.load_offline_token(
@@ -368,20 +368,20 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
                 )
                 if not offline_token:
                     logger.warning(
-                        f'[Bitbucket DC] No offline token for installer '
-                        f'{user_info.keycloak_user_id}'
+                        f"[Bitbucket DC] No offline token for installer "
+                        f"{user_info.keycloak_user_id}"
                     )
-                    raise MissingSettingsError('Missing settings')
+                    raise MissingSettingsError("Missing settings")
 
                 user_token = await self.token_manager.get_idp_token_from_offline_token(
                     offline_token, ProviderType.BITBUCKET_DATA_CENTER
                 )
                 if not user_token:
                     logger.warning(
-                        f'[Bitbucket DC] No Bitbucket DC token for installer '
-                        f'{user_info.keycloak_user_id}'
+                        f"[Bitbucket DC] No Bitbucket DC token for installer "
+                        f"{user_info.keycloak_user_id}"
                     )
-                    raise MissingSettingsError('Missing settings')
+                    raise MissingSettingsError("Missing settings")
 
                 secret_store = Secrets(
                     provider_tokens=MappingProxyType(
@@ -407,45 +407,45 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
                 conversation_id_hex = bitbucket_view.conversation_id
 
                 logger.info(
-                    f'[Bitbucket DC] Created conversation {conversation_id_hex} '
-                    f'for user {user_info.username}'
+                    f"[Bitbucket DC] Created conversation {conversation_id_hex} "
+                    f"for user {user_info.username}"
                 )
                 conversation_link = CONVERSATION_URL.format(conversation_id_hex)
                 msg_info = (
                     f"I'm on it! {user_info.username} can [track my progress at "
-                    f'all-hands.dev]({conversation_link})'
+                    f"all-hands.dev]({conversation_link})"
                 )
 
             except MissingSettingsError as e:
                 logger.warning(
-                    f'[Bitbucket DC] Missing settings for {user_info.username}: {e}'
+                    f"[Bitbucket DC] Missing settings for {user_info.username}: {e}"
                 )
                 msg_info = (
-                    f'@{user_info.username} please re-login into '
-                    f'[OpenHands Cloud]({HOST_URL}) before starting a job.'
+                    f"@{user_info.username} please re-login into "
+                    f"[OpenHands Cloud]({HOST_URL}) before starting a job."
                 )
 
             except LLMAuthenticationError as e:
                 logger.warning(
-                    f'[Bitbucket DC] LLM authentication error for '
-                    f'{user_info.username}: {e}'
+                    f"[Bitbucket DC] LLM authentication error for "
+                    f"{user_info.username}: {e}"
                 )
                 msg_info = (
-                    f'@{user_info.username} please set a valid LLM API key in '
-                    f'[OpenHands Cloud]({HOST_URL}) before starting a job.'
+                    f"@{user_info.username} please set a valid LLM API key in "
+                    f"[OpenHands Cloud]({HOST_URL}) before starting a job."
                 )
 
             except SessionExpiredError as e:
                 logger.warning(
-                    f'[Bitbucket DC] Session expired for {user_info.username}: {e}'
+                    f"[Bitbucket DC] Session expired for {user_info.username}: {e}"
                 )
                 msg_info = get_session_expired_message(user_info.username)
 
             await self.send_message(msg_info, bitbucket_view)
 
         except Exception as e:
-            logger.exception(f'[Bitbucket DC] Error starting job: {e}')
+            logger.exception(f"[Bitbucket DC] Error starting job: {e}")
             await self.send_message(
-                'Uh oh! There was an unexpected error starting the job :(',
+                "Uh oh! There was an unexpected error starting the job :(",
                 bitbucket_view,
             )

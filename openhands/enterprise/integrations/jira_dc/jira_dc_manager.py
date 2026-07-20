@@ -58,25 +58,25 @@ OH_LABEL, INLINE_OH_LABEL = get_oh_labels(HOST)
 # Unicode codepoint of the emoji reaction posted to acknowledge an @openhands
 # mention via Jira's internal reactions API. 1f44d =  (thumbs up). Note:
 # 1f440 ( eyes) is NOT in Jira DC's reaction palette, so thumbs-up is used.
-JIRA_DC_REACTION_EMOJI_ID = '1f44d'
+JIRA_DC_REACTION_EMOJI_ID = "1f44d"
 
 # Events the OpenHands webhook subscribes to, used when auto-enrolling the
 # webhook in Jira. The resolver only creates jobs for a narrower subset in
 # parse_webhook, but automations can subscribe to these broader issue/comment
 # lifecycle events.
 JIRA_DC_WEBHOOK_EVENTS = [
-    'jira:issue_created',
-    'jira:issue_updated',
-    'jira:issue_deleted',
-    'comment_created',
-    'comment_updated',
-    'comment_deleted',
+    "jira:issue_created",
+    "jira:issue_updated",
+    "jira:issue_deleted",
+    "comment_created",
+    "comment_updated",
+    "comment_deleted",
 ]
 
 # A Jira [~id] / [~accountid:id] mention token; captures the inner identifier.
 # {1,256} bounds the run so a long '[~[~...' body can't cause O(n^2) backtracking.
 _JIRA_MENTION_RE = re.compile(
-    r'\[~\s*(?:accountid:)?\s*([^\]\s]{1,256})\s*\]', re.IGNORECASE
+    r"\[~\s*(?:accountid:)?\s*([^\]\s]{1,256})\s*\]", re.IGNORECASE
 )
 
 
@@ -84,16 +84,16 @@ def _extract_workspace_url(payload: Dict) -> str:
     """Return a Jira URL whose host identifies the configured workspace."""
     for url in _extract_workspace_urls(payload):
         return url
-    return ''
+    return ""
 
 
 def _extract_workspace_urls(payload: Dict) -> list[str]:
     """Return Jira URLs whose hosts identify the configured workspace."""
     paths = (
-        ('comment', 'author', 'self'),
-        ('user', 'self'),
-        ('issue', 'self'),
-        ('comment', 'self'),
+        ("comment", "author", "self"),
+        ("user", "self"),
+        ("issue", "self"),
+        ("comment", "self"),
     )
 
     urls = []
@@ -143,7 +143,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         self.token_manager = token_manager
         self.integration_store = JiraDcIntegrationStore.get_instance()
         self.jinja_env = Environment(
-            loader=FileSystemLoader(OPENHANDS_RESOLVER_TEMPLATES_DIR + 'jira_dc')
+            loader=FileSystemLoader(OPENHANDS_RESOLVER_TEMPLATES_DIR + "jira_dc")
         )
         # Bot identifiers (username + Jira key) per workspace.id, resolved lazily
         # from /myself for matching picker mentions.
@@ -159,14 +159,14 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         # email to their OpenHands email instead. In OAuth mode we resolve
         # strictly by the verified Jira account id and never fall back to email,
         # preserving the verification guarantee.
-        if not JIRA_DC_ENABLE_OAUTH or not jira_dc_user_id or jira_dc_user_id == 'none':
+        if not JIRA_DC_ENABLE_OAUTH or not jira_dc_user_id or jira_dc_user_id == "none":
             # Get Keycloak user ID from email
             keycloak_user_id = await self.token_manager.get_user_id_from_user_email(
                 user_email
             )
             if not keycloak_user_id:
                 logger.warning(
-                    f'[Jira DC] No Keycloak user found for email: {user_email}'
+                    f"[Jira DC] No Keycloak user found for email: {user_email}"
                 )
                 return None, None
 
@@ -190,7 +190,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
 
         if not jira_dc_user:
             logger.warning(
-                f'[Jira DC] No active Jira DC user found for {user_email} in workspace {workspace_id}'
+                f"[Jira DC] No active Jira DC user found for {user_email} in workspace {workspace_id}"
             )
             return None, None
 
@@ -234,7 +234,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             except Exception as e:
                 # INFO (not DEBUG) so the reason is visible in support bundles;
                 # e carries the provider error incl. the attempted URL + status.
-                logger.info(f'[Jira DC] Repo verification failed for {repo_name}: {e}')
+                logger.info(f"[Jira DC] Repo verification failed for {repo_name}: {e}")
                 continue
             verified.setdefault(repo.full_name.lower(), repo)
         return list(verified.values())
@@ -252,13 +252,13 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         self, request: Request, workspace_id: int | None = None
     ) -> Tuple[bool, Optional[str], Optional[Dict], Optional[JiraDcWorkspace]]:
         """Verify Jira DC webhook signature and return the matched workspace."""
-        signature_header = request.headers.get('x-hub-signature')
-        signature = signature_header.split('=')[1] if signature_header else None
+        signature_header = request.headers.get("x-hub-signature")
+        signature = signature_header.split("=")[1] if signature_header else None
         body = await request.body()
         payload = await request.json()
 
         if not signature:
-            logger.warning('[Jira DC] No signature found in webhook headers')
+            logger.warning("[Jira DC] No signature found in webhook headers")
             return False, None, None, None
 
         if workspace_id is not None:
@@ -266,27 +266,27 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             payload_hosts = _extract_workspace_hosts(payload)
             if not payload_hosts:
                 logger.warning(
-                    '[Jira DC] No workspace host found in connection-scoped webhook payload'
+                    "[Jira DC] No workspace host found in connection-scoped webhook payload"
                 )
                 return False, None, None, None
             if workspace and any(
                 host != workspace.name.lower() for host in payload_hosts
             ):
                 logger.warning(
-                    '[Jira DC] Webhook payload hosts %s do not match connection %s (%s)',
+                    "[Jira DC] Webhook payload hosts %s do not match connection %s (%s)",
                     sorted(payload_hosts),
                     workspace.id,
                     workspace.name,
                 )
                 return False, None, None, None
         else:
-            workspace_name = ''
+            workspace_name = ""
             parsed_url = urlparse(_extract_workspace_url(payload))
             if parsed_url.hostname:
                 workspace_name = parsed_url.hostname
 
             if not workspace_name:
-                logger.warning('[Jira DC] No workspace name found in webhook payload')
+                logger.warning("[Jira DC] No workspace name found in webhook payload")
                 return False, None, None, None
 
             workspace = await self.integration_store.get_workspace_by_name(
@@ -294,18 +294,18 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             )
 
         if not workspace:
-            logger.warning('[Jira DC] Could not identify workspace for webhook')
+            logger.warning("[Jira DC] Could not identify workspace for webhook")
             return False, None, None, None
 
-        if workspace.status != 'active':
-            logger.warning(f'[Jira DC] Workspace {workspace.id} is not active')
+        if workspace.status != "active":
+            logger.warning(f"[Jira DC] Workspace {workspace.id} is not active")
             return False, None, None, None
 
         webhook_secret = self.token_manager.decrypt_text(workspace.webhook_secret)
         digest = hmac.new(webhook_secret.encode(), body, hashlib.sha256).hexdigest()
 
         if hmac.compare_digest(signature, digest):
-            logger.info('[Jira DC] Webhook signature verified successfully')
+            logger.info("[Jira DC] Webhook signature verified successfully")
             return True, signature, payload, workspace
 
         return False, None, None, None
@@ -313,52 +313,52 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
     def parse_webhook(
         self, payload: Dict, bot_mentions: set[str] | None = None
     ) -> JobContext | None:
-        event_type = payload.get('webhookEvent')
+        event_type = payload.get("webhookEvent")
 
-        if event_type == 'comment_created':
-            comment_data = payload.get('comment', {})
-            comment = comment_data.get('body', '')
-            comment_id = comment_data.get('id')
+        if event_type == "comment_created":
+            comment_data = payload.get("comment", {})
+            comment = comment_data.get("body", "")
+            comment_id = comment_data.get("id")
 
             if not _comment_addresses_openhands(comment, bot_mentions):
                 return None
 
-            issue_data = payload.get('issue', {})
-            issue_id = issue_data.get('id')
-            issue_key = issue_data.get('key')
-            base_api_url = issue_data.get('self', '').split('/rest/')[0]
+            issue_data = payload.get("issue", {})
+            issue_id = issue_data.get("id")
+            issue_key = issue_data.get("key")
+            base_api_url = issue_data.get("self", "").split("/rest/")[0]
 
-            user_data = comment_data.get('author', {})
-            user_email = user_data.get('emailAddress')
-            display_name = user_data.get('displayName')
-            user_key = user_data.get('key')
-        elif event_type == 'jira:issue_updated':
-            changelog = payload.get('changelog', {})
-            items = changelog.get('items', [])
+            user_data = comment_data.get("author", {})
+            user_email = user_data.get("emailAddress")
+            display_name = user_data.get("displayName")
+            user_key = user_data.get("key")
+        elif event_type == "jira:issue_updated":
+            changelog = payload.get("changelog", {})
+            items = changelog.get("items", [])
             labels = [
-                item.get('toString', '')
+                item.get("toString", "")
                 for item in items
-                if item.get('field') == 'labels' and 'toString' in item
+                if item.get("field") == "labels" and "toString" in item
             ]
 
             if OH_LABEL not in labels:
                 return None
 
-            issue_data = payload.get('issue', {})
-            issue_id = issue_data.get('id')
-            issue_key = issue_data.get('key')
-            base_api_url = issue_data.get('self', '').split('/rest/')[0]
+            issue_data = payload.get("issue", {})
+            issue_id = issue_data.get("id")
+            issue_key = issue_data.get("key")
+            base_api_url = issue_data.get("self", "").split("/rest/")[0]
 
-            user_data = payload.get('user', {})
-            user_email = user_data.get('emailAddress')
-            display_name = user_data.get('displayName')
-            user_key = user_data.get('key')
-            comment = ''
+            user_data = payload.get("user", {})
+            user_email = user_data.get("emailAddress")
+            display_name = user_data.get("displayName")
+            user_key = user_data.get("key")
+            comment = ""
             comment_id = None
         else:
             return None
 
-        workspace_name = ''
+        workspace_name = ""
 
         parsedUrl = urlparse(base_api_url)
         if parsedUrl.hostname:
@@ -386,12 +386,12 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             platform_user_id=user_key,
             workspace_name=workspace_name,
             base_api_url=base_api_url,
-            comment_id=comment_id or '',
+            comment_id=comment_id or "",
         )
 
     async def receive_message(self, message: Message):
         """Process incoming Jira DC webhook message."""
-        payload = message.message.get('payload', {})
+        payload = message.message.get("payload", {})
         bot_mentions = await self._resolve_service_account_mentions(payload)
         job_context = self.parse_webhook(payload, bot_mentions)
 
@@ -401,21 +401,21 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             # "mention didn't fire" case. Skips unrelated comments / mentions of
             # other users on this instance-wide webhook. Truncated since bodies
             # can hold sensitive content.
-            comment = (payload.get('comment') or {}).get('body', '') or ''
+            comment = (payload.get("comment") or {}).get("body", "") or ""
             lowered = comment.lower()
             refs_bot = OH_LABEL in lowered or any(
                 i in lowered for i in (bot_mentions or ())
             )
-            if payload.get('webhookEvent') == 'comment_created' and refs_bot:
+            if payload.get("webhookEvent") == "comment_created" and refs_bot:
                 logger.info(
-                    '[Jira DC] comment references the bot but did not trigger '
-                    '(bot_ids_resolved=%s mention_tokens=%s) body=%r',
+                    "[Jira DC] comment references the bot but did not trigger "
+                    "(bot_ids_resolved=%s mention_tokens=%s) body=%r",
                     bool(bot_mentions),
                     _JIRA_MENTION_RE.findall(comment),
                     comment[:500],
                 )
             else:
-                logger.info('[Jira DC] Webhook does not match trigger conditions')
+                logger.info("[Jira DC] Webhook does not match trigger conditions")
             return
 
         workspace = await self.integration_store.get_workspace_by_name(
@@ -423,11 +423,11 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         )
         if not workspace:
             logger.warning(
-                f'[Jira DC] No workspace found for email domain: {job_context.user_email}'
+                f"[Jira DC] No workspace found for email domain: {job_context.user_email}"
             )
             await self._send_error_comment(
                 job_context,
-                'Your workspace is not configured with Jira DC integration.',
+                "Your workspace is not configured with Jira DC integration.",
                 None,
             )
             return
@@ -438,7 +438,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             )
         except Exception as e:
             logger.error(
-                f'[Jira DC] Service account configuration is invalid: {str(e)}'
+                f"[Jira DC] Service account configuration is invalid: {str(e)}"
             )
             return
 
@@ -446,11 +446,11 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         if job_context.user_email == service_account.email:
             return
 
-        if workspace.status != 'active':
-            logger.warning(f'[Jira DC] Workspace {workspace.id} is not active')
+        if workspace.status != "active":
+            logger.warning(f"[Jira DC] Workspace {workspace.id} is not active")
             await self._send_error_comment(
                 job_context,
-                'Jira DC integration is not active for your workspace.',
+                "Jira DC integration is not active for your workspace.",
                 workspace,
             )
             return
@@ -461,7 +461,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         )
         if not jira_dc_user or not saas_user_auth:
             logger.warning(
-                f'[Jira DC] User authentication failed for {job_context.user_email}'
+                f"[Jira DC] User authentication failed for {job_context.user_email}"
             )
             # Distinguish "no OpenHands account" from "account exists but not linked
             # to this workspace" so the reply is actionable (mirrors GitHub/BBDC).
@@ -488,10 +488,10 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
                 bot_email=service_account.email,
             )
         except Exception as e:
-            logger.error(f'[Jira DC] Failed to get issue context: {str(e)}')
+            logger.error(f"[Jira DC] Failed to get issue context: {str(e)}")
             await self._send_error_comment(
                 job_context,
-                'Failed to retrieve issue details. Please check the issue key and try again.',
+                "Failed to retrieve issue details. Please check the issue key and try again.",
                 workspace,
             )
             return
@@ -506,11 +506,11 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             )
         except Exception as e:
             logger.error(
-                f'[Jira DC] Failed to create jira dc view: {str(e)}', exc_info=True
+                f"[Jira DC] Failed to create jira dc view: {str(e)}", exc_info=True
             )
             await self._send_error_comment(
                 job_context,
-                'Failed to initialize conversation. Please try again.',
+                "Failed to initialize conversation. Please try again.",
                 workspace,
             )
             return
@@ -529,7 +529,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             return True
 
         try:
-            target_str = f'{jira_dc_view.job_context.issue_description}\n{jira_dc_view.job_context.user_msg}'
+            target_str = f"{jira_dc_view.job_context.issue_description}\n{jira_dc_view.job_context.user_msg}"
             mentioned_repos = infer_repo_from_message(target_str)
 
             # Verify each mentioned repo directly rather than enumerating the
@@ -547,7 +547,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             # One INFO line that separates a parse miss (inferred=[]) from a
             # lookup miss (inferred set, verified=[]) in support bundles.
             logger.info(
-                '[Jira DC] repo resolution issue=%s inferred=%s verified=%s',
+                "[Jira DC] repo resolution issue=%s inferred=%s verified=%s",
                 jira_dc_view.job_context.issue_key,
                 mentioned_repos,
                 [r.full_name for r in verified_repos],
@@ -556,7 +556,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             if len(verified_repos) == 1:
                 jira_dc_view.selected_repo = verified_repos[0].full_name
                 logger.info(
-                    f'[Jira DC] Inferred repository: {verified_repos[0].full_name}'
+                    f"[Jira DC] Inferred repository: {verified_repos[0].full_name}"
                 )
                 return True
 
@@ -567,7 +567,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             return False
 
         except Exception as e:
-            logger.error(f'[Jira DC] Error in is_job_requested: {str(e)}')
+            logger.error(f"[Jira DC] Error in is_job_requested: {str(e)}")
             return False
 
     async def start_job(self, jira_dc_view: JiraDcViewInterface) -> None:
@@ -575,8 +575,8 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         try:
             user_info: JiraDcUser = jira_dc_view.jira_dc_user
             logger.info(
-                f'[Jira DC] Starting job for user {user_info.keycloak_user_id} '
-                f'issue {jira_dc_view.job_context.issue_key}',
+                f"[Jira DC] Starting job for user {user_info.keycloak_user_id} "
+                f"issue {jira_dc_view.job_context.issue_key}",
             )
 
             # Create conversation using V1 app conversation system
@@ -586,33 +586,33 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             )
 
             logger.info(
-                f'[Jira DC] Created/Updated conversation {conversation_id} for issue {jira_dc_view.job_context.issue_key}'
+                f"[Jira DC] Created/Updated conversation {conversation_id} for issue {jira_dc_view.job_context.issue_key}"
             )
 
             # Send initial response
             msg_info = jira_dc_view.get_response_msg()
 
         except MissingSettingsError as e:
-            logger.warning(f'[Jira DC] Missing settings error: {str(e)}')
-            msg_info = f'Please re-login into [OpenHands Cloud]({HOST_URL}) before starting a job.'
+            logger.warning(f"[Jira DC] Missing settings error: {str(e)}")
+            msg_info = f"Please re-login into [OpenHands Cloud]({HOST_URL}) before starting a job."
 
         except LLMAuthenticationError as e:
-            logger.warning(f'[Jira DC] LLM authentication error: {str(e)}')
-            msg_info = f'Please set a valid LLM API key in [OpenHands Cloud]({HOST_URL}) before starting a job.'
+            logger.warning(f"[Jira DC] LLM authentication error: {str(e)}")
+            msg_info = f"Please set a valid LLM API key in [OpenHands Cloud]({HOST_URL}) before starting a job."
 
         except SessionExpiredError as e:
-            logger.warning(f'[Jira DC] Session expired: {str(e)}')
+            logger.warning(f"[Jira DC] Session expired: {str(e)}")
             msg_info = get_session_expired_message()
 
         except JiraDcUserTokenError as e:
-            logger.warning(f'[Jira DC] User token unavailable: {str(e)}')
+            logger.warning(f"[Jira DC] User token unavailable: {str(e)}")
             msg_info = get_jira_dc_relink_message(jira_dc_view.job_context.display_name)
 
         except Exception as e:
             logger.error(
-                f'[Jira DC] Unexpected error starting job: {str(e)}', exc_info=True
+                f"[Jira DC] Unexpected error starting job: {str(e)}", exc_info=True
             )
-            msg_info = 'Sorry, there was an unexpected error starting the job. Please try again.'
+            msg_info = "Sorry, there was an unexpected error starting the job. Please try again."
 
         # Send response comment
         try:
@@ -626,7 +626,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
                 svc_acc_api_key=service_account.api_key,
             )
         except Exception as e:
-            logger.error(f'[Jira] Failed to send response message: {str(e)}')
+            logger.error(f"[Jira] Failed to send response message: {str(e)}")
 
     async def _resolve_service_account_mentions(self, payload: Dict) -> set[str] | None:
         """Best-effort bot identifiers (username + Jira key) for a picker mention.
@@ -637,12 +637,12 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         short-circuit. Cached per workspace; failures are not cached, so a later
         comment re-attempts resolution (this event is dropped, not retried).
         """
-        comment = (payload.get('comment') or {}).get('body', '') or ''
-        if has_exact_mention(comment, INLINE_OH_LABEL) or '[~' not in comment:
+        comment = (payload.get("comment") or {}).get("body", "") or ""
+        if has_exact_mention(comment, INLINE_OH_LABEL) or "[~" not in comment:
             return None
         try:
             base_api_url = (
-                (payload.get('issue') or {}).get('self', '').split('/rest/')[0]
+                (payload.get("issue") or {}).get("self", "").split("/rest/")[0]
             )
             workspace_name = urlparse(base_api_url).hostname
             if not workspace_name:
@@ -667,63 +667,63 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
                 self._svc_mentions_cache[workspace.id] = ids
             return ids or None
         except Exception as e:
-            logger.warning(f'[Jira DC] Could not resolve bot mentions: {str(e)}')
+            logger.warning(f"[Jira DC] Could not resolve bot mentions: {str(e)}")
             return None
 
     async def _fetch_service_account_identity(
         self, base_api_url: str, svc_acc_api_key: str
     ) -> tuple[str | None, str | None]:
         """Return the service account's Jira (name, key) from /myself."""
-        url = f'{base_api_url}/rest/api/2/myself'
-        headers = {'Authorization': f'Bearer {svc_acc_api_key}'}
+        url = f"{base_api_url}/rest/api/2/myself"
+        headers = {"Authorization": f"Bearer {svc_acc_api_key}"}
         async with httpx.AsyncClient(
             verify=httpx_verify_option(), timeout=JIRA_DC_HTTP_TIMEOUT
         ) as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
-            return data.get('name'), data.get('key')
+            return data.get("name"), data.get("key")
 
     async def get_issue_details(
         self, job_context: JobContext, svc_acc_api_key: str
     ) -> Tuple[str, str]:
         """Get issue details from Jira DC API."""
-        url = f'{job_context.base_api_url}/rest/api/2/issue/{job_context.issue_key}'
-        headers = {'Authorization': f'Bearer {svc_acc_api_key}'}
+        url = f"{job_context.base_api_url}/rest/api/2/issue/{job_context.issue_key}"
+        headers = {"Authorization": f"Bearer {svc_acc_api_key}"}
         async with httpx.AsyncClient(
             verify=httpx_verify_option(), timeout=JIRA_DC_HTTP_TIMEOUT
         ) as client:
             response = await client.get(url, headers=headers)
             if response.status_code == 401:
                 logger.error(
-                    '[Jira DC] 401 from %s. PAT length=%d prefix=%s '
-                    'WWW-Authenticate=%r X-Seraph-LoginReason=%r '
-                    'X-AUSERNAME=%r body=%s',
+                    "[Jira DC] 401 from %s. PAT length=%d prefix=%s "
+                    "WWW-Authenticate=%r X-Seraph-LoginReason=%r "
+                    "X-AUSERNAME=%r body=%s",
                     url,
                     len(svc_acc_api_key),
-                    svc_acc_api_key[:6] if svc_acc_api_key else '',
-                    response.headers.get('WWW-Authenticate'),
-                    response.headers.get('X-Seraph-LoginReason'),
-                    response.headers.get('X-AUSERNAME'),
+                    svc_acc_api_key[:6] if svc_acc_api_key else "",
+                    response.headers.get("WWW-Authenticate"),
+                    response.headers.get("X-Seraph-LoginReason"),
+                    response.headers.get("X-AUSERNAME"),
                     response.text[:500],
                 )
             response.raise_for_status()
             issue_payload = response.json()
 
         if not issue_payload:
-            raise ValueError(f'Issue with key {job_context.issue_key} not found.')
+            raise ValueError(f"Issue with key {job_context.issue_key} not found.")
 
-        title = issue_payload.get('fields', {}).get('summary', '')
-        description = issue_payload.get('fields', {}).get('description', '')
+        title = issue_payload.get("fields", {}).get("summary", "")
+        description = issue_payload.get("fields", {}).get("description", "")
 
         if not title:
             raise ValueError(
-                f'Issue with key {job_context.issue_key} does not have a title.'
+                f"Issue with key {job_context.issue_key} does not have a title."
             )
 
         if not description:
             raise ValueError(
-                f'Issue with key {job_context.issue_key} does not have a description.'
+                f"Issue with key {job_context.issue_key} does not have a description."
             )
 
         return title, description
@@ -746,15 +746,15 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         empty list so a transient comments-API issue never blocks the job.
         """
         url = (
-            f'{job_context.base_api_url}/rest/api/2/issue/'
-            f'{job_context.issue_key}/comment'
+            f"{job_context.base_api_url}/rest/api/2/issue/"
+            f"{job_context.issue_key}/comment"
         )
-        headers = {'Authorization': f'Bearer {svc_acc_api_key}'}
+        headers = {"Authorization": f"Bearer {svc_acc_api_key}"}
         # '-created' + reverse keeps the tail (most recent N) of long threads,
         # which is the relevant part, rather than the oldest N.
         params: dict[str, str | int] = {
-            'orderBy': '-created',
-            'maxResults': max_comments,
+            "orderBy": "-created",
+            "maxResults": max_comments,
         }
         try:
             async with httpx.AsyncClient(
@@ -762,38 +762,38 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             ) as client:
                 response = await client.get(url, headers=headers, params=params)
                 response.raise_for_status()
-                raw_comments = response.json().get('comments', [])
+                raw_comments = response.json().get("comments", [])
         except Exception as e:
             logger.warning(
-                f'[Jira DC] Failed to fetch comment thread for '
-                f'{job_context.issue_key} (non-fatal, continuing without '
-                f'history): {str(e)}'
+                f"[Jira DC] Failed to fetch comment thread for "
+                f"{job_context.issue_key} (non-fatal, continuing without "
+                f"history): {str(e)}"
             )
             return []
 
         comments: list[Comment] = []
         for raw in reversed(raw_comments):  # restore oldest -> newest order
             try:
-                if str(raw.get('id', '')) == str(job_context.comment_id):
+                if str(raw.get("id", "")) == str(job_context.comment_id):
                     continue  # shown separately as the actionable request
-                author = raw.get('author', {}) or {}
-                author_email = author.get('emailAddress')
+                author = raw.get("author", {}) or {}
+                author_email = author.get("emailAddress")
                 comments.append(
                     Comment(
-                        id=str(raw.get('id', '')),
-                        body=raw.get('body', '') or '',
-                        author=author.get('displayName')
-                        or author.get('name')
-                        or 'unknown',
-                        created_at=raw.get('created'),
-                        updated_at=raw.get('updated') or raw.get('created'),
+                        id=str(raw.get("id", "")),
+                        body=raw.get("body", "") or "",
+                        author=author.get("displayName")
+                        or author.get("name")
+                        or "unknown",
+                        created_at=raw.get("created"),
+                        updated_at=raw.get("updated") or raw.get("created"),
                         system=bool(
                             bot_email and author_email and author_email == bot_email
                         ),
                     )
                 )
             except Exception as e:
-                logger.debug(f'[Jira DC] Skipping unparseable comment: {str(e)}')
+                logger.debug(f"[Jira DC] Skipping unparseable comment: {str(e)}")
                 continue
         return comments
 
@@ -808,10 +808,10 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             base_api_url: The base API URL for the Jira DC instance
             svc_acc_api_key: Service account API key for authentication
         """
-        url = f'{base_api_url}/rest/api/2/issue/{issue_key}/comment'
-        headers = {'Authorization': f'Bearer {svc_acc_api_key}'}
+        url = f"{base_api_url}/rest/api/2/issue/{issue_key}/comment"
+        headers = {"Authorization": f"Bearer {svc_acc_api_key}"}
         # Convert standard Markdown to Jira Wiki Markup for proper rendering
-        data = {'body': markdown_to_jira_markup(message)}
+        data = {"body": markdown_to_jira_markup(message)}
         async with httpx.AsyncClient(
             verify=httpx_verify_option(), timeout=JIRA_DC_HTTP_TIMEOUT
         ) as client:
@@ -837,9 +837,9 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             svc_acc_api_key: Service account PAT used to authenticate.
             emoji_id: Unicode codepoint of the reaction emoji.
         """
-        url = f'{base_api_url}/rest/internal/2/reactions'
-        headers = {'Authorization': f'Bearer {svc_acc_api_key}'}
-        data = {'commentId': comment_id, 'emojiId': emoji_id}
+        url = f"{base_api_url}/rest/internal/2/reactions"
+        headers = {"Authorization": f"Bearer {svc_acc_api_key}"}
+        data = {"commentId": comment_id, "emojiId": emoji_id}
         async with httpx.AsyncClient(
             verify=httpx_verify_option(), timeout=JIRA_DC_HTTP_TIMEOUT
         ) as client:
@@ -865,11 +865,11 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
                 svc_acc_api_key=service_account.api_key,
             )
             logger.info(
-                f'[Jira DC] Reacted to comment {job_context.comment_id} on issue {job_context.issue_key}'
+                f"[Jira DC] Reacted to comment {job_context.comment_id} on issue {job_context.issue_key}"
             )
         except Exception as e:
             logger.warning(
-                f'[Jira DC] Failed to add acknowledgement reaction (non-fatal): {str(e)}'
+                f"[Jira DC] Failed to add acknowledgement reaction (non-fatal): {str(e)}"
             )
 
     async def register_webhook(
@@ -878,7 +878,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         admin_api_key: str,
         events_url: str,
         secret: str,
-        name: str = 'OpenHands',
+        name: str = "OpenHands",
     ) -> int:
         """Create or update the OpenHands webhook in Jira DC via the admin API.
 
@@ -897,16 +897,16 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         Returns:
             The id of the created or updated webhook.
         """
-        base = base_api_url.rstrip('/')
-        collection_url = f'{base}/rest/jira-webhook/1.0/webhooks'
-        headers = {'Authorization': f'Bearer {admin_api_key}'}
+        base = base_api_url.rstrip("/")
+        collection_url = f"{base}/rest/jira-webhook/1.0/webhooks"
+        headers = {"Authorization": f"Bearer {admin_api_key}"}
         payload = {
-            'name': name,
-            'url': events_url,
-            'events': JIRA_DC_WEBHOOK_EVENTS,
-            'active': True,
-            'scopeType': 'global',
-            'configuration': {'SECRET': secret, 'EXCLUDE_BODY': 'false'},
+            "name": name,
+            "url": events_url,
+            "events": JIRA_DC_WEBHOOK_EVENTS,
+            "active": True,
+            "scopeType": "global",
+            "configuration": {"SECRET": secret, "EXCLUDE_BODY": "false"},
         }
 
         async with httpx.AsyncClient(
@@ -916,26 +916,26 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             listing = await client.get(collection_url, headers=headers)
             listing.raise_for_status()
             existing = next(
-                (w for w in listing.json() if w.get('url') == events_url), None
+                (w for w in listing.json() if w.get("url") == events_url), None
             )
 
             if existing:
-                webhook_id = existing['id']
+                webhook_id = existing["id"]
                 response = await client.put(
-                    f'{collection_url}/{webhook_id}',
+                    f"{collection_url}/{webhook_id}",
                     headers=headers,
-                    json={**payload, 'id': webhook_id},
+                    json={**payload, "id": webhook_id},
                 )
                 response.raise_for_status()
-                logger.info(f'[Jira DC] Updated webhook {webhook_id} -> {events_url}')
+                logger.info(f"[Jira DC] Updated webhook {webhook_id} -> {events_url}")
                 return webhook_id
 
             response = await client.post(
-                collection_url, headers=headers, json={**payload, 'id': None}
+                collection_url, headers=headers, json={**payload, "id": None}
             )
             response.raise_for_status()
-            webhook_id = response.json().get('id')
-            logger.info(f'[Jira DC] Created webhook {webhook_id} -> {events_url}')
+            webhook_id = response.json().get("id")
+            logger.info(f"[Jira DC] Created webhook {webhook_id} -> {events_url}")
             return webhook_id
 
     async def delete_webhook(
@@ -960,9 +960,9 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         Returns:
             True if a webhook was deleted; False if there was nothing to delete.
         """
-        base = base_api_url.rstrip('/')
-        collection_url = f'{base}/rest/jira-webhook/1.0/webhooks'
-        headers = {'Authorization': f'Bearer {admin_api_key}'}
+        base = base_api_url.rstrip("/")
+        collection_url = f"{base}/rest/jira-webhook/1.0/webhooks"
+        headers = {"Authorization": f"Bearer {admin_api_key}"}
 
         async with httpx.AsyncClient(
             verify=httpx_verify_option(), timeout=JIRA_DC_HTTP_TIMEOUT
@@ -970,20 +970,20 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             listing = await client.get(collection_url, headers=headers)
             listing.raise_for_status()
             existing = next(
-                (w for w in listing.json() if w.get('url') == events_url), None
+                (w for w in listing.json() if w.get("url") == events_url), None
             )
             if not existing:
                 logger.info(
-                    f'[Jira DC] No webhook found for {events_url}; nothing to delete'
+                    f"[Jira DC] No webhook found for {events_url}; nothing to delete"
                 )
                 return False
 
-            webhook_id = existing['id']
+            webhook_id = existing["id"]
             response = await client.delete(
-                f'{collection_url}/{webhook_id}', headers=headers
+                f"{collection_url}/{webhook_id}", headers=headers
             )
             response.raise_for_status()
-            logger.info(f'[Jira DC] Deleted webhook {webhook_id} -> {events_url}')
+            logger.info(f"[Jira DC] Deleted webhook {webhook_id} -> {events_url}")
             return True
 
     async def _send_error_comment(
@@ -994,7 +994,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
     ):
         """Send error comment to Jira DC issue."""
         if not workspace:
-            logger.error('[Jira DC] Cannot send error comment - no workspace available')
+            logger.error("[Jira DC] Cannot send error comment - no workspace available")
             return
 
         try:
@@ -1008,7 +1008,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
                 svc_acc_api_key=service_account.api_key,
             )
         except Exception as e:
-            logger.error(f'[Jira DC] Failed to send error comment: {str(e)}')
+            logger.error(f"[Jira DC] Failed to send error comment: {str(e)}")
 
     async def _send_repo_selection_comment(
         self,
@@ -1022,22 +1022,22 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             matched_repo_names = [repo.full_name for repo in matched_repos or []]
             if not mentioned_repos:
                 comment_msg = (
-                    'Could not determine which repository to use. '
-                    'Please mention the repository (e.g., owner/repo or a '
-                    'repository URL) in the issue description or comment.'
+                    "Could not determine which repository to use. "
+                    "Please mention the repository (e.g., owner/repo or a "
+                    "repository URL) in the issue description or comment."
                 )
             elif len(matched_repo_names) > 1:
                 comment_msg = (
-                    f'Multiple repositories found: {", ".join(matched_repo_names)}. '
-                    'Please specify exactly one repository in the issue description '
-                    'or comment.'
+                    f"Multiple repositories found: {', '.join(matched_repo_names)}. "
+                    "Please specify exactly one repository in the issue description "
+                    "or comment."
                 )
             else:
                 comment_msg = (
-                    f'Could not access any of the mentioned repositories: '
-                    f'{", ".join(mentioned_repos)}. '
-                    'Please ensure the repository exists and that the Git account '
-                    'linked to your OpenHands user can access it.'
+                    f"Could not access any of the mentioned repositories: "
+                    f"{', '.join(mentioned_repos)}. "
+                    "Please ensure the repository exists and that the Git account "
+                    "linked to your OpenHands user can access it."
                 )
 
             service_account = resolve_jira_dc_service_account(
@@ -1052,10 +1052,10 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
             )
 
             logger.info(
-                f'[Jira] Sent repository selection comment for issue {jira_dc_view.job_context.issue_key}'
+                f"[Jira] Sent repository selection comment for issue {jira_dc_view.job_context.issue_key}"
             )
 
         except Exception as e:
             logger.error(
-                f'[Jira] Failed to send repository selection comment: {str(e)}'
+                f"[Jira] Failed to send repository selection comment: {str(e)}"
             )

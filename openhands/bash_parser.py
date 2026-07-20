@@ -54,7 +54,19 @@ def extract_bash_command(response: str) -> str | None:
 
     # DYNAMIC: If no code block found, look for common bash patterns anywhere
     # This handles cases where models forget to use code blocks
-    bash_keywords = ['cat ', 'echo ', 'find ', 'grep ', 'ls ', 'cd ', 'mkdir ', 'rm ', 'mv ', 'cp ', 'sed ']
+    bash_keywords = [
+        'cat ',
+        'echo ',
+        'find ',
+        'grep ',
+        'ls ',
+        'cd ',
+        'mkdir ',
+        'rm ',
+        'mv ',
+        'cp ',
+        'sed ',
+    ]
     for keyword in bash_keywords:
         if keyword in response:
             # Extract just the command part - up to file extension or end of path
@@ -85,12 +97,15 @@ def is_completion_command(command: str) -> bool:
         return False
 
     cmd_lower = command.lower().strip()
-    return any(marker in cmd_lower for marker in [
-        'echo complete',
-        'echo done',
-        'complete_task',
-        'finish_task',
-    ])
+    return any(
+        marker in cmd_lower
+        for marker in [
+            'echo complete',
+            'echo done',
+            'complete_task',
+            'finish_task',
+        ]
+    )
 
 
 def is_write_command(command: str) -> bool:
@@ -138,13 +153,18 @@ def extract_written_file_path(command: str) -> str | None:
     # Pattern: sed -i 's/.../.../' path/to/file.py
     if 'sed -i' in command or "sed -i'" in command:
         # Extract file path (last argument usually)
-        match = re.search(r'sed\s+-i[^\s]*\s+(?:\'[^\']+\'\s+|"[^"]+"\s+)?([a-zA-Z0-9_./\-]+\.[a-zA-Z0-9]+)', command)
+        match = re.search(
+            r'sed\s+-i[^\s]*\s+(?:\'[^\']+\'\s+|"[^"]+"\s+)?([a-zA-Z0-9_./\-]+\.[a-zA-Z0-9]+)',
+            command,
+        )
         if match:
             return match.group(1).strip()
 
     # Pattern: perl -i -pe 's/.../.../g' path/to/file.py
     if 'perl -i' in command:
-        match = re.search(r'perl\s+-i\S*\s+.*?([a-zA-Z0-9_./\-]+\.[a-zA-Z0-9]+)', command)
+        match = re.search(
+            r'perl\s+-i\S*\s+.*?([a-zA-Z0-9_./\-]+\.[a-zA-Z0-9]+)', command
+        )
         if match:
             return match.group(1).strip()
 

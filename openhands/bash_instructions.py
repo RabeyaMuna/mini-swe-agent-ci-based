@@ -7,10 +7,10 @@ This works for weak models (GLM-5.2) and strong models (GPT-4) alike.
 DYNAMIC: Handles 567+ different CI failure patterns flexibly.
 """
 
-from fault_localization import extract_faulty_files, build_fault_localization_summary
 
-
-def _get_phase_instruction(files_read: list[str], files_written: list[str], faulty_files: list[dict]) -> str:
+def _get_phase_instruction(
+    files_read: list[str], files_written: list[str], faulty_files: list[dict]
+) -> str:
     """Determine what phase we're in and return appropriate instruction."""
 
     # Phase 1: Haven't read any files yet - need to read faulty files
@@ -25,10 +25,10 @@ def _get_phase_instruction(files_read: list[str], files_written: list[str], faul
 FILE TO FIX: {file_to_read}"""
 
         if line_num:
-            instruction += f"\nLINE: {line_num}"
+            instruction += f'\nLINE: {line_num}'
 
         if error_msg:
-            instruction += f"\nERROR: {error_msg}"
+            instruction += f'\nERROR: {error_msg}'
 
         instruction += f"""
 
@@ -49,7 +49,7 @@ cat {file_to_read}
 FILE: {file_to_fix}"""
 
         if error_msg:
-            instruction += f"\nERROR TO FIX: {error_msg}"
+            instruction += f'\nERROR TO FIX: {error_msg}'
 
         instruction += """
 
@@ -78,9 +78,9 @@ echo COMPLETE_TASK
 
     # Default: read first faulty file
     if faulty_files:
-        return f"Read the file: {faulty_files[0]['file_path']}"
+        return f'Read the file: {faulty_files[0]["file_path"]}'
 
-    return "Analyze the problem and read the file that needs fixing."
+    return 'Analyze the problem and read the file that needs fixing.'
 
 
 def build_bash_instruction(
@@ -88,7 +88,7 @@ def build_bash_instruction(
     files_read: list[str],
     files_written: list[str],
     step_count: int = 0,
-    previous_result: str = "",
+    previous_result: str = '',
     faulty_files: list[dict] = None,
 ) -> str:
     """
@@ -99,40 +99,40 @@ def build_bash_instruction(
     """
 
     # Show fault localization results (first step only)
-    fault_loc_section = ""
+    fault_loc_section = ''
     if step_count == 0 and faulty_files:
-        fault_loc_section = "\nFAULT LOCALIZATION (files to fix):\n"
+        fault_loc_section = '\nFAULT LOCALIZATION (files to fix):\n'
         for i, loc in enumerate(faulty_files[:3], 1):
             file_path = loc['file_path']
             line_num = loc.get('line_number')
             error = loc.get('error', '')
             if line_num:
-                fault_loc_section += f"{i}. {file_path}:{line_num}"
+                fault_loc_section += f'{i}. {file_path}:{line_num}'
             else:
-                fault_loc_section += f"{i}. {file_path}"
+                fault_loc_section += f'{i}. {file_path}'
             if error:
-                fault_loc_section += f" - {error[:80]}"
-            fault_loc_section += "\n"
+                fault_loc_section += f' - {error[:80]}'
+            fault_loc_section += '\n'
 
     # Show progress and detect if stuck in read-only loop
-    progress = ""
+    progress = ''
     stuck_in_reading = files_read and not files_written and len(files_read) >= 2
 
     if files_read:
-        progress += f"\nFiles explored: {len(files_read)}"
+        progress += f'\nFiles explored: {len(files_read)}'
         if stuck_in_reading:
-            progress += " WARNING - TOO MANY READS, MUST WRITE NOW"
+            progress += ' WARNING - TOO MANY READS, MUST WRITE NOW'
     if files_written:
-        progress += f"\nFiles modified: {len(files_written)}"
-        progress += "\n" + "\n".join(f"  {f}" for f in files_written)
+        progress += f'\nFiles modified: {len(files_written)}'
+        progress += '\n' + '\n'.join(f'  {f}' for f in files_written)
 
     # Show previous result if available
-    result_section = ""
+    result_section = ''
     if previous_result and step_count > 0:
-        result_section = f"\nPrevious command result:\n{previous_result}\n"
+        result_section = f'\nPrevious command result:\n{previous_result}\n'
 
     # ANTI-LOOP: Force write if stuck in read phase
-    force_write_warning = ""
+    force_write_warning = ''
     if stuck_in_reading:
         force_write_warning = f"""
 WARNING: YOU HAVE READ {len(files_read)} FILES BUT WRITTEN 0 FIXES.
@@ -144,9 +144,9 @@ OUTPUT A WRITE COMMAND (sed -i OR cat >) IN YOUR NEXT RESPONSE.
     return f"""{problem_context}
 {fault_loc_section}
 
-{'='*70}
+{'=' * 70}
 INSTRUCTIONS: Use Bash Commands to Fix the Problem
-{'='*70}
+{'=' * 70}
 
 {progress}
 {result_section}

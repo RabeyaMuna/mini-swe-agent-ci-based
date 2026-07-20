@@ -262,8 +262,12 @@ def test_agent_setup_uses_existing_cache_without_docker(tmp_path, monkeypatch):
         ['git', 'config', 'user.name', 'Test User'], cwd=source, check=True
     )
     (source / 'README.md').write_text('hello\n')
-    interactive_agent.subprocess.run(['git', 'add', 'README.md'], cwd=source, check=True)
-    interactive_agent.subprocess.run(['git', 'commit', '-m', 'init'], cwd=source, check=True)
+    interactive_agent.subprocess.run(
+        ['git', 'add', 'README.md'], cwd=source, check=True
+    )
+    interactive_agent.subprocess.run(
+        ['git', 'commit', '-m', 'init'], cwd=source, check=True
+    )
     commit = interactive_agent.subprocess.run(
         ['git', 'rev-parse', 'HEAD'],
         cwd=source,
@@ -274,7 +278,9 @@ def test_agent_setup_uses_existing_cache_without_docker(tmp_path, monkeypatch):
 
     cache = cache_root / 'owner__repo'
     cache_root.mkdir()
-    interactive_agent.subprocess.run(['git', 'clone', str(source), str(cache)], check=True)
+    interactive_agent.subprocess.run(
+        ['git', 'clone', str(source), str(cache)], check=True
+    )
     monkeypatch.setattr(interactive_agent, 'REPO_CACHE_ROOT', cache_root)
 
     env = AgentEnvironment(

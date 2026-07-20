@@ -161,19 +161,19 @@ Build next instruction showing:
 ```json
 {"tool": "read_file", "args": {"file_path": "exact/path.py"}}
 ```
-❌ Fails if path is wrong  
-❌ Fails if model outputs prose  
-❌ Fails if model forgets JSON  
-❌ Requires exact format  
+❌ Fails if path is wrong
+❌ Fails if model outputs prose
+❌ Fails if model forgets JSON
+❌ Requires exact format
 
 ### Dynamic (Bash Commands)
 ```bash
 cat path.py
 ```
-✅ Auto-searches if path wrong  
-✅ Parses from prose  
-✅ Works without code blocks  
-✅ Accepts any bash format  
+✅ Auto-searches if path wrong
+✅ Parses from prose
+✅ Works without code blocks
+✅ Accepts any bash format
 
 ## Code Structure
 

@@ -34,7 +34,7 @@ from pydantic import BaseModel
 from openhands.analytics import get_analytics_service, resolve_analytics_context
 from openhands.app_server.user_auth import get_user_id
 
-analytics_events_router = APIRouter(prefix='/api/analytics/events', tags=['Analytics'])
+analytics_events_router = APIRouter(prefix="/api/analytics/events", tags=["Analytics"])
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,13 @@ logger = logging.getLogger(__name__)
 # Mirrors ``frontend/src/types/settings.ts::ProviderOptions``. Kept narrow so
 # only known providers can be forwarded as PostHog properties.
 GitProvider = Literal[
-    'github',
-    'gitlab',
-    'bitbucket',
-    'bitbucket_data_center',
-    'azure_devops',
-    'forgejo',
-    'enterprise_sso',
+    "github",
+    "gitlab",
+    "bitbucket",
+    "bitbucket_data_center",
+    "azure_devops",
+    "forgejo",
+    "enterprise_sso",
 ]
 
 
@@ -60,7 +60,7 @@ class CreatePrButtonClickedEvent(BaseModel):
     PostHog event in ``openhands/analytics/analytics_constants.py``.
     """
 
-    event_type: Literal['create pr button clicked']
+    event_type: Literal["create pr button clicked"]
     git_provider: GitProvider | None = None
 
 
@@ -81,7 +81,7 @@ class AnalyticsEventResponse(BaseModel):
     status: str
 
 
-@analytics_events_router.post('', response_model=AnalyticsEventResponse)
+@analytics_events_router.post("", response_model=AnalyticsEventResponse)
 async def track_frontend_event(
     body: FrontendEvent,
     user_id: str | None = Depends(get_user_id),
@@ -99,12 +99,12 @@ async def track_frontend_event(
             analytics.capture(
                 ctx=ctx,
                 event=body.event_type,
-                properties=body.model_dump(exclude={'event_type'}),
+                properties=body.model_dump(exclude={"event_type"}),
             )
     except Exception:
         logger.exception(
-            'analytics:frontend_event:failed',
-            extra={'event_type': body.event_type},
+            "analytics:frontend_event:failed",
+            extra={"event_type": body.event_type},
         )
 
-    return AnalyticsEventResponse(status='ok')
+    return AnalyticsEventResponse(status="ok")

@@ -38,12 +38,14 @@ def extract_faulty_files(problem_description: str) -> list[dict[str, Any]]:
         end = min(len(problem_description), match.end() + 200)
         context = problem_description[start:end].strip()
 
-        locations.append({
-            'file_path': file_path,
-            'line_number': line_num,
-            'error': _extract_error_message(problem_description, match.end()),
-            'context': context,
-        })
+        locations.append(
+            {
+                'file_path': file_path,
+                'line_number': line_num,
+                'error': _extract_error_message(problem_description, match.end()),
+                'context': context,
+            }
+        )
 
     # Pattern 2: pytest/unittest error format
     # path/to/test_file.py::test_function FAILED
@@ -56,12 +58,14 @@ def extract_faulty_files(problem_description: str) -> list[dict[str, Any]]:
         end = min(len(problem_description), match.end() + 150)
         context = problem_description[start:end].strip()
 
-        locations.append({
-            'file_path': file_path,
-            'line_number': None,
-            'error': f'Test {test_name} failed',
-            'context': context,
-        })
+        locations.append(
+            {
+                'file_path': file_path,
+                'line_number': None,
+                'error': f'Test {test_name} failed',
+                'context': context,
+            }
+        )
 
     # Pattern 3: mypy/flake8/type checker errors
     # path/to/file.py:42: error: Missing return type
@@ -71,12 +75,14 @@ def extract_faulty_files(problem_description: str) -> list[dict[str, Any]]:
         line_num = int(match.group(2))
         error_msg = match.group(4).strip()
 
-        locations.append({
-            'file_path': file_path,
-            'line_number': line_num,
-            'error': error_msg,
-            'context': match.group(0),
-        })
+        locations.append(
+            {
+                'file_path': file_path,
+                'line_number': line_num,
+                'error': error_msg,
+                'context': match.group(0),
+            }
+        )
 
     # Pattern 4: Generic file mentions in errors
     # Mentioned in: "error in app.py"
@@ -87,12 +93,14 @@ def extract_faulty_files(problem_description: str) -> list[dict[str, Any]]:
             file_path = match.group(1)
             if file_path not in seen_files:
                 seen_files.add(file_path)
-                locations.append({
-                    'file_path': file_path,
-                    'line_number': None,
-                    'error': 'File mentioned in error',
-                    'context': '',
-                })
+                locations.append(
+                    {
+                        'file_path': file_path,
+                        'line_number': None,
+                        'error': 'File mentioned in error',
+                        'context': '',
+                    }
+                )
 
     # Deduplicate by file_path (keep first occurrence)
     seen = set()
@@ -109,7 +117,7 @@ def extract_faulty_files(problem_description: str) -> list[dict[str, Any]]:
 def _extract_error_message(text: str, start_pos: int) -> str:
     """Extract error message after a stack trace line."""
     # Look for common error patterns after the file/line reference
-    remaining = text[start_pos:start_pos + 300]
+    remaining = text[start_pos : start_pos + 300]
 
     # Find first line that looks like an error
     for line in remaining.split('\n'):
@@ -129,9 +137,9 @@ def build_fault_localization_summary(problem_description: str) -> str:
     locations = extract_faulty_files(problem_description)
 
     if not locations:
-        return "No specific files identified in error. Manual investigation needed."
+        return 'No specific files identified in error. Manual investigation needed.'
 
-    lines = ["Fault Localization Results:", ""]
+    lines = ['Fault Localization Results:', '']
 
     for i, loc in enumerate(locations[:5], 1):  # Top 5 locations
         file_path = loc['file_path']
@@ -139,13 +147,13 @@ def build_fault_localization_summary(problem_description: str) -> str:
         error = loc.get('error', '')
 
         if line_num:
-            lines.append(f"{i}. {file_path}:{line_num}")
+            lines.append(f'{i}. {file_path}:{line_num}')
         else:
-            lines.append(f"{i}. {file_path}")
+            lines.append(f'{i}. {file_path}')
 
         if error:
-            lines.append(f"   Error: {error[:100]}")
+            lines.append(f'   Error: {error[:100]}')
 
-        lines.append("")
+        lines.append('')
 
     return '\n'.join(lines)

@@ -6,10 +6,10 @@ Just: template → model → bash command → result → repeat
 """
 
 import re
-import json
 import subprocess
 from pathlib import Path
 from typing import Any
+
 import litellm
 from dotenv import load_dotenv
 
@@ -87,20 +87,24 @@ def extract_fault_localization_simple(problem_text: str) -> str:
 
     # Pattern 1: Python errors - File "path.py", line 42
     for match in re.finditer(r'File "([^"]+)", line (\d+)', problem_text):
-        faults.append(f"  - {match.group(1)}:{match.group(2)}")
+        faults.append(f'  - {match.group(1)}:{match.group(2)}')
 
     # Pattern 2: mypy errors - path.py:42: error: message
-    for match in re.finditer(r'([a-zA-Z0-9_./\-]+\.py):(\d+):\s*error:\s*([^\n]+)', problem_text):
-        faults.append(f"  - {match.group(1)}:{match.group(2)} - {match.group(3)[:80]}")
+    for match in re.finditer(
+        r'([a-zA-Z0-9_./\-]+\.py):(\d+):\s*error:\s*([^\n]+)', problem_text
+    ):
+        faults.append(f'  - {match.group(1)}:{match.group(2)} - {match.group(3)[:80]}')
 
     # Pattern 3: pytest failures
-    for match in re.finditer(r'([a-zA-Z0-9_./\-]+\.py)::([\w_]+)\s+FAILED', problem_text):
-        faults.append(f"  - {match.group(1)} - test {match.group(2)} failed")
+    for match in re.finditer(
+        r'([a-zA-Z0-9_./\-]+\.py)::([\w_]+)\s+FAILED', problem_text
+    ):
+        faults.append(f'  - {match.group(1)} - test {match.group(2)} failed')
 
     if faults:
-        return "FAULT LOCALIZATION - Files with errors:\n" + "\n".join(faults[:5])
+        return 'FAULT LOCALIZATION - Files with errors:\n' + '\n'.join(faults[:5])
     else:
-        return "FAULT LOCALIZATION: Analyze the problem description to identify files to fix."
+        return 'FAULT LOCALIZATION: Analyze the problem description to identify files to fix.'
 
 
 def run_simple_agent(
@@ -134,8 +138,8 @@ def run_simple_agent(
         work_dir=str(work_dir),
     )
 
-    messages.append({"role": "system", "content": system_msg})
-    messages.append({"role": "user", "content": instance_msg})
+    messages.append({'role': 'system', 'content': system_msg})
+    messages.append({'role': 'user', 'content': instance_msg})
 
     while step < max_steps:
         step += 1
@@ -150,32 +154,37 @@ def run_simple_agent(
             )
             total_cost += (response.usage.total_tokens / 1000) * 0.01
         except Exception as e:
-            print(f"Model error: {e}")
+            print(f'Model error: {e}')
             break
 
-        response_text = response.choices[0].message.content or ""
-        messages.append({"role": "assistant", "content": response_text})
+        response_text = response.choices[0].message.content or ''
+        messages.append({'role': 'assistant', 'content': response_text})
 
-        print(f"\nStep {step}: {response_text[:100]}...")
+        print(f'\nStep {step}: {response_text[:100]}...')
 
         # Extract bash command
         bash_command = extract_bash_from_response(response_text)
         if not bash_command:
-            print("No bash command found")
+            print('No bash command found')
             continue
 
-        print(f"  Command: {bash_command[:80]}")
+        print(f'  Command: {bash_command[:80]}')
 
         # Check for completion
-        if "COMPLETE_TASK" in bash_command.upper():
-            print("Task marked complete")
+        if 'COMPLETE_TASK' in bash_command.upper():
+            print('Task marked complete')
             break
 
         # Execute command
         try:
             # Fix sed -i for Mac
             import platform
-            if platform.system() == 'Darwin' and 'sed -i' in bash_command and "sed -i ''" not in bash_command:
+
+            if (
+                platform.system() == 'Darwin'
+                and 'sed -i' in bash_command
+                and "sed -i ''" not in bash_command
+            ):
                 bash_command = bash_command.replace('sed -i ', "sed -i '' ")
 
             result = subprocess.run(
@@ -189,25 +198,29 @@ def run_simple_agent(
 
             output = result.stdout + result.stderr
             if len(output) > 5000:
-                output = output[:2500] + "\n... (output truncated) ...\n" + output[-2500:]
+                output = (
+                    output[:2500] + '\n... (output truncated) ...\n' + output[-2500:]
+                )
 
             observation = OBSERVATION_TEMPLATE.format(
                 returncode=result.returncode,
-                output=output or "(no output)",
+                output=output or '(no output)',
             )
 
         except Exception as e:
-            observation = f"<error>{str(e)}</error>"
+            observation = f'<error>{str(e)}</error>'
 
-        print(f"  Return code: {result.returncode if 'result' in locals() else 'error'}")
+        print(
+            f'  Return code: {result.returncode if "result" in locals() else "error"}'
+        )
 
         # Add observation
-        messages.append({"role": "user", "content": observation})
+        messages.append({'role': 'user', 'content': observation})
 
     # Generate patch
     try:
         diff_result = subprocess.run(
-            ["git", "diff", "--binary", commit],
+            ['git', 'diff', '--binary', commit],
             cwd=work_dir,
             capture_output=True,
             text=True,
@@ -215,10 +228,10 @@ def run_simple_agent(
         )
         patch = diff_result.stdout
     except Exception:
-        patch = ""
+        patch = ''
 
     return {
-        "patch": patch,
-        "cost": total_cost,
-        "steps": step,
+        'patch': patch,
+        'cost': total_cost,
+        'steps': step,
     }

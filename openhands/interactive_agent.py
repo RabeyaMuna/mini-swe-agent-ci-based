@@ -19,14 +19,15 @@ from urllib.parse import urlparse
 
 import litellm
 from dotenv import load_dotenv
+
 from bash_instructions import build_bash_instruction
 from bash_parser import (
     extract_bash_command,
-    is_completion_command,
-    is_write_command,
-    extract_written_file_path,
-    is_read_command,
     extract_read_file_path,
+    extract_written_file_path,
+    is_completion_command,
+    is_read_command,
+    is_write_command,
 )
 from fault_localization import extract_faulty_files
 
@@ -35,7 +36,9 @@ load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REPO_CACHE_ROOT = Path(
-    os.getenv('OPENHANDS_REPO_CACHE_ROOT') or os.getenv('MSWEA_REPO_CACHE_ROOT') or PROJECT_ROOT / 'repo'
+    os.getenv('OPENHANDS_REPO_CACHE_ROOT')
+    or os.getenv('MSWEA_REPO_CACHE_ROOT')
+    or PROJECT_ROOT / 'repo'
 ).resolve()
 BLOCKED_COMMANDS = {
     'docker',
@@ -76,7 +79,9 @@ def _ensure_relative_path(repo_dir: Path, file_path: str) -> Path:
     return full_path
 
 
-def _run_git(args: list[str], cwd: Path, timeout: int = 300) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    args: list[str], cwd: Path, timeout: int = 300
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ['git', *args],
         cwd=str(cwd),
@@ -86,24 +91,34 @@ def _run_git(args: list[str], cwd: Path, timeout: int = 300) -> subprocess.Compl
     )
 
 
-def _must_run_git(args: list[str], cwd: Path, error_label: str, timeout: int = 300) -> None:
+def _must_run_git(
+    args: list[str], cwd: Path, error_label: str, timeout: int = 300
+) -> None:
     result = _run_git(args, cwd, timeout=timeout)
     if result.returncode != 0:
-        raise RuntimeError(f'{error_label}:\n{result.stderr[:800] or result.stdout[:800]}')
+        raise RuntimeError(
+            f'{error_label}:\n{result.stderr[:800] or result.stdout[:800]}'
+        )
 
 
-def _ensure_commit_available(repo_path: Path, commit: str, remote: str = 'origin') -> None:
+def _ensure_commit_available(
+    repo_path: Path, commit: str, remote: str = 'origin'
+) -> None:
     verify = _run_git(['rev-parse', '--verify', f'{commit}^{{commit}}'], repo_path)
     if verify.returncode == 0:
         return
 
     fetch = _run_git(['fetch', '--quiet', remote, commit], repo_path)
     if fetch.returncode != 0:
-        raise RuntimeError(f'git fetch failed for commit {commit}:\n{fetch.stderr[:800]}')
+        raise RuntimeError(
+            f'git fetch failed for commit {commit}:\n{fetch.stderr[:800]}'
+        )
 
     verify = _run_git(['rev-parse', '--verify', f'{commit}^{{commit}}'], repo_path)
     if verify.returncode != 0:
-        raise RuntimeError(f'commit {commit} unavailable after fetch:\n{verify.stderr[:800]}')
+        raise RuntimeError(
+            f'commit {commit} unavailable after fetch:\n{verify.stderr[:800]}'
+        )
 
 
 def _is_blocked_command(command: str) -> bool:
@@ -179,7 +194,9 @@ class AgentEnvironment:
         """
         try:
             # Create temporary working directory
-            self.work_dir = Path(tempfile.mkdtemp(prefix=f'openhands_{self.instance_id}_'))
+            self.work_dir = Path(
+                tempfile.mkdtemp(prefix=f'openhands_{self.instance_id}_')
+            )
             self.repo_dir = self.work_dir / 'repo'
             repo_slug = _repo_slug(self.repo_url)
             repo_owner, repo_name = repo_slug.split('/', 1)
@@ -195,10 +212,22 @@ class AgentEnvironment:
                     timeout=300,
                 )
                 if result.returncode != 0:
-                    return {'status': 'failed', 'message': f'Clone failed: {result.stderr[:800]}'}
+                    return {
+                        'status': 'failed',
+                        'message': f'Clone failed: {result.stderr[:800]}',
+                    }
             else:
                 subprocess.run(
-                    ['git', '-C', str(cache_dir), 'fetch', '--all', '--tags', '--prune', '--quiet'],
+                    [
+                        'git',
+                        '-C',
+                        str(cache_dir),
+                        'fetch',
+                        '--all',
+                        '--tags',
+                        '--prune',
+                        '--quiet',
+                    ],
                     capture_output=True,
                     text=True,
                     timeout=300,
@@ -206,17 +235,33 @@ class AgentEnvironment:
 
             _ensure_commit_available(cache_dir, self.commit_sha)
             result = subprocess.run(
-                ['git', 'clone', '--quiet', '--shared', str(cache_dir), str(self.repo_dir)],
+                [
+                    'git',
+                    'clone',
+                    '--quiet',
+                    '--shared',
+                    str(cache_dir),
+                    str(self.repo_dir),
+                ],
                 capture_output=True,
                 text=True,
                 timeout=300,
             )
             if result.returncode != 0:
-                return {'status': 'failed', 'message': f'Local clone failed: {result.stderr[:800]}'}
+                return {
+                    'status': 'failed',
+                    'message': f'Local clone failed: {result.stderr[:800]}',
+                }
 
             _ensure_commit_available(self.repo_dir, self.commit_sha)
-            _must_run_git(['checkout', '--detach', '--force', self.commit_sha], self.repo_dir, 'Checkout failed')
-            _must_run_git(['reset', '--hard', self.commit_sha], self.repo_dir, 'Reset failed')
+            _must_run_git(
+                ['checkout', '--detach', '--force', self.commit_sha],
+                self.repo_dir,
+                'Checkout failed',
+            )
+            _must_run_git(
+                ['reset', '--hard', self.commit_sha], self.repo_dir, 'Reset failed'
+            )
             _must_run_git(['clean', '-fdx'], self.repo_dir, 'Clean failed')
 
             # Verify commit
@@ -260,7 +305,11 @@ class AgentEnvironment:
                 return {'status': 'failed', 'message': f'File not found: {file_path}'}
 
             content = full_path.read_text()
-            return {'status': 'success', 'content': content, 'message': f'Read {len(content)} chars'}
+            return {
+                'status': 'success',
+                'content': content,
+                'message': f'Read {len(content)} chars',
+            }
 
         except Exception as e:
             return {'status': 'failed', 'message': f'Read error: {e}'}
@@ -280,7 +329,10 @@ class AgentEnvironment:
             full_path = _ensure_relative_path(self.repo_dir, file_path)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content)
-            return {'status': 'success', 'message': f'Wrote {len(content)} chars to {file_path}'}
+            return {
+                'status': 'success',
+                'message': f'Wrote {len(content)} chars to {file_path}',
+            }
 
         except Exception as e:
             return {'status': 'failed', 'message': f'Write error: {e}'}
@@ -297,7 +349,11 @@ class AgentEnvironment:
             {"status": "success"/"failed", "output": str, "exit_code": int}
         """
         if not query:
-            return {'status': 'failed', 'message': 'Missing search query', 'exit_code': 2}
+            return {
+                'status': 'failed',
+                'message': 'Missing search query',
+                'exit_code': 2,
+            }
 
         command = ['rg', '-n', '--hidden', '--glob', '!.git', query]
         if file_glob:
@@ -341,7 +397,12 @@ class AgentEnvironment:
 
             # Fix sed -i for Mac OS X (BSD sed requires backup extension)
             import platform
-            if platform.system() == 'Darwin' and 'sed -i' in command and "sed -i ''" not in command:
+
+            if (
+                platform.system() == 'Darwin'
+                and 'sed -i' in command
+                and "sed -i ''" not in command
+            ):
                 # Convert: sed -i 's/.../' file
                 # To: sed -i '' 's/.../' file
                 command = command.replace('sed -i ', "sed -i '' ")
@@ -402,6 +463,7 @@ class AgentEnvironment:
         """Clean up working directory."""
         if self.work_dir and self.work_dir.exists():
             import shutil
+
             shutil.rmtree(self.work_dir, ignore_errors=True)
 
 
@@ -470,14 +532,16 @@ class OpenHandsAgent:
 
         try:
             problems = self._task_problems(task)
-            print(f"\n{'='*70}")
-            print(f"Starting sequential problem solving: {len(problems)} problem(s)")
-            print(f"{'='*70}")
+            print(f'\n{"=" * 70}')
+            print(f'Starting sequential problem solving: {len(problems)} problem(s)')
+            print(f'{"=" * 70}')
 
             for index, problem in enumerate(problems, start=1):
-                print(f"\n Problem {index}/{len(problems)}: {problem.get('source', 'unknown')}")
+                print(
+                    f'\n Problem {index}/{len(problems)}: {problem.get("source", "unknown")}'
+                )
                 if problem.get('title'):
-                    print(f"   Title: {problem['title']}")
+                    print(f'   Title: {problem["title"]}')
 
                 self.trajectory.append(
                     {
@@ -488,7 +552,7 @@ class OpenHandsAgent:
                     }
                 )
                 self._solve_problem(problem, env, index=index, total=len(problems))
-                print(f" Finished problem {index}/{len(problems)}")
+                print(f' Finished problem {index}/{len(problems)}')
 
             diff_result = env.get_diff()
             patch = diff_result.get('diff', '')
@@ -502,7 +566,9 @@ class OpenHandsAgent:
         finally:
             env.cleanup()
 
-    def _format_initial_observation(self, task: dict[str, Any], setup_result: dict) -> str:
+    def _format_initial_observation(
+        self, task: dict[str, Any], setup_result: dict
+    ) -> str:
         """Backward-compatible task summary for tests and diagnostics."""
         return self._build_problem_prompt(task)
 
@@ -543,7 +609,10 @@ class OpenHandsAgent:
         if problem:
             task_parts.append(f'## Problem\n{self._truncate(problem, 1200)}')
 
-        if processed_details and processed_details != 'Same as the Problem section above.':
+        if (
+            processed_details
+            and processed_details != 'Same as the Problem section above.'
+        ):
             task_parts.append(
                 f'## Processed CI Failure Details\n{self._truncate(processed_details, 1200)}'
             )
@@ -605,21 +674,21 @@ Failed commit already checked out: {commit_sha}
         # Determine current phase based on progress
         if not files_read:
             # Start: understand then investigate
-            current_phase = "understand"
+            current_phase = 'understand'
         elif len(files_read) == 1:
             # Read first file, analyze it
-            current_phase = "analyze"
+            current_phase = 'analyze'
         elif len(files_read) >= 2 and not files_written:
             # Read enough files, now fix
-            current_phase = "fix"
+            current_phase = 'fix'
         elif len(files_written) > 0:
             # Written files, can verify or complete
-            current_phase = "verify"
+            current_phase = 'verify'
         else:
             current_phase = phase
 
         instructions = {
-            "understand": f"""
+            'understand': f"""
 {problem_context}
 
 === PHASE 0: UNDERSTAND THE PROBLEM ===
@@ -658,14 +727,13 @@ TRY AUTOMATION FIRST IF APPLICABLE!
 
 Respond with JSON only.
 """,
-
-            "investigate": f"""
+            'investigate': f"""
 {problem_context}
 
 === PHASE 1: INVESTIGATE & LOCATE ===
 
 Files read: {len(files_read)}
-{chr(10).join(f"  ✓ {f}" for f in files_read) if files_read else ""}
+{chr(10).join(f'  ✓ {f}' for f in files_read) if files_read else ''}
 
 Your task: Identify WHERE the problem is in the repository.
 
@@ -696,14 +764,13 @@ OR read known problematic file:
 
 Respond with JSON only.
 """,
-
-            "analyze": f"""
+            'analyze': f"""
 {problem_context}
 
 === PHASE 2: ANALYZE & PLAN FIX ===
 
 Files you've read: {len(files_read)}
-{chr(10).join(f"  ✓ {f}" for f in files_read) if files_read else ""}
+{chr(10).join(f'  ✓ {f}' for f in files_read) if files_read else ''}
 
 Your task: ANALYZE the errors and DECIDE fix approach.
 
@@ -740,17 +807,16 @@ Next action - Try automated fix OR prepare for manual fix:
 
 Respond with JSON only.
 """,
-
-            "fix": f"""
+            'fix': f"""
 {problem_context}
 
 === PHASE 3: FIX THE CODE (WRITE FILES NOW!) ===
 
 Files READ: {len(files_read)} ✓
-{chr(10).join(f"  📖 {f}" for f in files_read[-5:]) if files_read else ""}
+{chr(10).join(f'  📖 {f}' for f in files_read[-5:]) if files_read else ''}
 
 Files WRITTEN: {len(files_written)} {'❌ ZERO - MUST WRITE NOW!' if not files_written else '✓'}
-{chr(10).join(f"  ✏️  {f}" for f in files_written) if files_written else ""}
+{chr(10).join(f'  ✏️  {f}' for f in files_written) if files_written else ''}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️  CRITICAL: You MUST use write_file RIGHT NOW!
@@ -776,14 +842,13 @@ EXAMPLE (copy this pattern):
 
 RESPOND NOW WITH write_file JSON!
 """,
-
-            "verify": f"""
+            'verify': f"""
 {problem_context}
 
 === PHASE 4: VERIFY (Optional) ===
 
 Files written: {len(files_written)}
-{chr(10).join(f"  ✏️  {f}" for f in files_written) if files_written else ""}
+{chr(10).join(f'  ✏️  {f}' for f in files_written) if files_written else ''}
 
 You've written fixes! Optionally verify them:
 
@@ -795,8 +860,7 @@ Most likely: Use 'done' now.
 
 Respond with JSON only.
 """,
-
-            "complete": f"""
+            'complete': f"""
 {problem_context}
 
 === PHASE 5: COMPLETE ===
@@ -804,7 +868,7 @@ Respond with JSON only.
 Summary:
 - Files read: {len(files_read)}
 - Files written: {len(files_written)}
-{chr(10).join(f"  ✏️  {f}" for f in files_written) if files_written else "  ⚠️  NO FILES WRITTEN!"}
+{chr(10).join(f'  ✏️  {f}' for f in files_written) if files_written else '  ⚠️  NO FILES WRITTEN!'}
 
 FINAL STEP: Mark this problem as complete.
 
@@ -814,7 +878,7 @@ Respond with JSON only.
 """,
         }
 
-        return instructions.get(current_phase, instructions["investigate"])
+        return instructions.get(current_phase, instructions['investigate'])
 
     def _task_problems(self, task: dict[str, Any]) -> list[dict[str, Any]]:
         """Return baseline CI problem plus optional memory follow-up problems."""
@@ -880,13 +944,15 @@ Respond with JSON only.
                 file_path = action.get('args', {}).get('file_path', '')
                 if file_path:
                     file_name = file_path.split('/')[-1]
-                    print(f"Auto-searching for: {file_name}")
+                    print(f'Auto-searching for: {file_name}')
                     # Use find command to locate file by name
                     find_result = env.run_command(
                         f'find . -type f -name "{file_name}" 2>/dev/null | head -5',
-                        timeout=10
+                        timeout=10,
                     )
-                    if find_result.get('status') == 'success' and find_result.get('stdout'):
+                    if find_result.get('status') == 'success' and find_result.get(
+                        'stdout'
+                    ):
                         # Get first matching file path
                         found_paths = [
                             p.strip().lstrip('./')
@@ -895,7 +961,7 @@ Respond with JSON only.
                         ]
                         if found_paths:
                             actual_path = found_paths[0]
-                            print(f"   Found at: {actual_path}")
+                            print(f'   Found at: {actual_path}')
                             # Retry read with correct path
                             result = env.read_file(actual_path)
                             # Update action to reflect what actually happened
@@ -906,23 +972,28 @@ Respond with JSON only.
                 file_path = action['args'].get('file_path', '')
                 if file_path and file_path not in files_read:
                     files_read.append(file_path)
-                    print(f"  Read: {file_path}")
+                    print(f'  Read: {file_path}')
 
             if action.get('tool') == 'write_file' and result.get('status') == 'success':
                 file_path = action['args'].get('file_path', '')
                 if file_path and file_path not in files_written:
                     files_written.append(file_path)
-                    print(f"  Wrote: {file_path}")
+                    print(f'  Wrote: {file_path}')
 
             # Track in-place edits (sed, perl, patch)
-            if action.get('tool') == 'run_command' and result.get('status') == 'success':
+            if (
+                action.get('tool') == 'run_command'
+                and result.get('status') == 'success'
+            ):
                 modifies_file = action['args'].get('modifies_file', '')
                 if modifies_file and modifies_file not in files_written:
                     files_written.append(modifies_file)
-                    print(f"  Modified: {modifies_file}")
+                    print(f'  Modified: {modifies_file}')
 
             # LOOP DETECTION: Check if model is repeating same action
-            action_signature = f"{action.get('tool')}:{action.get('args', {}).get('file_path', '')}"
+            action_signature = (
+                f'{action.get("tool")}:{action.get("args", {}).get("file_path", "")}'
+            )
             last_actions.append(action_signature)
             if len(last_actions) > 3:
                 last_actions.pop(0)  # Keep only last 3 actions
@@ -935,8 +1006,8 @@ Respond with JSON only.
                 and files_read
                 and not files_written
             ):
-                print(f"  WARNING: Loop detected - model keeps reading same file.")
-                print(f"  Stopping problem - model stuck in read loop.")
+                print('  WARNING: Loop detected - model keeps reading same file.')
+                print('  Stopping problem - model stuck in read loop.')
                 # Stop this problem - model is stuck
                 self.trajectory.append(
                     {
@@ -956,7 +1027,7 @@ Respond with JSON only.
                 }
             )
             if action.get('tool') == 'done':
-                print(f"  ✓ Problem marked complete")
+                print('  ✓ Problem marked complete')
                 return
             if result.get('status') == 'failed':
                 consecutive_errors += 1
@@ -1045,8 +1116,8 @@ echo COMPLETE_TASK
 
         if not bash_command:
             # No bash block found - model might have output prose
-            print(f"    No bash command found in response")
-            print(f"  Response: {response_text[:200]}...")
+            print('    No bash command found in response')
+            print(f'  Response: {response_text[:200]}...')
             # Fallback: try to find file mentioned and read it
             action = {
                 'tool': 'search',
@@ -1056,9 +1127,9 @@ echo COMPLETE_TASK
 
         # DEBUG: Show what model generated
         if bash_command and len(bash_command) < 100:
-            print(f"  Model: {bash_command}")
+            print(f'  Model: {bash_command}')
         elif bash_command:
-            print(f"  Model: {bash_command[:80]}...")
+            print(f'  Model: {bash_command[:80]}...')
 
         # Convert bash command to action
         action = self._bash_to_action(bash_command)
@@ -1103,7 +1174,10 @@ echo COMPLETE_TASK
                 else:
                     # No content extracted - maybe it's a simple redirect
                     # Execute as command and let bash handle it
-                    return {'tool': 'run_command', 'args': {'command': bash_command, 'timeout': 60}}
+                    return {
+                        'tool': 'run_command',
+                        'args': {'command': bash_command, 'timeout': 60},
+                    }
 
         # Check for read command
         if is_read_command(bash_command):
@@ -1113,11 +1187,17 @@ echo COMPLETE_TASK
 
         # DYNAMIC: Handle find commands specially (for file discovery)
         if bash_command.strip().startswith('find '):
-            return {'tool': 'run_command', 'args': {'command': bash_command, 'timeout': 30}}
+            return {
+                'tool': 'run_command',
+                'args': {'command': bash_command, 'timeout': 30},
+            }
 
         # DYNAMIC: Handle grep commands (for code search)
         if 'grep ' in bash_command:
-            return {'tool': 'run_command', 'args': {'command': bash_command, 'timeout': 30}}
+            return {
+                'tool': 'run_command',
+                'args': {'command': bash_command, 'timeout': 30},
+            }
 
         # Otherwise, run as generic command with reasonable timeout
         return {'tool': 'run_command', 'args': {'command': bash_command, 'timeout': 60}}
@@ -1135,7 +1215,11 @@ echo COMPLETE_TASK
         import re
 
         # Try standard heredoc with delimiter
-        match = re.search(r"<<\s*['\"]?(\w+)['\"]?\s*\n(.*?)^\1\s*$", bash_command, re.MULTILINE | re.DOTALL)
+        match = re.search(
+            r"<<\s*['\"]?(\w+)['\"]?\s*\n(.*?)^\1\s*$",
+            bash_command,
+            re.MULTILINE | re.DOTALL,
+        )
         if match:
             return match.group(2).rstrip('\n')
 
@@ -1152,9 +1236,11 @@ echo COMPLETE_TASK
             return content.rstrip('\n')
 
         # If no heredoc pattern, return empty
-        return ""
+        return ''
 
-    def _execute_action(self, action: dict[str, Any], env: AgentEnvironment) -> dict[str, Any]:
+    def _execute_action(
+        self, action: dict[str, Any], env: AgentEnvironment
+    ) -> dict[str, Any]:
         """Execute a model-selected repository action."""
         tool = action.get('tool')
         args = action.get('args') or {}
@@ -1242,7 +1328,7 @@ if __name__ == '__main__':
     }
 
     result = execute_openhands_agent(test_task, 'zai/glm-5.2', max_steps=5)
-    print(f"Status: {result['status']}")
-    print(f"Patch length: {len(result['patch'])}")
-    print(f"Steps: {len(result['trajectory'])}")
-    print(f"Cost: ${result['total_cost']:.4f}")
+    print(f'Status: {result["status"]}')
+    print(f'Patch length: {len(result["patch"])}')
+    print(f'Steps: {len(result["trajectory"])}')
+    print(f'Cost: ${result["total_cost"]:.4f}')
