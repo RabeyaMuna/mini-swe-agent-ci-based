@@ -130,6 +130,7 @@ def _load_json(content: str, default: Any) -> Any:
 def _read_repo_file(
     repo_path: Optional[str], rel_path: str, max_chars: int = 80_000
 ) -> Optional[str]:
+    """Read file from repo working tree (current checkout state)."""
     if not repo_path or not rel_path:
         return None
 
@@ -145,6 +146,62 @@ def _read_repo_file(
     try:
         return path.read_text(encoding="utf-8", errors="replace")[:max_chars]
     except Exception:
+        return None
+
+
+def _read_repo_file_at_commit(
+    repo_path: Optional[str],
+    rel_path: str,
+    sha: Optional[str] = None,
+    max_chars: int = 80_000,
+) -> Optional[str]:
+    """
+    Read file from repo at specific commit without checking out.
+
+    Uses `git show {sha}:{path}` to read file content at a specific commit
+    without modifying the working tree. Falls back to working tree if no SHA.
+
+    Args:
+        repo_path: Path to git repository
+        rel_path: Relative path to file within repo
+        sha: Git commit SHA (if None, reads from working tree)
+        max_chars: Maximum characters to read
+
+    Returns:
+        File content or None if file doesn't exist or read fails
+    """
+    if not repo_path or not rel_path:
+        return None
+
+    # Normalize path (remove leading /)
+    rel_path = str(rel_path).lstrip("/")
+
+    # If no SHA specified, use current working tree
+    if not sha:
+        return _read_repo_file(repo_path, rel_path, max_chars)
+
+    # Read from specific commit using git show
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{sha}:{rel_path}"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,  # Prevent hanging
+        )
+        content = result.stdout[:max_chars]
+        return content
+    except subprocess.CalledProcessError:
+        # File doesn't exist at that commit or git command failed
+        return None
+    except subprocess.TimeoutExpired:
+        LOGGER.warning(f"Timeout reading {rel_path} at {sha}")
+        return None
+    except Exception as e:
+        LOGGER.warning(f"Failed to read {rel_path} at {sha}: {e}")
         return None
 
 
@@ -204,18 +261,31 @@ def _normalize_validation_sequence(raw_steps: Any) -> List[Dict[str, Any]]:
 def build_dependent_file_prompt(workflow_path: str, workflow_content: str) -> str:
     return f"""You are analyzing a GitHub Actions workflow from a benchmark instance.
 
-Your task is to identify repo files that are required to understand the workflow's
+Your task is to identify ALL repo files that are required to understand the workflow's
 actual validation commands.
 
-Only include a dependent file when the workflow references it or depends on it
-to define validations. Do not include general project files unless they are
-needed to understand a validation command.
+Include a file when the workflow references or depends on it. Scan for:
 
-Common valid examples:
-- ".pre-commit-config.yaml" when the workflow runs pre-commit
-- ".github/workflows/name.yml" when the workflow calls a reusable workflow
-- ".github/actions/name/action.yml" when the workflow uses a local composite action
-- config files explicitly referenced by a validation command
+1. **Config files** that define validation tools/hooks:
+   - ".pre-commit-config.yaml" (pre-commit hooks)
+   - "pyproject.toml" (tool configurations)
+   - "tox.ini", "setup.cfg", ".flake8", etc.
+
+2. **Reusable workflows and actions**:
+   - ".github/workflows/*.yml" (reusable workflows)
+   - ".github/actions/*/action.yml" (local composite actions)
+
+3. **Scripts referenced in run: commands**:
+   - Shell scripts: "./scripts/validate.sh", "./bin/check.sh"
+   - Python scripts: "python scripts/lint.py"
+   - Any custom executable referenced with explicit path
+   - Look for: "run: ./", "run: scripts/", "run: bin/", "run: python "
+
+4. **Validation config files explicitly referenced**:
+   - Files passed as arguments: "--config myconfig.yml"
+   - Files in working-directory paths
+
+IMPORTANT: Include the FULL PATH as it appears in the workflow (e.g., "scripts/validate.sh" not just "validate.sh")
 
 WORKFLOW PATH
 {workflow_path}
@@ -296,7 +366,8 @@ Return this JSON array:
     "validates": "Code style and imports",
     "installation_cmd": "",
     "validation_cmd": "ruff check"
-  }}
+  }},
+  // ... additional steps as needed
 ]
 """
 
@@ -325,14 +396,26 @@ def analyze_workflow_from_benchmark(
         _load_json(dependent_raw, {"dependent_files": []})
     )
 
+    # Read dependent files from the failing commit (sha_fail)
+    # This ensures we analyze the exact state that caused the CI failure
+    if sha_fail:
+        print(f"       Reading dependent files from commit: {sha_fail[:8]}...")
+
     dependent_file_contents: List[Dict[str, Any]] = []
     for dep in dependent_files:
-        content = _read_repo_file(repo_path, dep["path"])
+        # Use sha_fail to read from the exact failing commit
+        content = _read_repo_file_at_commit(repo_path, dep["path"], sha=sha_fail or None)
+
+        found = content is not None
+        if sha_fail:
+            status = "✓" if found else "✗"
+            print(f"         {status} {dep['path']}")
+
         dependent_file_contents.append(
             {
                 "path": dep["path"],
                 "reason": dep.get("reason", ""),
-                "found": content is not None,
+                "found": found,
                 "content": content or "",
             }
         )

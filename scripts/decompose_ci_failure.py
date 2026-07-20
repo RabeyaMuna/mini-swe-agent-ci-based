@@ -138,6 +138,12 @@ def _get_model_aware_limits(model_name: str | None = None) -> dict[str, int]:
         }
 
 
+def _classification_output_tokens(model_name: str | None = None) -> int:
+    """Use a bounded output budget for compact Step 1 classification JSON."""
+    model_limits = _get_model_aware_limits(model_name)
+    return min(model_limits["output_safe_tokens"], 60_000)
+
+
 LOGGER = logging.getLogger(__name__)
 STRICT_JSON_RULES = """### Output Rules (STRICT) - CRITICAL FOR PARSING
 - Output MUST be ONLY valid JSON - nothing else.
@@ -777,6 +783,114 @@ def _is_dependency_file(file_path: str) -> bool:
     return any(file_path.endswith(f) for f in dep_files)
 
 
+def _build_caller_callee_contexts(
+    val_group: dict[str, Any],
+    filtered_edges: list[dict],
+    file_changes_lookup: dict[str, list],
+) -> list[dict[str, Any]]:
+    """
+    Build caller → callee dependency contexts from graph edges.
+
+    CRITICAL: Only uses edges where BOTH caller AND callee are:
+    1. In the changed files (file_changes_lookup)
+    2. In this validation group
+
+    This ensures we only analyze real dependencies between files that changed together.
+
+    Args:
+        val_group: Validation group with all_files
+        filtered_edges: Graph edges filtered to modified files only (caller & callee both modified)
+        file_changes_lookup: Map of file → changes
+
+    Returns:
+        List of caller → callee contexts with changes
+    """
+    group_files = set(val_group.get("all_files", []))
+    contexts = []
+
+    # Group edges by (caller, type) to build caller → callees structure
+    caller_groups = {}
+    for edge in filtered_edges:
+        caller = edge.get("from")
+        callee = edge.get("to")
+        dep_type = edge.get("type", "unknown")
+
+        # STRICT FILTER: Both caller AND callee must be in:
+        # 1. This validation group (group_files)
+        # 2. The changed files (file_changes_lookup)
+        if (caller in group_files and callee in group_files and
+            caller in file_changes_lookup and callee in file_changes_lookup):
+
+            key = (caller, dep_type)
+            if key not in caller_groups:
+                caller_groups[key] = {
+                    "caller": caller,
+                    "type": dep_type,
+                    "callees": []
+                }
+            if callee not in caller_groups[key]["callees"]:
+                caller_groups[key]["callees"].append(callee)
+
+    # Build structured contexts for each caller → callees relationship
+    for (caller, dep_type), group in caller_groups.items():
+        callees = group["callees"]
+
+        # Build caller info
+        caller_info = {
+            "file": caller,
+            "changes": _compact_changes(file_changes_lookup.get(caller, []), max_changes=3),
+            "role": _classify_file_type_for_role(caller)
+        }
+
+        # Build callee infos
+        callee_infos = []
+        for callee in callees:
+            callee_info = {
+                "file": callee,
+                "changes": _compact_changes(file_changes_lookup.get(callee, []), max_changes=3),
+                "role": _classify_file_type_for_role(callee)
+            }
+            callee_infos.append(callee_info)
+
+        # Create structured context
+        context = {
+            "dependency_type": dep_type.upper(),
+            "caller": caller_info,
+            "callees": callee_infos,
+            "cascade_explanation": f"Caller ({caller}) {dep_type.upper()} callees ({len(callees)} files)"
+        }
+
+        contexts.append(context)
+
+    return contexts
+
+
+def _classify_file_type_for_role(file_path: str) -> str:
+    """Classify file for role description in caller/callee context."""
+    if file_path.endswith("_test.py") or "/tests/" in file_path:
+        return "test"
+    elif file_path.endswith((".toml", ".yaml", ".yml", ".json", ".ini", ".cfg")):
+        return "config"
+    elif file_path.endswith((".rst", ".md")):
+        return "docs"
+    elif file_path.endswith(".py"):
+        return "code"
+    else:
+        return "other"
+
+
+def _compact_changes(changes: list[dict], max_changes: int = 3) -> list[dict]:
+    """Compact changes to first N with truncated before/after."""
+    compacted = []
+    for change in changes[:max_changes]:
+        compacted.append({
+            "line": change.get("line"),
+            "before": _compact_text(change.get("before", ""), 200),
+            "after": _compact_text(change.get("after", ""), 200),
+        })
+    return compacted
+
+
 def merge_chunks_by_validation(
     chunk_findings: list[dict[str, Any]],
     validation_sequence: list[dict[str, Any]],
@@ -795,6 +909,36 @@ def merge_chunks_by_validation(
         structured_chunks: Original parsed diff chunks with actual changes
     """
     validation_groups = {}
+    chunk_dependency_lookup = {}
+    all_dependency_contexts = []
+    if structured_chunks:
+        for chunk in structured_chunks:
+            dep_cluster = chunk.get("dependency_cluster") or []
+            dep_explanation = str(chunk.get("dependency_explanation") or "").strip()
+            dep_context = {
+                "chunk_index": chunk.get("chunk_index"),
+                "dependency_cluster": dep_cluster,
+                "dependency_explanation": dep_explanation,
+            }
+            if dep_cluster and dep_explanation and dep_explanation != "No dependencies within cluster":
+                all_dependency_contexts.append(dep_context)
+                for file_path in dep_cluster:
+                    chunk_dependency_lookup.setdefault(file_path, []).append(dep_context)
+            for caller_context in chunk.get("dependency_contexts") or []:
+                caller = caller_context.get("caller", {})
+                callees = caller_context.get("callees", [])
+                related_files = [
+                    caller.get("file"),
+                    *(callee.get("file") for callee in callees),
+                ]
+                related_files = [file_path for file_path in related_files if file_path]
+                if not related_files:
+                    continue
+                all_dependency_contexts.append(caller_context)
+                for file_path in related_files:
+                    chunk_dependency_lookup.setdefault(file_path, []).append(
+                        caller_context
+                    )
     sequence_by_order = {
         str(item.get("order")): item
         for item in validation_sequence
@@ -838,6 +982,7 @@ def merge_chunks_by_validation(
                             "all_changes": [],
                             "has_pattern": False,
                             "total_files": 0,
+                            "dependency_contexts": [],
                         }
 
                     validation_groups[key]["chunks"].append(chunk["chunk_index"])
@@ -858,11 +1003,19 @@ def merge_chunks_by_validation(
                 issue_type = str(
                     val_entry.get("issue_type") or val_entry.get("failure_name") or ""
                 ).strip()
+                is_cascading = bool(val_entry.get("is_cascading", False))
+                dependency_type = str(val_entry.get("dependency_type") or "").strip()
+                cascade_explanation = str(
+                    val_entry.get("cascade_explanation") or ""
+                ).strip()
                 key_parts = [str(val_order)]
                 if failure_type:
                     key_parts.append(failure_type.lower().replace(" ", "_"))
                 if issue_type:
                     key_parts.append(issue_type.lower().replace(" ", "_"))
+                key_parts.append("cascading" if is_cascading else "independent")
+                if is_cascading and dependency_type:
+                    key_parts.append(dependency_type.lower())
                 key = "::".join(key_parts)
 
                 if key not in validation_groups:
@@ -877,6 +1030,14 @@ def merge_chunks_by_validation(
                         "all_changes": [],
                         "has_pattern": False,
                         "total_files": 0,
+                        "dependency_contexts": [],
+                        "is_cascading": is_cascading,
+                        "dependency_type": dependency_type if is_cascading else "",
+                        "cascade_explanation": cascade_explanation
+                        if is_cascading
+                        else "",
+                        "change_type": val_entry.get("change_type", ""),
+                        "visibility": val_entry.get("visibility", ""),
                     }
 
                 validation_groups[key]["chunks"].append(chunk["chunk_index"])
@@ -885,6 +1046,22 @@ def merge_chunks_by_validation(
                 validation_groups[key]["total_files"] += val_entry.get(
                     "total_files", len(val_entry.get("files", []))
                 )
+                if is_cascading:
+                    validation_groups[key]["is_cascading"] = True
+                    if dependency_type and not validation_groups[key].get(
+                        "dependency_type"
+                    ):
+                        validation_groups[key]["dependency_type"] = dependency_type
+                    if cascade_explanation:
+                        existing_explanation = validation_groups[key].get(
+                            "cascade_explanation", ""
+                        )
+                        if cascade_explanation not in existing_explanation:
+                            validation_groups[key]["cascade_explanation"] = (
+                                f"{existing_explanation}; {cascade_explanation}"
+                                if existing_explanation
+                                else cascade_explanation
+                            )
 
                 # Cross-chunk pattern detection
                 if val_entry.get("has_pattern"):
@@ -894,6 +1071,8 @@ def merge_chunks_by_validation(
     # Build a lookup of file -> changes from the original structured chunks
     file_changes_lookup = {}
     all_changed_files = set()
+    dependency_edges = []
+
     if structured_chunks:
         for chunk in structured_chunks:
             if "files" in chunk:
@@ -906,8 +1085,24 @@ def merge_chunks_by_validation(
                             file_changes_lookup[file_path] = []
                         file_changes_lookup[file_path].extend(file_info["changes"])
 
+            # Extract dependency edges from chunks (for caller → callee structure)
+            if "dependency_graph" in chunk:
+                dep_graph = chunk["dependency_graph"]
+                if isinstance(dep_graph, dict) and "edges" in dep_graph:
+                    dependency_edges.extend(dep_graph["edges"])
+
+    # CRITICAL FILTER: Only include edges where BOTH caller AND callee are in changed files
+    # This ensures we only analyze dependencies between files that actually changed together
+    filtered_edges = [
+        edge for edge in dependency_edges
+        if edge.get("from") in all_changed_files and edge.get("to") in all_changed_files
+    ]
+
+    print(f"[DEBUG] Total edges: {len(dependency_edges)}, Filtered (both modified): {len(filtered_edges)}")
+
     # Now attach changes to each validation group
     for val_group in validation_groups.values():
+        group_dependency_contexts = []
         for file_path in val_group["all_files"]:
             if file_path in file_changes_lookup:
                 # Add all changes for this file
@@ -917,6 +1112,52 @@ def merge_chunks_by_validation(
                     change_with_file = change.copy()
                     change_with_file["file"] = file_path
                     val_group["all_changes"].append(change_with_file)
+            group_dependency_contexts.extend(chunk_dependency_lookup.get(file_path, []))
+
+        # Build caller → callee dependency contexts from graph edges
+        caller_callee_contexts = _build_caller_callee_contexts(
+            val_group, filtered_edges, file_changes_lookup
+        )
+
+        if caller_callee_contexts:
+            val_group["dependency_contexts"] = caller_callee_contexts
+        elif group_dependency_contexts:
+            # Fallback to old cluster-based approach if no edges
+            seen_contexts = set()
+            val_group["dependency_contexts"] = []
+            for context in group_dependency_contexts:
+                if "caller" in context and "callees" in context:
+                    caller = context.get("caller", {})
+                    callees = context.get("callees", [])
+                    key = (
+                        context.get("dependency_type", ""),
+                        caller.get("file", ""),
+                        tuple(callee.get("file") for callee in callees),
+                    )
+                else:
+                    key = (
+                        tuple(context.get("dependency_cluster") or []),
+                        context.get("dependency_explanation", ""),
+                    )
+                if key in seen_contexts:
+                    continue
+
+                # ENHANCEMENT: Attach actual changes from dependency files
+                # This allows LLM to see WHAT CHANGED in config/dependency files
+                enriched_context = context.copy()
+                dependency_changes = {}
+
+                for dep_file in context.get("dependency_cluster", []):
+                    if dep_file in file_changes_lookup and dep_file != file_path:
+                        # This is a dependency file (not the current file)
+                        # Include its changes so LLM can understand cascading effects
+                        dependency_changes[dep_file] = file_changes_lookup[dep_file]
+
+                if dependency_changes:
+                    enriched_context["dependency_file_changes"] = dependency_changes
+
+                seen_contexts.add(key)
+                val_group["dependency_contexts"].append(enriched_context)
 
     # Sort by validation order for sequential processing. LLMs should return
     # numeric orders, but keep this deterministic if a string slips through.
@@ -946,6 +1187,7 @@ def merge_chunks_by_validation(
                 (".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock")
             )
         ),
+        "dependency_contexts": all_dependency_contexts,
     }
 
 
@@ -957,7 +1199,11 @@ def _chunk_validation_changes(
     """
     Chunk a single validation if it has too many changes.
 
-    Now model-aware: minimax=400 changes, GLM=800 changes per chunk.
+    Now DEPENDENCY-AWARE:
+    - If dependency contexts exist: Keep caller + callees together in one chunk
+    - If no dependencies: Use regular change-based chunking
+
+    Model-aware limits: minimax=400 changes, GLM=800 changes per chunk.
 
     Args:
         val_group: Validation group dict
@@ -972,35 +1218,157 @@ def _chunk_validation_changes(
         max_changes_per_chunk = model_limits["max_changes_per_chunk"]
 
     all_changes = val_group.get("all_changes", [])
+    dependency_contexts = val_group.get("dependency_contexts", [])
 
     if len(all_changes) <= max_changes_per_chunk:
         # Small enough, return as single chunk
         return [val_group]
 
-    # Split into chunks
+    # DEPENDENCY-AWARE CHUNKING: Group changes by dependency relationships
+    if dependency_contexts:
+        return _chunk_by_dependencies(
+            val_group, dependency_contexts, max_changes_per_chunk
+        )
+
+    # NO DEPENDENCIES: Use regular change-based chunking
     chunks = []
     for start_idx in range(0, len(all_changes), max_changes_per_chunk):
         chunk_changes = all_changes[start_idx : start_idx + max_changes_per_chunk]
 
-        chunk = {
+        chunk = _copy_validation_chunk_metadata(val_group, {
             "validation_cmd": val_group.get("validation_cmd", ""),
             "failure_type": val_group.get("failure_type", ""),
             "issue_type": val_group.get("issue_type", ""),
             "all_files": val_group.get("all_files", []),  # Keep full file list
             "all_changes": chunk_changes,
             "chunk_info": f"Changes {start_idx + 1}-{start_idx + len(chunk_changes)} of {len(all_changes)} total",
-        }
+        })
         chunks.append(chunk)
 
     return chunks
 
 
-ATOMIC_ANALYSIS_MAX_PROMPT_CHARS = 48000
-ATOMIC_ANALYSIS_MAX_OUTPUT_TOKENS = (
-    16000  # MiniMax M2.5 supports up to 64K, 16K is safe
-)
-VALIDATION_MERGE_MAX_PROMPT_CHARS = 32000
-VALIDATION_MERGE_MAX_OUTPUT_TOKENS = 8000  # Increased from 6000
+def _copy_validation_chunk_metadata(
+    source: dict[str, Any], target: dict[str, Any]
+) -> dict[str, Any]:
+    """Preserve classification/dependency metadata on deep-analysis chunks."""
+    for key in [
+        "change_type",
+        "visibility",
+        "is_cascading",
+        "dependency_type",
+        "cascade_explanation",
+    ]:
+        if key in source and key not in target:
+            target[key] = source.get(key)
+    return target
+
+
+def _chunk_by_dependencies(
+    val_group: dict[str, Any],
+    dependency_contexts: list[dict],
+    max_changes_per_chunk: int,
+) -> list[dict[str, Any]]:
+    """
+    Chunk validation changes by dependency relationships.
+
+    Strategy:
+    1. For each dependency context (caller → callees):
+       - Keep caller + callees together in one chunk
+       - Include all their changes together
+    2. If total changes exceed max, split callees across chunks but keep caller in each
+
+    Args:
+        val_group: Validation group
+        dependency_contexts: List of caller → callee contexts
+        max_changes_per_chunk: Max changes per chunk
+
+    Returns:
+        List of dependency-aware chunks
+    """
+    chunks = []
+
+    for dep_context in dependency_contexts:
+        # Extract caller and callee files
+        caller_file = dep_context.get("caller", {}).get("file")
+        callee_files = [c.get("file") for c in dep_context.get("callees", [])]
+        dep_files = [caller_file] + callee_files if caller_file else callee_files
+
+        # Gather all changes for these files
+        dep_changes = [
+            change for change in val_group.get("all_changes", [])
+            if change.get("file") in dep_files
+        ]
+
+        if not dep_changes:
+            continue
+
+        # If changes fit in one chunk, create single chunk with dependency context
+        if len(dep_changes) <= max_changes_per_chunk:
+            chunk = _copy_validation_chunk_metadata(val_group, {
+                "validation_cmd": val_group.get("validation_cmd", ""),
+                "failure_type": val_group.get("failure_type", ""),
+                "issue_type": val_group.get("issue_type", ""),
+                "all_files": dep_files,
+                "all_changes": dep_changes,
+                "dependency_contexts": [dep_context],  # Attach dependency context
+                "chunk_info": f"Dependency chunk: {caller_file} → {len(callee_files)} callees",
+            })
+            chunks.append(chunk)
+        else:
+            # Too many changes - split callees but keep caller context in each chunk
+            for start_idx in range(0, len(dep_changes), max_changes_per_chunk):
+                chunk_changes = dep_changes[start_idx : start_idx + max_changes_per_chunk]
+
+                chunk = _copy_validation_chunk_metadata(val_group, {
+                    "validation_cmd": val_group.get("validation_cmd", ""),
+                    "failure_type": val_group.get("failure_type", ""),
+                    "issue_type": val_group.get("issue_type", ""),
+                    "all_files": dep_files,
+                    "all_changes": chunk_changes,
+                    "dependency_contexts": [dep_context],  # Keep dependency context
+                    "chunk_info": f"Dependency chunk {start_idx // max_changes_per_chunk + 1}: {caller_file} → callees (partial)",
+                })
+                chunks.append(chunk)
+
+    # Handle remaining changes not covered by dependencies
+    all_dep_files = set()
+    for dep_context in dependency_contexts:
+        caller_file = dep_context.get("caller", {}).get("file")
+        callee_files = [c.get("file") for c in dep_context.get("callees", [])]
+        if caller_file:
+            all_dep_files.add(caller_file)
+        all_dep_files.update(callee_files)
+
+    remaining_changes = [
+        change for change in val_group.get("all_changes", [])
+        if change.get("file") not in all_dep_files
+    ]
+
+    if remaining_changes:
+        # Chunk remaining changes without dependency context
+        for start_idx in range(0, len(remaining_changes), max_changes_per_chunk):
+            chunk_changes = remaining_changes[start_idx : start_idx + max_changes_per_chunk]
+
+            chunk = _copy_validation_chunk_metadata(val_group, {
+                "validation_cmd": val_group.get("validation_cmd", ""),
+                "failure_type": val_group.get("failure_type", ""),
+                "issue_type": val_group.get("issue_type", ""),
+                "all_files": list(set(ch.get("file") for ch in chunk_changes)),
+                "all_changes": chunk_changes,
+                "chunk_info": f"Non-dependency changes {start_idx + 1}-{start_idx + len(chunk_changes)}",
+            })
+            chunks.append(chunk)
+
+    return chunks if chunks else [val_group]  # Fallback to full group if no chunks created
+
+
+# DEPRECATED: Use model-aware limits from get_model_config() instead
+# These are kept for backwards compatibility but should not be used directly
+ATOMIC_ANALYSIS_MAX_PROMPT_CHARS = 48000  # DEPRECATED: use model config
+ATOMIC_ANALYSIS_MAX_OUTPUT_TOKENS = 16000  # DEPRECATED: use model config
+VALIDATION_MERGE_MAX_PROMPT_CHARS = 32000  # DEPRECATED: use model config
+VALIDATION_MERGE_MAX_OUTPUT_TOKENS = 8000  # DEPRECATED: use model config
 
 
 def _compact_text(value: Any, limit: int = 1200) -> str:
@@ -1111,7 +1479,7 @@ def _semantic_cluster_problems(
             # Note: validation_cmd should be same for all (already grouped by validation)
             text = f"""
 Validation: {prob.get("validation_cmd", "")}
-Problem: {prob.get("what_broke", "")}
+Problem: {prob.get("problem", "")}
 Root Cause: {prob.get("root_cause", "")}
 Fix: {prob.get("how_fixed", "")}
 Failure Type: {prob.get("failure_type", "")}
@@ -1195,11 +1563,13 @@ def _llm_merge_decision(
             f"""
 Problem {idx}:
   Affected files: {files_str}
-  What broke: {prob.get("what_broke", "N/A")}
+  Problem: {prob.get("problem", "N/A")}
   Root cause: {prob.get("root_cause", "N/A")}
   How fixed: {prob.get("how_fixed", "N/A")}
   Failure type: {prob.get("failure_type", "N/A")}
   Issue type: {prob.get("issue_type", "N/A")}
+  Cascading: {prob.get("is_cascading", False)}
+  Dependency type: {prob.get("dependency_type", "")}
 """.strip()
         )
 
@@ -1248,9 +1618,10 @@ For MERGE:
   "action": "merge",
   "reasoning": "Why all problems are the same",
   "merged_problem": {{
+    "problem": "Unified description of what failed",
     "root_cause": "Unified description of root cause",
     "how_fixed": "Unified description of fix pattern",
-    "why_fixed_works": "Why this fix solves all instances"
+    "why_fix_works": "Why this fix solves all instances"
   }}
 }}
 
@@ -1263,9 +1634,10 @@ For PARTIAL_MERGE:
       "problem_indices": [1, 2, 3],
       "action": "merge",
       "merged_problem": {{
+        "problem": "...",
         "root_cause": "...",
         "how_fixed": "...",
-        "why_fixed_works": "..."
+        "why_fix_works": "..."
       }}
     }},
     {{
@@ -1298,21 +1670,25 @@ IMPORTANT: Be CONSERVATIVE. When in doubt, SEPARATE.
             merged_prob = decision.get("merged_problem", {})
             merged = {
                 "affected_files": list(dict.fromkeys(all_files)),  # Deduplicate
+                "problem": merged_prob.get("problem", cluster[0].get("problem")),
                 "root_cause": merged_prob.get(
                     "root_cause", cluster[0].get("root_cause")
                 ),
                 "how_fixed": merged_prob.get("how_fixed", cluster[0].get("how_fixed")),
-                "why_fixed_works": merged_prob.get(
-                    "why_fixed_works", cluster[0].get("why_fixed_works")
-                ),
-                "what_broke": merged_prob.get(
-                    "root_cause", cluster[0].get("what_broke")
+                "why_fix_works": merged_prob.get(
+                    "why_fix_works",
+                    merged_prob.get(
+                        "why_fixed_works", cluster[0].get("why_fix_works")
+                    ),
                 ),
                 "failure_type": cluster[0].get("failure_type"),
                 "issue_type": cluster[0].get("issue_type"),
                 "validation_cmd": cluster[0].get("validation_cmd"),
                 "validation_order": cluster[0].get("validation_order"),
                 "problem_type": cluster[0].get("problem_type"),
+                "is_cascading": cluster[0].get("is_cascading", False),
+                "dependency_type": cluster[0].get("dependency_type", ""),
+                "cascade_explanation": cluster[0].get("cascade_explanation", ""),
                 "is_merged": True,
                 "merged_from": [p.get("problem_id", i) for i, p in enumerate(cluster)],
                 "merge_count": len(cluster),
@@ -1343,23 +1719,32 @@ IMPORTANT: Be CONSERVATIVE. When in doubt, SEPARATE.
                     merged_prob = sub_group.get("merged_problem", {})
                     merged = {
                         "affected_files": list(dict.fromkeys(all_files)),
+                        "problem": merged_prob.get(
+                            "problem", sub_problems[0].get("problem")
+                        ),
                         "root_cause": merged_prob.get(
                             "root_cause", sub_problems[0].get("root_cause")
                         ),
                         "how_fixed": merged_prob.get(
                             "how_fixed", sub_problems[0].get("how_fixed")
                         ),
-                        "why_fixed_works": merged_prob.get(
-                            "why_fixed_works", sub_problems[0].get("why_fixed_works")
-                        ),
-                        "what_broke": merged_prob.get(
-                            "root_cause", sub_problems[0].get("what_broke")
+                        "why_fix_works": merged_prob.get(
+                            "why_fix_works",
+                            merged_prob.get(
+                                "why_fixed_works",
+                                sub_problems[0].get("why_fix_works"),
+                            ),
                         ),
                         "failure_type": sub_problems[0].get("failure_type"),
                         "issue_type": sub_problems[0].get("issue_type"),
                         "validation_cmd": sub_problems[0].get("validation_cmd"),
                         "validation_order": sub_problems[0].get("validation_order"),
                         "problem_type": sub_problems[0].get("problem_type"),
+                        "is_cascading": sub_problems[0].get("is_cascading", False),
+                        "dependency_type": sub_problems[0].get("dependency_type", ""),
+                        "cascade_explanation": sub_problems[0].get(
+                            "cascade_explanation", ""
+                        ),
                         "is_merged": True,
                         "merged_from": [
                             p.get("problem_id", i) for i, p in enumerate(sub_problems)
@@ -1491,7 +1876,7 @@ def _reorder_by_repair_trajectory(
     if not problems:
         return problems
 
-    def _problem_sort_key(problem: dict[str, Any]) -> tuple[int, int, int, int]:
+    def _problem_sort_key(problem: dict[str, Any]) -> tuple[int, int, int, int, int]:
         try:
             validation_order = int(problem.get("validation_order", 999))
         except (TypeError, ValueError):
@@ -1499,6 +1884,10 @@ def _reorder_by_repair_trajectory(
 
         problem_type_rank = 0 if problem.get("problem_type") == "primary" else 1
         files = problem.get("affected_files", [])
+        text = " ".join(
+            str(problem.get(field, "")).lower()
+            for field in ["validation_cmd", "failure_type", "issue_type", "problem"]
+        )
         config_rank = (
             0
             if any(
@@ -1509,10 +1898,27 @@ def _reorder_by_repair_trajectory(
             )
             else 1
         )
+        if any(marker in text for marker in ["install", "setup", "dependency"]):
+            dependency_rank = 0
+        elif config_rank == 0:
+            dependency_rank = 1
+        elif any(marker in text for marker in ["format", "formatter", "docstrfmt", "lint", "ruff", "black", "mypy", "type"]):
+            dependency_rank = 2
+        elif problem.get("is_cascading") and str(problem.get("dependency_type", "")).upper():
+            dependency_rank = 3
+        else:
+            dependency_rank = 2
         original_id = int(problem.get("problem_id", 10**9) or 10**9)
-        return (validation_order, problem_type_rank, config_rank, original_id)
+        return (
+            problem_type_rank,
+            validation_order,
+            dependency_rank,
+            config_rank,
+            original_id,
+        )
 
     reordered = sorted(problems, key=_problem_sort_key)
+    reordered = _apply_cascading_dependency_order(reordered)
     for idx, prob in enumerate(reordered, 1):
         prob["problem_id"] = idx
         prob["repair_sequence_index"] = idx
@@ -1528,6 +1934,68 @@ def _reorder_by_repair_trajectory(
     print(f"    Total reordered: {len(reordered)}")
 
     return reordered
+
+
+def _apply_cascading_dependency_order(
+    problems: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Move cascading adaptations after likely source/doc/config problems."""
+    ordered = list(problems)
+
+    def _safe_validation_order(problem: dict[str, Any]) -> int:
+        try:
+            return int(problem.get("validation_order", 999))
+        except (TypeError, ValueError):
+            return 999
+
+    def _is_adaptation(problem: dict[str, Any]) -> bool:
+        files = [str(file_path) for file_path in problem.get("affected_files", [])]
+        source_like_file = any(
+            file_path.endswith((".rst", ".md", ".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock"))
+            for file_path in files
+        )
+        return (
+            bool(problem.get("is_cascading"))
+            and not source_like_file
+            and bool(str(problem.get("dependency_type", "")).strip())
+        )
+
+    def _is_likely_dependency_source(problem: dict[str, Any]) -> bool:
+        text = " ".join(
+            str(problem.get(field, "")).lower()
+            for field in ["validation_cmd", "failure_type", "issue_type", "problem"]
+        )
+        return any(
+            marker in text
+            for marker in ["docstrfmt", "rst", "format", "formatter", "config", "dependency", "setup"]
+        )
+
+    changed = True
+    while changed:
+        changed = False
+        for idx, problem in enumerate(list(ordered)):
+            if not _is_adaptation(problem):
+                continue
+            problem_order = _safe_validation_order(problem)
+            source_indices = [
+                source_idx
+                for source_idx, source in enumerate(ordered)
+                if source is not problem
+                and _is_likely_dependency_source(source)
+                and (
+                    source.get("problem_type") == problem.get("problem_type")
+                    or source.get("problem_type") == "primary"
+                )
+            ]
+            if not source_indices:
+                continue
+            target_idx = max(source_indices) + 1
+            if idx < target_idx - 1:
+                ordered.pop(idx)
+                ordered.insert(target_idx - 1, problem)
+                changed = True
+                break
+    return ordered
 
 
 def _validation_group_sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
@@ -1598,6 +2066,233 @@ def _atomic_changes_data(chunk: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _dependency_context_for_prompt(chunk: dict[str, Any]) -> str:
+    contexts = chunk.get("dependency_contexts") or []
+    if not contexts:
+        return ""
+
+    # Check if contexts use new caller → callee structure
+    has_caller_callee = any("caller" in ctx and "callees" in ctx for ctx in contexts)
+
+    if has_caller_callee:
+        # Use new caller → callee structure
+        return _caller_callee_context_for_prompt(contexts)
+    else:
+        # Fallback to old cluster-based structure
+        return _legacy_cluster_context_for_prompt(contexts)
+
+
+def _cascading_classification_context(chunk: dict[str, Any]) -> str:
+    """
+    Format classification results for deep analysis.
+
+    Passes the classification decision (cascading vs independent) to deep analysis
+    so it can generate better root cause explanations.
+
+    ALWAYS returns context - for both cascading AND independent changes!
+    """
+    is_cascading = chunk.get("is_cascading", False)
+
+    if not is_cascading:
+        # INDEPENDENT changes - no dependency trigger
+        return """
+## CLASSIFICATION CONTEXT (from classification analysis)
+
+This validation group was identified as INDEPENDENT during classification:
+- is_cascading: False
+- No dependency relationships triggered these changes
+- These are standalone fixes within this validation
+
+IMPORTANT: Analyze these changes as INDEPENDENT problems:
+- root_cause should focus on the DIRECT validation failure (not dependency triggers)
+- how_fixed should explain what was wrong and what was corrected
+- Do NOT look for cascading relationships or dependency triggers
+
+Example for independent change:
+- problem: "Incorrect comparison operator used for literal comparison"
+- root_cause: "Code used 'is' operator for literal comparison which violates Ruff F632 rule requiring '==' for value comparisons"
+- how_fixed: "Replaced 'is' with '==' operator for literal comparison"
+- why_fix_works: "The '==' operator correctly compares values rather than object identity, satisfying Ruff's comparison requirements"
+
+These are direct fixes to validation failures, NOT cascading adaptations!
+"""
+
+    # CASCADING changes - dependency-triggered
+    dependency_type = chunk.get("dependency_type", "")
+    cascade_explanation = chunk.get("cascade_explanation", "")
+
+    if not dependency_type or not cascade_explanation:
+        # Has is_cascading=True but missing details - treat as independent
+        return """
+## CLASSIFICATION CONTEXT (from classification analysis)
+
+This validation group was marked as cascading but details are incomplete.
+Analyze as INDEPENDENT changes focusing on the direct validation failure.
+"""
+
+    return f"""
+## CLASSIFICATION CONTEXT (from classification analysis)
+
+This validation group was identified as CASCADING during classification:
+- is_cascading: True
+- Dependency Type: {dependency_type}
+- Cascading Relationship: {cascade_explanation}
+
+CRITICAL: Use this cascading information in your problem analysis!
+
+When writing root_cause and how_fixed:
+1. Explain the dependency trigger (what changed in the caller/dependency)
+2. Explain the cascading effect (why callees needed to adapt)
+3. Show the cause-effect relationship
+
+Example for READS dependency:
+- problem: "Test assertions updated to validate new RST title format"
+- root_cause: "RST documentation files changed from underline-only (====) to overline+underline (####) title format due to docstrfmt 1.7.0 upgrade. Test file exit_code_test.py reads and validates these RST files, requiring test assertions to adapt to the new format."
+- how_fixed: "Updated test assertions in exit_code_test.py to expect and validate the new overline+underline title format instead of underline-only format"
+- why_fix_works: "Test assertions now correctly validate the RST title format enforced by docstrfmt 1.7.0, ensuring documentation formatting compliance"
+
+Example for CONFIGURES dependency:
+- problem: "Type annotations updated after mypy plugin removal"
+- root_cause: "framework/pyproject.toml removed numpy.typing.mypy_plugin configuration. This plugin previously provided DTypeLike type hints. Without the plugin, mypy no longer recognizes DTypeLike, requiring code to use standard types."
+- how_fixed: "Replaced DTypeLike type annotations with Any in ndarrays_arithmetic.py to maintain mypy compatibility without the numpy typing plugin"
+- why_fix_works: "Any is a standard Python type that works without plugin support, allowing mypy type checking to pass"
+
+The cascading explanation shows the REAL root cause (dependency change) not just surface symptoms!
+"""
+
+
+def _caller_callee_context_for_prompt(contexts: list[dict[str, Any]]) -> str:
+    """Format caller → callee dependency contexts for prompt."""
+    compact_contexts = []
+
+    for context in contexts[:8]:
+        caller = context.get("caller", {})
+        callees = context.get("callees", [])
+        dep_type = context.get("dependency_type", "UNKNOWN")
+
+        if not caller or not callees:
+            continue
+
+        context_entry = {
+            "dependency_type": dep_type,
+            "caller": {
+                "file": caller.get("file"),
+                "changes": caller.get("changes", [])[:3],  # First 3 changes
+                "role": caller.get("role", "unknown")
+            },
+            "callees": [
+                {
+                    "file": callee.get("file"),
+                    "changes": callee.get("changes", [])[:3],
+                    "role": callee.get("role", "unknown")
+                }
+                for callee in callees[:10]  # Limit to 10 callees
+            ]
+        }
+        compact_contexts.append(context_entry)
+
+    if not compact_contexts:
+        return ""
+
+    return f"""
+DEPENDENCY CONTEXT (Caller → Callee Structure):
+
+{json.dumps(compact_contexts, indent=2)}
+
+CRITICAL ANALYSIS INSTRUCTIONS:
+
+1. For each dependency:
+   - CALLER: The file that triggers changes (config, source code, test)
+   - CALLEES: Files that adapt to caller changes
+   - RELATIONSHIP: How caller affects callees (CONFIGURES, IMPORTS, TESTS, READS)
+
+2. Check caller changes:
+   - What configuration/behavior changed in the caller?
+   - Does this change affect the CURRENT validation?
+
+3. Decision:
+   - CASCADING: Caller change directly triggered callee adaptations
+     Example: "dev/pyproject.toml upgraded docstrfmt → RST files reformatted"
+
+   - INDEPENDENT: Caller changed, but NOT in a way that affects this validation
+     Example: "dev/pyproject.toml changed mdformat, current validation is Black (unrelated)"
+
+4. Root cause format:
+   - If CASCADING: "Caller {{caller_file}} {{what_changed}}, triggering {{callee_adaptation}}"
+   - If INDEPENDENT: "{{standalone_issue}}, unrelated to {{caller_file}} changes"
+
+EXAMPLE (Cascading):
+  Caller: dev/pyproject.toml changed docstrfmt 1.5.0 → 1.7.0
+  Callees: 85 RST files changed heading format
+  root_cause: "dev/pyproject.toml upgraded docstrfmt to 1.7.0, which enforces overline+underline heading style, requiring all RST files to update their heading format"
+
+EXAMPLE (Independent):
+  Caller: dev/pyproject.toml changed mdformat-beautysh 0.2.2 → 1.0.0
+  Current file: exit_code_test.py (Black validation)
+  root_cause: "Long if-condition exceeds Black line length limit (standalone issue, unrelated to mdformat-beautysh change in dev/pyproject.toml)"
+"""
+
+
+def _legacy_cluster_context_for_prompt(contexts: list[dict[str, Any]]) -> str:
+    """Legacy cluster-based dependency context (fallback)."""
+    compact_contexts = []
+    for context in contexts[:8]:
+        explanation = str(context.get("dependency_explanation") or "").strip()
+        if not explanation or explanation == "No dependencies within cluster":
+            continue
+
+        context_entry = {
+            "dependency_cluster": context.get("dependency_cluster", [])[:80],
+            "dependency_explanation": _compact_text(explanation, 1800),
+        }
+
+        # CRITICAL: Include actual changes from dependency files
+        # This allows LLM to determine if changes are truly cascading or independent
+        dependency_file_changes = context.get("dependency_file_changes", {})
+        if dependency_file_changes:
+            # Compact the changes to avoid token bloat
+            compact_changes = {}
+            for dep_file, changes in dependency_file_changes.items():
+                # Show first 3 changes from each dependency file
+                compact_changes[dep_file] = [
+                    {
+                        "line": ch.get("line"),
+                        "before": _compact_text(ch.get("before", ""), 200),
+                        "after": _compact_text(ch.get("after", ""), 200),
+                    }
+                    for ch in changes[:3]
+                ]
+            context_entry["dependency_file_changes"] = compact_changes
+
+        compact_contexts.append(context_entry)
+
+    if not compact_contexts:
+        return ""
+
+    return f"""
+DEPENDENCY CONTEXT:
+{json.dumps(compact_contexts, indent=2)}
+
+CRITICAL ANALYSIS INSTRUCTIONS:
+1. Review dependency_file_changes to see WHAT ACTUALLY CHANGED in config/dependency files
+2. Determine if the current file's changes are:
+   - CASCADING: Caused by changes in a dependency file (e.g., config version bump requires reformatting)
+   - INDEPENDENT: Unrelated to dependency file changes (e.g., config changed mdformat, but this is a Black issue)
+
+3. If CASCADING:
+   - root_cause: Explain how the dependency change triggered this fix
+   - how_fixed: Describe the cascading fix that adapts to the new dependency behavior
+   - Example: "dev/pyproject.toml upgraded docstrfmt, which enforces overline+underline style"
+
+4. If INDEPENDENT:
+   - Treat as a standalone issue
+   - Do NOT mention dependency files in root_cause/how_fixed
+   - Example: "Black line length violation (standalone formatting issue)"
+
+Use dependency_file_changes to make this determination accurately!
+"""
+
+
 def _build_atomic_prompt(
     *,
     ci_context: dict[str, Any],
@@ -1617,6 +2312,7 @@ def _build_atomic_prompt(
     effective_validation_cmd = (
         val_info.get("validation_cmd") or chunk.get("validation_cmd") or ""
     )
+    failure_type = chunk.get("failure_type", "")
 
     return f"""Analyze this validation group and create atomic CI repair problems.
 
@@ -1627,120 +2323,111 @@ VALIDATION CONTEXT:
 - validation_order: {validation_order}
 - validation_cmd: {effective_validation_cmd}
 - validates: {val_info.get("validates", "Code quality/formatting")}
-- failure_type: {chunk.get("failure_type", "")}
+- failure_type: {failure_type}
 - issue_type_hint: {chunk.get("issue_type", "")}
 - change_type: {change_type.upper()}
 - FAILED_VALIDATION_ORDER: {failed_validation_order} (CI stopped here)
+- is_cascading: {chunk.get("is_cascading", False)}
+- dependency_type: {chunk.get("dependency_type", "")}
+- cascade_explanation: {chunk.get("cascade_explanation", "")}
 
 {change_type_context}
 
 CHANGES:
 {json.dumps(changes_data, indent=2)}
 
+{_dependency_context_for_prompt(chunk)}
+
+{_cascading_classification_context(chunk)}
+
 TASK:
 Infer the actual CI step problem fixed by these before/after changes.
-This group contains only {change_type.upper()} changes. Preserve concrete
-details from those changes. CI steps include setup, installation, dependency
-resolution, environment preparation, formatting, linting, type checking, tests,
-docs checks, build steps, and workflow-local commands.
+
+This group contains only {change_type.upper()} changes. Preserve concrete details from those changes. CI steps may include setup, installation,
+dependency resolution, environment preparation, formatting, linting, type checking, tests, docs checks, build steps, and workflow-local commands.
 
 DECISION PROCESS:
+
 1. Identify the CI step being repaired.
-   - validation_cmd may be an install/setup command, not only a final checker.
-   - Package metadata, dependency files, lockfiles, workflow setup,
-     environment config, and tool installation changes belong to the relevant
-     setup/install CI step.
-   - Source, docs, and test changes belong to the validator that checks them.
+- validation_cmd may be an install/setup command, not only a final checker.
+- Package metadata, dependency files, lockfiles, workflow setup, environment config, and tool installation changes belong to the relevant setup/
+install CI step.
+- Source, docs, and test changes belong to the validator that directly checks them.
+- Prefer the CI step that would fail without this specific change.
 
 2. Decide merge vs split.
-   Merge changes into one atomic problem when one explanation can cover all
-   affected files:
-   - same validation_cmd, validator, or tool family
-   - same repair family or same developer mental model
-   - differences are variants of the same failure family
+Merge changes into one atomic problem when one explanation clearly covers all affected files:
+- same validation_cmd, validator, or tool family
+- same repair family or developer mental model
+- variants of the same failure family
+- repeated instances of the same validator problem across multiple files
 
-   Split changes into separate atomic problems when one explanation would hide
-   important differences:
-   - different CI step or validator concern
-   - materially different repair strategy
-   - setup/config/dependency enablement mixed with source/docs/test fixes
-   - same directory or same validator, but different problem family, root cause,
-     or repair family
+Split changes into separate atomic problems when one explanation would hide important differences:
+- different CI step or validator concern
+- materially different repair strategy
+- setup/config/dependency enablement mixed with source/docs/test fixes
+- same directory or validator, but different problem family, root cause, or repair family
 
 3. Handle repeated failures across files dynamically.
-   - Same validator plus same repair family across many files is one repeated
-     problem pattern, even when files have variants.
-   - Formatter/linter/doc-style variants are usually one problem when the same
-     tool normalizes them, such as RST heading underline length, trailing
-     whitespace, blank-line spacing, list/table spacing, import ordering,
-     docstring style, quote style, or repeated lint codes.
-   - For bulk changes, group by directory scope, file type, validator, and
-     repair family. Mention the directory scope and important variants in
-     problem/root_cause/how_fixed. Do not list every file in prose because
-     affected_files already contains exact paths.
+- Same validator plus same repair family across many files is one repeated problem pattern, even when files have variants.
+- Formatter/linter/doc-style variants are usually one problem when the same tool normalizes them, such as RST heading underline length, trailing
+whitespace, blank-line spacing, list/table spacing, import ordering, docstring style, quote style, or repeated lint codes.
+- For bulk changes, group by directory scope, file type, validator, and repair family.
+- Mention directory scope and important variants in problem/root_cause/how_fixed.
+- Do not list every file in prose because affected_files already contains exact paths.
 
 4. Keep setup/install enablement separate.
-   - Examples: invalid pyproject metadata, missing dependency, wrong extras,
-     incompatible tool version, broken pip/poetry install config, workflow setup
-     command mismatch.
-   - If setup changes only enable a later formatter, linter, type checker, or
-     test command, report the setup/install issue separately from later
-     validation violations.
+- Examples: invalid pyproject metadata, missing dependency, wrong extras, incompatible tool version, broken pip/poetry install config, workflow
+setup command mismatch.
+- If setup changes only enable a later formatter, linter, type checker, or test command, report the setup/install issue separately from later
+validation violations.
 
-5. Handle merge-conflict cleanup correctly.
-   - Git conflict markers and conflict resolution mechanics are not CI problems.
-   - Never use "merge conflict" or "conflict resolution" as failure_type,
-     issue_type, problem, root_cause, or how_fixed.
-   - Do not discard real fixes because they appear near removed conflict
-     markers. Analyze the final before/after content around the conflict and
-     classify the CI-relevant change that remained after resolution.
-   - If conflict resolution selected or combined code/docs/config that fixes a
-     formatter, linter, type, test, setup, dependency, or docs validation issue,
-     report that real validation/setup problem.
-   - If the only change is conflict marker removal with no CI-relevant behavior,
-     formatting, config, docs, dependency, or workflow change, do not create a
-     problem for that change.
+5. Handle cascading fixes.
+- Cascading means one change caused or required another related change.
+- If all affected files share the same CI validation and repair family, they may be one atomic problem.
+- If related files are caught by different CI validations or require different repair strategies, split them into separate atomic problems.
+- For cascading problems, explain the triggering relationship in problem, root_cause, how_fixed, or why_fix_works.
+
+6. Handle merge-conflict cleanup correctly.
+- Git conflict markers and conflict resolution mechanics are not CI problems.
+- Never use "merge conflict" or "conflict resolution" as failure_type, issue_type, problem, root_cause, or how_fixed.
+- Do not discard real fixes because they appear near removed conflict markers.
+- Analyze the final before/after content around the conflict and classify the CI-relevant change that remained after resolution.
+- If conflict resolution selected or combined code/docs/config that fixes a formatter, linter, type, test, setup, dependency, or docs validation
+issue, report that real validation/setup problem.
+- If the only change is conflict marker removal with no CI-relevant behavior, formatting, config, docs, dependency, or workflow change, do not
+create a problem for that change.
 
 QUALITY RULES:
 - Each problem must have a specific root cause and fix that applies to every affected file.
-- Be specific about packages, symbols, config keys, validators, commands,
-  before/after states, directories, and affected file kinds.
+- Be specific about packages, symbols, config keys, validators, commands, before/after states, directories, and affected file kinds.
 - Do not mention line numbers.
 - Do not use vague phrasing like "fixed issues" or "updated files".
 - affected_files must include only files directly involved in that problem's fix.
 - If no valid CI problem can be extracted, return {{"atomic_problems": []}}.
 
 EXAMPLES:
-- MERGE: RST formatting failures in docs/api/*.rst with variants including
-  section underline length mismatches, trailing whitespace, and blank-line
-  spacing normalization.
+- MERGE: RST formatting failures in docs/api/*.rst with variants including section underline length mismatches, trailing whitespace, and blank-
+line spacing normalization.
 - MERGE: Ruff unused imports removed across several Python modules.
 - SEPARATE: Ruff source-code errors and pyproject Ruff configuration changes.
 - SEPARATE: RST formatting cleanup and broken docs reference/import targets.
-- SEPARATE: Dependency/setup change that enables the formatter and formatter
-  violations in docs files.
-- SEPARATE: Formatter plugin version bump in pyproject.toml that enables the
-  docs formatter, and RST formatting violations in docs files.
+- SEPARATE: Dependency/setup change that enables the formatter and formatter violations in docs files.
+- SEPARATE: Formatter plugin version bump in pyproject.toml that enables the docs formatter, and RST formatting violations in docs files.
 
 FIELD GUIDANCE:
-- problem: 1-2 sentences describing what failed. Mention directory scope, file
-  types, and important variants when relevant. If this is a CASCADING problem
-  (triggered by changes in other files), explain the relationship.
-- root_cause: 1-2 sentences explaining what violated which rule, requirement,
-  or expectation. For cascading problems, explain how the dependency change
-  triggered this fix.
-- how_fixed: 1-2 sentences describing what changed and why it was necessary.
-  Include variants when one atomic problem covers multiple variants. For cascading
-  problems, explain what format/behavior changed in the dependency.
-- why_fix_works: 1-2 sentences explaining how the new state satisfies the CI
-  step or validator or handles the new format/behavior from dependencies.
-- issue_type: Specific failure subtype, error code, rule, or validator-specific
-  category. Be precise, such as "RST Formatter: Section Underline Length
-  Mismatch", "Ruff: Unsorted Import", "Dependency: Package Version Mismatch",
-  "Test Parser Logic Update (Cascading)"
-  or "Test Failure: Assertion Mismatch".
-- problem_type: "primary" when affected_files are visible in CI failure context;
-  otherwise "hidden".
+- problem: 1-2 sentences describing what failed. Mention directory scope, file types, and important variants when relevant. If this is a cascading
+problem, explain the relationship.
+- root_cause: 1-2 sentences explaining what violated which rule, requirement, or expectation. For cascading problems, explain how the dependency
+change triggered this fix.
+- how_fixed: 1-2 sentences describing what changed and why it was necessary. Include variants when one atomic problem covers multiple variants.
+For cascading problems, explain what format/behavior changed in the dependency.
+- why_fix_works: 1-2 sentences explaining how the new state satisfies the CI step or validator or handles the new format/behavior from
+dependencies.
+- issue_type: Specific failure subtype, error code, rule, or validator-specific category. Be precise, such as "RST Formatter: Section Underline
+Length Mismatch", "Ruff: Unsorted Import", "Dependency: Package Version Mismatch", "Test Parser Logic Update (Cascading)", or "Test Failure:
+Assertion Mismatch".
+- problem_type: "primary" when affected_files are visible in CI failure context; otherwise "hidden".
 
 OUTPUT FORMAT:
 {{
@@ -1748,15 +2435,18 @@ OUTPUT FORMAT:
     {{
       "problem_id": 1,
       "validation_order": {validation_order},
-      "validation_cmd": "{effective_validation_cmd}",
-      "failure_type": "{chunk.get("failure_type", "")}",
+      "validation_cmd": {json.dumps(effective_validation_cmd)},
+      "failure_type": {json.dumps(failure_type)},
       "issue_type": "specific_error_code_or_type",
       "problem": "Brief description of what broke",
       "root_cause": "Why it failed",
       "how_fixed": "What changed",
       "why_fix_works": "Why the fix solves it",
       "affected_files": ["file1.py", "file2.py"],
-      "problem_type": "primary"
+      "problem_type": "primary",
+      "is_cascading": {json.dumps(chunk.get("is_cascading", False))},
+      "dependency_type": {json.dumps(chunk.get("dependency_type", ""))},
+      "cascade_explanation": {json.dumps(chunk.get("cascade_explanation", ""))}
     }}
   ]
 }}
@@ -1765,16 +2455,21 @@ OUTPUT REQUIREMENTS:
 - Return only a JSON object with the "atomic_problems" array.
 - If no problems can be extracted, return {{"atomic_problems": []}}.
 - problem_id must be an integer starting at 1 and incrementing by 1.
-- validation_order must be an integer.
-- affected_files must be an array of file path strings.
+- validation_order must be the integer validation_order from VALIDATION CONTEXT.
+- validation_cmd must exactly match validation_cmd from VALIDATION CONTEXT.
+- failure_type must match failure_type from VALIDATION CONTEXT unless the value is empty.
+- affected_files must be an array of file path strings from CHANGES.
+- Do not include files that are not directly involved in the problem.
 - problem_type must be either "primary" or "hidden".
-- String fields must be non-empty for every returned problem: issue_type,
-  problem, root_cause, how_fixed, why_fix_works.
+- is_cascading must be a boolean matching the value from CLASSIFICATION CONTEXT.
+- dependency_type must be a string (empty string if not cascading).
+- cascade_explanation must be a string (empty string if not cascading).
+- String fields must be non-empty for every returned problem: issue_type, problem, root_cause, how_fixed, why_fix_works.
 - Do not include JavaScript-style comments in JSON.
+- Do not include markdown, explanations, or text outside the JSON object.
 
-{STRICT_JSON_RULES}
-"""
-
+  {STRICT_JSON_RULES}
+  """
 
 def _extract_atomic_problems(result: Any) -> list[dict[str, Any]]:
     if isinstance(result, list):
@@ -1798,14 +2493,37 @@ def _extract_atomic_problems(result: Any) -> list[dict[str, Any]]:
     return valid_problems
 
 
-def _atomic_chunk_requires_split(prompt: str, changes: list[dict[str, Any]]) -> bool:
-    return (
-        len(prompt) > ATOMIC_ANALYSIS_MAX_PROMPT_CHARS or len(changes) > 200
-    ) and len(changes) > 1
+def _atomic_chunk_requires_split(
+    prompt: str, changes: list[dict[str, Any]], model_name: str | None = None
+) -> bool:
+    """Check if chunk needs splitting based on model-aware limits."""
+    model_limits = _get_model_aware_limits(model_name)
+    max_prompt_chars = model_limits["diff_chunk_chars"]  # Use model-aware limit
+    max_changes = 200  # Conservative change limit
+
+    return (len(prompt) > max_prompt_chars or len(changes) > max_changes) and len(
+        changes
+    ) > 1
 
 
-def _split_count_for_atomic_chunk(prompt_size: int, change_count: int) -> int:
-    target_prompt_size = 15000
+def _split_count_for_atomic_chunk(
+    prompt_size: int, change_count: int, model_name: str | None = None
+) -> int:
+    """
+    Calculate optimal split count based on model-aware limits.
+
+    Args:
+        prompt_size: Current prompt size in chars
+        change_count: Number of changes
+        model_name: Model name for limit lookup
+
+    Returns:
+        Number of splits needed
+    """
+    model_limits = _get_model_aware_limits(model_name)
+    # Target 50% of max chunk size to leave room for CI context overhead
+    target_prompt_size = model_limits["diff_chunk_chars"] // 2
+
     estimated_splits = max(2, (prompt_size // target_prompt_size) + 1)
     max_splits = min(estimated_splits, change_count // 10, 8)
     return 2 if max_splits <= 2 else max_splits
@@ -1843,10 +2561,22 @@ def _analyze_split_atomic_chunk(
     min_changes_to_split: int = 10,
 ) -> list[dict[str, Any]]:
     changes = chunk.get("all_changes", [])
-    if len(changes) <= min_changes_to_split:
+    change_type = chunk.get("change_type", "unknown")
+
+    # Special handling for config changes: they can be split even with fewer changes
+    # because they tend to generate very verbose output
+    effective_min_split = 2 if change_type == "config" else min_changes_to_split
+
+    if len(changes) <= effective_min_split:
         print(
-            f"      WARNING: Chunk too small to split further ({len(changes)} changes)"
+            f"      WARNING: Chunk too small to split further ({len(changes)} changes, min={effective_min_split} for {change_type})"
         )
+        if change_type == "config" and len(changes) > 1:
+            print(
+                "        Config changes hit output limit but cannot split further - trying with reduced prompt"
+            )
+            # For config, try one more time with simplified prompt (reduce CI context)
+            # This is a last-resort fallback
         print("        Returning empty to avoid infinite recursion")
         return []
 
@@ -1858,6 +2588,10 @@ def _analyze_split_atomic_chunk(
         )
         return []
 
+    model_name = getattr(llm, "model_name", None)
+    model_limits = _get_model_aware_limits(model_name)
+    target_chunk_size = model_limits["diff_chunk_chars"] // 2
+
     prompt = _build_atomic_prompt(
         ci_context=ci_context,
         failed_validation_order=failed_validation_order,
@@ -1867,13 +2601,15 @@ def _analyze_split_atomic_chunk(
         changes_data=_atomic_changes_data(chunk),
     )
     indent = "  " * depth
-    num_splits = _split_count_for_atomic_chunk(len(prompt), len(changes))
+    num_splits = _split_count_for_atomic_chunk(len(prompt), len(changes), model_name)
 
     print(f"      {indent}{reason} for {chunk_label}; smart splitting analysis:")
     print(f"      {indent}  Current size: {len(prompt)} chars, {len(changes)} changes")
-    print("      {indent}  Target size per chunk: 15000 chars".format(indent=indent))
     print(
-        f"      {indent}  Estimated splits needed: {max(2, (len(prompt) // 15000) + 1)}"
+        f"      {indent}  Target size per chunk: {target_chunk_size} chars (model: {model_name or 'default'})"
+    )
+    print(
+        f"      {indent}  Estimated splits needed: {max(2, (len(prompt) // target_chunk_size) + 1)}"
     )
     print(f"      {indent}  -> Splitting into {num_splits} sub-chunks")
 
@@ -1939,6 +2675,9 @@ def _analyze_atomic_chunk(
     depth: int = 0,
 ) -> list[dict[str, Any]]:
     changes = chunk.get("all_changes", [])
+    model_name = getattr(llm, "model_name", None)
+    model_limits = _get_model_aware_limits(model_name)
+
     prompt = _build_atomic_prompt(
         ci_context=ci_context,
         failed_validation_order=failed_validation_order,
@@ -1951,16 +2690,22 @@ def _analyze_atomic_chunk(
     print(f"      Calling LLM for {chunk_label}")
     print(f"        Prompt size: {len(prompt)} chars, {len(changes)} changes")
 
-    if _atomic_chunk_requires_split(prompt, changes):
-        if len(prompt) > ATOMIC_ANALYSIS_MAX_PROMPT_CHARS:
-            print(f"        Proactive split: prompt too large ({len(prompt)} chars)")
+    # Use model-aware limits for splitting decision
+    max_prompt_chars = model_limits["diff_chunk_chars"]
+    max_output_tokens = model_limits["output_safe_tokens"]
+
+    if _atomic_chunk_requires_split(prompt, changes, model_name):
+        if len(prompt) > max_prompt_chars:
+            print(
+                f"        Proactive split: prompt too large ({len(prompt)} chars > {max_prompt_chars} limit)"
+            )
         else:
             print(
                 f"        Proactive split: too many changes ({len(changes)} changes, max 200)"
             )
         result = "SPLIT_REQUIRED"
     else:
-        result = _invoke_json(llm, prompt, max_tokens=ATOMIC_ANALYSIS_MAX_OUTPUT_TOKENS)
+        result = _invoke_json(llm, prompt, max_tokens=max_output_tokens)
 
     if result == "SPLIT_REQUIRED" and len(changes) > 1:
         return _analyze_split_atomic_chunk(
@@ -2056,6 +2801,23 @@ def _normalize_problem_defaults(
         "failure_type", ""
     )
     problem["issue_type"] = problem.get("issue_type") or val_group.get("issue_type", "")
+    problem["problem_type"] = problem.get("problem_type") or val_group.get(
+        "visibility", ""
+    )
+    if not problem.get("problem_type"):
+        problem["problem_type"] = "primary"
+    problem["is_cascading"] = bool(
+        problem.get("is_cascading", val_group.get("is_cascading", False))
+    )
+    problem["dependency_type"] = str(
+        problem.get("dependency_type", val_group.get("dependency_type", "")) or ""
+    )
+    problem["cascade_explanation"] = str(
+        problem.get(
+            "cascade_explanation", val_group.get("cascade_explanation", "")
+        )
+        or ""
+    )
     if not isinstance(problem.get("affected_files"), list):
         problem["affected_files"] = []
     problem["affected_files"] = list(
@@ -2067,6 +2829,8 @@ def _normalize_problem_defaults(
     )
     for key in ["problem", "root_cause", "how_fixed", "why_fix_works"]:
         problem[key] = str(problem.get(key, "") or "").strip()
+    if not problem["why_fix_works"] and problem.get("why_fixed_works"):
+        problem["why_fix_works"] = str(problem.get("why_fixed_works") or "").strip()
     return problem
 
 
@@ -2088,6 +2852,11 @@ def _problem_merge_summaries(
             "root_cause": _compact_text(problem.get("root_cause", ""), 600),
             "how_fixed": _compact_text(problem.get("how_fixed", ""), 600),
             "why_fix_works": _compact_text(problem.get("why_fix_works", ""), 600),
+            "is_cascading": problem.get("is_cascading", False),
+            "dependency_type": problem.get("dependency_type", ""),
+            "cascade_explanation": _compact_text(
+                problem.get("cascade_explanation", ""), 400
+            ),
             "affected_files": problem.get("affected_files", [])[:12],
             "affected_files_count": len(problem.get("affected_files", [])),
         }
@@ -2100,6 +2869,7 @@ def _build_validation_merge_prompt(
     summaries: list[dict[str, Any]],
     validation_order: Any,
     val_group: dict[str, Any],
+    summary_limit: int = VALIDATION_MERGE_MAX_PROMPT_CHARS - 8000,
 ) -> str:
     return f"""Merge atomic problems for one validation group.
 
@@ -2109,7 +2879,10 @@ VALIDATION:
 - failure_type: {val_group.get("failure_type", "")}
 
 CHUNK-LEVEL PROBLEMS:
-{_compact_json(summaries, VALIDATION_MERGE_MAX_PROMPT_CHARS - 8000)}
+{_compact_json(summaries, summary_limit)}
+
+DEPENDENCY CONTEXT:
+{_compact_json(val_group.get("dependency_contexts", []), 6000)}
 
 TASK:
 Analyze the problems above and merge those that represent the same underlying issue and same general repair strategy..
@@ -2205,14 +2978,19 @@ OUTPUT FORMAT:
       "problem_id": 1,
       "problem_type": "primary or hidden",
       "validation_order": {validation_order},
-      "validation_cmd": "{val_group.get("validation_cmd", "")}",
-      "failure_type": "{val_group.get("failure_type", "")}",
+      "validation_cmd": {json.dumps(val_group.get("validation_cmd", ""))},
+      "failure_type": {json.dumps(val_group.get("failure_type", ""))},
       "issue_type": "",
       "problem": "",
       "root_cause": "",
       "how_fixed": "",
       "why_fix_works": "",
-      "affected_files": []
+      "affected_files": [],
+      "is_cascading": {json.dumps(val_group.get("is_cascading", False))},
+      "dependency_type": {json.dumps(val_group.get("dependency_type", ""))},
+      "cascade_explanation": {json.dumps(val_group.get("cascade_explanation", ""))},
+      "is_merged": true,
+      "merged_from": [1, 2]
     }}
   ]
 }}
@@ -2231,18 +3009,30 @@ def _merge_validation_problems(
     if len(problems) <= 1:
         return problems
 
+    problems = _deterministic_merge_repeated_problem_candidates(problems)
+    if len(problems) <= 1:
+        return problems
+
+    model_limits = _get_model_aware_limits(getattr(llm, "model_name", None))
+    merge_prompt_limit = max(
+        VALIDATION_MERGE_MAX_PROMPT_CHARS, model_limits["diff_chunk_chars"] // 4
+    )
+    merge_output_tokens = min(model_limits["output_safe_tokens"], 16_000)
+
     prompt = _build_validation_merge_prompt(
         summaries=_problem_merge_summaries(problems, val_group),
         validation_order=validation_order,
         val_group=val_group,
+        summary_limit=max(8000, merge_prompt_limit - 12000),
     )
-    if len(prompt) > VALIDATION_MERGE_MAX_PROMPT_CHARS:
+
+    if len(prompt) > merge_prompt_limit:
         print(
             "      WARNING Validation merge prompt too large; using chunk-level problems"
         )
         return problems
 
-    result = _invoke_json(llm, prompt, max_tokens=VALIDATION_MERGE_MAX_OUTPUT_TOKENS)
+    result = _invoke_json(llm, prompt, max_tokens=merge_output_tokens)
     merged = _extract_atomic_problems(result)
     if not merged:
         print("      WARNING Validation-level merge failed; using chunk-level problems")
@@ -2253,6 +3043,94 @@ def _merge_validation_problems(
             all_files.extend(problem.get("affected_files", []))
         merged[0]["affected_files"] = list(dict.fromkeys(all_files))
     return merged
+
+
+def _deterministic_merge_repeated_problem_candidates(
+    problems: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """
+    Pre-merge obvious repeated chunk artifacts before LLM merge.
+
+    This is intentionally narrow: same validation/failure/issue/cascade signature
+    and a formatter/linter/docs-style issue family. The LLM still handles less
+    obvious semantic merges afterward.
+    """
+    if len(problems) <= 1:
+        return problems
+
+    buckets: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for problem in problems:
+        key = (
+            problem.get("validation_order"),
+            problem.get("validation_cmd"),
+            str(problem.get("failure_type", "")).lower(),
+            str(problem.get("issue_type", "")).lower(),
+            bool(problem.get("is_cascading", False)),
+            str(problem.get("dependency_type", "")).lower(),
+            problem.get("problem_type", ""),
+        )
+        buckets.setdefault(key, []).append(problem)
+
+    merged: list[dict[str, Any]] = []
+    for group in buckets.values():
+        if len(group) == 1 or not _is_repeated_style_problem(group):
+            merged.extend(group)
+            continue
+
+        all_files = []
+        merged_from = []
+        for item in group:
+            all_files.extend(item.get("affected_files", []))
+            merged_from.append(item.get("problem_id"))
+
+        base = group[0].copy()
+        base["affected_files"] = list(dict.fromkeys(all_files))
+        base["is_merged"] = True
+        base["merged_from"] = [item for item in merged_from if item is not None]
+        base["merge_count"] = len(group)
+        if len(group) > 1:
+            scope = _file_scope_summary(base["affected_files"])
+            base["problem"] = _compact_text(
+                f"{base.get('problem', '')} This repeated pattern affects {len(base['affected_files'])} files across {scope}.",
+                900,
+            )
+            base["how_fixed"] = _compact_text(
+                f"{base.get('how_fixed', '')} The same repair pattern was applied across all affected files.",
+                900,
+            )
+        merged.append(base)
+
+    return merged
+
+
+def _is_repeated_style_problem(group: list[dict[str, Any]]) -> bool:
+    text = " ".join(
+        str(item.get(field, "")).lower()
+        for item in group
+        for field in ["validation_cmd", "failure_type", "issue_type", "problem"]
+    )
+    return any(
+        marker in text
+        for marker in [
+            "format",
+            "formatter",
+            "docstrfmt",
+            "rst",
+            "ruff",
+            "lint",
+            "black",
+            "mdformat",
+        ]
+    )
+
+
+def _file_scope_summary(files: list[str]) -> str:
+    dirs = sorted({str(file_path).rsplit("/", 1)[0] for file_path in files if "/" in str(file_path)})
+    if not dirs:
+        return "the changed files"
+    if len(dirs) == 1:
+        return dirs[0]
+    return ", ".join(dirs[:3]) + (" and related directories" if len(dirs) > 3 else "")
 
 
 def _group_changes_by_type(
@@ -2615,17 +3493,19 @@ def _split_structured_chunk(
         )
         return sum(len(file_info.get("changes", [])) for file_info in records)
 
+    def with_metadata(chunk_files: Any) -> dict[str, Any]:
+        return {
+            "dependency_cluster": chunk.get("dependency_cluster"),
+            "dependency_explanation": chunk.get("dependency_explanation"),
+            "is_partial_cluster": chunk.get("is_partial_cluster", True),
+            "files": chunk_files,
+            "total_files": len(chunk_files),
+            "total_changes": change_count(chunk_files),
+        }
+
     return (
-        {
-            "files": chunk1_files,
-            "total_files": len(chunk1_files),
-            "total_changes": change_count(chunk1_files),
-        },
-        {
-            "files": chunk2_files,
-            "total_files": len(chunk2_files),
-            "total_changes": change_count(chunk2_files),
-        },
+        with_metadata(chunk1_files),
+        with_metadata(chunk2_files),
     )
 
 
@@ -2635,6 +3515,105 @@ def _is_token_limit_error(error: Exception) -> bool:
         keyword in error_msg
         for keyword in ["token", "length", "limit", "too long", "maximum"]
     )
+
+
+def _format_caller_callee_for_classification(dependency_contexts: list[dict]) -> str:
+    """
+    Format caller → callee dependency contexts for classification prompt.
+
+    This helps LLM understand relationships between files during classification,
+    so it can decide if related files should be grouped together or kept separate.
+    """
+    if not dependency_contexts:
+        return ""
+
+    formatted_deps = []
+    for ctx in dependency_contexts[:8]:  # Limit to 8 contexts
+        caller = ctx.get("caller", {})
+        callees = ctx.get("callees", [])
+        dep_type = ctx.get("dependency_type", "UNKNOWN")
+
+        if not caller or not callees:
+            continue
+
+        caller_file = caller.get("file", "unknown")
+        caller_changes = caller.get("changes", [])
+        callee_files = [c.get("file", "unknown") for c in callees[:10]]  # Limit callees
+
+        # Format changes summary
+        caller_change_summary = "no changes"
+        if caller_changes:
+            first_change = caller_changes[0]
+            before = _compact_text(first_change.get("before", ""), 100)
+            after = _compact_text(first_change.get("after", ""), 100)
+            caller_change_summary = f'"{before}" → "{after}"'
+
+        formatted_deps.append(f"""
+DEPENDENCY {len(formatted_deps) + 1}:
+  Type: {dep_type}
+  Caller: {caller_file}
+    Role: {caller.get("role", "unknown")}
+    Changes: {caller_change_summary}
+  Callees ({len(callee_files)} files):
+    {", ".join(callee_files[:5])}{"..." if len(callee_files) > 5 else ""}
+
+  Meaning: Caller {dep_type.lower()}s callees
+  Example: If caller changed tool config → callees may adapt to new tool behavior
+""")
+
+    if not formatted_deps:
+        return ""
+
+    return f"""
+## DEPENDENCY CONTEXT (Caller → Callee Relationships)
+
+This chunk contains files with DIRECT CODE DEPENDENCIES:
+
+{"".join(formatted_deps)}
+
+CRITICAL CLASSIFICATION GUIDANCE:
+
+1. **CASCADING Changes** (analyze together):
+   - Caller change TRIGGERED callee adaptations
+   - Example: config upgraded docstrfmt → RST files reformatted
+   - Decision: Classify as ONE problem spanning validations OR assign to primary validation
+
+2. **INDEPENDENT Changes** (analyze separately):
+   - Caller changed, but NOT in a way affecting callees
+   - Example: config changed mdformat, but current files are Black-related
+   - Decision: Classify separately by their actual validation
+
+3. **Test ↔ Code Dependencies**:
+   - If test file READS/TESTS code/docs files, and BOTH changed:
+     * Check: Did code/docs change trigger test update?
+     * If yes: Classify together (cascading)
+     * If no: Classify separately (independent fixes)
+
+4. **Config → Files Dependencies**:
+   - If config CONFIGURES files (tool versions, formatters):
+     * Check config changes: What tool/version changed?
+     * Check if that change affects current validation
+     * Classify based on actual relationship
+
+EXAMPLE DECISION PROCESS:
+
+Scenario: exit_code_test.py (test) READS ref-exit-codes/*.rst (docs)
+- Caller: exit_code_test.py
+- Callees: ref-exit-codes/*.rst
+- Both changed in same commit
+
+Analysis:
+1. What changed in caller? Test assertion updated
+2. What changed in callees? RST title format changed
+3. Relationship: Test validates RST structure
+4. Conclusion: CASCADING - RST format change required test update
+
+Classification:
+- Option A: ONE problem (docstrfmt upgrade with test adaptation)
+- Option B: Assign to primary validation (validation 17 - docstrfmt) with note about test
+
+Choose the option that best matches the ground truth repair intent.
+"""
 
 
 def classify_chunk_with_fallback(
@@ -2648,6 +3627,10 @@ def classify_chunk_with_fallback(
     """
     Classify a chunk with automatic fallback to smaller chunks if token limit hit.
 
+    NEW: Routes to specialized classification based on dependency presence:
+    - With dependencies: Use dependency-focused analysis
+    - Without dependencies: Use regular file-by-file classification
+
     Strategy:
     - Try with current chunk size
     - If token limit -> split in half and retry recursively
@@ -2659,29 +3642,294 @@ def classify_chunk_with_fallback(
     if files_in_chunk == 0:
         return []
 
+    # Check for caller → callee dependency contexts
+    dependency_contexts = chunk.get("dependency_contexts", [])
+    has_caller_callee = any("caller" in ctx and "callees" in ctx for ctx in dependency_contexts)
+
+    # ROUTE TO SPECIALIZED CLASSIFICATION
+    if has_caller_callee and dependency_contexts:
+        # PATH 1: Dependency-aware classification
+        # Chunk already contains caller + callees + all changes
+        # Use specialized dependency analysis instructions
+        return _classify_chunk_with_dependencies(
+            chunk=chunk,
+            dependency_contexts=dependency_contexts,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            visible_failure_context=visible_failure_context,
+            validation_sequence=validation_sequence,
+            llm=llm,
+        )
+    else:
+        # PATH 2: Regular classification
+        # Chunk contains independent files
+        # Use regular file-by-file classification
+        return _classify_chunk_regular(
+            chunk=chunk,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            visible_failure_context=visible_failure_context,
+            validation_sequence=validation_sequence,
+            llm=llm,
+        )
+
+
+def _classify_chunk_with_dependencies(
+    chunk: dict,
+    dependency_contexts: list[dict],
+    chunk_index: int,
+    total_chunks: int,
+    visible_failure_context: dict,
+    validation_sequence: list,
+    llm: Any,
+) -> list[dict]:
+    """
+    Specialized classification for chunks WITH caller → callee dependencies.
+
+    Analyzes dependency relationships FIRST, then classifies as cascading or independent.
+    """
+    files_in_chunk = chunk.get("total_files", 0)
     ci_visible_files = [
         rf.get("file", "") for rf in visible_failure_context.get("relevant_files", [])
     ]
     formatted_validations = _format_validation_sequence(validation_sequence)
 
-    # Extract dependency information if available
-    dependency_info = ""
-    if chunk.get("dependency_explanation"):
-        dependency_info = f"""
-## DEPENDENCY CONTEXT (CRITICAL for understanding relationships)
+    # Format compact dependency context
+    dependency_info = _format_caller_callee_for_dependency_classification(dependency_contexts)
 
-This chunk contains files with DEPENDENCY RELATIONSHIPS:
+    prompt = f"""Classify each changed file by the CI step that would catch or require the fixed issue.
 
-{chunk.get("dependency_explanation", "")}
+  ## INPUT
 
-Dependency cluster: {json.dumps(chunk.get("dependency_cluster", []), indent=2)}
+  CI failure context:
+  {json.dumps(visible_failure_context, indent=2)}
 
-IMPORTANT:
-- These files are RELATED and should be analyzed TOGETHER
-- Changes in one file may be CASCADING from changes in another
-- Example: If test file reads .rst files, and .rst format changed, test logic may have updated
-- Look for CAUSE-EFFECT relationships between files in this cluster
-"""
+  FILES VISIBLE IN CI FAILURE LOGS (primary errors):
+  {json.dumps(ci_visible_files, indent=2) if ci_visible_files else "[]"}
+
+  Available validations:
+  {json.dumps(formatted_validations, indent=2)}
+
+  Changed files, chunk {chunk_index}/{total_chunks} ({files_in_chunk} files):
+  {format_structured_for_llm(chunk, max_changes_per_file=1)}
+
+  ## DEPENDENCY CONTEXT
+
+  The chunk contains files with caller → callee relationships.
+  Use this to decide if related files should be grouped together.
+
+  {dependency_info}
+
+  ## TASK
+
+  Classify files by CI validation step, USING dependency context for better decisions.
+
+  CLASSIFICATION BASIS:
+  1. CI failure context: visible/primary failures
+  2. Ground-truth diff: complete repair
+  3. Workflow validation sequence: all CI steps
+  4. Dependency relationships: caller → callee connections
+
+  For every file:
+  1. Inspect the provided before/after change data
+  2. Decide what CI validation the change fixes
+  3. Choose validation_order from VALIDATIONS
+  4. Set validation_cmd to the exact effective_cmd from VALIDATIONS
+  5. Group files with the same CI step + failure_type + issue_type
+  6. Determine visibility as primary or hidden
+
+  DEPENDENCY-AWARE DECISIONS:
+
+  CRITICAL: Dependency context helps UNDERSTAND the problem, but each file is STILL classified by the CI validation that catches its specific change!
+
+  Use dependency context to:
+  1. Understand WHY changes happened (root cause)
+  2. Identify cascading relationships, their changes before and after and the changes related to each other to identify the problems properly.
+  3. Link related problems across validations
+
+  BUT: Each file must be classified by WHICH CI validation would catch it!
+
+  Example:
+    Dependency: exit_code_test.py READS ref-exit-codes/*.rst
+
+    Analysis:
+    - RST files changed format (caught by docstrfmt - validation 17)
+    - Test file adapted assertions (caught by Black/pytest - validation 7)
+    - They are RELATED (cascading), but different validations!
+
+    Correct classification:
+    - Group 1: RST files → validation 17 (docstrfmt)
+      * is_cascading: true
+      * cascade_explanation: "docstrfmt upgrade triggered test adaptation"
+
+    - Group 2: Test file → validation 7 (Black/test validation)
+      * is_cascading: true
+      * cascade_explanation: "Test adapted to new RST format from validation 17"
+      * DO NOT put test in docstrfmt validation!
+
+  Rules for file → validation mapping:
+  - Config files → Config validation (taplo, etc.)
+  - Test files → Test validation (Black, pytest, etc.)
+  - RST/docs → Doc validation (docstrfmt)
+  - Python code → Python validation (Black, mypy, ruff)
+
+  Cascading means: Related problems across different validations
+  - Mark related groups with is_cascading=true
+  - Use cascade_explanation to explain relationship
+  - But classify each file by its ACTUAL CI validation!
+
+  VISIBILITY RULE:
+  - visibility="primary" if at least one file in the group appears in FILES VISIBLE IN CI FAILURE LOGS or is directly implicated by CI failure
+  context
+  - visibility="hidden" otherwise
+
+  ## OUTPUT FORMAT
+
+  Return ONLY a JSON array with this format:
+
+  [
+    {{
+      "validation_order": <INT>,
+      "validation_cmd": "<exact command from VALIDATIONS>",
+      "failure_type": "<category>",
+      "issue_type": "<specific>",
+      "change_type": "<code|dependency|config>",
+      "visibility": "<primary|hidden>",
+      "files": [...],
+      "total_files": <int>,
+      "is_cascading": <true|false>,
+      "dependency_type": "<dependency relationship type or empty string>",
+      "cascade_explanation": "<explanation or empty string>"
+    }}
+  ]
+
+  REQUIREMENTS:
+  - Return valid JSON only. Do not include markdown or commentary.
+  - validation_order must be an INTEGER from VALIDATIONS.
+  - validation_cmd must exactly match an effective_cmd from VALIDATIONS.
+  - visibility must be "primary" or "hidden".
+  - Every changed file in this chunk must appear exactly once.
+  - Do not include files that are not in this chunk.
+  - For cascading groups, explain the trigger in cascade_explanation.
+  - For independent groups, dependency_type and cascade_explanation must be empty strings.
+  - If uncertain between cascading and independent, prefer independent unless dependency context clearly shows one change triggered the other.
+
+  {STRICT_JSON_RULES}
+  """
+
+    try:
+        output_safe_tokens = _classification_output_tokens(
+            getattr(llm, "model_name", None)
+        )
+
+        result = _invoke_json(llm, prompt, max_tokens=output_safe_tokens)
+        valid = _normalize_classification_validations(
+            _extract_validation_list(result),
+            validation_sequence,
+        )
+
+        print(
+            f"    OK Chunk {chunk_index} DEPENDENCY-AWARE ({files_in_chunk} files): {len(valid)} validation groups"
+        )
+        return valid
+
+    except Exception as e:
+        if _is_token_limit_error(e):
+            print(
+                f"    WARNING Token limit hit with {files_in_chunk} files, falling back to regular classification..."
+            )
+            # Fallback to regular classification if dependency analysis is too large
+            return _classify_chunk_regular(
+                chunk, chunk_index, total_chunks, visible_failure_context, validation_sequence, llm
+            )
+        else:
+            print(f"    FAIL Chunk {chunk_index} dependency classification failed: {str(e)[:100]}")
+            return []
+
+
+def _format_caller_callee_for_dependency_classification(dependency_contexts: list[dict]) -> str:
+    """
+    Format caller → callee contexts for dependency-focused classification.
+
+    COMPACT format to avoid token bloat:
+    - Shows caller with 1-2 sample changes
+    - Lists callees (first 3 files + count)
+    - Shows 1 representative callee change
+    - Avoids duplicating full changes (already in chunk)
+    """
+    formatted = []
+
+    for idx, ctx in enumerate(dependency_contexts, 1):
+        caller = ctx.get("caller", {})
+        callees = ctx.get("callees", [])
+        dep_type = ctx.get("dependency_type", "UNKNOWN")
+
+        if not caller or not callees:
+            continue
+
+        caller_file = caller.get("file", "unknown")
+        caller_changes = caller.get("changes", [])
+        caller_role = caller.get("role", "unknown")
+
+        # Show 1-2 sample caller changes (compact)
+        caller_change_summary = ""
+        if caller_changes:
+            ch = caller_changes[0]  # Just first change
+            before = _compact_text(ch.get("before", ""), 60)
+            after = _compact_text(ch.get("after", ""), 60)
+            caller_change_summary = f'    Sample: Line {ch.get("line")}: "{before}" → "{after}"'
+
+        # Compact callee list: First 3 files + count
+        callee_files_list = []
+        for callee in callees[:3]:  # First 3 only
+            callee_files_list.append(f'    - {callee.get("file", "unknown")} ({callee.get("role", "unknown")})')
+
+        if len(callees) > 3:
+            callee_files_list.append(f'    - ... and {len(callees) - 3} more files with similar changes')
+
+        # Show ONE representative callee change
+        callee_change_sample = ""
+        if callees and callees[0].get("changes"):
+            ch = callees[0]["changes"][0]
+            before = _compact_text(ch.get("before", ""), 60)
+            after = _compact_text(ch.get("after", ""), 60)
+            callee_change_sample = f'    Representative: Line {ch.get("line")}: "{before}" → "{after}"'
+
+        formatted.append(f"""
+DEPENDENCY {idx}: {dep_type}
+
+Caller: {caller_file} ({caller_role})
+{caller_change_summary}
+
+Callees ({len(callees)} files total):
+{chr(10).join(callee_files_list)}
+{callee_change_sample}
+
+Relationship: Caller {dep_type.lower()}s callees
+Analysis needed: Did caller change trigger callee adaptations?
+""")
+
+    return "\n".join(formatted) if formatted else "No dependency contexts available"
+
+
+def _classify_chunk_regular(
+    chunk: dict,
+    chunk_index: int,
+    total_chunks: int,
+    visible_failure_context: dict,
+    validation_sequence: list,
+    llm: Any,
+) -> list[dict]:
+    """
+    Regular classification for chunks WITHOUT dependencies.
+
+    Analyzes files independently based on their changes.
+    """
+    files_in_chunk = chunk.get("total_files", 0)
+    ci_visible_files = [
+        rf.get("file", "") for rf in visible_failure_context.get("relevant_files", [])
+    ]
+    formatted_validations = _format_validation_sequence(validation_sequence)
 
     prompt = f"""Classify each changed file by the CI step that would catch or require the fixed issue.
 
@@ -2697,8 +3945,7 @@ Available validations:
 {json.dumps(formatted_validations, indent=2)}
 
 Changed files, chunk {chunk_index}/{total_chunks} ({files_in_chunk} files):
-{format_structured_for_llm(chunk)}
-{dependency_info}
+{format_structured_for_llm(chunk, max_changes_per_file=2)}
 
 ## TASK
 
@@ -2801,8 +4048,9 @@ REQUIREMENTS:
 """
 
     try:
-        model_limits = _get_model_aware_limits(getattr(llm, "model_name", None))
-        output_safe_tokens = model_limits["output_safe_tokens"]
+        output_safe_tokens = _classification_output_tokens(
+            getattr(llm, "model_name", None)
+        )
 
         # Try classification. The output token budget uses the selected model's
         # configured safe output limit; file count is controlled earlier by
@@ -2812,7 +4060,7 @@ REQUIREMENTS:
             prompt,
             max_tokens=output_safe_tokens,
         )
-
+   
         valid = _normalize_classification_validations(
             _extract_validation_list(result),
             validation_sequence,
@@ -2900,26 +4148,27 @@ def analyze_diff_chunks(
     print("  Step 0.5: Building file dependency graph...")
     from dependency_detector import build_dependency_graph
 
-    dependency_graph = build_dependency_graph(structured_diff)
+    dependency_graph = build_dependency_graph(
+        structured_diff, repo_path=benchmark_context.get("repo_path")
+    )
     total_clusters = len(dependency_graph.get("clusters", []))
     total_edges = len(dependency_graph.get("edges", []))
     print(f"    Found {total_clusters} dependency clusters with {total_edges} edges")
 
     # Chunk by file count (not char count) - cleaner and more predictable
     # Now model-aware: minimax=80 files, GLM=150 files
-    # NOW DEPENDENCY-AWARE: keeps related files together
-    # classify_chunk_with_fallback will auto-split if token limit hit
-    model_limits = _get_model_aware_limits(
-        llm.model_name if hasattr(llm, "model_name") else None
-    )
+    # NOW TOKEN + DEPENDENCY-AWARE: keeps related files together while respecting token limits
+    model_name = llm.model_name if hasattr(llm, "model_name") else "glm-5.2"
+    model_limits = _get_model_aware_limits(model_name)
     max_files = model_limits["max_files_per_chunk"]
 
     chunks = chunk_structured_diff(
         structured_diff,
-        max_files_per_chunk=max_files,
-        dependency_graph=dependency_graph,  # NEW: Pass dependency graph
+        max_files_per_chunk=max_files,  # Fallback for non-dependency chunks
+        dependency_graph=dependency_graph,
+        model_name=model_name,  # NEW: Token-aware chunking
     )
-    print(f"    Using model-aware chunking: max {max_files} files per chunk")
+    print(f"    Using token + dependency-aware chunking (model: {model_name})")
     if not chunks:
         raise ValueError(
             f"Issue {_issue_id(issue)} ground-truth diff could not be chunked"
@@ -3285,6 +4534,9 @@ def _stage2_dependencies_full_llm(problems: list[dict], llm) -> dict:
                 "root_cause": prob.get("root_cause", "")[:300],
                 "how_fixed": prob.get("how_fixed", "")[:300],
                 "why_fix_works": prob.get("why_fix_works", "")[:300],
+                "is_cascading": prob.get("is_cascading", False),
+                "dependency_type": prob.get("dependency_type", ""),
+                "cascade_explanation": prob.get("cascade_explanation", "")[:300],
                 "affected_files": prob.get("affected_files", [])[:10],
                 "files_count": len(prob.get("affected_files", [])),
             }
@@ -3298,6 +4550,19 @@ PROBLEMS:
 TASK: Analyze how these problems relate to each other.
 
 CONTEXT-AWARE DEPENDENCY ANALYSIS:
+
+CASCADING METADATA:
+Some problems include is_cascading, dependency_type, and cascade_explanation.
+These fields are evidence from earlier classification/deep analysis. Use them
+to reason about interdependency, but do not treat them as automatic edges.
+
+When cascading metadata is present:
+- Identify which problem is the source/enabler that changed behavior,
+  configuration, tooling, dependency, docs, tests, or code.
+- Identify which problem is the dependent/adaptation problem.
+- Create a dependency only when problem/root_cause/how_fixed supports it.
+- Direction should be source/enabler -> dependent/adaptation.
+- Keep the existing output schema exactly as shown below.
 
 For EACH pair of problems, ask:
 
@@ -3427,6 +4692,8 @@ OUTPUT FORMAT:
 IMPORTANT:
 - Analyze based on actual content (root_cause, how_fixed), not just keywords
 - Think about what a developer would need to know about problem interactions
+- Use cascading metadata as evidence, but infer direction and relationship type
+  from the problem content
 - Identify both obvious (validation order) and subtle (semantic) dependencies
 - Be specific in reasons - explain WHY the relationship exists
 - Consider the real-world implications of fix order
@@ -3532,6 +4799,9 @@ def _analyze_validation_dependencies_llm(
                 "problem": prob.get("problem", "")[:250],
                 "root_cause": prob.get("root_cause", "")[:250],
                 "how_fixed": prob.get("how_fixed", "")[:250],
+                "is_cascading": prob.get("is_cascading", False),
+                "dependency_type": prob.get("dependency_type", ""),
+                "cascade_explanation": prob.get("cascade_explanation", "")[:250],
                 "affected_files": prob.get("affected_files", []),
                 "file_count": len(prob.get("affected_files", [])),
             }
@@ -3544,6 +4814,19 @@ Problems in this validation:
 {json.dumps(problems_data, indent=2)}
 
 TASK: Identify dependencies between these problems.
+
+CASCADING METADATA:
+Some problems include is_cascading, dependency_type, and cascade_explanation.
+These fields are evidence from earlier classification/deep analysis. Use them
+to reason about interdependency, but do not treat them as automatic edges.
+
+When cascading metadata is present:
+- Identify which problem is the source/enabler that changed behavior,
+  configuration, tooling, dependency, docs, tests, or code.
+- Identify which problem is the dependent/adaptation problem.
+- Create a dependency only when problem/root_cause/how_fixed supports it.
+- Direction should be source/enabler -> dependent/adaptation.
+- Keep the existing output schema exactly as shown below.
 
 Analyze TWO types of relationships:
 
@@ -3584,6 +4867,8 @@ OUTPUT format:
 Rules:
 - Only include ACTUAL dependencies (not forced)
 - Explain both file-based AND problem-based reasoning
+- Use cascading metadata as evidence, but infer direction and relationship type
+  from the problem content
 - If no dependencies exist, return: {{"dependencies": []}}
 - Be specific - explain WHY the dependency exists
 - ALWAYS return valid JSON object with "dependencies" key
