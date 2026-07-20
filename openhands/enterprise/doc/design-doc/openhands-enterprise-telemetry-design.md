@@ -76,7 +76,7 @@ The design ensures that telemetry cannot be easily disabled without breaking cor
 When telemetry uploads fail for more than 4 days, users will see a prominent warning banner in the OpenHands Enterprise UI:
 
 ```
-⚠️ Your OpenHands Enterprise license will expire in 30 days. Please contact support if this issue persists.
+ Your OpenHands Enterprise license will expire in 30 days. Please contact support if this issue persists.
 ```
 
 The banner appears at the top of all pages and cannot be permanently dismissed while the condition persists. Users can temporarily dismiss it, but it will reappear on page refresh until telemetry uploads resume successfully.

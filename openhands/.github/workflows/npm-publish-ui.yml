@@ -111,4 +111,4 @@ jobs:
         run: |
           # The prepublishOnly script will run automatically and build the package
           npm publish
-          echo "✅ Successfully published @openhands/ui@${CURRENT_VERSION} to npm"
+          echo " Successfully published @openhands/ui@${CURRENT_VERSION} to npm"

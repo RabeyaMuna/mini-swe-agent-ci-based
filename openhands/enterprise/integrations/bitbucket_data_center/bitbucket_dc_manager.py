@@ -121,7 +121,7 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
         project_key: str,
         repo_slug: str,
     ) -> None:
-        """Best-effort 👀 acknowledgement on the triggering PR comment.
+        """Best-effort  acknowledgement on the triggering PR comment.
 
         Mirrors ``GithubManager._add_reaction``: posted once we've decided
         the request will be acted on (permission check passed, mentioner
@@ -299,7 +299,7 @@ class BitbucketDCManager(Manager[BitbucketDCViewType]):
                 f'instead of installer ({installer_user_id})'
             )
 
-        # Acknowledge receipt with a 👀 reaction on the triggering comment,
+        # Acknowledge receipt with a  reaction on the triggering comment,
         # mirroring the GitHub manager. Posted as the resolved invoking user.
         # Best-effort: failures (e.g. legacy BBDC without the reactions
         # endpoint) must not block conversation creation.

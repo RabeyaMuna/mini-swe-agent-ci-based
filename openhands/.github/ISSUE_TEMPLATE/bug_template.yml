@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        ## Thank you for reporting a bug! 🐛
+        ## Thank you for reporting a bug! 
 
         **Please fill out all required fields.** Issues missing critical information (version, installation method, reproduction steps, etc.) will be delayed or closed until complete details are provided.
 
@@ -155,7 +155,7 @@ body:
       description: |
         Add screenshots, videos, runtime environment, or other context that helps explain the issue.
 
-        💡 **Share conversation history:** In the OpenHands chat UI, click the 👎 or 👍 button (above the message input) to generate a shareable link to your conversation.
+         **Share conversation history:** In the OpenHands chat UI, click the  or  button (above the message input) to generate a shareable link to your conversation.
 
       placeholder: Drag and drop screenshots here, paste links, or add additional context.
 

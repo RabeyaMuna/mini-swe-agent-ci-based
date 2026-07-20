@@ -159,12 +159,12 @@ const getTaskTrackerObservationContent = (
 
     taskList.forEach((task, index: number) => {
       const statusMap = {
-        todo: "⏳",
-        in_progress: "🔄",
-        done: "✅",
+        todo: "",
+        in_progress: "",
+        done: "",
       };
       const statusIcon =
-        statusMap[task.status as keyof typeof statusMap] || "❓";
+        statusMap[task.status as keyof typeof statusMap] || "";
 
       content += `\n${index + 1}. ${statusIcon} **[${task.status.toUpperCase().replace("_", " ")}]** ${task.title}`;
       if (task.notes) {

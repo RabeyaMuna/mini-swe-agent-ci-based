@@ -26,19 +26,19 @@ This is the **complete memory plugin system** for CI-Bench, shared by BOTH mini-
 
 ## Features
 
-### ✅ Three-Layer Memory
+###  Three-Layer Memory
 
 - **L1 (failure_memory.json)**: Similar CI failures from same repo
 - **L2 (repo_memory.json)**: Repository-specific patterns
 - **L3 (cross_memory.json)**: Cross-repo general principles
 
-### ✅ Top-K Retrieval
+###  Top-K Retrieval
 
 - Configurable top-K (default: 3, supports up to 10)
 - Semantic similarity using sentence-transformers
 - Cosine similarity ranking
 
-### ✅ Analysis & Selection
+###  Analysis & Selection
 
 - Fetches top-10 candidates from each layer
 - Analyzes for relevance, commonality, consecutiveness
@@ -46,14 +46,14 @@ This is the **complete memory plugin system** for CI-Bench, shared by BOTH mini-
 - Organizes by source (L1/L2/L3)
 - Generates repair plan
 
-### ✅ Ablation Support
+###  Ablation Support
 
 - **Baseline**: No memory (layers=None)
 - **L1**: Failure memory only
 - **L1+L2**: Failure + Repository patterns
 - **L1+L2+L3**: Full memory (all three layers)
 
-### ✅ Performance Optimizations
+###  Performance Optimizations
 
 - Embedding caching (no re-embedding)
 - Pre-loaded stored embeddings
@@ -282,25 +282,25 @@ Based on previous experiences, consider these approaches:
 
 ## Benefits
 
-### ✅ Shared Between Both Agents
+###  Shared Between Both Agents
 
 - Same code, same logic, same results
 - No duplication
 - Single source of truth
 
-### ✅ No Breakage
+###  No Breakage
 
 - Mini-swe-agent continues to work
 - Just updates import path
 - All features preserved
 
-### ✅ Easy to Maintain
+###  Easy to Maintain
 
 - Fix bug once → fixes for both agents
 - Update once → updates for both
 - Add feature once → available to both
 
-### ✅ Fair Comparison
+###  Fair Comparison
 
 - Both agents use identical memory system
 - Only agent scaffold differs
@@ -337,4 +337,4 @@ from memory_plugin import MemoryPlugin
 
 **Last Updated**: July 16, 2026
 **Version**: 1.0.0
-**Status**: ✅ Ready for use by both agents
+**Status**:  Ready for use by both agents

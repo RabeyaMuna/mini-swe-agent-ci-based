@@ -186,8 +186,8 @@ export function CriticResultDisplay({
           {t(I18nKey.CRITIC$SUCCESS_LIKELIHOOD_LABEL)}
         </span>
         <span className={`${colorClass} text-xs tracking-wide`}>
-          {"★".repeat(filled)}
-          {"☆".repeat(empty)}
+          {"".repeat(filled)}
+          {"".repeat(empty)}
         </span>
         <span className="text-neutral-500 text-xs">({percentage}%)</span>
 

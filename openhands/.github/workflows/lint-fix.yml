@@ -52,7 +52,7 @@ jobs:
           git config --local user.email "openhands@all-hands.dev"
           git config --local user.name "OpenHands Bot"
           git add -A
-          git commit -m "🤖 Auto-fix frontend linting issues" --no-verify
+          git commit -m " Auto-fix frontend linting issues" --no-verify
           git push
 
   # Python lint fixes
@@ -94,5 +94,5 @@ jobs:
           git config --local user.email "openhands@all-hands.dev"
           git config --local user.name "OpenHands Bot"
           git add -A
-          git commit -m "🤖 Auto-fix Python linting issues" --no-verify
+          git commit -m " Auto-fix Python linting issues" --no-verify
           git push

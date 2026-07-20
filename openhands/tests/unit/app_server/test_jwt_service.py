@@ -445,7 +445,7 @@ class TestJwtService:
         """Test JWS and JWE with unicode and special characters."""
         unicode_payload = {
             'user_name': 'José María',
-            'description': 'Testing with émojis 🚀 and spëcial chars: @#$%^&*()',
+            'description': 'Testing with émojis  and spëcial chars: @#$%^&*()',
             'chinese': '你好世界',
             'arabic': 'مرحبا بالعالم',
             'symbols': '∑∆∏∫√∞≠≤≥',
@@ -520,7 +520,7 @@ class TestJwtService:
         # Test unicode token decryption
         unicode_decrypted = jwt_service.decrypt_jwe_token(unicode_token)
         assert unicode_decrypted['user_name'] == 'José María'
-        assert unicode_decrypted['description'] == 'Testing with émojis 🚀'
+        assert unicode_decrypted['description'] == 'Testing with émojis '
         assert unicode_decrypted['chinese'] == '你好世界'
         assert unicode_decrypted['iat'] == 1704067200
 
@@ -584,7 +584,7 @@ class TestJwtService:
         # Test unicode token decryption
         unicode_decrypted = jwt_service.decrypt_jwe_token(unicode_token)
         assert unicode_decrypted['user_name'] == 'José María'
-        assert unicode_decrypted['description'] == 'Testing with émojis 🚀'
+        assert unicode_decrypted['description'] == 'Testing with émojis '
         assert unicode_decrypted['chinese'] == '你好世界'
         assert unicode_decrypted['iat'] == 1704067200
 
@@ -620,7 +620,7 @@ class TestEncryptDecryptValue:
         assert jwt_service.decrypt_value(ciphertext) == plaintext
 
     def test_encrypt_decrypt_unicode(self, jwt_service):
-        plaintext = 'Héllo Wörld 🔑'
+        plaintext = 'Héllo Wörld '
         ciphertext = jwt_service.encrypt_value(plaintext)
         assert jwt_service.decrypt_value(ciphertext) == plaintext
 

@@ -85,9 +85,9 @@ class DockerSandboxSpecServiceInjector(SandboxSpecServiceInjector):
             try:
                 docker_client.images.get(spec.id)
             except docker.errors.ImageNotFound:
-                _logger.info(f'⬇️  Pulling Docker Image: {spec.id}')
+                _logger.info(f'  Pulling Docker Image: {spec.id}')
                 await self._pull_with_progress_logging(docker_client, spec.id)
-                _logger.info(f'⬇️  Finished Pulling Docker Image: {spec.id}')
+                _logger.info(f'  Finished Pulling Docker Image: {spec.id}')
         except docker.errors.APIError as exc:
             raise SandboxError(f'Error Getting Docker Image: {spec.id}') from exc
 
@@ -106,7 +106,7 @@ class DockerSandboxSpecServiceInjector(SandboxSpecServiceInjector):
                     break  # Pull completed
                 except asyncio.TimeoutError:
                     # 5 seconds elapsed, log progress message
-                    _logger.info(f'🔄 Downloading Docker Image: {image_id}...')
+                    _logger.info(f' Downloading Docker Image: {image_id}...')
 
         async def pull_image():
             """Perform the actual Docker image pull."""

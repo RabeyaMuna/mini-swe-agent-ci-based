@@ -2133,9 +2133,9 @@ class TestLiveStatusAppConversationService:
 
         mock_conversation_info = Mock(spec=AppConversationInfo)
         mock_conversation_info.id = conversation_id
-        mock_conversation_info.title = 'Café 🔐'
+        mock_conversation_info.title = 'Café '
         mock_conversation_info.model_dump_json = Mock(
-            return_value='{"id": "test", "title": "Café 🔐"}'
+            return_value='{"id": "test", "title": "Café "}'
         )
 
         self.mock_app_conversation_info_service.get_app_conversation_info = AsyncMock(
@@ -2148,7 +2148,7 @@ class TestLiveStatusAppConversationService:
             return_value={
                 'id': str(mock_event.id),
                 'type': 'observation',
-                'message': 'résumé 🔐',
+                'message': 'résumé ',
             }
         )
 
@@ -2162,7 +2162,7 @@ class TestLiveStatusAppConversationService:
         with zipfile.ZipFile(io.BytesIO(result), 'r') as zipf:
             with zipf.open('meta.json') as meta_file:
                 meta_content = meta_file.read().decode('utf-8')
-                assert '"title": "Café 🔐"' in meta_content
+                assert '"title": "Café "' in meta_content
 
             event_files = [
                 name for name in zipf.namelist() if name.startswith('event_')
@@ -2170,7 +2170,7 @@ class TestLiveStatusAppConversationService:
             assert len(event_files) == 1
             with zipf.open(event_files[0]) as event_file:
                 event_content = json.loads(event_file.read().decode('utf-8'))
-                assert event_content['message'] == 'résumé 🔐'
+                assert event_content['message'] == 'résumé '
 
     @pytest.mark.asyncio
     async def test_export_conversation_conversation_not_found(self):

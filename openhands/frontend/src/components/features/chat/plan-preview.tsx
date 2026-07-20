@@ -132,7 +132,7 @@ export function PlanPreview({
           <Typography.Text className="font-medium text-[14px] text-black leading-5">
             {t(I18nKey.COMMON$BUILD)}{" "}
             <Typography.Text className="font-medium text-black">
-              ⌘↩
+              ↩
             </Typography.Text>
           </Typography.Text>
         </button>

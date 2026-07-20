@@ -125,10 +125,10 @@ const getTaskTrackingObservationContent = (
     taskList.forEach((task, index) => {
       const statusIcon =
         {
-          todo: "⏳",
-          in_progress: "🔄",
-          done: "✅",
-        }[task.status] || "❓";
+          todo: "",
+          in_progress: "",
+          done: "",
+        }[task.status] || "";
 
       content += `\n${index + 1}. ${statusIcon} **[${task.status.toUpperCase().replace("_", " ")}]** ${task.title}`;
       content += `\n   *ID: ${task.id}*`;

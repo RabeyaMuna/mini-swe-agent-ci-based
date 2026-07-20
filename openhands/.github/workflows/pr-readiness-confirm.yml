@@ -140,7 +140,7 @@ jobs:
                   issue_number: issueNumber,
                   body: [
                     reminderMarker,
-                    '👋 Thanks for opening this PR!',
+                    ' Thanks for opening this PR!',
                     '',
                     'Before review, please add a short note in the `HUMAN:` section at the top of the PR description telling maintainers, in your own words, what this PR does.',
                     '',
@@ -197,9 +197,9 @@ jobs:
             const marker = '<!-- pr-readiness-confirm -->';
             const body = [
               marker,
-              '👋 Thanks for opening this PR!',
+              ' Thanks for opening this PR!',
               '',
-              'Your PR is marked for review. Can you confirm with a 👍 reaction **on this comment** or a reply that this PR is ready to review?',
+              'Your PR is marked for review. Can you confirm with a  reaction **on this comment** or a reply that this PR is ready to review?',
               '',
               '> If no confirmation is received within 7 days, this PR will be converted back to a draft.',
             ].join('\n');
@@ -248,7 +248,7 @@ jobs:
               const commentDate = new Date(botComment.created_at);
               if (commentDate > cutoff) continue; // not stale yet
 
-              // Check for a 👍 reaction from the PR author
+              // Check for a  reaction from the PR author
               const reactions = await github.paginate(github.rest.reactions.listForIssueComment, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,

@@ -200,7 +200,7 @@ def main():
     try:
         new_spec = update_openapi_spec(spec_path)
 
-        print('✅ Successfully updated OpenAPI specification!')
+        print(' Successfully updated OpenAPI specification!')
         print(f'   OpenAPI version: {new_spec.get("openapi", "N/A")}')
         print(f'   API version: {new_spec.get("info", {}).get("version", "N/A")}')
         print(f'   Total endpoints: {len(new_spec.get("paths", {}))}')
@@ -217,7 +217,7 @@ def main():
                 print(f'     ... and {len(paths) - 5} more')
 
     except Exception as e:
-        print(f'❌ Error updating OpenAPI specification: {e}')
+        print(f' Error updating OpenAPI specification: {e}')
         sys.exit(1)
 
 

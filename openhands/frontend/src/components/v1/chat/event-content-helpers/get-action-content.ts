@@ -119,12 +119,12 @@ const getTaskTrackerActionContent = (action: TaskTrackerAction): string => {
       content += `\n\n**Task List (${action.task_list.length} ${action.task_list.length === 1 ? "item" : "items"}):**\n`;
       action.task_list.forEach((task, index: number) => {
         const statusMap = {
-          todo: "⏳",
-          in_progress: "🔄",
-          done: "✅",
+          todo: "",
+          in_progress: "",
+          done: "",
         };
         const statusIcon =
-          statusMap[task.status as keyof typeof statusMap] || "❓";
+          statusMap[task.status as keyof typeof statusMap] || "";
         content += `\n${index + 1}. ${statusIcon} **[${task.status.toUpperCase().replace("_", " ")}]** ${task.title}`;
         if (task.notes) {
           content += `\n   *Notes: ${task.notes}*`;

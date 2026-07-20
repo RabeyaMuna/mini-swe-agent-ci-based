@@ -414,7 +414,7 @@ def seed_data(
                 total_conversations += conversations_per_org
                 print(f'  Created {conversations_per_org} conversations')
 
-        print('\n✅ Seed complete!')
+        print('\n Seed complete!')
         print(f'   Organizations: {org_count}')
         print(f'   Total users: {org_count * users_per_org}')
         print(f'   Total conversations: {total_conversations}')
@@ -422,7 +422,7 @@ def seed_data(
 
     except Exception as e:
         session.rollback()
-        print(f'❌ Error seeding data: {e}')
+        print(f' Error seeding data: {e}')
         raise
     finally:
         session.close()

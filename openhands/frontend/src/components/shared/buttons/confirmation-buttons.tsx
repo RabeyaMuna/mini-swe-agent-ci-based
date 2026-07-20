@@ -71,9 +71,9 @@ export function ConfirmationButtons() {
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      // Cancel: Shift+Cmd+Backspace (⇧⌘⌫)
+      // Cancel: Shift+Cmd+Backspace (⇧)
       handleCancelShortcut(event);
-      // Continue: Cmd+Enter (⌘↩)
+      // Continue: Cmd+Enter (↩)
       handleContinueShortcut(event);
     };
 

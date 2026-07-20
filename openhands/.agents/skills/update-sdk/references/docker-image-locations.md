@@ -10,7 +10,7 @@ These files contain image tags that **must** be updated whenever the SDK version
 - **Line:** `AGENT_SERVER_IMAGE = 'ghcr.io/openhands/agent-server:<tag>-python'`
 - **Format:** `<sdk-version>-python` for releases (e.g., `1.12.0-python`), `<7-char-commit-hash>-python` for dev pins
 - **Source of truth** for which agent-server image the app server pulls at runtime
-- **⚠️ Gotcha:** When pinning to an SDK PR, the image tag is the **merge-commit SHA** from GitHub Actions, not the PR head-commit SHA. Check the SDK PR description or CI logs for the correct tag.
+- ** Gotcha:** When pinning to an SDK PR, the image tag is the **merge-commit SHA** from GitHub Actions, not the PR head-commit SHA. Check the SDK PR description or CI logs for the correct tag.
 
 ### `docker-compose.yml`
 - **Lines:**

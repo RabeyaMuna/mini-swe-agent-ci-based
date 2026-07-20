@@ -37,9 +37,9 @@ class MemoryRetriever:
                 if path.exists():
                     with open(path, 'r') as f:
                         self.memory_data[layer] = json.load(f)
-                    print(f"✓ Loaded {layer} memory from {path}")
+                    print(f" Loaded {layer} memory from {path}")
                 else:
-                    print(f"⚠️  {path} not found, {layer} memory disabled")
+                    print(f"  {path} not found, {layer} memory disabled")
                     self.memory_data[layer] = {}
 
     def retrieve(

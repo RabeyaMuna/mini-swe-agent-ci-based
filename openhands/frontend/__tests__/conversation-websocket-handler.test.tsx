@@ -1483,7 +1483,7 @@ describe("Conversation WebSocket Handler", () => {
     it("should append output to store when ExecuteBashObservation event is received", async () => {
       // Create a mock ExecuteBashObservation event
       const mockBashObservationEvent = createMockExecuteBashObservationEvent(
-        "PASS  tests/example.test.js\n  ✓ should work (2 ms)",
+        "PASS  tests/example.test.js\n   should work (2 ms)",
         "npm test",
       );
 
@@ -1516,7 +1516,7 @@ describe("Conversation WebSocket Handler", () => {
       const { commands } = useCommandStore.getState();
       expect(commands[0].type).toBe("output");
       expect(commands[0].content).toBe(
-        "PASS  tests/example.test.js\n  ✓ should work (2 ms)",
+        "PASS  tests/example.test.js\n   should work (2 ms)",
       );
     });
   });

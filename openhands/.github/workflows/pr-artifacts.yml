@@ -67,7 +67,7 @@ jobs:
                   script: |
                       const marker = '<!-- pr-artifacts-notice -->';
                       const body = `${marker}
-                      ✅ **PR Artifacts Cleaned Up**
+                       **PR Artifacts Cleaned Up**
 
                       The \`.pr/\` directory has been automatically removed.
                       `;
@@ -115,7 +115,7 @@ jobs:
                   script: |
                       const marker = '<!-- pr-artifacts-notice -->';
                       const body = `${marker}
-                      📁 **PR Artifacts Notice**
+                       **PR Artifacts Notice**
 
                       This PR contains a \`.pr/\` directory with PR-specific documents. This directory will be **automatically removed** when the PR is approved.
 

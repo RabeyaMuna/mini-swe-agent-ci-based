@@ -34,7 +34,7 @@ LOG_JSON_LEVEL_KEY = os.getenv('LOG_JSON_LEVEL_KEY', 'level')
 # Configure litellm logging based on DEBUG_LLM
 if DEBUG_LLM:
     confirmation = input(
-        '\n⚠️ WARNING: You are enabling DEBUG_LLM which may expose sensitive information like API keys.\n'
+        '\n WARNING: You are enabling DEBUG_LLM which may expose sensitive information like API keys.\n'
         'This should NEVER be enabled in production.\n'
         "Type 'y' to confirm you understand the risks: "
     )

@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        ## Thank you for suggesting a feature! 💡
+        ## Thank you for suggesting a feature! 
 
         **Please provide detailed information.** Vague or low-effort requests may be closed. Well-documented feature requests with strong community support are more likely to be added to the roadmap.
 

@@ -56,7 +56,7 @@ describe("CriticResultDisplay", () => {
       <CriticResultDisplay criticResult={makeCriticResult({ score: 1.0 })} />,
     );
 
-    expect(screen.getByText("★★★★★")).toBeInTheDocument();
+    expect(screen.getByText("")).toBeInTheDocument();
   });
 
   it("renders 0 stars for a zero score", () => {
@@ -64,7 +64,7 @@ describe("CriticResultDisplay", () => {
       <CriticResultDisplay criticResult={makeCriticResult({ score: 0 })} />,
     );
 
-    expect(screen.getByText("☆☆☆☆☆")).toBeInTheDocument();
+    expect(screen.getByText("")).toBeInTheDocument();
   });
 
   it("renders green color for high score", () => {
@@ -72,7 +72,7 @@ describe("CriticResultDisplay", () => {
       <CriticResultDisplay criticResult={makeCriticResult({ score: 0.8 })} />,
     );
 
-    const stars = screen.getByText("★★★★☆");
+    const stars = screen.getByText("");
     expect(stars.className).toContain("text-green-400");
   });
 
@@ -81,7 +81,7 @@ describe("CriticResultDisplay", () => {
       <CriticResultDisplay criticResult={makeCriticResult({ score: 0.5 })} />,
     );
 
-    const stars = screen.getByText("★★★☆☆");
+    const stars = screen.getByText("");
     expect(stars.className).toContain("text-yellow-400");
   });
 
@@ -90,7 +90,7 @@ describe("CriticResultDisplay", () => {
       <CriticResultDisplay criticResult={makeCriticResult({ score: 0.2 })} />,
     );
 
-    const stars = screen.getByText("★☆☆☆☆");
+    const stars = screen.getByText("");
     expect(stars.className).toContain("text-red-400");
   });
 

@@ -10,24 +10,24 @@ interface HookExecutionEventMessageProps {
 
 function getHookIcon(hookType: string, blocked: boolean): string {
   if (blocked) {
-    return "🚫";
+    return "";
   }
 
   switch (hookType) {
     case "PreToolUse":
-      return "⏳";
+      return "";
     case "PostToolUse":
-      return "✅";
+      return "";
     case "UserPromptSubmit":
-      return "📝";
+      return "";
     case "SessionStart":
-      return "🚀";
+      return "";
     case "SessionEnd":
-      return "🏁";
+      return "";
     case "Stop":
-      return "⏹️";
+      return "";
     default:
-      return "🔗";
+      return "";
   }
 }
 

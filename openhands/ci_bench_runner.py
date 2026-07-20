@@ -20,9 +20,11 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import our modules
-from data_loader import CIBenchDataLoader
-from prompt_formatter import PromptFormatter
 from scripts.model_registry import configure_model_environment, resolve_model_alias
+
+from data_loader import CIBenchDataLoader
+from simple_agent import run_simple_agent
+from prompt_formatter import PromptFormatter
 
 # Shared paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -105,8 +107,9 @@ class OpenHandsMemoryAdapter:
 
     def get_problem(self, issue_data: dict[str, Any]) -> dict[str, Any]:
         problem = issue_data.get('problem_statement', '')
+        ci_problem = _ci_problem_from_issue(issue_data)
         if not self._memory_system:
-            return {'problem': problem, 'repair_plan': None}
+            return {'problem': problem, 'repair_plan': None, 'problems': [ci_problem]}
 
         from memory_plugin.ci_memory_system import format_memory_context
 
@@ -124,7 +127,74 @@ class OpenHandsMemoryAdapter:
             validation_sequence=workflow.get('validation_sequence') or [],
         )
         repair_plan = format_memory_context(memory) or None
-        return {'problem': problem, 'repair_plan': repair_plan}
+        memory_problems = _memory_problems_from_retrieval(memory)
+        return {
+            'problem': problem,
+            'repair_plan': repair_plan,
+            'problems': [ci_problem, *memory_problems],
+        }
+
+
+def _ci_problem_from_issue(issue_data: dict[str, Any]) -> dict[str, Any]:
+    """Create the baseline problem passed to OpenHands."""
+    workflow = issue_data.get('workflow') or {}
+    return {
+        'source': 'ci failure',
+        'title': 'Current CI failure',
+        'description': issue_data.get('problem_statement', ''),
+        'ci_failure_summary': issue_data.get('ci_failure_summary', ''),
+        'workflow_context': workflow,
+        'validation_command': issue_data.get('validation_command')
+        or workflow.get('validation_command')
+        or '',
+    }
+
+
+def _memory_problems_from_retrieval(memory: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract previous-experience follow-up problems from memory retrieval."""
+    llm_selection = memory.get('llm_selection') or {}
+    raw_problems = (
+        llm_selection.get('separate_problems')
+        or (llm_selection.get('guidance_document') or {}).get('problems')
+        or []
+    )
+    if not isinstance(raw_problems, list):
+        return []
+
+    problems = []
+    seen = set()
+    for raw in raw_problems:
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get('source') or raw.get('memory_level') or '').lower()
+        if source in {'ci', 'ci failure'}:
+            continue
+        description = (
+            raw.get('problem_statement')
+            or raw.get('description')
+            or raw.get('problem')
+            or raw.get('error_description')
+            or ''
+        )
+        fix_strategy = raw.get('fix_strategy') or raw.get('how_fixed') or ''
+        key = (str(description).strip(), str(fix_strategy).strip())
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        problems.append(
+            {
+                'source': raw.get('source') or raw.get('memory_level') or 'previous experience',
+                'title': f'Previous experience problem {len(problems) + 1}',
+                'description': str(description),
+                'root_cause': str(raw.get('root_cause') or ''),
+                'fix_strategy': str(fix_strategy),
+                'validation_command': str(
+                    raw.get('verification_cmd') or raw.get('validation_cmd') or ''
+                ),
+                'files': raw.get('files') or raw.get('affected_files') or [],
+            }
+        )
+    return problems
 
 
 def run_single_issue(
@@ -168,22 +238,73 @@ def run_single_issue(
         ],  # None for baseline, string for memory
     )
 
-    # TODO: Actually run OpenHands here
-    # For now, this is a placeholder
-    print(f'  Repository: {openhands_task["repository"]}')
-    print(f'  Branch: {openhands_task["selected_branch"]}')
-    print(f'  Has Repair Plan: {memory_result["repair_plan"] is not None}')
-    print('  ⚠️  OpenHands execution not yet implemented')
+    # Add commit_sha for environment setup
+    openhands_task['commit_sha'] = issue_data['sha_fail']
+    openhands_task['validation_command'] = issue_data.get('validation_command', '')
+    openhands_task['problems'] = memory_result['problems']
 
-    # Placeholder result
+    # Execute agent to generate patch
+    print(f'  Repository: {openhands_task["repository"]}')
+    print(f'  Commit: {openhands_task["commit_sha"][:8]}')
+    print(f'  Has Repair Plan: {memory_result["repair_plan"] is not None}')
+    print(f'  Problems to solve: {len(openhands_task["problems"])}')
+
+    # Setup repository
+    from pathlib import Path
+    import subprocess
+    import tempfile
+    import shutil
+
+    repo_cache = REPO_ROOT / 'shared_cache' / instance_id.split('_')[0]
+
+    # Clone if needed
+    if not repo_cache.exists():
+        repo_cache.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ['git', 'clone', '--depth', '1', openhands_task['repository'], str(repo_cache)],
+            check=True,
+            capture_output=True,
+        )
+
+    # Create temp working copy
+    work_dir = Path(tempfile.mkdtemp(prefix=f'openhands_{instance_id}_'))
+    shutil.copytree(repo_cache, work_dir, dirs_exist_ok=True, symlinks=True)
+
+    # Fetch and checkout specific commit
+    try:
+        subprocess.run(['git', 'fetch', 'origin', openhands_task['commit_sha']], cwd=work_dir, check=True, capture_output=True)
+        subprocess.run(['git', 'checkout', openhands_task['commit_sha']], cwd=work_dir, check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        # Try fetching all
+        subprocess.run(['git', 'fetch', '--unshallow'], cwd=work_dir, capture_output=True)
+        subprocess.run(['git', 'checkout', openhands_task['commit_sha']], cwd=work_dir, check=True)
+
+    # Run simple agent
+    try:
+        agent_result = run_simple_agent(
+            problem_description=openhands_task['initial_message'],
+            repository=openhands_task['repository'],
+            commit=openhands_task['commit_sha'],
+            work_dir=work_dir,
+            model=model,
+            max_steps=30,
+        )
+    finally:
+        # Cleanup temp directory
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    # Format result
     result = {
         'instance_id': instance_id,
         'model_name_or_path': model,
-        'model_patch': '',  # Would contain the generated patch
+        'model_patch': agent_result['patch'],
         'agent': 'openhands',
         'has_memory': memory_result['repair_plan'] is not None,
-        'status': 'pending_implementation',
+        'status': 'success' if agent_result['patch'] else 'no_patch',
+        'total_cost': agent_result['cost'],
     }
+
+    print(f'  Status: {result["status"]} | Cost: ${result["total_cost"]:.4f}')
 
     return result
 
@@ -279,16 +400,14 @@ def run_batch(
         json.dump(results, f, indent=2)
 
     print(f'\n{"=" * 80}')
-    print(f'✓ Completed {len(results)} issues')
-    print(f'✓ Results saved to: {preds_file}')
-    print('✓ Used shared memory plugin: consistent with mini-swe-agent')
+    print(f' Completed {len(results)} issues')
+    print(f' Results saved to: {preds_file}')
+    print(' Used shared memory plugin: consistent with mini-swe-agent')
     print(f'{"=" * 80}\n')
 
     # Summary
     print('Next steps:')
-    print('1. Implement actual OpenHands agent execution')
-    print('2. Replace placeholder results with real patches')
-    print(f'3. Evaluate with: python scripts/evaluate_ablation_preds.py {preds_file}')
+    print(f'1. Evaluate with: python scripts/evaluate_ablation_preds.py {preds_file}')
 
 
 def main():

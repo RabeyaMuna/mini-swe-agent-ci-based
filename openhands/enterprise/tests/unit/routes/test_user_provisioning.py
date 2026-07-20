@@ -607,7 +607,7 @@ class TestProvisionUserHandler:
         handles['token_manager'].delete_keycloak_user.assert_awaited_once_with(
             new_user_id
         )
-        # Ordering: target-membership ➜ personal-org cascade ➜ Keycloak.
+        # Ordering: target-membership  personal-org cascade  Keycloak.
         call_names = [c[0] for c in order_tracker.mock_calls]
         assert call_names == [
             'remove_member',

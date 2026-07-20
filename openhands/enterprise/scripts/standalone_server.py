@@ -408,7 +408,7 @@ def create_standalone_frontend():
 <body>
     <div class="container">
         <header>
-            <h1>🎯 OpenHands Admin Dashboard</h1>
+            <h1> OpenHands Admin Dashboard</h1>
             <select id="orgSelect" class="org-select">
                 <option value="">Select Organization</option>
             </select>

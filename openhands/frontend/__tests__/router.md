@@ -113,14 +113,14 @@ render(
 `BrowserRouter` interacts with the actual browser history API, which can cause issues in test environments:
 
 ```typescript
-// ❌ Avoid
+//  Avoid
 render(
   <BrowserRouter>
     <MyComponent />
   </BrowserRouter>
 );
 
-// ✅ Use MemoryRouter instead
+//  Use MemoryRouter instead
 render(
   <MemoryRouter>
     <MyComponent />
@@ -133,7 +133,7 @@ render(
 Mocking hooks like `useParams` directly can be brittle and doesn't test the actual routing behavior:
 
 ```typescript
-// ❌ Avoid when possible
+//  Avoid when possible
 vi.mock("react-router", async () => {
   const actual = await vi.importActual("react-router");
   return {
@@ -142,7 +142,7 @@ vi.mock("react-router", async () => {
   };
 });
 
-// ✅ Prefer createRoutesStub - tests real routing behavior
+//  Prefer createRoutesStub - tests real routing behavior
 const RouterStub = createRoutesStub([
   {
     Component: MyComponent,

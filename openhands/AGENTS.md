@@ -109,7 +109,7 @@ When working on a PR that requires design documents, scripts meant for developme
 ### Important Notes
 
 - Do NOT put anything in `.pr/` that needs to be preserved after merge
-- The `.pr/` check passes (green ✅) during development — it only posts a notification, not a blocking error
+- The `.pr/` check passes (green ) during development — it only posts a notification, not a blocking error
 - For fork PRs: You must manually remove `.pr/` before the PR can be merged
 
 ### When to Use
@@ -296,7 +296,7 @@ Each integration follows a consistent pattern with service classes, storage mode
 
 If you are starting a pull request (PR), please follow the template in `.github/pull_request_template.md`.
 - The PR template now starts with a `HUMAN:` section, the human-tested checkbox, and an `AGENT:` section.
-- `.github/workflows/pr-readiness-confirm.yml` checks non-draft PRs for non-empty text between `HUMAN:` and the human-tested checkbox; if present it adds a 👍 reaction, and if absent it posts a reminder comment.
+- `.github/workflows/pr-readiness-confirm.yml` checks non-draft PRs for non-empty text between `HUMAN:` and the human-tested checkbox; if present it adds a  reaction, and if absent it posts a reminder comment.
 
 
 ## Implementation Details

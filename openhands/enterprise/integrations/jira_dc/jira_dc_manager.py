@@ -56,8 +56,8 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 OH_LABEL, INLINE_OH_LABEL = get_oh_labels(HOST)
 
 # Unicode codepoint of the emoji reaction posted to acknowledge an @openhands
-# mention via Jira's internal reactions API. 1f44d = 👍 (thumbs up). Note:
-# 1f440 (👀 eyes) is NOT in Jira DC's reaction palette, so thumbs-up is used.
+# mention via Jira's internal reactions API. 1f44d =  (thumbs up). Note:
+# 1f440 ( eyes) is NOT in Jira DC's reaction palette, so thumbs-up is used.
 JIRA_DC_REACTION_EMOJI_ID = '1f44d'
 
 # Events the OpenHands webhook subscribes to, used when auto-enrolling the
@@ -829,7 +829,7 @@ class JiraDcManager(Manager[JiraDcViewInterface]):
         """Add an emoji reaction to a Jira DC comment as the service account.
 
         Uses Jira Data Center's internal reactions API (the endpoint the web UI
-        calls). emoji_id is a Unicode codepoint string, e.g. '1f44d' for 👍.
+        calls). emoji_id is a Unicode codepoint string, e.g. '1f44d' for .
 
         Args:
             comment_id: The id of the comment to react to.

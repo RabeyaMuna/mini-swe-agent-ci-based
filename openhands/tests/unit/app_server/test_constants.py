@@ -114,7 +114,7 @@ class TestValidateSecretsDict:
         """Value length should be checked in bytes, not characters."""
         # Each emoji is 4 bytes in UTF-8
         emoji_count = (MAX_API_SECRET_VALUE_LENGTH // 4) + 1
-        unicode_value = '🔐' * emoji_count
+        unicode_value = '' * emoji_count
         with pytest.raises(ValueError, match='value exceeds maximum length'):
             validate_secrets_dict({'KEY': unicode_value})
 

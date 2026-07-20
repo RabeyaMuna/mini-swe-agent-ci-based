@@ -233,7 +233,7 @@ def print_results(pr_info: dict[int, dict]):
         commit_count = len(info['commits'])
         if commit_count > 1:
             print(
-                f'  ⚠️  Found {commit_count} commits (possible cherry-pick or multi-commit PR):'
+                f'    Found {commit_count} commits (possible cherry-pick or multi-commit PR):'
             )
             for commit in info['commits'][:3]:  # Show first 3
                 print(f'      {commit["hash"]}: {commit["subject"][:60]}')

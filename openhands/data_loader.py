@@ -224,14 +224,14 @@ class CIBenchDataLoader:
         """
         eval_path = Path(eval_issues_path)
         eval_issues = self._load_json_or_jsonl(eval_path)
-        print(f'✓ Loaded {len(eval_issues)} eval issue ids from {eval_issues_path}')
+        print(f' Loaded {len(eval_issues)} eval issue ids from {eval_issues_path}')
 
         try:
             hf_rows = self._load_hf_rows(hf_dataset, split)
             hf_index = self._index_records(hf_rows)
-            print(f'✓ Loaded {len(hf_rows)} benchmark rows from {hf_dataset}')
+            print(f' Loaded {len(hf_rows)} benchmark rows from {hf_dataset}')
         except Exception as exc:
-            print(f'⚠️  Could not load Hugging Face dataset: {exc}')
+            print(f'  Could not load Hugging Face dataset: {exc}')
             hf_index = {}
 
         issues = []
@@ -246,7 +246,7 @@ class CIBenchDataLoader:
             merged = {**match, **eval_issue} if match else eval_issue
             issues.append(self._normalize_issue(merged))
 
-        print(f'✓ Prepared {len(issues)} filtered benchmark issues')
+        print(f' Prepared {len(issues)} filtered benchmark issues')
         return issues
 
     def ensure_data_files(
@@ -261,11 +261,11 @@ class CIBenchDataLoader:
         """
         # Load or generate log_details
         if self.log_details_path.exists():
-            print(f'✓ Loading cached CI logs from {self.log_details_path}')
+            print(f' Loading cached CI logs from {self.log_details_path}')
             with open(self.log_details_path, 'r') as f:
                 log_details = json.load(f)
         else:
-            print(f'⚠️  {self.log_details_path} not found, starting empty cache')
+            print(f'  {self.log_details_path} not found, starting empty cache')
             log_details = {}
 
         log_details, logs_changed = self._ensure_ci_failure_records(
@@ -277,15 +277,15 @@ class CIBenchDataLoader:
         if logs_changed:
             with open(self.log_details_path, 'w') as f:
                 json.dump(log_details, f, indent=2)
-            print(f'✓ Updated CI failure cache at {self.log_details_path}')
+            print(f' Updated CI failure cache at {self.log_details_path}')
 
         # Load or generate workflow_cache
         if self.workflow_cache_path.exists():
-            print(f'✓ Loading cached workflow data from {self.workflow_cache_path}')
+            print(f' Loading cached workflow data from {self.workflow_cache_path}')
             with open(self.workflow_cache_path, 'r') as f:
                 workflow_cache = json.load(f)
         else:
-            print(f'⚠️  {self.workflow_cache_path} not found, starting empty cache')
+            print(f'  {self.workflow_cache_path} not found, starting empty cache')
             workflow_cache = {}
 
         workflow_cache, workflow_changed = self._ensure_workflow_records(
@@ -296,7 +296,7 @@ class CIBenchDataLoader:
         if workflow_changed:
             with open(self.workflow_cache_path, 'w') as f:
                 json.dump(workflow_cache, f, indent=2)
-            print(f'✓ Updated workflow validation cache at {self.workflow_cache_path}')
+            print(f' Updated workflow validation cache at {self.workflow_cache_path}')
 
         return log_details, workflow_cache
 

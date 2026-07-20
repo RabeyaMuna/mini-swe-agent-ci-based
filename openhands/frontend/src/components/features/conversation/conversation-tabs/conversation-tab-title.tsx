@@ -67,7 +67,7 @@ export function ConversationTabTitle({
           data-testid="planner-tab-build-button"
         >
           <Typography.Text className="text-black text-[11px] font-medium leading-5">
-            {t(I18nKey.COMMON$BUILD)} ⌘↩
+            {t(I18nKey.COMMON$BUILD)} ↩
           </Typography.Text>
         </button>
       )}

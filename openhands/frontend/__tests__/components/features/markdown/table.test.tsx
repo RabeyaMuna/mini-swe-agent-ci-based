@@ -5,8 +5,8 @@ import { MarkdownRenderer } from "#/components/features/markdown/markdown-render
 const GFM_TABLE = [
   "| Feature | OpenAI Codex | Claude Code |",
   "|---------|--------------|-------------|",
-  "| CLI     | ✅           | ✅          |",
-  "| Mobile  | ❌           | ✅          |",
+  "| CLI     |            |           |",
+  "| Mobile  |            |           |",
 ].join("\n");
 
 describe("table (markdown)", () => {

@@ -387,7 +387,7 @@ StartConversationRequest(
 )
 ```
 
-**⚠️ CRITICAL**: Plugin parameters are passed to the agent via **message text**, not via the `PluginSource` object. The SDK's `PluginSource` class only has `source`, `ref`, and `repo_path` fields.
+** CRITICAL**: Plugin parameters are passed to the agent via **message text**, not via the `PluginSource` object. The SDK's `PluginSource` class only has `source`, `ref`, and `repo_path` fields.
 
 **Note on message construction**: The original slash command `/city-weather:now` does NOT include the parameter value "Tokyo" inline. The parameter appears only in the formatted "Plugin Configuration Parameters" block appended by the App Server.
 

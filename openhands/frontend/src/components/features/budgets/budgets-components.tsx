@@ -49,7 +49,7 @@ export function PillBadge({
           : "bg-[#151D2A] text-[#6B6B6B] border-[#262626]"
       } ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
     >
-      {active && <span className="text-blue-400">✓</span>}
+      {active && <span className="text-blue-400"></span>}
       {icon}
       {label}
     </span>

@@ -481,13 +481,13 @@ export const getConversationStatusLabel = (
 export const getStatusIcon = (status: string) => {
   switch (status) {
     case "todo":
-      return "⏳";
+      return "";
     case "in_progress":
-      return "🔄";
+      return "";
     case "done":
-      return "✅";
+      return "";
     default:
-      return "❓";
+      return "";
   }
 };
 

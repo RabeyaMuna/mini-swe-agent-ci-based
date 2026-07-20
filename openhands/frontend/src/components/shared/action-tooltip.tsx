@@ -22,8 +22,8 @@ export function ActionTooltip({ type, onClick }: ActionTooltipProps) {
     : t(I18nKey.CHAT_INTERFACE$USER_REJECTED);
 
   const buttonLabel = isConfirm
-    ? `${t(I18nKey.CHAT_INTERFACE$INPUT_CONTINUE_MESSAGE)} ⌘↩`
-    : `${t(I18nKey.BUTTON$CANCEL)} ⇧⌘⌫`;
+    ? `${t(I18nKey.CHAT_INTERFACE$INPUT_CONTINUE_MESSAGE)} ↩`
+    : `${t(I18nKey.BUTTON$CANCEL)} ⇧`;
 
   return (
     <Tooltip content={content} closeDelay={100}>

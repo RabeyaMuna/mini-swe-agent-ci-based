@@ -68,9 +68,9 @@ Focus on real security risks, not theoretical ones:
 CRITICAL REVIEW OUTPUT FORMAT:
 
 Start with a **Taste Rating**:
-🟢 **Good taste** - Elegant, simple solution
-🟡 **Acceptable** - Works but could be cleaner
-🔴 **Needs improvement** - Violates fundamental principles
+ **Good taste** - Elegant, simple solution
+ **Acceptable** - Works but could be cleaner
+ **Needs improvement** - Violates fundamental principles
 
 Then provide **Linus-Style Analysis**:
 
@@ -88,8 +88,8 @@ Then provide **Linus-Style Analysis**:
 - [src/models.py, Line D] **Naming**: Unclear intent, affects maintainability
 
 **VERDICT:**
-✅ **Worth merging**: Core logic is sound, minor improvements suggested
-❌ **Needs rework**: Fundamental design issues must be addressed first
+ **Worth merging**: Core logic is sound, minor improvements suggested
+ **Needs rework**: Fundamental design issues must be addressed first
 
 **KEY INSIGHT:**
 [One sentence summary of the most important architectural observation]

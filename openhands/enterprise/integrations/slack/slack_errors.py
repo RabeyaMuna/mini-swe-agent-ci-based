@@ -68,27 +68,27 @@ class SlackError(Exception):
 # Centralized user-facing messages
 _USER_MESSAGES: dict[SlackErrorCode, str] = {
     SlackErrorCode.SESSION_EXPIRED: (
-        '⏰ Your session has expired. '
+        ' Your session has expired. '
         'Please mention me again with your request to start a new conversation.'
     ),
     SlackErrorCode.REDIS_STORE_FAILED: (
-        '⚠️ Something went wrong on our end (ref: {code}). '
+        ' Something went wrong on our end (ref: {code}). '
         'Please try again in a few moments.'
     ),
     SlackErrorCode.REDIS_RETRIEVE_FAILED: (
-        '⚠️ Something went wrong on our end (ref: {code}). '
+        ' Something went wrong on our end (ref: {code}). '
         'Please try again in a few moments.'
     ),
     SlackErrorCode.USER_NOT_AUTHENTICATED: (
-        '🔐 Please link your Slack account to OpenHands: '
+        ' Please link your Slack account to OpenHands: '
         '[Click here to Login]({login_link})'
     ),
     SlackErrorCode.PROVIDER_TIMEOUT: (
-        '⏱️ The request timed out while connecting to your git provider. '
+        ' The request timed out while connecting to your git provider. '
         'Please try again.'
     ),
     SlackErrorCode.PROVIDER_AUTH_FAILED: (
-        '🔐 Authentication with your git provider failed. '
+        ' Authentication with your git provider failed. '
         f'Please re-login at [OpenHands Cloud]({HOST_URL}) and try again.'
     ),
     SlackErrorCode.LLM_AUTH_FAILED: (
@@ -100,7 +100,7 @@ _USER_MESSAGES: dict[SlackErrorCode, str] = {
         f'[OpenHands Cloud]({HOST_URL}) before starting a job.'
     ),
     SlackErrorCode.MISSING_SLACK_SCOPES: (
-        '⚠️ The Slack app is missing required permissions. '
+        ' The Slack app is missing required permissions. '
         f'Please ask your workspace admin to re-install the OpenHands Slack App at {HOST_URL}/slack/install '
         'to authorize the updated permissions.'
     ),

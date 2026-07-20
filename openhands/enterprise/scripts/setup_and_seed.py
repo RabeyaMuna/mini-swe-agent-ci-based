@@ -549,14 +549,14 @@ def seed_data(
                 total_conversations += conversations_per_org
                 print(f'  Created {conversations_per_org} conversations')
 
-        print('\n✅ Seed complete!')
+        print('\n Seed complete!')
         print(f'   Orgs: {org_count}')
         print(f'   Total users: {org_count * users_per_org}')
         print(f'   Total conversations: {total_conversations}')
 
     except Exception as e:
         session.rollback()
-        print(f'❌ Error seeding data: {e}')
+        print(f' Error seeding data: {e}')
         raise
     finally:
         session.close()
@@ -601,9 +601,9 @@ def main():
     # Test connection
     try:
         with engine.connect() as _:
-            print('✅ Connected to database')
+            print(' Connected to database')
     except Exception as e:
-        print(f'❌ Could not connect to database: {e}')
+        print(f' Could not connect to database: {e}')
         return 1
 
     # Create tables
@@ -617,7 +617,7 @@ def main():
         users_per_org=args.users_per_org,
     )
 
-    print(f'\n📊 Database ready at: {db_url}')
+    print(f'\n Database ready at: {db_url}')
 
     return 0
 

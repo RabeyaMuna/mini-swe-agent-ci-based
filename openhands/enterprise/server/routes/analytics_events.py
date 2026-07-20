@@ -72,7 +72,7 @@ class CreatePrButtonClickedEvent(BaseModel):
 #     ]
 # With a single member the discriminator is unnecessary; pydantic still uses
 # the ``Literal`` on ``event_type`` to reject unknown event types.
-# ⚠️ When adding a second event, wrap in:
+#  When adding a second event, wrap in:
 # Annotated[CreatePrButtonClickedEvent | NewEvent, Field(discriminator='event_type')]
 FrontendEvent = CreatePrButtonClickedEvent
 
