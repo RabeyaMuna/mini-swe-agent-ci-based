@@ -21,22 +21,9 @@ class PromptFormatter:
         if workflow_path:
             lines.append(f'Workflow path: {workflow_path}')
 
-        dependent_files = workflow.get('dependent_files')
-        if isinstance(dependent_files, list) and dependent_files:
-            lines.append('\nDependent files to inspect:')
-            for item in dependent_files:
-                if not isinstance(item, dict):
-                    continue
-                path = item.get('path')
-                reason = item.get('reason')
-                if path and reason:
-                    lines.append(f'- {path}: {reason}')
-                elif path:
-                    lines.append(f'- {path}')
-
         validation_sequence = workflow.get('validation_sequence')
         if isinstance(validation_sequence, list) and validation_sequence:
-            lines.append('\nCI setup and validation sequence:')
+            lines.append('\nCI verification sequence:')
             for item in validation_sequence:
                 if not isinstance(item, dict):
                     continue
@@ -108,20 +95,8 @@ class PromptFormatter:
 ## Repository
 {issue_data['repo']}
 
-## Required Checkout
-Before analyzing or editing, checkout exactly the failed commit and work from a branch based on it:
-
-```bash
-git fetch --all --tags
-git checkout -B benchmark-fix-{benchmark_id} {issue_data['sha_fail']} || (
-  git fetch --unshallow || true
-  git fetch origin {issue_data['sha_fail']}
-  git checkout -B benchmark-fix-{benchmark_id} {issue_data['sha_fail']}
-)
-git rev-parse HEAD
-```
-
-The `git rev-parse HEAD` output must match:
+## Failed Commit
+The runtime will checkout this failed commit before the agent edits files:
 {issue_data['sha_fail']}
 
 ## Problem
@@ -136,7 +111,7 @@ Use this processed failure analysis instead of raw CI logs:
 {repair_plan_section}
 
 ## CI Workflow Validation Context
-Use this cached workflow validation context as the source of setup and validation commands. If a command is a GitHub Actions action or shorthand, inspect the workflow path and dependent files in the repository to reconstruct the equivalent local setup.
+Use this cached workflow validation context as the source of setup and validation commands. Treat `validation_sequence` as CI verification information, not as files to edit. If a command is a GitHub Actions action or shorthand, inspect the workflow file in the repository to reconstruct the equivalent local setup.
 
 {workflow_validation}
 
@@ -144,14 +119,13 @@ Use this cached workflow validation context as the source of setup and validatio
 {issue_data.get('workflow_path') or issue_data.get('workflow', {}).get('workflow_path') or 'Inspect .github/workflows/ for the relevant workflow file.'}
 
 ## Task
-1. Do only the required checkout above before making changes.
-2. Review the problem statement, repair plan/prior experience if available, workflow validation context, workflow file, and dependent files.
-3. Determine the necessary local setup from the CI workflow and validation context.
-4. Reproduce or narrow the failing validation when practical using the relevant commands from the workflow validation context.
-5. Identify the root cause and make the smallest correct code change.
-6. If tools like ruff, black, isort, docformatter, or project-specific formatters are the appropriate fix, use them instead of hand-editing formatting.
-7. Run the relevant validation command(s) if possible. Prefer the smallest command that validates the failing area, then broader workflow commands if practical.
-8. If validation cannot run because of missing CI-only services, secrets, system packages, or time limits, state exactly what could not be run and what local checks you did run.
+1. Review the problem statement, repair plan/prior experience if available, workflow validation context, and workflow file.
+2. Determine the necessary local setup from the CI workflow and validation context.
+3. Reproduce or narrow the failing validation when practical using the relevant commands from the workflow validation context.
+4. Identify the root cause and make the smallest correct code change.
+5. If tools like ruff, black, isort, docformatter, or project-specific formatters are the appropriate fix, use them instead of hand-editing formatting.
+6. Run the relevant validation command(s) if possible. Prefer the smallest command that validates the failing area, then broader workflow commands if practical.
+7. If validation cannot run because of missing CI-only services, secrets, system packages, or time limits, state exactly what could not be run and what local checks you did run.
 
 ## Expected Output
 Leave the repository with the fix applied. The benchmark runner will collect the final unified diff against {issue_data['sha_fail']}.
@@ -165,9 +139,40 @@ Leave the repository with the fix applied. The benchmark runner will collect the
         }
 
     @staticmethod
+    def format_baseline_ci_failure(ci_failure_summary: str) -> str:
+        """
+        Format BASELINE task - just raw CI failure info, no guidance.
+
+        Agent must figure out everything on its own:
+        - What the errors mean
+        - Which files to fix
+        - How to fix them
+
+        Args:
+            ci_failure_summary: Formatted CI failure from data_loader
+
+        Returns:
+            Simple problem statement for baseline mode
+        """
+        return f"""The CI run failed. Fix the failures described below.
+
+{ci_failure_summary}
+
+Your task:
+1. Analyze the CI failure information above
+2. Identify which files need to be fixed
+3. Make the necessary code changes to fix the errors
+4. Ensure the fixes address all reported issues
+
+The repository is already checked out at the failed commit. Make your changes and the benchmark runner will collect the final diff.
+"""
+
+    @staticmethod
     def format_baseline_task(issue_data: dict[str, Any]) -> dict[str, Any]:
         """
-        Format baseline task (no memory) - uses unified format
+        Format baseline task (no memory, no decomposition, no guidance)
+
+        Baseline = Raw CI failure info only. Agent figures it out.
 
         Args:
             issue_data: Issue data from data_loader

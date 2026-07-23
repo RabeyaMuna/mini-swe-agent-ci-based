@@ -28,6 +28,16 @@ tqdm>=4.66.0
 pyyaml>=6.0.0
 python-dotenv>=1.0.0
 
+# HTTP Requests
+requests>=2.31.0
+
+# LLM Integration
+litellm>=1.0.0
+demjson3>=3.0.0
+
+# Dataset Loading
+datasets>=2.0.0
+
 # Optional: For advanced analysis
 # plotly>=5.22.0
 # bokeh>=3.4.0

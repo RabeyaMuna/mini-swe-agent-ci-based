@@ -93,54 +93,82 @@ class CIBenchDataLoader:
         return {}
 
     @staticmethod
-    def _format_processed_ci_failure(log_detail: dict[str, Any]) -> str:
-        """Format processed CI log analysis without including raw logs."""
+    def _format_processed_ci_failure(log_detail: dict[str, Any], baseline_mode: bool = False) -> str:
+        """
+        Format CI failure with ACTIONABLE details for the agent.
+
+        Args:
+            log_detail: Processed CI failure analysis
+            baseline_mode: If True, returns ONLY concrete errors (minimal guidance)
+
+        Returns:
+            Formatted CI failure description
+
+        KEY CHANGE: Include raw error output, not just summaries.
+        In baseline mode, ONLY show concrete errors - no extra guidance.
+        """
         if not log_detail:
             return ''
 
         lines = []
 
-        error_context = log_detail.get('error_context')
-        if isinstance(error_context, list) and error_context:
-            lines.append('Failure context:')
-            for item in error_context[:3]:
-                lines.append(f'- {item}')
+        # CRITICAL: Extract raw error messages from evidence
+        raw_errors = []
+        error_types = log_detail.get('error_types', [])
+        if isinstance(error_types, list):
+            for item in error_types:
+                if isinstance(item, dict):
+                    evidence = item.get('evidence', '')
+                    # Extract concrete error messages (mypy, pylint, pytest, etc.)
+                    if evidence and any(keyword in evidence.lower() for keyword in
+                                       ['error', 'failed', 'exception', 'traceback', 'assert']):
+                        raw_errors.append(evidence)
 
-        error_types = log_detail.get('error_types')
-        if isinstance(error_types, list) and error_types:
-            lines.append('\nError types:')
-            for item in error_types[:5]:
-                if not isinstance(item, dict):
-                    continue
-                category = item.get('category', '')
-                subcategory = item.get('subcategory', '')
-                evidence = item.get('evidence', '')
-                label = ' / '.join(part for part in (category, subcategory) if part)
-                if label:
-                    lines.append(f'- {label}')
-                if evidence:
-                    lines.append(f'  evidence: {evidence}')
+        # Show raw errors FIRST - this is what agent needs to see
+        if raw_errors:
+            lines.append('## CI Failure: Concrete Error Messages')
+            lines.append('\nThe following errors must be fixed:')
+            lines.append('```')
+            for error in raw_errors[:15]:  # Show up to 15 concrete errors
+                lines.append(error)
+            lines.append('```')
+        else:
+            lines.append('## CI Failure')
 
+        # BASELINE MODE: Stop here - only show raw errors
+        # Agent must figure out which files and context on its own
+        if baseline_mode:
+            return '\n'.join(lines)
+
+        # MEMORY MODE: Include additional guidance below
+        # Show relevant files with exact locations
         relevant_files = log_detail.get('relevant_files')
         if isinstance(relevant_files, list) and relevant_files:
-            lines.append('\nRelevant files from CI failure analysis:')
-            for item in relevant_files[:10]:
+            lines.append('\n### Files to Fix:')
+            for idx, item in enumerate(relevant_files[:10], 1):
                 if not isinstance(item, dict):
                     continue
                 file_path = item.get('file') or item.get('path')
                 line_number = item.get('line_number')
                 issue_type = item.get('issue_type', '')
                 failed_tool = item.get('failed_tool', '')
-                reason = item.get('reason', '')
                 location = f'{file_path}:{line_number}' if line_number else file_path
                 if location:
-                    lines.append(f'- {location} ({issue_type or failed_tool})'.rstrip())
-                if reason:
-                    lines.append(f'  reason: {reason}')
+                    lines.append(f'{idx}. {location}')
+                    if issue_type or failed_tool:
+                        lines.append(f'   Type: {issue_type or failed_tool}')
 
+        # Add context only if we have it
+        error_context = log_detail.get('error_context')
+        if isinstance(error_context, list) and error_context:
+            lines.append('\n### Context:')
+            for item in error_context[:3]:
+                lines.append(f'- {item}')
+
+        # Show failed jobs for reference
         failed_job = log_detail.get('failed_job')
         if isinstance(failed_job, list) and failed_job:
-            lines.append('\nFailed CI jobs/steps:')
+            lines.append('\n### Failed CI Jobs:')
             for item in failed_job[:5]:
                 if not isinstance(item, dict):
                     continue
@@ -156,13 +184,32 @@ class CIBenchDataLoader:
     @staticmethod
     def _load_json_or_jsonl(path: Path) -> list[dict[str, Any]]:
         """Load a JSON array or JSONL file."""
+        if not path.exists():
+            siblings = []
+            if path.parent.exists():
+                siblings = sorted(
+                    item.name for item in path.parent.iterdir() if item.is_file()
+                )
+            hint = (
+                f' Available files in {path.parent}: {", ".join(siblings[:20])}'
+                if siblings
+                else ''
+            )
+            raise FileNotFoundError(f'Input issue file not found: {path}.{hint}')
+
         raw_text = path.read_text(encoding='utf-8').strip()
         if not raw_text:
             return []
 
         if raw_text.startswith('['):
             data = json.loads(raw_text)
-            return [item for item in data if isinstance(item, dict)]
+            records = []
+            for item in data:
+                if isinstance(item, dict):
+                    records.append(item)
+                elif item is not None and str(item):
+                    records.append({'id': str(item)})
+            return records
 
         records = []
         for line in raw_text.splitlines():
@@ -173,7 +220,13 @@ class CIBenchDataLoader:
             if isinstance(item, dict):
                 records.append(item)
             elif isinstance(item, list):
-                records.extend(row for row in item if isinstance(row, dict))
+                for row in item:
+                    if isinstance(row, dict):
+                        records.append(row)
+                    elif row is not None and str(row):
+                        records.append({'id': str(row)})
+            elif item is not None and str(item):
+                records.append({'id': str(item)})
         return records
 
     @staticmethod
@@ -244,6 +297,21 @@ class CIBenchDataLoader:
                     if match:
                         break
             merged = {**match, **eval_issue} if match else eval_issue
+            if not match and (
+                'sha_fail' not in merged
+                or ('repo' not in merged and 'repo_owner' not in merged)
+            ):
+                issue_label = (
+                    merged.get('id')
+                    or merged.get('instance_id')
+                    or merged.get('sha_fail')
+                    or '<unknown>'
+                )
+                print(
+                    f'  Warning: skipping issue {issue_label}; full row not found '
+                    'in Hugging Face dataset and local row only contains an id.'
+                )
+                continue
             issues.append(self._normalize_issue(merged))
 
         print(f' Prepared {len(issues)} filtered benchmark issues')
@@ -462,6 +530,7 @@ class CIBenchDataLoader:
         log_detail = self._find_cache_record(issue, log_details)
         workflow_validation = self._find_workflow_validation(issue, workflow_cache)
         ci_failure_summary = self._format_processed_ci_failure(log_detail)
+        source_problem = issue.get('problem_statement') or issue.get('problem') or ''
 
         return {
             'instance_id': instance_id,
@@ -469,10 +538,8 @@ class CIBenchDataLoader:
             'repo': self._repo(issue),
             'sha_fail': issue['sha_fail'],
             'base_sha': issue.get('base_sha', 'main'),
-            'problem_statement': issue.get('problem_statement')
-            or issue.get('problem')
-            or ci_failure_summary
-            or '',
+            'problem_statement': ci_failure_summary or source_problem,
+            'source_problem_statement': source_problem,
             'ci_failure': log_detail,
             'ci_failure_summary': ci_failure_summary,
             'ci_logs': '',

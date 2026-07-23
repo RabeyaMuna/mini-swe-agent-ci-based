@@ -727,7 +727,6 @@ def _extract_workflow_profile(
             "validation_cmd": _coerce_str_list(precomputed.get("validation_cmd")),
             "critical_steps": _coerce_str_list(yaml_profile.get("critical_steps")),
             "validation_sequence": [],
-            "dependent_files": [],
         }
 
     ErrorContextAgent = _try_import_error_context_agent()
@@ -780,7 +779,6 @@ def _workflow_profile_from_cache_or_analyzer(
             "validation_cmd": [],
             "critical_steps": [],
             "validation_sequence": [],
-            "dependent_files": [],
         }
 
     workflow_content = str(instance.get("workflow") or "")
@@ -789,8 +787,7 @@ def _workflow_profile_from_cache_or_analyzer(
             "installation_cmd": [],
             "validation_cmd": [],
             "critical_steps": [],
-            "validation_sequence": [],
-            "dependent_files": [],
+            "validation_sequence": []
         }
 
     try:
@@ -817,8 +814,7 @@ def _workflow_profile_from_cache_or_analyzer(
             "installation_cmd": [],
             "validation_cmd": [],
             "critical_steps": [],
-            "validation_sequence": [],
-            "dependent_files": [],
+            "validation_sequence": []
         }
 
     if context.get("validation_sequence"):
@@ -829,8 +825,7 @@ def _workflow_profile_from_cache_or_analyzer(
         "installation_cmd": [],
         "validation_cmd": [],
         "critical_steps": [],
-        "validation_sequence": [],
-        "dependent_files": [],
+        "validation_sequence": []
     }
 
 
@@ -881,7 +876,6 @@ def _save_workflow_validation_cache(context: dict[str, Any]) -> None:
             "id": issue_id,
             "sha_fail": sha_fail,
             "workflow_path": str(context.get("workflow_path") or ""),
-            "dependent_files": context.get("dependent_files", []) or [],
             "validation_sequence": context.get("validation_sequence", []) or [],
         }
 
@@ -938,8 +932,7 @@ def _workflow_validation_context_to_profile(context: dict[str, Any]) -> dict[str
         "installation_cmd": installation_cmd,
         "validation_cmd": validation_cmd,
         "critical_steps": critical_steps,
-        "validation_sequence": sequence if isinstance(sequence, list) else [],
-        "dependent_files": context.get("dependent_files", []) or [],
+        "validation_sequence": sequence if isinstance(sequence, list) else []
     }
 
 

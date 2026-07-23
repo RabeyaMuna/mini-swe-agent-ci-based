@@ -13,6 +13,7 @@ from interactive_agent import (  # noqa: E402
     AgentEnvironment,
     OpenHandsAgent,
     _ensure_relative_path,
+    _extract_action,
     _extract_json_object,
     _is_blocked_command,
     _repo_slug,
@@ -35,6 +36,84 @@ def test_extract_json_object_handles_nested_args_and_fences():
         'tool': 'read_file',
         'args': {'file_path': 'src/app.py'},
     }
+
+
+def test_extract_action_accepts_json_list_and_bare_file_path():
+    assert _extract_action(
+        '[{"tool": "read_file", "args": {"file_path": "src/app.py"}}]'
+    ) == {'tool': 'read_file', 'args': {'file_path': 'src/app.py'}}
+
+    assert _extract_action('{"file_path": "src/app.py"}') == {
+        'tool': 'read_file',
+        'args': {'file_path': 'src/app.py'},
+    }
+
+
+def test_extract_action_accepts_openhands_tool_call_block():
+    response = """[TOOL_CALL]
+{tool => 'run_command', args => {
+  --command "pytest tests/test_app.py 2>&1 | head -30"
+  --timeout "90"
+}}
+[/TOOL_CALL]"""
+
+    assert _extract_action(response) == {
+        'tool': 'run_command',
+        'args': {
+            'command': 'pytest tests/test_app.py 2>&1 | head -30',
+            'timeout': 90,
+        },
+    }
+
+
+def test_agent_select_action_skips_repeated_read():
+    actions = [
+        {'tool': 'read_file', 'args': {'file_path': 'a.py'}},
+        {'tool': 'read_file', 'args': {'file_path': 'b.py'}},
+    ]
+
+    assert OpenHandsAgent._select_action(actions, {'a.py'}) == {
+        'tool': 'read_file',
+        'args': {'file_path': 'b.py'},
+    }
+
+
+def test_agent_select_action_prefers_allowed_repair_action():
+    actions = [
+        {'tool': 'read_file', 'args': {'file_path': 'a.py'}},
+        {'tool': 'write_file', 'args': {'file_path': 'a.py', 'content': 'fixed\n'}},
+    ]
+
+    assert OpenHandsAgent._select_action(
+        actions,
+        skip_read_paths=set(),
+        allowed_tools={'write_file', 'run_command', 'done'},
+    ) == {'tool': 'write_file', 'args': {'file_path': 'a.py', 'content': 'fixed\n'}}
+
+
+def test_agent_repair_gate_activates_after_targets_read():
+    assert OpenHandsAgent._should_force_repair(
+        files_read=['a.py', 'b.py'],
+        files_written=[],
+        target_files=['a.py', 'b.py'],
+        read_budget=4,
+    )
+
+
+def test_repair_only_prompt_disables_read_and_search():
+    agent = OpenHandsAgent(model='test-model')
+    prompt = agent._build_tool_instruction(
+        problem_context='Problem',
+        files_read=['a.py'],
+        files_written=[],
+        step_count=1,
+        file_context={'a.py': 'VALUE = 1\n'},
+        repair_only=True,
+    )
+
+    assert 'Repair mode is active' in prompt
+    assert 'read_file and search are disabled' in prompt
+    assert '{"tool": "write_file"' in prompt
 
 
 @pytest.mark.parametrize(
@@ -248,6 +327,129 @@ def test_agent_runs_multiple_problems_in_one_checkout(monkeypatch):
     assert env.cleanup_count == 1
     assert env.writes == [('a.py', 'A = 1\n'), ('b.py', 'B = 1\n')]
     assert result['patch'] == 'diff --git combined\n'
+
+
+def test_agent_reuses_auto_resolved_path_for_write(monkeypatch):
+    class FakeEnv:
+        def __init__(self):
+            self.writes = []
+
+        def setup(self):
+            return {'status': 'success', 'message': 'ready', 'work_dir': '/tmp/repo'}
+
+        def read_file(self, file_path):
+            if file_path == 'py/flwr/app.py':
+                return {'status': 'failed', 'message': 'File not found: py/flwr/app.py'}
+            assert file_path == 'framework/py/flwr/app.py'
+            return {'status': 'success', 'content': 'VALUE = 1\n'}
+
+        def search(self, query, file_glob=''):
+            return {'status': 'success', 'output': '', 'stderr': '', 'exit_code': 1}
+
+        def write_file(self, file_path, content):
+            self.writes.append((file_path, content))
+            return {'status': 'success', 'message': 'wrote'}
+
+        def run_command(self, command, timeout=60):
+            if command.startswith('find . -type f -name "app.py"'):
+                return {
+                    'status': 'success',
+                    'stdout': './framework/py/flwr/app.py\n',
+                    'stderr': '',
+                    'exit_code': 0,
+                }
+            return {'status': 'success', 'stdout': '', 'stderr': '', 'exit_code': 0}
+
+        def get_diff(self):
+            return {'status': 'success', 'diff': 'diff --git app\n'}
+
+        def cleanup(self):
+            pass
+
+    responses = iter(
+        [
+            '{"tool": "read_file", "args": {"file_path": "py/flwr/app.py"}}',
+            '{"tool": "write_file", "args": {"file_path": "py/flwr/app.py", "content": "VALUE = 2\\n"}}',
+            '{"tool": "done", "args": {"notes": "fixed"}}',
+        ]
+    )
+
+    def fake_completion(**kwargs):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=next(responses)))],
+            usage=SimpleNamespace(total_tokens=50),
+        )
+
+    monkeypatch.setattr(interactive_agent.litellm, 'completion', fake_completion)
+    env = FakeEnv()
+    agent = OpenHandsAgent(model='test-model', max_steps=3)
+
+    result = agent.run(
+        {
+            'repository': 'https://github.com/owner/repo',
+            'commit_sha': 'abc123',
+            'problems': [{'source': 'ci failure', 'description': 'fix app.py'}],
+        },
+        env,
+    )
+
+    assert env.writes == [('framework/py/flwr/app.py', 'VALUE = 2\n')]
+    assert result['status'] == 'success'
+
+
+def test_agent_includes_cached_file_content_in_next_prompt(monkeypatch):
+    class FakeEnv:
+        def setup(self):
+            return {'status': 'success', 'message': 'ready', 'work_dir': '/tmp/repo'}
+
+        def read_file(self, file_path):
+            return {'status': 'success', 'content': 'VALUE = 1\n'}
+
+        def search(self, query, file_glob=''):
+            return {'status': 'success', 'output': '', 'stderr': '', 'exit_code': 1}
+
+        def write_file(self, file_path, content):
+            return {'status': 'success', 'message': 'wrote'}
+
+        def run_command(self, command, timeout=60):
+            return {'status': 'success', 'stdout': '', 'stderr': '', 'exit_code': 0}
+
+        def get_diff(self):
+            return {'status': 'success', 'diff': 'diff --git app\n'}
+
+        def cleanup(self):
+            pass
+
+    prompts = []
+    responses = iter(
+        [
+            '{"tool": "read_file", "args": {"file_path": "src/app.py"}}',
+            '{"tool": "write_file", "args": {"file_path": "src/app.py", "content": "VALUE = 2\\n"}}',
+            '{"tool": "done", "args": {"notes": "fixed"}}',
+        ]
+    )
+
+    def fake_completion(**kwargs):
+        prompts.append(kwargs['messages'][-1]['content'])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=next(responses)))],
+            usage=SimpleNamespace(total_tokens=50),
+        )
+
+    monkeypatch.setattr(interactive_agent.litellm, 'completion', fake_completion)
+    agent = OpenHandsAgent(model='test-model', max_steps=3)
+
+    agent.run(
+        {
+            'repository': 'https://github.com/owner/repo',
+            'commit_sha': 'abc123',
+            'problems': [{'source': 'ci failure', 'description': 'fix app.py'}],
+        },
+        FakeEnv(),
+    )
+
+    assert '### src/app.py' in prompts[1]
+    assert 'VALUE = 1' in prompts[1]
 
 
 def test_agent_setup_uses_existing_cache_without_docker(tmp_path, monkeypatch):

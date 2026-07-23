@@ -29,6 +29,44 @@ except Exception:
 
 LOGGER = logging.getLogger(__name__)
 
+COMMAND_PREFIXES = (
+    "./",
+    "bash ",
+    "sh ",
+    "python ",
+    "python3 ",
+    "pip ",
+    "uv ",
+    "poetry ",
+    "npm ",
+    "pnpm ",
+    "yarn ",
+    "make ",
+    "tox ",
+    "pytest ",
+    "ruff ",
+    "mypy ",
+    "black ",
+    "isort ",
+    "flake8 ",
+    "docformatter ",
+    "pre-commit ",
+)
+
+FILE_SUFFIXES = (
+    ".cfg",
+    ".ini",
+    ".json",
+    ".lock",
+    ".py",
+    ".rst",
+    ".sh",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+)
+
 
 class WorkflowValidationExtractionError(RuntimeError):
     """Raised when CI workflow validation sequence extraction fails."""
@@ -205,6 +243,32 @@ def _read_repo_file_at_commit(
         return None
 
 
+def _is_repo_file_reference(path: str) -> bool:
+    """Return whether a model-provided value looks like a repo file path."""
+    path = str(path or "").strip().lstrip("/")
+    if not path:
+        return False
+
+    lowered = path.lower()
+    if any(lowered.startswith(prefix) for prefix in COMMAND_PREFIXES):
+        return False
+    if any(token in path for token in ("&&", "||", "|", ";", "\n", "$(", "`")):
+        return False
+    if any(char.isspace() for char in path):
+        return False
+    if path.startswith("-"):
+        return False
+    if lowered in {"pytest", "ruff", "mypy", "black", "isort", "make", "tox"}:
+        return False
+
+    return (
+        "/" in path
+        or lowered.startswith(".")
+        or lowered.endswith(FILE_SUFFIXES)
+        or Path(path).name in {"Dockerfile", "Makefile"}
+    )
+
+
 def _normalize_dependent_files(raw: Any) -> List[Dict[str, str]]:
     payload = raw if isinstance(raw, dict) else {}
     rows = payload.get("dependent_files") or []
@@ -215,7 +279,7 @@ def _normalize_dependent_files(raw: Any) -> List[Dict[str, str]]:
             continue
         path = str(item.get("path") or item.get("file") or "").strip().lstrip("/")
         reason = str(item.get("reason") or "").strip()
-        if not path or path in seen:
+        if not path or path in seen or not _is_repo_file_reference(path):
             continue
         seen.add(path)
         out.append({"path": path, "reason": reason})
@@ -389,43 +453,12 @@ def analyze_workflow_from_benchmark(
     if not workflow_content.strip():
         raise WorkflowValidationExtractionError("workflow_content is required.")
 
-    dependent_raw = _call_llm(
-        llm, build_dependent_file_prompt(workflow_path, workflow_content)
-    )
-    dependent_files = _normalize_dependent_files(
-        _load_json(dependent_raw, {"dependent_files": []})
-    )
-
-    # Read dependent files from the failing commit (sha_fail)
-    # This ensures we analyze the exact state that caused the CI failure
-    if sha_fail:
-        print(f"       Reading dependent files from commit: {sha_fail[:8]}...")
-
-    dependent_file_contents: List[Dict[str, Any]] = []
-    for dep in dependent_files:
-        # Use sha_fail to read from the exact failing commit
-        content = _read_repo_file_at_commit(
-            repo_path, dep["path"], sha=sha_fail or None
-        )
-
-        found = content is not None
-        if sha_fail:
-            status = "✓" if found else "✗"
-            print(f"         {status} {dep['path']}")
-
-        dependent_file_contents.append(
-            {
-                "path": dep["path"],
-                "reason": dep.get("reason", ""),
-                "found": found,
-                "content": content or "",
-            }
-        )
-
     sequence_raw = _call_llm(
         llm,
         build_validation_sequence_prompt(
-            workflow_path, workflow_content, dependent_file_contents
+            workflow_path,
+            workflow_content,
+            [],
         ),
     )
 
@@ -445,7 +478,7 @@ def analyze_workflow_from_benchmark(
         "id": issue_id,
         "sha_fail": sha_fail,
         "workflow_path": workflow_path,
-        "dependent_files": dependent_files,
         "validation_sequence": validation_sequence,
+        "dependent_files": [],
     }
     return result

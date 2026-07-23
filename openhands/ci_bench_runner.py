@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from data_loader import CIBenchDataLoader
 from prompt_formatter import PromptFormatter
 from scripts.model_registry import configure_model_environment, resolve_model_alias
-from simple_agent import run_simple_agent
+from interactive_agent import execute_openhands_agent
 
 # Shared paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -134,19 +134,49 @@ class OpenHandsMemoryAdapter:
         }
 
 
-def _ci_problem_from_issue(issue_data: dict[str, Any]) -> dict[str, Any]:
-    """Create the baseline problem passed to OpenHands."""
+def _ci_problem_from_issue(issue_data: dict[str, Any], for_baseline: bool = False) -> dict[str, Any]:
+    """
+    Create the CI problem passed to OpenHands.
+
+    Args:
+        issue_data: Full issue data
+        for_baseline: If True, creates minimal problem for baseline mode
+
+    Returns:
+        Problem dict with source, title, description
+    """
     workflow = issue_data.get('workflow') or {}
-    return {
-        'source': 'ci failure',
-        'title': 'Current CI failure',
-        'description': issue_data.get('problem_statement', ''),
-        'ci_failure_summary': issue_data.get('ci_failure_summary', ''),
-        'workflow_context': workflow,
-        'validation_command': issue_data.get('validation_command')
-        or workflow.get('validation_command')
-        or '',
-    }
+
+    if for_baseline:
+        # BASELINE MODE: Just raw CI failure info, no extra guidance
+        # Format the CI failure in baseline mode (errors only, no file list/context)
+        from data_loader import CIBenchDataLoader
+        from prompt_formatter import PromptFormatter
+
+        log_detail = issue_data.get('ci_failure', {})
+        baseline_ci_summary = CIBenchDataLoader._format_processed_ci_failure(log_detail, baseline_mode=True)
+        baseline_description = PromptFormatter.format_baseline_ci_failure(baseline_ci_summary)
+
+        return {
+            'source': 'ci failure',
+            'title': 'CI Failure - Fix Required',
+            'description': baseline_description,
+            'validation_command': issue_data.get('validation_command')
+            or workflow.get('validation_command')
+            or '',
+        }
+    else:
+        # MEMORY MODE: Can include more structure
+        return {
+            'source': 'ci failure',
+            'title': 'Current CI failure',
+            'description': issue_data.get('problem_statement', ''),
+            'ci_failure_summary': issue_data.get('ci_failure_summary', ''),
+            'workflow_context': workflow,
+            'validation_command': issue_data.get('validation_command')
+            or workflow.get('validation_command')
+            or '',
+        }
 
 
 def _memory_problems_from_retrieval(memory: dict[str, Any]) -> list[dict[str, Any]]:
@@ -198,6 +228,201 @@ def _memory_problems_from_retrieval(memory: dict[str, Any]) -> list[dict[str, An
     return problems
 
 
+def _load_decomposed_issues(path: Optional[str]) -> dict[str, dict[str, Any]]:
+    """Load decomposed CI problems keyed by id/instance/sha."""
+    if not path:
+        return {}
+    decomp_path = Path(path)
+    if not decomp_path.exists():
+        raise FileNotFoundError(f'Decomposed issues file not found: {decomp_path}')
+
+    raw_text = decomp_path.read_text(encoding='utf-8').strip()
+    if not raw_text:
+        return {}
+    if raw_text.startswith('['):
+        rows = json.loads(raw_text)
+    else:
+        rows = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
+
+    index = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in (
+            'id',
+            'issue_id',
+            'instance_id',
+            'original_issue_id',
+            'sha_fail',
+        ):
+            value = row.get(key)
+            if value is not None and str(value):
+                index[str(value)] = row
+    return index
+
+
+def _find_decomposed_issue(
+    issue: dict[str, Any], decomposed_index: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Find decomposed problem record for an issue."""
+    for key in ('id', 'issue_id', 'instance_id', 'original_issue_id', 'sha_fail'):
+        value = issue.get(key)
+        if value is not None:
+            match = decomposed_index.get(str(value))
+            if match:
+                return match
+    return {}
+
+
+def _decomposed_problem_rows(decomposed_issue: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return problem list from either old or commit-based decomposition output."""
+    problems = (
+        decomposed_issue.get('problem_sequence')
+        or decomposed_issue.get('problems')
+        or decomposed_issue.get('optimized_problems')
+        or []
+    )
+    return [problem for problem in problems if isinstance(problem, dict)]
+
+
+def _format_job_records(records: Any) -> str:
+    if not isinstance(records, list) or not records:
+        return ''
+    lines = []
+    for record in records[:8]:
+        if not isinstance(record, dict):
+            continue
+        parts = [
+            str(record.get('workflow') or ''),
+            str(record.get('job') or ''),
+            str(record.get('step') or ''),
+            str(record.get('validation_cmd') or ''),
+        ]
+        text = ' | '.join(part for part in parts if part)
+        if text:
+            lines.append(f'- {text}')
+    return '\n'.join(lines)
+
+
+def _problem_files(problem: dict[str, Any]) -> list[str]:
+    files = problem.get('files') or problem.get('affected_files') or []
+    if isinstance(files, str):
+        return [files]
+    return [str(file_path) for file_path in files if file_path]
+
+
+def _problem_validation_command(problem: dict[str, Any]) -> str:
+    return str(
+        problem.get('validation_cmd')
+        or problem.get('validation_command')
+        or problem.get('verification_cmd')
+        or ''
+    )
+
+
+def _problem_fix_strategy(problem: dict[str, Any]) -> str:
+    return str(
+        problem.get('fixes')
+        or problem.get('how_fixed')
+        or problem.get('fix_strategy')
+        or problem.get('changes_made')
+        or ''
+    )
+
+
+def _format_decomposed_problem(problem: dict[str, Any], index: int) -> dict[str, Any]:
+    """Convert a decomposed CI problem into one agent problem statement."""
+    files = _problem_files(problem)
+    failed_jobs = _format_job_records(problem.get('current_failed_jobs'))
+    fixed_jobs = _format_job_records(problem.get('current_fixed_jobs'))
+
+    description_parts = []
+    for key, label in (
+        ('problem', 'Problem'),
+        ('changes_made', 'Known Repair Change'),
+        ('introduces', 'Introduces'),
+    ):
+        value = problem.get(key)
+        if value:
+            description_parts.append(f'{label}: {value}')
+    if files:
+        description_parts.append(f'Affected files: {", ".join(files)}')
+    if failed_jobs:
+        description_parts.append(f'Current failed CI jobs/steps:\n{failed_jobs}')
+    if fixed_jobs:
+        description_parts.append(f'Current passed CI jobs:\n{fixed_jobs}')
+
+    failure_type = problem.get('failure_type') or problem.get('problem_type') or 'ci'
+    issue_type = problem.get('issue_type') or ''
+    title = f'CI problem {problem.get("problem_id") or index}: {failure_type}'
+    if issue_type:
+        title = f'{title} / {issue_type}'
+
+    return {
+        'source': 'ci decomposition',
+        'title': title,
+        'description': '\n'.join(description_parts).strip()
+        or str(problem.get('problem') or ''),
+        'root_cause': str(problem.get('root_cause') or ''),
+        'fix_strategy': _problem_fix_strategy(problem),
+        'validation_command': _problem_validation_command(problem),
+        'files': files,
+    }
+
+
+def _ci_problems_for_openhands(
+    issue_data: dict[str, Any],
+    decomposed_issue: dict[str, Any],
+    memory_result: dict[str, Any],
+    mode: str = 'baseline',
+) -> list[dict[str, Any]]:
+    """
+    Build the one-at-a-time problem list for the OpenHands agent.
+
+    Args:
+        issue_data: Full issue data
+        decomposed_issue: Optional decomposed problem data
+        memory_result: Memory retrieval result
+        mode: 'baseline' or 'memory' - controls whether to use decomposition
+
+    Returns:
+        List of problems to solve sequentially
+    """
+    workflow_context = PromptFormatter._format_workflow_validation(
+        issue_data.get('workflow') or {}
+    )
+
+    # BASELINE MODE: Always use single CI failure, ignore decomposition
+    # Pass for_baseline=True to get minimal, unstructured problem
+    if mode == 'baseline':
+        problems = [_ci_problem_from_issue(issue_data, for_baseline=True)]
+    else:
+        # MEMORY MODE: Use decomposition if available, otherwise use memory problems
+        decomposed = _decomposed_problem_rows(decomposed_issue)
+        if decomposed:
+            problems = [
+                _format_decomposed_problem(problem, index)
+                for index, problem in enumerate(decomposed, 1)
+            ]
+        else:
+            problems = memory_result.get('problems') or [_ci_problem_from_issue(issue_data)]
+
+        # Add memory-guided repair plan as additional problem
+        if memory_result.get('repair_plan'):
+            problems.append(
+                {
+                    'source': 'previous experience',
+                    'title': 'Relevant prior repair guidance',
+                    'description': str(memory_result['repair_plan']),
+                    'validation_command': issue_data.get('validation_command', ''),
+                }
+            )
+
+    for problem in problems:
+        problem.setdefault('ci_verification_context', workflow_context)
+    return problems
+
+
 def run_single_issue(
     issue: dict[str, Any],
     log_details: dict[str, Any],
@@ -205,6 +430,9 @@ def run_single_issue(
     memory_engine: OpenHandsMemoryAdapter,
     model: str,
     results_dir: Path,
+    decomposed_index: Optional[dict[str, dict[str, Any]]] = None,
+    max_steps: int = 15,
+    mode: str = 'baseline',
 ) -> dict[str, Any]:
     """
     Run OpenHands on a single issue using SHARED memory plugin
@@ -229,6 +457,7 @@ def run_single_issue(
 
     # Use shared memory plugin to get problem + repair plan
     memory_result = memory_engine.get_problem(issue_data)
+    decomposed_issue = _find_decomposed_issue(issue_data, decomposed_index or {})
 
     # Format for OpenHands using shared result
     formatter = PromptFormatter()
@@ -242,78 +471,22 @@ def run_single_issue(
     # Add commit_sha for environment setup
     openhands_task['commit_sha'] = issue_data['sha_fail']
     openhands_task['validation_command'] = issue_data.get('validation_command', '')
-    openhands_task['problems'] = memory_result['problems']
+    openhands_task['problems'] = _ci_problems_for_openhands(
+        issue_data, decomposed_issue, memory_result, mode=mode
+    )
 
     # Execute agent to generate patch
     print(f'  Repository: {openhands_task["repository"]}')
     print(f'  Commit: {openhands_task["commit_sha"][:8]}')
     print(f'  Has Repair Plan: {memory_result["repair_plan"] is not None}')
+    print(f'  Has Decomposed Problems: {bool(decomposed_issue)}')
     print(f'  Problems to solve: {len(openhands_task["problems"])}')
 
-    # Setup repository
-    import shutil
-    import subprocess
-    import tempfile
-    from pathlib import Path
-
-    repo_cache = REPO_ROOT / 'shared_cache' / instance_id.split('_')[0]
-
-    # Clone if needed
-    if not repo_cache.exists():
-        repo_cache.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [
-                'git',
-                'clone',
-                '--depth',
-                '1',
-                openhands_task['repository'],
-                str(repo_cache),
-            ],
-            check=True,
-            capture_output=True,
-        )
-
-    # Create temp working copy
-    work_dir = Path(tempfile.mkdtemp(prefix=f'openhands_{instance_id}_'))
-    shutil.copytree(repo_cache, work_dir, dirs_exist_ok=True, symlinks=True)
-
-    # Fetch and checkout specific commit
-    try:
-        subprocess.run(
-            ['git', 'fetch', 'origin', openhands_task['commit_sha']],
-            cwd=work_dir,
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ['git', 'checkout', openhands_task['commit_sha']],
-            cwd=work_dir,
-            check=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError:
-        # Try fetching all
-        subprocess.run(
-            ['git', 'fetch', '--unshallow'], cwd=work_dir, capture_output=True
-        )
-        subprocess.run(
-            ['git', 'checkout', openhands_task['commit_sha']], cwd=work_dir, check=True
-        )
-
-    # Run simple agent
-    try:
-        agent_result = run_simple_agent(
-            problem_description=openhands_task['initial_message'],
-            repository=openhands_task['repository'],
-            commit=openhands_task['commit_sha'],
-            work_dir=work_dir,
-            model=model,
-            max_steps=30,
-        )
-    finally:
-        # Cleanup temp directory
-        shutil.rmtree(work_dir, ignore_errors=True)
+    agent_result = execute_openhands_agent(
+        openhands_task,
+        model=model,
+        max_steps=max_steps,
+    )
 
     # Format result
     result = {
@@ -322,8 +495,13 @@ def run_single_issue(
         'model_patch': agent_result['patch'],
         'agent': 'openhands',
         'has_memory': memory_result['repair_plan'] is not None,
-        'status': 'success' if agent_result['patch'] else 'no_patch',
-        'total_cost': agent_result['cost'],
+        'has_decomposed_problems': bool(decomposed_issue),
+        'problem_count': len(openhands_task['problems']),
+        'status': agent_result.get('status') or (
+            'success' if agent_result.get('patch') else 'no_patch'
+        ),
+        'total_cost': agent_result.get('total_cost', 0.0),
+        'trajectory': agent_result.get('trajectory', []),
     }
 
     print(f'  Status: {result["status"]} | Cost: ${result["total_cost"]:.4f}')
@@ -340,6 +518,8 @@ def run_batch(
     slice_range: Optional[str] = None,
     hf_dataset: str = 'ci-benchmark-user/ci-repair-bench',
     split: str = 'train',
+    decomposed_issues_path: Optional[str] = None,
+    max_steps: int = 15,
 ):
     """
     Run CI-Bench evaluation on OpenHands using SHARED memory plugin
@@ -359,6 +539,8 @@ def run_batch(
     print(f'Mode: {mode}')
     print(f'Model: {model}')
     print(f'Memory Layers: {memory_layers if mode == "memory" else "None (baseline)"}')
+    print(f'Decomposed Issues: {decomposed_issues_path or "None"}')
+    print(f'Max Steps Per Problem: {max_steps}')
     print(f'Output: {output_dir}')
     print(f'{"=" * 80}\n')
 
@@ -379,6 +561,10 @@ def run_batch(
         start, end = map(int, slice_range.split(':'))
         eval_issues = eval_issues[start:end]
         print(f'Using slice: {slice_range} ({len(eval_issues)} issues)\n')
+
+    decomposed_index = _load_decomposed_issues(decomposed_issues_path)
+    if decomposed_index:
+        print(f' Loaded decomposed CI problems ({len(decomposed_index)} lookup keys)')
 
     # Ensure data files exist. Missing entries are generated by the shared
     # analyzer scripts and then cached for later runs.
@@ -413,6 +599,9 @@ def run_batch(
             memory_engine=memory_engine,  # Same shared plugin for both modes
             model=model,
             results_dir=results_dir,
+            decomposed_index=decomposed_index,
+            max_steps=max_steps,
+            mode=mode,  # Pass mode to ensure baseline doesn't use decomposition
         )
         results.append(result)
 
@@ -438,26 +627,42 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Baseline mode (no memory)
+  # 1. Baseline: no memory integration
   python ci_bench_runner.py --eval-issues ../data/trs/eval_set.jsonl \\
-      --mode baseline --model glm5.2 \\
-      --output ../results/openhands/glm-5.2/baseline
+      --mode baseline --model minimax2.5 \\
+      --decomposed-issues ../data/trs/decomposed_issues.json \\
+      --output ../results/openhands/minimax-m2.5/baseline
 
-  # Filter HuggingFace benchmark rows using eval_issues.json
-  python ci_bench_runner.py --eval-issues ../data/eval_issues.json \\
+  # 2. L1: failure memory
+  python ci_bench_runner.py --eval-issues ../data/trs/eval_set.jsonl \\
+      --mode memory --memory-layers L1 --model minimax2.5 \\
+      --decomposed-issues ../data/trs/decomposed_issues.json \\
+      --output ../results/openhands/minimax-m2.5/L1
+
+  # 3. L1+L2: failure + repository memory
+  python ci_bench_runner.py --eval-issues ../data/trs/eval_set.jsonl \\
+      --mode memory --memory-layers L1 L2 --model minimax2.5 \\
+      --decomposed-issues ../data/trs/decomposed_issues.json \\
+      --output ../results/openhands/minimax-m2.5/L1_L2
+
+  # 4. L1+L2+L3: full memory integration
+  python ci_bench_runner.py --eval-issues ../data/trs/eval_set.jsonl \\
+      --mode memory --memory-layers L1 L2 L3 --model minimax2.5 \\
+      --decomposed-issues ../data/trs/decomposed_issues.json \\
+      --output ../results/openhands/minimax-m2.5/L1_L2_L3
+
+  # Optional: fetch full rows from Hugging Face using eval IDs
+  python ci_bench_runner.py --eval-issues ../data/trs/eval_issue_ids.json \\
       --hf-dataset ci-benchmark-user/ci-repair-bench --split train \\
-      --mode baseline --model glm5.2 \\
-      --output ../results/openhands/glm-5.2/baseline
-
-  # Memory mode (L1+L2+L3)
-  python ci_bench_runner.py --eval-issues ../data/trs/eval_set.jsonl \\
-      --mode memory --memory-layers L1 L2 L3 --model glm5.2 \\
-      --output ../results/openhands/glm-5.2/L1_L2_L3
+      --mode baseline --model minimax2.5 \\
+      --decomposed-issues ../data/trs/decomposed_issues.json \\
+      --output ../results/openhands/minimax-m2.5/baseline
 
   # Test on first 5 issues
   python ci_bench_runner.py --eval-issues ../data/trs/eval_set.jsonl \\
-      --mode baseline --model glm5.2 --slice 0:5 \\
-      --output ../results/openhands/glm-5.2/test
+      --mode baseline --model minimax2.5 --slice 0:5 \\
+      --decomposed-issues ../data/trs/decomposed_issues.json \\
+      --output ../results/openhands/minimax-m2.5/test
         """,
     )
     parser.add_argument(
@@ -493,6 +698,20 @@ Examples:
     parser.add_argument(
         '--slice', help="Optional slice range (e.g., '0:5' for first 5 issues)"
     )
+    parser.add_argument(
+        '--decomposed-issues',
+        help=(
+            'Optional decomposed_issues.json/JSONL. When provided, each '
+            'decomposed CI problem is passed to the agent one at a time in a '
+            'single checkout, then one final model_patch is collected.'
+        ),
+    )
+    parser.add_argument(
+        '--max-steps',
+        type=int,
+        default=15,
+        help='Maximum OpenHands agent steps per problem statement',
+    )
 
     args = parser.parse_args()
 
@@ -506,6 +725,8 @@ Examples:
         slice_range=args.slice,
         hf_dataset=args.hf_dataset,
         split=args.split,
+        decomposed_issues_path=args.decomposed_issues,
+        max_steps=args.max_steps,
     )
 
     return 0

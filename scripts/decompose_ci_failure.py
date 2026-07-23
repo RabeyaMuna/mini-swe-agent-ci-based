@@ -441,8 +441,15 @@ def _load_llm_json(content: str) -> Any:
     return []
 
 
-def _invoke_json(llm: Any, prompt: str, max_tokens: int | None = None) -> Any:
-    """Invoke LLM and parse JSON with robust error handling."""
+def _invoke_json(llm: Any, prompt: str, max_tokens: int | None = None, retry_count: int = 0) -> Any:
+    """Invoke LLM and parse JSON with robust error handling.
+
+    Args:
+        llm: Language model instance
+        prompt: The prompt to send
+        max_tokens: Maximum tokens for response
+        retry_count: Current retry attempt (0 = first attempt, 1 = timeout retry)
+    """
     # Check prompt size upfront
     prompt_size_kb = len(prompt) / 1024
     if prompt_size_kb > 80:
@@ -470,6 +477,33 @@ def _invoke_json(llm: Any, prompt: str, max_tokens: int | None = None) -> Any:
             print("          -> Chunk too large, reduce max_files_per_chunk")
         elif "rate limit" in error_msg.lower():
             print("        FAIL Rate limit - increase delay (currently 3s)")
+        elif "timeout" in error_msg.lower() or "Timeout" in str(type(exc).__name__):
+            # Smart timeout handling: retry once with increased timeout, then split
+            if retry_count == 0:
+                # First timeout: retry with 2x timeout
+                print(f"        FAIL API Timeout (attempt {retry_count + 1}): {type(exc).__name__}")
+                print(f"          Prompt size: {prompt_size_kb:.1f}KB")
+                print(f"          -> Retrying with increased timeout (2x)...")
+                LOGGER.warning(f"LLM API timeout on first attempt, retrying with increased timeout: {exc}")
+
+                # Temporarily increase timeout
+                original_timeout = int(os.getenv("LITELLM_TIMEOUT", "900"))
+                os.environ["LITELLM_TIMEOUT"] = str(original_timeout * 2)
+
+                try:
+                    time.sleep(2)  # Brief pause before retry
+                    result = _invoke_json(llm, prompt, max_tokens=max_tokens, retry_count=1)
+                    return result
+                finally:
+                    # Restore original timeout
+                    os.environ["LITELLM_TIMEOUT"] = str(original_timeout)
+            else:
+                # Second timeout: split the chunk
+                print(f"        FAIL API Timeout (attempt {retry_count + 1}): {type(exc).__name__}")
+                print(f"          Prompt size: {prompt_size_kb:.1f}KB")
+                print("          -> Timeout persists after retry, splitting chunk...")
+                LOGGER.warning(f"LLM API timeout after retry, triggering split: {exc}")
+                return "SPLIT_REQUIRED"  # Signal to caller to split chunk and retry
         else:
             print(f"        FAIL API Error: {type(exc).__name__}: {str(exc)[:200]}")
 
@@ -647,7 +681,6 @@ def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
             "workflow_path": str(
                 cached_validation.get("workflow_path") or workflow_path
             ),
-            "dependent_files": cached_validation.get("dependent_files", []),
             "validation_sequence": validation_sequence,
         }
         print(f"       Found {len(validation_sequence)} validation steps (cached)")
@@ -673,7 +706,6 @@ def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
             print("       Using fallback: empty validation sequence")
             workflow_validation_context = {
                 "workflow_path": str(workflow_path),
-                "dependent_files": [],
                 "validation_sequence": [],
             }
             validation_sequence = []
@@ -6542,6 +6574,17 @@ def main():
         action="store_true",
         help="Skip building memory files (L1/L2/L3) - only save decomposed_issues.json. Use this when you plan to do similarity-based split later.",
     )
+    parser.add_argument(
+        "--auto-split",
+        action="store_true",
+        help="Automatic 3-phase workflow: (1) Decompose all, (2) Cosine similarity split per repo (30%% memory, 70%% eval), (3) Build L1/L2/L3 only for memory set. Recommended for full pipeline.",
+    )
+    parser.add_argument(
+        "--memory-ratio",
+        type=float,
+        default=0.3,
+        help="Memory set ratio for auto-split (default: 0.3 = 30%%)",
+    )
     args = parser.parse_args()
 
     issues = _load_issues_for_args(args)
@@ -6573,7 +6616,149 @@ def main():
     decomposed_cache = _load_decomposed_cache(decomposed_issues_path)
     results, processed_ids = _load_existing_l2_results(l2_sequences_path)
 
-    # Decompose issues with incremental saving
+    # AUTO-SPLIT MODE: Three-phase workflow
+    if args.auto_split:
+        print(f"\n{'=' * 80}")
+        print("AUTO-SPLIT MODE: 3-Phase Workflow")
+        print(f"{'=' * 80}")
+        print("Phase 1: Decompose all issues")
+        print("Phase 2: Cosine similarity split per repo")
+        print("Phase 3: Build L1/L2/L3 only for memory set")
+        print(f"{'=' * 80}\n")
+
+        # PHASE 1: Decompose all issues (no L1/L2/L3)
+        print(f"\n{'=' * 80}")
+        print(f"PHASE 1: Decomposing {len(issues)} issues")
+        print(f"{'=' * 80}\n")
+
+        for i, issue in enumerate(issues, 1):
+            issue_id = _issue_id(issue)
+            if not issue_id:
+                print(f"\nProgress: {i}/{len(issues)} - missing issue id, skipping")
+                continue
+
+            print(f"\nProgress: {i}/{len(issues)}")
+
+            # Check cache
+            if issue_id in decomposed_cache:
+                print(f"  ✅ Found in cache - skipping decomposition")
+                continue
+            else:
+                # Decompose
+                print("  🔄 Decomposing...")
+                decomposed_result = decompose_issue(issue, llm)
+
+                if "error" not in decomposed_result:
+                    decomposed_cache[issue_id] = decomposed_result
+                    _save_decomposed_cache(decomposed_cache, decomposed_issues_path)
+                    print(f"  ✅ Saved to cache")
+
+        # PHASE 2: Cosine similarity split
+        print(f"\n{'=' * 80}")
+        print("PHASE 2: Cosine Similarity Split (per repo)")
+        print(f"{'=' * 80}\n")
+
+        print("  Running prepare_memory_train_test_split.py...")
+        print("  This will compute embeddings and split by similarity...\n")
+
+        # Run the split script
+        import subprocess
+        split_cmd = [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "prepare_memory_train_test_split.py"),
+            "--dataset", str(args.dataset) if args.dataset else "data/trs/filtered_issues.jsonl",
+            "--output-dir", str(output_dir),
+            "--memory-ratio", str(args.memory_ratio),
+        ]
+
+        try:
+            result = subprocess.run(split_cmd, check=True, capture_output=False)
+        except subprocess.CalledProcessError as e:
+            print(f"  ❌ ERROR: Similarity split failed: {e}")
+            print(f"  You can run it manually:")
+            print(f"    python scripts/prepare_memory_train_test_split.py \\")
+            print(f"      --dataset {args.dataset} \\")
+            print(f"      --output-dir {output_dir} \\")
+            print(f"      --memory-ratio {args.memory_ratio}")
+            return 1
+
+        # Load the split results
+        memory_issues_path = output_dir / "memory_issues.jsonl"
+        eval_issues_path = output_dir / "eval_issues.jsonl"
+
+        if not memory_issues_path.exists():
+            print(f"  ❌ ERROR: {memory_issues_path} not found")
+            print("  The similarity split may have failed.")
+            return 1
+
+        # Load memory issue IDs
+        memory_ids = []
+        with open(memory_issues_path) as f:
+            for line in f:
+                if line.strip():
+                    issue = json.loads(line)
+                    memory_ids.append(_issue_id(issue))
+
+        eval_count = 0
+        if eval_issues_path.exists():
+            with open(eval_issues_path) as f:
+                for line in f:
+                    if line.strip():
+                        eval_count += 1
+
+        print(f"\n  ✅ Similarity split complete")
+        print(f"  Total issues: {len(decomposed_cache)}")
+        print(f"  Memory set: {len(memory_ids)} issues ({len(memory_ids)/len(decomposed_cache)*100:.1f}%)")
+        print(f"  Eval set: {eval_count} issues ({eval_count/len(decomposed_cache)*100:.1f}%)")
+
+        # PHASE 3: Build L1/L2/L3 only for memory set
+        print(f"\n{'=' * 80}")
+        print(f"PHASE 3: Building L1/L2/L3 for Memory Set ({len(memory_ids)} issues)")
+        print(f"{'=' * 80}\n")
+
+        for i, issue_id in enumerate(memory_ids, 1):
+            print(f"\nMemory Issue {i}/{len(memory_ids)}: {issue_id}")
+
+            decomposed_result = decomposed_cache.get(issue_id)
+            if not decomposed_result or "error" in decomposed_result:
+                print(f"  ⚠️  Skipping - decomposition error or missing")
+                continue
+
+            # Deep copy to prevent cache pollution
+            import copy
+            decomposed_copy = copy.deepcopy(decomposed_result)
+            result = generate_l1_l2_l3_pipeline(decomposed_copy, llm)
+            results.append(result)
+
+            # Incremental save
+            try:
+                _save_to_memory_files(results, args.output_dir)
+                print(f"  ✅ Saved ({len(results)} memory issues total)")
+            except Exception as e:
+                print(f"  ⚠️  Could not save: {e}")
+
+        # Final save
+        _save_to_memory_files(results, args.output_dir)
+
+        print(f"\n{'=' * 80}")
+        print("AUTO-SPLIT COMPLETE")
+        print(f"{'=' * 80}")
+        print(f"✅ Decomposed: {len(decomposed_cache)} issues")
+        print(f"✅ Memory set: {len(memory_ids)} issues with L1/L2/L3")
+        print(f"✅ Eval set: {eval_count} issues (decomposition only)")
+        print(f"\nOutput files:")
+        print(f"  - decomposed_issues.json ({len(decomposed_cache)} issues)")
+        print(f"  - memory_issues.jsonl ({len(memory_ids)} issues)")
+        print(f"  - eval_issues.jsonl ({eval_count} issues)")
+        print(f"  - l1_file_level.json ({len(results)} issues)")
+        print(f"  - l2_repair_sequences.json ({len(results)} issues)")
+        print(f"  - l3_analysis.json ({len(results)} issues)")
+        print(f"  - similarity_analysis.json (cosine similarity data)")
+        print(f"{'=' * 80}\n")
+
+        return 0
+
+    # REGULAR MODE: Decompose issues with incremental saving
     for i, issue in enumerate(issues, 1):
         issue_id = _issue_id(issue)
         if not issue_id:
@@ -6616,7 +6801,10 @@ def main():
         else:
             # Run full L1/L2/L3 pipeline (unless --skip-memory)
             if not args.skip_memory:
-                result = generate_l1_l2_l3_pipeline(decomposed_result, llm)
+                # IMPORTANT: Deep copy to prevent L1/L2/L3 pipeline from modifying cache
+                import copy
+                decomposed_copy = copy.deepcopy(decomposed_result)
+                result = generate_l1_l2_l3_pipeline(decomposed_copy, llm)
                 results.append(result)
             else:
                 # Just save decomposed result without L1/L2/L3
