@@ -23,14 +23,16 @@ class CommitAnalyzer:
     """Analyzes commits to extract problems and repair plans using LLM"""
 
     def __init__(self, model_name: str = None):
-        self.model_name = model_name or os.getenv("MEMCI_LLM_MODEL", "openrouter/minimax/minimax-m2.5")
+        self.model_name = model_name or os.getenv(
+            "MEMCI_LLM_MODEL", "openrouter/minimax/minimax-m2.5"
+        )
 
     def analyze_commit_group(
         self,
         group: Dict,
         commit_diff: str,
         ci_logs: Any,
-        relevant_validations: List[Dict]
+        relevant_validations: List[Dict],
     ) -> Dict:
         """
         Analyze a commit group to extract:
@@ -198,11 +200,14 @@ IMPORTANT RULES:
         try:
             response = self._call_llm(prompt)
             result = self._parse_response(response)
-            import pdb; pdb.set_trace()
+            import pdb
+
+            pdb.set_trace()
             return self._normalize_commit_analysis(result, group)
         except Exception as e:
             print(f"    ERROR: LLM analysis failed: {e}")
             import traceback
+
             traceback.print_exc()
             return {"problems": [], "error": str(e)}
 
@@ -259,7 +264,9 @@ OUTPUT JSON ONLY:
         try:
             response = self._call_llm(prompt)
             result = self._parse_response(response)
-            import pdb; pdb.set_trace()
+            import pdb
+
+            pdb.set_trace()
             selected = self._resolve_selected_files(
                 result.get("selected_files", []), changed_files
             )
@@ -322,23 +329,25 @@ OUTPUT JSON ONLY:
         for problem in result.get("problems", []) or []:
             if not isinstance(problem, dict):
                 continue
-            normalized["problems"].append({
-                "files": problem.get("files", []),
-                "failure_type": problem.get("failure_type", ""),
-                "issue_type": problem.get("issue_type", ""),
-                "problem": problem.get("problem", ""),
-                "root_cause": problem.get("root_cause", ""),
-                "changes_made": problem.get("changes_made", ""),
-                "introduces": problem.get("introduces", ""),
-                "fixes": problem.get("fixes", ""),
-                "current_failed_jobs": current_failed_jobs,
-                "current_fixed_jobs": current_jobs_fixed,
-                "validation_cmd": problem.get("validation_cmd", ""),
-                "commit_sha": commit_sha,
-                "commit_message": commit_message,
-                "sha_success": group.get("sha_success"),
-                "sha_fail": group.get("sha_fail"),
-            })
+            normalized["problems"].append(
+                {
+                    "files": problem.get("files", []),
+                    "failure_type": problem.get("failure_type", ""),
+                    "issue_type": problem.get("issue_type", ""),
+                    "problem": problem.get("problem", ""),
+                    "root_cause": problem.get("root_cause", ""),
+                    "changes_made": problem.get("changes_made", ""),
+                    "introduces": problem.get("introduces", ""),
+                    "fixes": problem.get("fixes", ""),
+                    "current_failed_jobs": current_failed_jobs,
+                    "current_fixed_jobs": current_jobs_fixed,
+                    "validation_cmd": problem.get("validation_cmd", ""),
+                    "commit_sha": commit_sha,
+                    "commit_message": commit_message,
+                    "sha_success": group.get("sha_success"),
+                    "sha_fail": group.get("sha_fail"),
+                }
+            )
 
         return normalized
 
@@ -364,7 +373,9 @@ OUTPUT JSON ONLY:
             # Simple string logs
             lines = ci_logs.split("\n")
             # Find error lines
-            error_lines = [l for l in lines if "error" in l.lower() or "failed" in l.lower()]
+            error_lines = [
+                l for l in lines if "error" in l.lower() or "failed" in l.lower()
+            ]
             if error_lines:
                 return "\n".join(error_lines[:10])  # First 10 error lines
             return ci_logs[:2000]  # First 2000 chars
@@ -381,7 +392,9 @@ OUTPUT JSON ONLY:
 
             combined = "\n".join(all_logs)
             lines = combined.split("\n")
-            error_lines = [l for l in lines if "error" in l.lower() or "failed" in l.lower()]
+            error_lines = [
+                l for l in lines if "error" in l.lower() or "failed" in l.lower()
+            ]
             if error_lines:
                 return "\n".join(error_lines[:10])
             return combined[:2000]
@@ -438,26 +451,27 @@ OUTPUT JSON ONLY:
         if lowered.startswith("openrouter/") or "minimax" in lowered:
             return (
                 os.getenv("OPENROUTER_API_KEY"),
-                os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+                os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
             )
 
         # GLM models
         if "glm" in lowered or "z-ai" in lowered or "zai" in lowered:
             return (
                 os.getenv("GLM_API_KEY"),
-                os.getenv("GLM_BASE_URL", "https://api.z.ai/api/paas/v4")
+                os.getenv("GLM_BASE_URL", "https://api.z.ai/api/paas/v4"),
             )
 
         # Default to OpenRouter
         return (
             os.getenv("OPENROUTER_API_KEY"),
-            os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+            os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         )
 
     def _get_max_tokens(self, model_name: str) -> int:
         """Get max tokens based on model"""
         try:
             from scripts.model_token_config import get_output_safe_tokens
+
             return get_output_safe_tokens(model_name)
         except:
             # Fallback

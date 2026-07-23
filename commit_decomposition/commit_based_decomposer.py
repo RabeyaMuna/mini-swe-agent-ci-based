@@ -11,7 +11,6 @@ Simplified production-ready version:
 
 import json
 import sys
-import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -89,9 +88,8 @@ def filter_relevant_validations(
     validation_sequence: List[Dict], structured_failure: Dict
 ) -> List[Dict]:
     """Prefer validations matching failed commands/tools from structured failure."""
-    failure_items = (
-        (structured_failure.get("relevant_files", []) or [])
-        + (structured_failure.get("failed_job", []) or [])
+    failure_items = (structured_failure.get("relevant_files", []) or []) + (
+        structured_failure.get("failed_job", []) or []
     )
     failed_commands = {
         str(item.get("failed_cmd") or item.get("command") or "").strip()
@@ -147,7 +145,9 @@ def merge_file_lists(*file_lists: List[str]) -> List[str]:
     return merged
 
 
-def extract_validation_sequence_from_ci_metadata(ci_metadata: Dict, workflow_path: str = "") -> List[Dict]:
+def extract_validation_sequence_from_ci_metadata(
+    ci_metadata: Dict, workflow_path: str = ""
+) -> List[Dict]:
     """
     Build validation sequence from CI metadata step information
 
@@ -175,12 +175,14 @@ def extract_validation_sequence_from_ci_metadata(ci_metadata: Dict, workflow_pat
         seen_steps.add(step_name)
 
         # Build validation entry
-        validation_sequence.append({
-            "order": idx,
-            "validates": step_name,
-            "validation_cmd": "",  # Will be enriched later if needed
-            "source": workflow_path or workflow_name
-        })
+        validation_sequence.append(
+            {
+                "order": idx,
+                "validates": step_name,
+                "validation_cmd": "",  # Will be enriched later if needed
+                "source": workflow_path or workflow_name,
+            }
+        )
 
     return validation_sequence
 
@@ -205,7 +207,7 @@ def generate_and_cache_validation(
         build_validation_sequence_prompt,
         _load_json,
         _normalize_dependent_files,
-        _normalize_validation_sequence
+        _normalize_validation_sequence,
     )
 
     repo_owner = issue_data.get("repo_owner", "")
@@ -214,8 +216,12 @@ def generate_and_cache_validation(
     workflow_path = issue_data.get("workflow_path", "")
 
     if not all([repo_owner, repo_name, sha_fail, workflow_path]):
-        print(f"    Missing required fields to generate validation sequence")
-        return {"validation_sequence": [], "failure_info": "", "workflow_path": workflow_path}
+        print("    Missing required fields to generate validation sequence")
+        return {
+            "validation_sequence": [],
+            "failure_info": "",
+            "workflow_path": workflow_path,
+        }
 
     print(f"    Generating validation sequence from workflow at {sha_fail[:8]}...")
 
@@ -226,13 +232,16 @@ def generate_and_cache_validation(
 
     if not workflow_content:
         print(f"    Could not fetch workflow file: {workflow_path}")
-        return {"validation_sequence": [], "failure_info": "", "workflow_path": workflow_path}
+        return {
+            "validation_sequence": [],
+            "failure_info": "",
+            "workflow_path": workflow_path,
+        }
 
     # Generate validation sequence using LLM
     try:
         # Step 1: Ask LLM which dependent files are needed
         import litellm
-        llm = analyzer
 
         # Create a simple LLM caller that works with litellm
         class SimpleLLM:
@@ -243,7 +252,7 @@ def generate_and_cache_validation(
                 response = litellm.completion(
                     model=self.model_name,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0
+                    temperature=0.0,
                 )
                 return response.choices[0].message.content
 
@@ -269,12 +278,14 @@ def generate_and_cache_validation(
             status = "✓" if found else "✗"
             print(f"      {status} {dep_path}")
 
-            dependent_file_contents.append({
-                "path": dep_path,
-                "reason": dep.get("reason", ""),
-                "found": found,
-                "content": content or "",
-            })
+            dependent_file_contents.append(
+                {
+                    "path": dep_path,
+                    "reason": dep.get("reason", ""),
+                    "found": found,
+                    "content": content or "",
+                }
+            )
 
         # Step 3: Generate validation sequence using prompts directly
         validation_prompt = build_validation_sequence_prompt(
@@ -282,10 +293,12 @@ def generate_and_cache_validation(
         )
         validation_raw = simple_llm.invoke(validation_prompt)
 
-        print(f"    [DEBUG] Validation LLM response (first 500 chars):")
+        print("    [DEBUG] Validation LLM response (first 500 chars):")
         print(f"    {str(validation_raw)[:500]}")
 
-        validation_sequence = _normalize_validation_sequence(_load_json(validation_raw, []))
+        validation_sequence = _normalize_validation_sequence(
+            _load_json(validation_raw, [])
+        )
         print(f"    Generated {len(validation_sequence)} validation steps")
 
         # Save to cache
@@ -304,16 +317,18 @@ def generate_and_cache_validation(
             "workflow_path": workflow_path,
             "validation_sequence": validation_sequence,
             "failure_info": "",
-            "generated_at": str(Path(__file__).stat().st_mtime)
+            "generated_at": str(Path(__file__).stat().st_mtime),
         }
 
         # Remove old entry if exists
-        cache = [c for c in cache if str(c.get("issue_id") or c.get("id")) != str(issue_id)]
+        cache = [
+            c for c in cache if str(c.get("issue_id") or c.get("id")) != str(issue_id)
+        ]
         cache.append(cache_entry)
 
         # Save
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_path, 'w') as f:
+        with open(cache_path, "w") as f:
             json.dump(cache, f, indent=2)
 
         print(f"    Saved validation sequence to cache: {cache_path}")
@@ -321,14 +336,19 @@ def generate_and_cache_validation(
         return {
             "validation_sequence": validation_sequence,
             "failure_info": "",
-            "workflow_path": workflow_path
+            "workflow_path": workflow_path,
         }
 
     except Exception as e:
         print(f"    Error generating validation sequence: {e}")
         import traceback
+
         traceback.print_exc()
-        return {"validation_sequence": [], "failure_info": "", "workflow_path": workflow_path}
+        return {
+            "validation_sequence": [],
+            "failure_info": "",
+            "workflow_path": workflow_path,
+        }
 
 
 def load_validation_cache(
@@ -354,21 +374,26 @@ def load_validation_cache(
         for entry in cache:
             entry_issue_id = str(entry.get("issue_id") or entry.get("id") or "")
             entry_sha_fail = str(entry.get("sha_fail") or "")
-            if entry_issue_id == str(issue_id) or (sha_fail and entry_sha_fail == sha_fail):
-                print(f"  Found validation sequence in cache: {len(entry.get('validation_sequence', []))} steps")
+            if entry_issue_id == str(issue_id) or (
+                sha_fail and entry_sha_fail == sha_fail
+            ):
+                print(
+                    f"  Found validation sequence in cache: {len(entry.get('validation_sequence', []))} steps"
+                )
                 return {
                     "validation_sequence": entry.get("validation_sequence", []),
                     "failure_info": (
-                        entry.get("failure_info")
-                        or entry.get("failure_summary", "")
+                        entry.get("failure_info") or entry.get("failure_summary", "")
                     ),
-                    "workflow_path": entry.get("workflow_path", "")
+                    "workflow_path": entry.get("workflow_path", ""),
                 }
 
     # Not in cache - generate and save it
     if issue_data and github_fetcher and analyzer:
         print(f"  Issue {issue_id} not in cache, generating validation sequence...")
-        return generate_and_cache_validation(issue_id, issue_data, github_fetcher, analyzer)
+        return generate_and_cache_validation(
+            issue_id, issue_data, github_fetcher, analyzer
+        )
 
     # Fallback: Return empty - will be populated from ci_metadata during analysis
     # The actual validation steps will come from the per-commit CI metadata
@@ -378,7 +403,7 @@ def load_validation_cache(
         return {
             "validation_sequence": [],
             "failure_info": "",
-            "workflow_path": issue_data.get("workflow_path", "")
+            "workflow_path": issue_data.get("workflow_path", ""),
         }
 
     print(f"  Warning: No validation data found for issue {issue_id}")
@@ -386,14 +411,20 @@ def load_validation_cache(
 
 
 def get_commits_between(
-    repo_owner: str, repo_name: str, sha_success: str, sha_fail: str, github_fetcher: GitHubFetcher
+    repo_owner: str,
+    repo_name: str,
+    sha_success: str,
+    sha_fail: str,
+    github_fetcher: GitHubFetcher,
 ) -> List[Dict]:
     """
     Get all commits between success and fail using GitHub API
 
     No local repo needed!
     """
-    return github_fetcher.get_commits_between(repo_owner, repo_name, sha_success, sha_fail)
+    return github_fetcher.get_commits_between(
+        repo_owner, repo_name, sha_success, sha_fail
+    )
 
 
 def get_commit_diff(
@@ -411,7 +442,7 @@ def decompose_issue(
     issue: Dict,
     validation_cache: Dict,
     analyzer: CommitAnalyzer,
-    github_fetcher: GitHubFetcher
+    github_fetcher: GitHubFetcher,
 ) -> Dict:
     """
     Simple commit-based decomposition using GitHub API
@@ -434,14 +465,16 @@ def decompose_issue(
     print(f"    sha_fail: {sha_fail[:12]}")
 
     # 1. Get all commits from GitHub
-    commits = get_commits_between(repo_owner, repo_name, sha_success, sha_fail, github_fetcher)
+    commits = get_commits_between(
+        repo_owner, repo_name, sha_success, sha_fail, github_fetcher
+    )
     print(f"    Total commits: {len(commits)}")
 
     if not commits:
         return {
             "issue_id": issue_id,
             "error": "No commits found",
-            "problem_sequence": []
+            "problem_sequence": [],
         }
 
     # 2. Analyze each commit
@@ -461,7 +494,7 @@ def decompose_issue(
     if structured_failure:
         ci_logs = structured_failure
     elif not issue.get("logs") or len(str(issue.get("logs", ""))) < 100:
-        print(f"    Using cached CI failure info (logs expired or missing)")
+        print("    Using cached CI failure info (logs expired or missing)")
         ci_logs = ci_failure_info
     else:
         ci_logs = issue.get("logs", "")
@@ -482,11 +515,15 @@ def decompose_issue(
 
         # If validation_sequence is empty (not in cache), extract from first commit's CI metadata
         if needs_validation_from_metadata and ci_metadata.get("step_names_executed"):
-            print(f"      Building validation sequence from CI metadata (not in cache)...")
+            print(
+                "      Building validation sequence from CI metadata (not in cache)..."
+            )
             validation_sequence = extract_validation_sequence_from_ci_metadata(
                 ci_metadata, workflow_path
             )
-            print(f"      Extracted {len(validation_sequence)} validation steps from CI metadata")
+            print(
+                f"      Extracted {len(validation_sequence)} validation steps from CI metadata"
+            )
             needs_validation_from_metadata = False  # Only do this once
 
         ci_metadata = enrich_ci_metadata_commands(
@@ -527,7 +564,9 @@ def decompose_issue(
             "changed_files": changed_files,
             "validated_changed_files": validated_changed_files,
             "ci_metadata_summary": {
-                "workflow_run_exists": compact_metadata.get("workflow_run_exists", False),
+                "workflow_run_exists": compact_metadata.get(
+                    "workflow_run_exists", False
+                ),
                 "workflow_names": compact_metadata.get("workflow_names", []),
                 "jobs_executed": compact_metadata.get("jobs_executed", []),
                 "job_conclusions": compact_metadata.get("job_conclusions", []),
@@ -585,20 +624,24 @@ def decompose_issue(
             ignored_files = total_files - included_files
 
         if ignored_files > 0:
-            print(f"      Filtered: {total_files} files → {included_files} files (ignored {ignored_files} .github/.json files)")
+            print(
+                f"      Filtered: {total_files} files → {included_files} files (ignored {ignored_files} .github/.json files)"
+            )
 
         if not filtered_diff or filtered_diff.strip() == "":
-            print(f"      No relevant files after filtering, skipping")
+            print("      No relevant files after filtering, skipping")
             continue
 
         # Check if we need to chunk this commit (if too large)
         # Chunk by files if needed, but keep context that this is ONE commit
-        chunks = chunk_commit_diff(filtered_diff, max_tokens=12000, max_files_per_chunk=40)
+        chunks = chunk_commit_diff(
+            filtered_diff, max_tokens=12000, max_files_per_chunk=40
+        )
 
         if len(chunks) > 1:
             print(f"      Large commit - split into {len(chunks)} chunks for analysis")
         else:
-            print(f"      Analyzing commit changes...")
+            print("      Analyzing commit changes...")
 
         # Analyze each chunk of this commit
         commit_problems = []
@@ -607,7 +650,9 @@ def decompose_issue(
             file_count = chunk.get("file_count", len(chunk_files))
 
             if len(chunks) > 1:
-                print(f"        Chunk {chunk_idx + 1}/{len(chunks)}: {file_count} file(s)")
+                print(
+                    f"        Chunk {chunk_idx + 1}/{len(chunks)}: {file_count} file(s)"
+                )
 
             # LLM analysis on this chunk
             analysis_result = analyzer.analyze_commit_group(
@@ -628,14 +673,16 @@ def decompose_issue(
                 },
                 commit_diff=chunk["diff"],
                 ci_logs=ci_logs,
-                relevant_validations=validation_sequence
+                relevant_validations=validation_sequence,
             )
 
             # Collect problems from this chunk
             for problem in analysis_result.get("problems", []):
                 problem["commit"] = commit_sha[:8]
                 problem["commit_sha"] = problem.get("commit_sha") or commit_sha
-                problem["commit_message"] = problem.get("commit_message") or commit.get("message", "")
+                problem["commit_message"] = problem.get("commit_message") or commit.get(
+                    "message", ""
+                )
                 problem["commit_number"] = i
                 commit_problems.append(problem)
 
@@ -647,16 +694,18 @@ def decompose_issue(
 
     # 3. Deduplicate similar problems
     if len(all_problems) > 1:
-        deduplicated = deduplicate_problems(all_problems, analyzer, similarity_threshold=0.7)
+        deduplicated = deduplicate_problems(
+            all_problems, analyzer, similarity_threshold=0.7
+        )
         all_problems = deduplicated
 
     # 4. Final LLM organization (if we have problems)
     if all_problems:
-        print(f"    Organizing repair trajectory...")
+        print("    Organizing repair trajectory...")
         organized = organize_trajectory_with_llm(
             all_problems=all_problems,
             validation_sequence=validation_sequence,
-            analyzer=analyzer
+            analyzer=analyzer,
         )
         problem_sequence = organized
     else:
@@ -670,5 +719,5 @@ def decompose_issue(
         "decomposition_type": "commit_based",
         "total_commits": len(commits),
         "total_problems": len(problem_sequence),
-        "problem_sequence": problem_sequence
+        "problem_sequence": problem_sequence,
     }

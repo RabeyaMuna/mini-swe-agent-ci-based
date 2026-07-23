@@ -10,27 +10,29 @@ from typing import List, Dict, Set
 
 # Files/directories to IGNORE (not CI-validated)
 IGNORED_PATTERNS = [
-    '.github/**',
-    'docs/**',
-    '*.md',
-    'LICENSE*',
-    '.gitignore',
-    '.editorconfig',
-    '.vscode/**',
-    '.idea/**',
-    'README*',
-    'CONTRIBUTING*',
-    'CHANGELOG*',
-    '.pre-commit-config.yaml',
-    '.readthedocs.yml',
-    'mkdocs.yml'
+    ".github/**",
+    "docs/**",
+    "*.md",
+    "LICENSE*",
+    ".gitignore",
+    ".editorconfig",
+    ".vscode/**",
+    ".idea/**",
+    "README*",
+    "CONTRIBUTING*",
+    "CHANGELOG*",
+    ".pre-commit-config.yaml",
+    ".readthedocs.yml",
+    "mkdocs.yml",
 ]
 
 
 def should_ignore_file(filepath: str) -> bool:
     """Check if file should be ignored (not CI-validated)"""
     for pattern in IGNORED_PATTERNS:
-        if fnmatch.fnmatch(filepath, pattern) or fnmatch.fnmatch(f"**/{filepath}", pattern):
+        if fnmatch.fnmatch(filepath, pattern) or fnmatch.fnmatch(
+            f"**/{filepath}", pattern
+        ):
             return True
     return False
 
@@ -47,7 +49,10 @@ def extract_validated_patterns(validation_sequence: List[Dict]) -> Set[str]:
         validates = validation.get("validates", "").lower()
 
         # Python validations
-        if any(x in validates for x in ["mypy", "isort", "black", "ruff", "pylint", "flake8", "python"]):
+        if any(
+            x in validates
+            for x in ["mypy", "isort", "black", "ruff", "pylint", "flake8", "python"]
+        ):
             patterns.add("*.py")
 
         # Python config
@@ -63,7 +68,9 @@ def extract_validated_patterns(validation_sequence: List[Dict]) -> Set[str]:
             patterns.add("tests/**/*.py")
 
         # JavaScript/TypeScript
-        if any(x in validates for x in ["eslint", "prettier", "javascript", "typescript"]):
+        if any(
+            x in validates for x in ["eslint", "prettier", "javascript", "typescript"]
+        ):
             patterns.add("*.js")
             patterns.add("*.ts")
             patterns.add("*.jsx")
@@ -114,7 +121,9 @@ def matches_pattern(filepath: str, patterns: Set[str]) -> bool:
     return False
 
 
-def filter_to_validated_files(all_files: List[str], validation_sequence: List[Dict]) -> List[str]:
+def filter_to_validated_files(
+    all_files: List[str], validation_sequence: List[Dict]
+) -> List[str]:
     """
     Filter file list to only those validated by CI
 
@@ -140,7 +149,9 @@ def filter_to_validated_files(all_files: List[str], validation_sequence: List[Di
     return validated_files
 
 
-def filter_validations_for_files(validation_sequence: List[Dict], files: List[str]) -> List[Dict]:
+def filter_validations_for_files(
+    validation_sequence: List[Dict], files: List[str]
+) -> List[Dict]:
     """
     Get only the validation commands relevant to these files
 
@@ -163,7 +174,10 @@ def filter_validations_for_files(validation_sequence: List[Dict], files: List[st
 
             # Python files
             if ext == ".py":
-                if any(x in validates for x in ["mypy", "isort", "black", "ruff", "pylint", "flake8"]):
+                if any(
+                    x in validates
+                    for x in ["mypy", "isort", "black", "ruff", "pylint", "flake8"]
+                ):
                     if validation not in relevant:
                         relevant.append(validation)
                 if "test" in name and "pytest" in validates:

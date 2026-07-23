@@ -50,9 +50,7 @@ def build_repair_trajectory(per_commit_analysis: List[Dict]) -> List[Dict]:
 
 
 def organize_trajectory_with_llm(
-    all_problems: List[Dict],
-    validation_sequence: List[Dict],
-    analyzer
+    all_problems: List[Dict], validation_sequence: List[Dict], analyzer
 ) -> List[Dict]:
     """
     Final LLM step: Organize all problems into optimal repair trajectory
@@ -158,7 +156,7 @@ IMPORTANT:
 
     except Exception as e:
         print(f"    Warning: LLM organization failed: {e}")
-        print(f"    Returning problems in original order")
+        print("    Returning problems in original order")
         return _normalize_organized_problems(all_problems)
 
 

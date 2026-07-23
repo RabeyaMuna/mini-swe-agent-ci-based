@@ -22,10 +22,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from commit_decomposition.commit_based_decomposer import decompose_issue, load_validation_cache
+from commit_decomposition.commit_based_decomposer import (
+    decompose_issue,
+    load_validation_cache,
+)
 from commit_decomposition.commit_analyzer import CommitAnalyzer
 from commit_decomposition.github_fetcher import GitHubFetcher
-from scripts.model_registry import configure_model_environment, resolve_model_alias
+from scripts.model_registry import configure_model_environment
 
 
 def load_issues_from_huggingface(issue_id: str = None) -> list:
@@ -35,10 +38,7 @@ def load_issues_from_huggingface(issue_id: str = None) -> list:
     print("Loading dataset from HuggingFace: ci-benchmark-user/ci-repair-bench")
 
     try:
-        ds = load_dataset(
-            'ci-benchmark-user/ci-repair-bench',
-            split='train'
-        )
+        ds = load_dataset("ci-benchmark-user/ci-repair-bench", split="train")
         print(f"  Loaded {len(ds)} issues from HuggingFace")
     except Exception as e:
         print(f"  Error loading dataset: {e}")
@@ -75,33 +75,23 @@ def main():
         "--dataset",
         type=Path,
         default=PROJECT_ROOT / "data" / "trs" / "filtered_issues.jsonl",
-        help="Path to issues JSONL file (optional, will use HuggingFace if --use-huggingface)"
+        help="Path to issues JSONL file (optional, will use HuggingFace if --use-huggingface)",
     )
     parser.add_argument(
         "--use-huggingface",
         action="store_true",
-        help="Load data directly from HuggingFace (always fresh)"
+        help="Load data directly from HuggingFace (always fresh)",
     )
-    parser.add_argument(
-        "--issue-id",
-        type=str,
-        help="Process single issue by ID"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        help="Limit number of issues to process"
-    )
+    parser.add_argument("--issue-id", type=str, help="Process single issue by ID")
+    parser.add_argument("--limit", type=int, help="Limit number of issues to process")
     parser.add_argument(
         "--output",
         type=Path,
         default=PROJECT_ROOT / "data" / "trs" / "commit_decomposed_issues.json",
-        help="Output file path"
+        help="Output file path",
     )
     parser.add_argument(
-        "--model",
-        type=str,
-        help="LLM model to use (default: from env MEMCI_LLM_MODEL)"
+        "--model", type=str, help="LLM model to use (default: from env MEMCI_LLM_MODEL)"
     )
 
     args = parser.parse_args()
@@ -112,14 +102,14 @@ def main():
 
     # Load issues
     if args.use_huggingface:
-        print(f"\nLoading issues from HuggingFace")
+        print("\nLoading issues from HuggingFace")
         issues = load_issues_from_huggingface(args.issue_id)
     else:
         print(f"\nLoading issues from {args.dataset}")
         issues = load_issues(args.dataset, args.issue_id)
 
     if args.limit:
-        issues = issues[:args.limit]
+        issues = issues[: args.limit]
 
     print(f"Loaded {len(issues)} issue(s)")
 
@@ -139,9 +129,11 @@ def main():
     # Initialize GitHub fetcher
     github_fetcher = GitHubFetcher()
     rate_limit = github_fetcher.check_rate_limit()
-    print(f"GitHub API rate limit: {rate_limit['remaining']}/{rate_limit['limit']} remaining")
+    print(
+        f"GitHub API rate limit: {rate_limit['remaining']}/{rate_limit['limit']} remaining"
+    )
 
-    if rate_limit['remaining'] < 10:
+    if rate_limit["remaining"] < 10:
         print("WARNING: Low GitHub API rate limit! Consider setting GITHUB_TOKEN")
         print("Without token: 60 requests/hour. With token: 5000 requests/hour")
 
@@ -152,7 +144,7 @@ def main():
         "success": 0,
         "failed": 0,
         "no_commits": 0,
-        "no_validated_commits": 0
+        "no_validated_commits": 0,
     }
 
     for i, issue in enumerate(issues, 1):
@@ -163,10 +155,7 @@ def main():
         # Load validation cache (has validation_sequence + failure_info)
         # Pass issue data, github_fetcher, and analyzer to generate if not in cache
         validation_cache = load_validation_cache(
-            issue_id,
-            issue_data=issue,
-            github_fetcher=github_fetcher,
-            analyzer=analyzer
+            issue_id, issue_data=issue, github_fetcher=github_fetcher, analyzer=analyzer
         )
 
         # Decompose using GitHub API
@@ -175,7 +164,7 @@ def main():
                 issue=issue,
                 validation_cache=validation_cache,
                 analyzer=analyzer,
-                github_fetcher=github_fetcher
+                github_fetcher=github_fetcher,
             )
 
             # Update stats
@@ -193,13 +182,16 @@ def main():
         except Exception as e:
             print(f"  ERROR: {e}")
             import traceback
+
             traceback.print_exc()
 
-            results.append({
-                "issue_id": issue_id,
-                "error": str(e),
-                "decomposition_type": "commit_based"
-            })
+            results.append(
+                {
+                    "issue_id": issue_id,
+                    "error": str(e),
+                    "decomposition_type": "commit_based",
+                }
+            )
             stats["failed"] += 1
 
     # Save results
@@ -233,7 +225,7 @@ def main():
         print(f"Total commits: {example.get('total_commits', 0)}")
         print(f"Total problems: {example.get('total_problems', 0)}")
         if example.get("problem_sequence"):
-            print(f"\nFirst problem:")
+            print("\nFirst problem:")
             print(json.dumps(example["problem_sequence"][0], indent=2))
 
     print("\n" + "=" * 70)

@@ -108,28 +108,32 @@ def _structured_failure_candidates(structured_failure: Dict) -> List[Dict]:
             continue
         command = item.get("command") or item.get("failed_cmd")
         if command:
-            candidates.append({
-                "command": str(command),
-                "source": "structured_failure.failed_job",
-                "job": item.get("job", ""),
-                "step": item.get("step", ""),
-                "text": " ".join(str(item.get(key, "")) for key in ("job", "step")),
-            })
+            candidates.append(
+                {
+                    "command": str(command),
+                    "source": "structured_failure.failed_job",
+                    "job": item.get("job", ""),
+                    "step": item.get("step", ""),
+                    "text": " ".join(str(item.get(key, "")) for key in ("job", "step")),
+                }
+            )
 
     for item in structured_failure.get("relevant_files", []) or []:
         if not isinstance(item, dict):
             continue
         command = item.get("failed_cmd") or item.get("command")
         if command:
-            candidates.append({
-                "command": str(command),
-                "source": "structured_failure.relevant_files",
-                "tool": item.get("failed_tool", ""),
-                "text": " ".join(
-                    str(item.get(key, ""))
-                    for key in ("failed_tool", "issue_type", "reason", "file")
-                ),
-            })
+            candidates.append(
+                {
+                    "command": str(command),
+                    "source": "structured_failure.relevant_files",
+                    "tool": item.get("failed_tool", ""),
+                    "text": " ".join(
+                        str(item.get(key, ""))
+                        for key in ("failed_tool", "issue_type", "reason", "file")
+                    ),
+                }
+            )
     return candidates
 
 
@@ -140,15 +144,17 @@ def _validation_sequence_candidates(validation_sequence: List[Dict]) -> List[Dic
             continue
         command = item.get("validation_cmd") or item.get("installation_cmd")
         if command:
-            candidates.append({
-                "command": str(command),
-                "source": "validation_sequence",
-                "text": " ".join(
-                    str(item.get(key, ""))
-                    for key in ("validates", "evidence", "source")
-                ),
-                "order": item.get("order"),
-            })
+            candidates.append(
+                {
+                    "command": str(command),
+                    "source": "validation_sequence",
+                    "text": " ".join(
+                        str(item.get(key, ""))
+                        for key in ("validates", "evidence", "source")
+                    ),
+                    "order": item.get("order"),
+                }
+            )
     return candidates
 
 
@@ -165,7 +171,9 @@ def _workflow_candidates(
 
     candidates = []
     for path in workflow_paths:
-        content = github_fetcher.get_file_content(repo_owner, repo_name, path, commit_sha)
+        content = github_fetcher.get_file_content(
+            repo_owner, repo_name, path, commit_sha
+        )
         if not content:
             continue
         try:
@@ -186,13 +194,15 @@ def _workflow_candidates(
                 if not command:
                     continue
                 step_name = str(step.get("name") or command).strip()
-                candidates.append({
-                    "command": _compact_shell(command),
-                    "source": f"workflow:{path}",
-                    "job": job_name,
-                    "step": step_name,
-                    "text": f"{job_key} {job_name} {step_name}",
-                })
+                candidates.append(
+                    {
+                        "command": _compact_shell(command),
+                        "source": f"workflow:{path}",
+                        "job": job_name,
+                        "step": step_name,
+                        "text": f"{job_key} {job_name} {step_name}",
+                    }
+                )
     return candidates
 
 
@@ -236,13 +246,21 @@ def _best_candidate(record: Dict, candidates: List[Dict]) -> Dict | None:
 
         if step_text and candidate_step and step_text == candidate_step:
             score += 100
-        elif step_text and candidate_step and (
-            step_text in candidate_step or candidate_step in step_text
+        elif (
+            step_text
+            and candidate_step
+            and (step_text in candidate_step or candidate_step in step_text)
         ):
             score += 70
 
-        if job_text and candidate_job and (
-            job_text == candidate_job or job_text in candidate_job or candidate_job in job_text
+        if (
+            job_text
+            and candidate_job
+            and (
+                job_text == candidate_job
+                or job_text in candidate_job
+                or candidate_job in job_text
+            )
         ):
             score += 20
 
@@ -295,7 +313,7 @@ def _extract_command_from_log(log_text: str, step_name: str) -> str:
                 start_idx = idx
                 break
 
-    window = lines[start_idx:start_idx + 160]
+    window = lines[start_idx : start_idx + 160]
     commands = []
     for line in window:
         clean = ANSI_RE.sub("", line).strip()

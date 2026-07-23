@@ -93,7 +93,9 @@ class CIBenchDataLoader:
         return {}
 
     @staticmethod
-    def _format_processed_ci_failure(log_detail: dict[str, Any], baseline_mode: bool = False) -> str:
+    def _format_processed_ci_failure(
+        log_detail: dict[str, Any], baseline_mode: bool = False
+    ) -> str:
         """
         Format CI failure with ACTIONABLE details for the agent.
 
@@ -120,8 +122,16 @@ class CIBenchDataLoader:
                 if isinstance(item, dict):
                     evidence = item.get('evidence', '')
                     # Extract concrete error messages (mypy, pylint, pytest, etc.)
-                    if evidence and any(keyword in evidence.lower() for keyword in
-                                       ['error', 'failed', 'exception', 'traceback', 'assert']):
+                    if evidence and any(
+                        keyword in evidence.lower()
+                        for keyword in [
+                            'error',
+                            'failed',
+                            'exception',
+                            'traceback',
+                            'assert',
+                        ]
+                    ):
                         raw_errors.append(evidence)
 
         # Show raw errors FIRST - this is what agent needs to see

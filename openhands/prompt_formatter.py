@@ -71,7 +71,7 @@ class PromptFormatter:
             Dict with repository, branch, and initial_message for OpenHands
         """
         repo_url = f'https://github.com/{issue_data["repo"]}'
-        benchmark_id = issue_data.get('id') or issue_data['instance_id']
+        issue_data.get('id') or issue_data['instance_id']
         workflow_validation = PromptFormatter._format_workflow_validation(
             issue_data.get('workflow', {})
         )

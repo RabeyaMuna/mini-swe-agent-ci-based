@@ -787,7 +787,7 @@ def _workflow_profile_from_cache_or_analyzer(
             "installation_cmd": [],
             "validation_cmd": [],
             "critical_steps": [],
-            "validation_sequence": []
+            "validation_sequence": [],
         }
 
     try:
@@ -814,7 +814,7 @@ def _workflow_profile_from_cache_or_analyzer(
             "installation_cmd": [],
             "validation_cmd": [],
             "critical_steps": [],
-            "validation_sequence": []
+            "validation_sequence": [],
         }
 
     if context.get("validation_sequence"):
@@ -825,7 +825,7 @@ def _workflow_profile_from_cache_or_analyzer(
         "installation_cmd": [],
         "validation_cmd": [],
         "critical_steps": [],
-        "validation_sequence": []
+        "validation_sequence": [],
     }
 
 
@@ -932,7 +932,7 @@ def _workflow_validation_context_to_profile(context: dict[str, Any]) -> dict[str
         "installation_cmd": installation_cmd,
         "validation_cmd": validation_cmd,
         "critical_steps": critical_steps,
-        "validation_sequence": sequence if isinstance(sequence, list) else []
+        "validation_sequence": sequence if isinstance(sequence, list) else [],
     }
 
 

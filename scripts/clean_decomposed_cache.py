@@ -25,33 +25,6 @@ from pathlib import Path
 def clean_problem(problem: dict) -> dict:
     """Remove L1/L2/L3 artifacts from a problem dict."""
     # Fields that should be in decomposition
-    allowed_fields = {
-        # Core problem info
-        "files",
-        "affected_files",
-        "problem",
-        "root_cause",
-        "failure_patterns",
-        "changes",
-        "fix_strategy",
-        "validation_cmd",
-        "validation_order",
-        "fixed",
-        "introduced_commit",
-        "source_commits",
-        "problem_type",
-        "visibility",
-        "failure_category",
-
-        # Metadata
-        "problem_id",  # OK to keep as long as it's from decomposition
-
-        # Any other decomposition-specific fields
-        "line_numbers",
-        "error_message",
-        "test_path",
-        "config_file",
-    }
 
     # Fields that should NOT be in decomposition (L1/L2/L3 artifacts)
     forbidden_fields = {
@@ -85,17 +58,6 @@ def clean_decomposed_issue(issue: dict) -> dict:
     cleaned = {}
 
     # Copy top-level allowed fields
-    allowed_top_fields = {
-        "original_issue_id",
-        "sha_fail",
-        "repo",
-        "original_error_type",
-        "problems",
-        "total_problems",
-        "total_changed_files",
-        "benchmark_ci_context",
-        "diff_analysis_context",
-    }
 
     # Fields to remove (L1/L2/L3 sections)
     forbidden_top_fields = {
@@ -121,7 +83,9 @@ def clean_decomposed_issue(issue: dict) -> dict:
 
     if removed_top:
         issue_id = issue.get("original_issue_id", "?")
-        print(f"    Issue {issue_id}: Removed top-level fields: {', '.join(removed_top)}")
+        print(
+            f"    Issue {issue_id}: Removed top-level fields: {', '.join(removed_top)}"
+        )
 
     return cleaned
 
@@ -130,20 +94,16 @@ def main():
     parser = argparse.ArgumentParser(
         description="Clean decomposed_issues.json by removing L1/L2/L3 artifacts"
     )
-    parser.add_argument(
-        "input_file",
-        type=Path,
-        help="Path to decomposed_issues.json"
-    )
+    parser.add_argument("input_file", type=Path, help="Path to decomposed_issues.json")
     parser.add_argument(
         "--backup",
         action="store_true",
-        help="Create backup before cleaning (.bak file)"
+        help="Create backup before cleaning (.bak file)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be cleaned without modifying file"
+        help="Show what would be cleaned without modifying file",
     )
 
     args = parser.parse_args()
@@ -183,14 +143,16 @@ def main():
     # Calculate file size difference
     original_size = input_file.stat().st_size
     cleaned_json = json.dumps(cleaned_issues, indent=2)
-    new_size = len(cleaned_json.encode('utf-8'))
+    new_size = len(cleaned_json.encode("utf-8"))
     size_diff = original_size - new_size
     size_diff_pct = (size_diff / original_size) * 100 if original_size > 0 else 0
 
-    print(f"\nFile size:")
+    print("\nFile size:")
     print(f"  Before: {original_size:,} bytes ({original_size / 1024 / 1024:.2f} MB)")
     print(f"  After:  {new_size:,} bytes ({new_size / 1024 / 1024:.2f} MB)")
-    print(f"  Saved:  {size_diff:,} bytes ({size_diff / 1024 / 1024:.2f} MB, {size_diff_pct:.1f}%)")
+    print(
+        f"  Saved:  {size_diff:,} bytes ({size_diff / 1024 / 1024:.2f} MB, {size_diff_pct:.1f}%)"
+    )
 
     if args.dry_run:
         print(f"\n{'=' * 60}")
@@ -200,13 +162,13 @@ def main():
 
     # Create backup if requested
     if args.backup:
-        backup_file = input_file.with_suffix(input_file.suffix + '.bak')
+        backup_file = input_file.with_suffix(input_file.suffix + ".bak")
         print(f"\nCreating backup: {backup_file}")
         shutil.copy2(input_file, backup_file)
 
     # Save cleaned version
     print(f"\nSaving cleaned version to: {input_file}")
-    with open(input_file, 'w') as f:
+    with open(input_file, "w") as f:
         f.write(cleaned_json)
 
     print(f"\n{'=' * 60}")

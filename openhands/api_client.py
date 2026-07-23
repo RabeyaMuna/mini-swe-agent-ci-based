@@ -3,7 +3,6 @@
 OpenHands API Client - Send structured problems to OpenHands server
 """
 
-import json
 import time
 from typing import Any, Optional
 
@@ -15,7 +14,7 @@ class OpenHandsAPIClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:3000",
+        base_url: str = 'http://localhost:3000',
         api_token: Optional[str] = None,
     ):
         """
@@ -26,10 +25,10 @@ class OpenHandsAPIClient:
             api_token: Optional API token for authentication
         """
         self.base_url = base_url.rstrip('/')
-        self.api_base = f"{self.base_url}/api/v1"
-        self.headers = {"Content-Type": "application/json"}
+        self.api_base = f'{self.base_url}/api/v1'
+        self.headers = {'Content-Type': 'application/json'}
         if api_token:
-            self.headers["Authorization"] = f"Bearer {api_token}"
+            self.headers['Authorization'] = f'Bearer {api_token}'
 
     def create_conversation(
         self, problem: dict[str, Any], metadata: Optional[dict[str, Any]] = None
@@ -45,36 +44,36 @@ class OpenHandsAPIClient:
             conversation_id: ID of created conversation
         """
         payload = {
-            "messages": [
+            'messages': [
                 {
-                    "role": "user",
-                    "content": {"type": "problem", "problem": problem},
+                    'role': 'user',
+                    'content': {'type': 'problem', 'problem': problem},
                 }
             ]
         }
 
         if metadata:
-            payload["metadata"] = metadata
+            payload['metadata'] = metadata
 
-        print(f"Creating conversation at {self.api_base}/conversations")
-        print(f"Problem ID: {problem.get('problem_id')}")
+        print(f'Creating conversation at {self.api_base}/conversations')
+        print(f'Problem ID: {problem.get("problem_id")}')
 
         response = requests.post(
-            f"{self.api_base}/conversations", json=payload, headers=self.headers
+            f'{self.api_base}/conversations', json=payload, headers=self.headers
         )
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"Failed to create conversation: {response.status_code} - {response.text}"
+                f'Failed to create conversation: {response.status_code} - {response.text}'
             )
 
         result = response.json()
-        conversation_id = result.get("conversation_id") or result.get("id")
+        conversation_id = result.get('conversation_id') or result.get('id')
 
         if not conversation_id:
-            raise RuntimeError(f"No conversation_id in response: {result}")
+            raise RuntimeError(f'No conversation_id in response: {result}')
 
-        print(f"Created conversation: {conversation_id}")
+        print(f'Created conversation: {conversation_id}')
         return conversation_id
 
     def send_message(
@@ -90,17 +89,17 @@ class OpenHandsAPIClient:
         Returns:
             Response from API
         """
-        payload = {"content": [message]}
+        payload = {'content': [message]}
 
         response = requests.post(
-            f"{self.api_base}/conversations/{conversation_id}/messages",
+            f'{self.api_base}/conversations/{conversation_id}/messages',
             json=payload,
             headers=self.headers,
         )
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"Failed to send message: {response.status_code} - {response.text}"
+                f'Failed to send message: {response.status_code} - {response.text}'
             )
 
         return response.json()
@@ -108,12 +107,12 @@ class OpenHandsAPIClient:
     def get_conversation_state(self, conversation_id: str) -> dict[str, Any]:
         """Get current conversation state"""
         response = requests.get(
-            f"{self.api_base}/conversations/{conversation_id}", headers=self.headers
+            f'{self.api_base}/conversations/{conversation_id}', headers=self.headers
         )
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"Failed to get conversation: {response.status_code} - {response.text}"
+                f'Failed to get conversation: {response.status_code} - {response.text}'
             )
 
         return response.json()
@@ -133,26 +132,26 @@ class OpenHandsAPIClient:
             Final conversation state
         """
         start_time = time.time()
-        print(f"Waiting for conversation {conversation_id} to complete...")
+        print(f'Waiting for conversation {conversation_id} to complete...')
 
         while time.time() - start_time < timeout:
             state = self.get_conversation_state(conversation_id)
-            status = state.get("status", "unknown")
+            status = state.get('status', 'unknown')
 
-            print(f"  Status: {status} ({int(time.time() - start_time)}s elapsed)")
+            print(f'  Status: {status} ({int(time.time() - start_time)}s elapsed)')
 
             # Check for terminal states
-            if status in ["completed", "finished", "success"]:
-                print(f"✓ Conversation completed successfully")
+            if status in ['completed', 'finished', 'success']:
+                print('✓ Conversation completed successfully')
                 return state
-            elif status in ["failed", "error", "stopped"]:
-                print(f"✗ Conversation failed: {status}")
+            elif status in ['failed', 'error', 'stopped']:
+                print(f'✗ Conversation failed: {status}')
                 return state
 
             time.sleep(poll_interval)
 
         raise TimeoutError(
-            f"Conversation {conversation_id} did not complete within {timeout}s"
+            f'Conversation {conversation_id} did not complete within {timeout}s'
         )
 
     def get_patch(self, conversation_id: str) -> str:
@@ -169,11 +168,11 @@ class OpenHandsAPIClient:
 
         # Try different possible locations for patch
         patch = (
-            state.get("patch")
-            or state.get("model_patch")
-            or state.get("diff")
-            or state.get("result", {}).get("patch")
-            or ""
+            state.get('patch')
+            or state.get('model_patch')
+            or state.get('diff')
+            or state.get('result', {}).get('patch')
+            or ''
         )
 
         return patch
@@ -181,7 +180,7 @@ class OpenHandsAPIClient:
     def get_trajectory(self, conversation_id: str) -> list[dict[str, Any]]:
         """Get agent trajectory (actions taken)"""
         state = self.get_conversation_state(conversation_id)
-        return state.get("trajectory", []) or state.get("history", [])
+        return state.get('trajectory', []) or state.get('history', [])
 
 
 def format_problem_message(
@@ -221,58 +220,58 @@ def format_problem_message(
         Structured problem dict
     """
     problem = {
-        "problem_id": problem_id,
-        "summary": summary,
-        "severity": "high",
-        "priority": 100,
-        "repo": repo,
-        "sha_fail": sha_fail,
-        "reproduction": reproduction,
-        "relevant_files": relevant_files,
-        "logs_snippet": logs_snippet,
-        "validation": validation,
-        "time_budget_minutes": time_budget_minutes,
-        "allow_auto_apply": allow_auto_apply,
+        'problem_id': problem_id,
+        'summary': summary,
+        'severity': 'high',
+        'priority': 100,
+        'repo': repo,
+        'sha_fail': sha_fail,
+        'reproduction': reproduction,
+        'relevant_files': relevant_files,
+        'logs_snippet': logs_snippet,
+        'validation': validation,
+        'time_budget_minutes': time_budget_minutes,
+        'allow_auto_apply': allow_auto_apply,
     }
 
     if root_causes:
-        problem["root_causes"] = root_causes
+        problem['root_causes'] = root_causes
 
     if suggested_fixes:
-        problem["suggested_fixes"] = suggested_fixes
+        problem['suggested_fixes'] = suggested_fixes
 
     if fix_strategy:
-        problem["fix_strategy"] = fix_strategy
+        problem['fix_strategy'] = fix_strategy
 
     return problem
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     # Test example
-    client = OpenHandsAPIClient("http://localhost:3000")
+    client = OpenHandsAPIClient('http://localhost:3000')
 
     # Example problem
     problem = format_problem_message(
-        problem_id="test-mypy-001",
-        summary="Fix mypy type annotation errors",
-        repo="https://github.com/adap/flower",
-        sha_fail="6aee1d58e8ce6402c48325c8c479dae84596d352",
+        problem_id='test-mypy-001',
+        summary='Fix mypy type annotation errors',
+        repo='https://github.com/adap/flower',
+        sha_fail='6aee1d58e8ce6402c48325c8c479dae84596d352',
         reproduction=[
-            "cd py",
-            "python -m mypy --config-file=pyproject.toml flwr/common/inflatable_test.py",
+            'cd py',
+            'python -m mypy --config-file=pyproject.toml flwr/common/inflatable_test.py',
         ],
         relevant_files=[
-            "py/flwr/common/inflatable_test.py",
-            "py/flwr/common/secure_aggregation/ndarrays_arithmetic.py",
+            'py/flwr/common/inflatable_test.py',
+            'py/flwr/common/secure_aggregation/ndarrays_arithmetic.py',
         ],
-        logs_snippet="py/flwr/common/inflatable_test.py:60: error: Function is missing a return type annotation",
-        validation=["cd py && python -m mypy --config-file=pyproject.toml flwr/"],
+        logs_snippet='py/flwr/common/inflatable_test.py:60: error: Function is missing a return type annotation',
+        validation=['cd py && python -m mypy --config-file=pyproject.toml flwr/'],
         root_causes=[
             {
-                "id": "rc1",
-                "description": "Missing -> None return type on test function",
-                "evidence": "mypy error at line 60",
-                "confidence": 0.95,
+                'id': 'rc1',
+                'description': 'Missing -> None return type on test function',
+                'evidence': 'mypy error at line 60',
+                'confidence': 0.95,
             }
         ],
     )
@@ -282,7 +281,7 @@ if __name__ == "__main__":
         final_state = client.wait_for_completion(conv_id)
         patch = client.get_patch(conv_id)
 
-        print(f"\nPatch ({len(patch)} chars):")
+        print(f'\nPatch ({len(patch)} chars):')
         print(patch[:500])
     except Exception as e:
-        print(f"Error: {e}")
+        print(f'Error: {e}')

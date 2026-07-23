@@ -13,10 +13,10 @@ This module decomposes pull requests by analyzing commits individually (when ind
 
 ## Key Features
 
-✅ **Only processes CI-validated files** - Ignores `.github/`, `docs/`, `*.md`, etc.  
-✅ **Commit-level granularity** - Treats each commit as repair unit  
-✅ **Smart grouping** - Groups overlapping commits together  
-✅ **Validation matching** - Maps changes to relevant CI checks  
+✅ **Only processes CI-validated files** - Ignores `.github/`, `docs/`, `*.md`, etc.
+✅ **Commit-level granularity** - Treats each commit as repair unit
+✅ **Smart grouping** - Groups overlapping commits together
+✅ **Validation matching** - Maps changes to relevant CI checks
 ✅ **Complete repair plans** - Actionable file edits and validation commands
 
 ## Files
@@ -67,7 +67,7 @@ python3 commit_decomposition/run_commit_decomposition.py \
   "sha_fail": "6aee1d58...",
   "sha_success": "714647c8...",
   "decomposition_type": "commit_based",
-  
+
   "summary": {
     "total_commits": 2,
     "commit_groups": 1,
@@ -75,7 +75,7 @@ python3 commit_decomposition/run_commit_decomposition.py \
     "indirect_problems": 0,
     "non_problems": 0
   },
-  
+
   "ci_failures": [
     {
       "problem": {
@@ -123,7 +123,7 @@ python3 commit_decomposition/run_commit_decomposition.py \
       "confidence": "high"
     }
   ],
-  
+
   "repair_trajectory": [
     {
       "step": 1,

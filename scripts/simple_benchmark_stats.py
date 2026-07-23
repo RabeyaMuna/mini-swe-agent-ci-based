@@ -17,7 +17,6 @@ import json
 import statistics
 from collections import Counter
 from pathlib import Path
-from typing import Any
 
 
 def load_decomposed_issues(path: Path) -> list[dict]:
@@ -30,7 +29,7 @@ def load_decomposed_issues(path: Path) -> list[dict]:
         return []
 
     # Try JSON array first
-    if text.startswith('['):
+    if text.startswith("["):
         return json.loads(text)
 
     # Try JSONL
@@ -43,22 +42,22 @@ def analyze_commits_per_pr(issues: list[dict]) -> dict:
 
     for issue in issues:
         # Try repair_trajectory first
-        trajectory = issue.get('repair_trajectory', [])
+        trajectory = issue.get("repair_trajectory", [])
         if trajectory:
             commits_per_pr.append(len(trajectory))
             continue
 
         # Try git_patches
-        patches = issue.get('git_patches', [])
+        patches = issue.get("git_patches", [])
         if patches:
             commits_per_pr.append(len(patches))
             continue
 
         # Try problems (each problem might have a commit)
         problems = (
-            issue.get('problems')
-            or issue.get('problem_sequence')
-            or issue.get('optimized_problems')
+            issue.get("problems")
+            or issue.get("problem_sequence")
+            or issue.get("optimized_problems")
             or []
         )
         if problems:
@@ -70,13 +69,13 @@ def analyze_commits_per_pr(issues: list[dict]) -> dict:
         commits_per_pr.append(1)
 
     return {
-        'mean': statistics.mean(commits_per_pr) if commits_per_pr else 0,
-        'median': statistics.median(commits_per_pr) if commits_per_pr else 0,
-        'std': statistics.stdev(commits_per_pr) if len(commits_per_pr) > 1 else 0,
-        'min': min(commits_per_pr) if commits_per_pr else 0,
-        'max': max(commits_per_pr) if commits_per_pr else 0,
-        'distribution': dict(Counter(commits_per_pr)),
-        'data': commits_per_pr,
+        "mean": statistics.mean(commits_per_pr) if commits_per_pr else 0,
+        "median": statistics.median(commits_per_pr) if commits_per_pr else 0,
+        "std": statistics.stdev(commits_per_pr) if len(commits_per_pr) > 1 else 0,
+        "min": min(commits_per_pr) if commits_per_pr else 0,
+        "max": max(commits_per_pr) if commits_per_pr else 0,
+        "distribution": dict(Counter(commits_per_pr)),
+        "data": commits_per_pr,
     }
 
 
@@ -89,9 +88,9 @@ def analyze_files_per_pr(issues: list[dict]) -> dict:
         all_files = set()
 
         problems = (
-            issue.get('problems')
-            or issue.get('problem_sequence')
-            or issue.get('optimized_problems')
+            issue.get("problems")
+            or issue.get("problem_sequence")
+            or issue.get("optimized_problems")
             or []
         )
 
@@ -99,7 +98,7 @@ def analyze_files_per_pr(issues: list[dict]) -> dict:
             if not isinstance(problem, dict):
                 continue
 
-            files = problem.get('affected_files', [])
+            files = problem.get("affected_files", [])
             if isinstance(files, list):
                 all_files.update(str(f) for f in files if f)
 
@@ -107,17 +106,17 @@ def analyze_files_per_pr(issues: list[dict]) -> dict:
             files_per_pr.append(len(all_files))
         else:
             # Fallback: use total_changed_files if available
-            num_files = issue.get('total_changed_files', 1)
+            num_files = issue.get("total_changed_files", 1)
             files_per_pr.append(num_files)
 
     return {
-        'mean': statistics.mean(files_per_pr) if files_per_pr else 0,
-        'median': statistics.median(files_per_pr) if files_per_pr else 0,
-        'std': statistics.stdev(files_per_pr) if len(files_per_pr) > 1 else 0,
-        'min': min(files_per_pr) if files_per_pr else 0,
-        'max': max(files_per_pr) if files_per_pr else 0,
-        'distribution': dict(Counter(files_per_pr)),
-        'data': files_per_pr,
+        "mean": statistics.mean(files_per_pr) if files_per_pr else 0,
+        "median": statistics.median(files_per_pr) if files_per_pr else 0,
+        "std": statistics.stdev(files_per_pr) if len(files_per_pr) > 1 else 0,
+        "min": min(files_per_pr) if files_per_pr else 0,
+        "max": max(files_per_pr) if files_per_pr else 0,
+        "distribution": dict(Counter(files_per_pr)),
+        "data": files_per_pr,
     }
 
 
@@ -129,31 +128,31 @@ def analyze_lines_per_pr(issues: list[dict]) -> dict:
         total_lines = 0
 
         # Try to count from git patches
-        patches = issue.get('git_patches', [])
+        patches = issue.get("git_patches", [])
         for patch in patches:
             if isinstance(patch, str):
                 # Count additions and deletions
-                for line in patch.split('\n'):
-                    if line.startswith('+') and not line.startswith('+++'):
+                for line in patch.split("\n"):
+                    if line.startswith("+") and not line.startswith("+++"):
                         total_lines += 1
-                    elif line.startswith('-') and not line.startswith('---'):
+                    elif line.startswith("-") and not line.startswith("---"):
                         total_lines += 1
 
         # If no patches, estimate from number of files
         if total_lines == 0:
-            num_files = issue.get('total_changed_files', 1)
+            num_files = issue.get("total_changed_files", 1)
             # Conservative estimate: 10 lines per file
             total_lines = num_files * 10
 
         lines_per_pr.append(total_lines)
 
     return {
-        'mean': statistics.mean(lines_per_pr) if lines_per_pr else 0,
-        'median': statistics.median(lines_per_pr) if lines_per_pr else 0,
-        'std': statistics.stdev(lines_per_pr) if len(lines_per_pr) > 1 else 0,
-        'min': min(lines_per_pr) if lines_per_pr else 0,
-        'max': max(lines_per_pr) if lines_per_pr else 0,
-        'data': lines_per_pr,
+        "mean": statistics.mean(lines_per_pr) if lines_per_pr else 0,
+        "median": statistics.median(lines_per_pr) if lines_per_pr else 0,
+        "std": statistics.stdev(lines_per_pr) if len(lines_per_pr) > 1 else 0,
+        "min": min(lines_per_pr) if lines_per_pr else 0,
+        "max": max(lines_per_pr) if lines_per_pr else 0,
+        "data": lines_per_pr,
     }
 
 
@@ -163,9 +162,9 @@ def analyze_problems_per_pr(issues: list[dict]) -> dict:
 
     for issue in issues:
         problems = (
-            issue.get('problems')
-            or issue.get('problem_sequence')
-            or issue.get('optimized_problems')
+            issue.get("problems")
+            or issue.get("problem_sequence")
+            or issue.get("optimized_problems")
             or []
         )
 
@@ -173,20 +172,20 @@ def analyze_problems_per_pr(issues: list[dict]) -> dict:
 
         if num_problems == 0:
             # Fallback: use total_problems field
-            num_problems = issue.get('total_problems', 1)
+            num_problems = issue.get("total_problems", 1)
 
         problems_per_pr.append(num_problems)
 
     return {
-        'mean': statistics.mean(problems_per_pr) if problems_per_pr else 0,
-        'median': statistics.median(problems_per_pr) if problems_per_pr else 0,
-        'std': statistics.stdev(problems_per_pr) if len(problems_per_pr) > 1 else 0,
-        'min': min(problems_per_pr) if problems_per_pr else 0,
-        'max': max(problems_per_pr) if problems_per_pr else 0,
-        'distribution': dict(Counter(problems_per_pr)),
-        'single_problem': sum(1 for p in problems_per_pr if p == 1),
-        'multi_problem': sum(1 for p in problems_per_pr if p > 1),
-        'data': problems_per_pr,
+        "mean": statistics.mean(problems_per_pr) if problems_per_pr else 0,
+        "median": statistics.median(problems_per_pr) if problems_per_pr else 0,
+        "std": statistics.stdev(problems_per_pr) if len(problems_per_pr) > 1 else 0,
+        "min": min(problems_per_pr) if problems_per_pr else 0,
+        "max": max(problems_per_pr) if problems_per_pr else 0,
+        "distribution": dict(Counter(problems_per_pr)),
+        "single_problem": sum(1 for p in problems_per_pr if p == 1),
+        "multi_problem": sum(1 for p in problems_per_pr if p > 1),
+        "data": problems_per_pr,
     }
 
 
@@ -223,11 +222,11 @@ def print_summary(stats: dict, total_issues: int):
     print(f"  Range:  {stats['problems']['min']} - {stats['problems']['max']}")
     print(
         f"  Single-problem PRs: {stats['problems']['single_problem']} "
-        f"({100*stats['problems']['single_problem']/max(total_issues,1):.1f}%)"
+        f"({100 * stats['problems']['single_problem'] / max(total_issues, 1):.1f}%)"
     )
     print(
         f"  Multi-problem PRs:  {stats['problems']['multi_problem']} "
-        f"({100*stats['problems']['multi_problem']/max(total_issues,1):.1f}%)"
+        f"({100 * stats['problems']['multi_problem'] / max(total_issues, 1):.1f}%)"
     )
 
     print("\n" + "=" * 70)
@@ -243,9 +242,9 @@ def generate_markdown_table(stats: dict, total_issues: int) -> str:
         f"| Lines changed | {stats['lines']['mean']:.1f} | {stats['lines']['median']:.1f} | {stats['lines']['std']:.1f} | {stats['lines']['min']} | {stats['lines']['max']} |",
         f"| Problems per PR | {stats['problems']['mean']:.2f} | {stats['problems']['median']:.1f} | {stats['problems']['std']:.2f} | {stats['problems']['min']} | {stats['problems']['max']} |",
         "",
-        f"**Multi-problem PRs:** {stats['problems']['multi_problem']}/{total_issues} ({100*stats['problems']['multi_problem']/max(total_issues,1):.1f}%)",
+        f"**Multi-problem PRs:** {stats['problems']['multi_problem']}/{total_issues} ({100 * stats['problems']['multi_problem'] / max(total_issues, 1):.1f}%)",
     ]
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def generate_latex_table(stats: dict, total_issues: int) -> str:
@@ -264,39 +263,37 @@ def generate_latex_table(stats: dict, total_issues: int) -> str:
         f"Lines changed & {stats['lines']['mean']:.1f} & {stats['lines']['median']:.1f} & {stats['lines']['std']:.1f} & {stats['lines']['min']} & {stats['lines']['max']} \\\\",
         f"Problems per PR & {stats['problems']['mean']:.2f} & {stats['problems']['median']:.1f} & {stats['problems']['std']:.2f} & {stats['problems']['min']} & {stats['problems']['max']} \\\\",
         "\\hline",
-        f"\\multicolumn{{6}}{{l}}{{Multi-problem PRs: {stats['problems']['multi_problem']}/{total_issues} ({100*stats['problems']['multi_problem']/max(total_issues,1):.1f}\\%)}} \\\\",
+        f"\\multicolumn{{6}}{{l}}{{Multi-problem PRs: {stats['problems']['multi_problem']}/{total_issues} ({100 * stats['problems']['multi_problem'] / max(total_issues, 1):.1f}\\%)}} \\\\",
         "\\hline",
         "\\end{tabular}",
         "\\end{table}",
     ]
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def save_distributions(stats: dict, output_dir: Path):
     """Save distribution data for plotting."""
     distributions = {
-        'commits_distribution': stats['commits']['distribution'],
-        'files_distribution': stats['files']['distribution'],
-        'problems_distribution': stats['problems']['distribution'],
+        "commits_distribution": stats["commits"]["distribution"],
+        "files_distribution": stats["files"]["distribution"],
+        "problems_distribution": stats["problems"]["distribution"],
     }
 
-    with open(output_dir / 'distributions.json', 'w') as f:
+    with open(output_dir / "distributions.json", "w") as f:
         json.dump(distributions, f, indent=2)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Compute simple benchmark statistics'
+    parser = argparse.ArgumentParser(description="Compute simple benchmark statistics")
+    parser.add_argument(
+        "--input",
+        default="data/trs/decomposed_issues.json",
+        help="Path to decomposed_issues.json",
     )
     parser.add_argument(
-        '--input',
-        default='data/trs/decomposed_issues.json',
-        help='Path to decomposed_issues.json',
-    )
-    parser.add_argument(
-        '--output-dir',
-        default='results/analytics',
-        help='Output directory for reports',
+        "--output-dir",
+        default="results/analytics",
+        help="Output directory for reports",
     )
 
     args = parser.parse_args()
@@ -309,10 +306,10 @@ def main():
     # Analyze
     print("\nAnalyzing...")
     stats = {
-        'commits': analyze_commits_per_pr(issues),
-        'files': analyze_files_per_pr(issues),
-        'lines': analyze_lines_per_pr(issues),
-        'problems': analyze_problems_per_pr(issues),
+        "commits": analyze_commits_per_pr(issues),
+        "files": analyze_files_per_pr(issues),
+        "lines": analyze_lines_per_pr(issues),
+        "problems": analyze_problems_per_pr(issues),
     }
 
     # Print summary
@@ -324,28 +321,28 @@ def main():
 
     # Save full report
     report = {
-        'total_issues': len(issues),
-        'commits_per_pr': stats['commits'],
-        'files_per_pr': stats['files'],
-        'lines_changed': stats['lines'],
-        'problems_per_pr': stats['problems'],
+        "total_issues": len(issues),
+        "commits_per_pr": stats["commits"],
+        "files_per_pr": stats["files"],
+        "lines_changed": stats["lines"],
+        "problems_per_pr": stats["problems"],
     }
 
-    report_file = output_dir / 'benchmark_stats.json'
-    with open(report_file, 'w') as f:
+    report_file = output_dir / "benchmark_stats.json"
+    with open(report_file, "w") as f:
         json.dump(report, f, indent=2)
     print(f"\n✅ Full report: {report_file}")
 
     # Save markdown table
-    md_file = output_dir / 'benchmark_stats.md'
-    with open(md_file, 'w') as f:
+    md_file = output_dir / "benchmark_stats.md"
+    with open(md_file, "w") as f:
         f.write("# Benchmark Statistics\n\n")
         f.write(generate_markdown_table(stats, len(issues)))
     print(f"✅ Markdown table: {md_file}")
 
     # Save LaTeX table
-    tex_file = output_dir / 'benchmark_stats.tex'
-    with open(tex_file, 'w') as f:
+    tex_file = output_dir / "benchmark_stats.tex"
+    with open(tex_file, "w") as f:
         f.write(generate_latex_table(stats, len(issues)))
     print(f"✅ LaTeX table: {tex_file}")
 
@@ -358,5 +355,5 @@ def main():
     print("=" * 70)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

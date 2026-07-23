@@ -9,8 +9,8 @@ from typing import List
 
 # Files/directories to ignore before CI relevance analysis.
 IGNORED_PATTERNS = [
-    r'^\.github/',       # GitHub workflow/action files
-    r'(^|/)[^/]+\.json$',  # JSON files
+    r"^\.github/",  # GitHub workflow/action files
+    r"(^|/)[^/]+\.json$",  # JSON files
 ]
 
 
@@ -44,7 +44,7 @@ def filter_diff(diff: str) -> str:
         return diff
 
     # Split diff by file markers
-    file_pattern = r'(diff --git a/(.*?) b/.*?\n)'
+    file_pattern = r"(diff --git a/(.*?) b/.*?\n)"
     parts = re.split(file_pattern, diff)
 
     filtered_parts = []
@@ -57,7 +57,7 @@ def filter_diff(diff: str) -> str:
             i += 1
             continue
 
-        if i + 2 < len(parts) and parts[i].startswith('diff --git'):
+        if i + 2 < len(parts) and parts[i].startswith("diff --git"):
             # This is a file header
             file_header = parts[i]
             file_path = parts[i + 1]
@@ -67,11 +67,13 @@ def filter_diff(diff: str) -> str:
             content_end = content_start
 
             # Find where this file's diff ends
-            while content_end < len(parts) and not (content_end > i + 2 and parts[content_end].startswith('diff --git')):
+            while content_end < len(parts) and not (
+                content_end > i + 2 and parts[content_end].startswith("diff --git")
+            ):
                 content_end += 1
 
             # Get all content for this file
-            file_content = ''.join(parts[content_start:content_end])
+            file_content = "".join(parts[content_start:content_end])
 
             # Check if we should include this file
             if not should_ignore_file(file_path):
@@ -84,7 +86,7 @@ def filter_diff(diff: str) -> str:
         else:
             i += 1
 
-    return ''.join(filtered_parts)
+    return "".join(filtered_parts)
 
 
 def _matches_target_file(file_path: str, target_files: List[str]) -> bool:
@@ -115,7 +117,7 @@ def filter_diff_to_files(diff: str, target_files: List[str]) -> str:
     if not diff or diff.startswith("Error") or not target_files:
         return ""
 
-    file_pattern = r'(diff --git a/(.*?) b/.*?\n)'
+    file_pattern = r"(diff --git a/(.*?) b/.*?\n)"
     parts = re.split(file_pattern, diff)
 
     filtered_parts = []
@@ -126,27 +128,29 @@ def filter_diff_to_files(diff: str, target_files: List[str]) -> str:
             i += 1
             continue
 
-        if i + 2 < len(parts) and parts[i].startswith('diff --git'):
+        if i + 2 < len(parts) and parts[i].startswith("diff --git"):
             file_header = parts[i]
             file_path = parts[i + 1]
             content_start = i + 2
             content_end = content_start
 
             while content_end < len(parts) and not (
-                content_end > i + 2 and parts[content_end].startswith('diff --git')
+                content_end > i + 2 and parts[content_end].startswith("diff --git")
             ):
                 content_end += 1
 
-            if _matches_target_file(file_path, target_files) and not should_ignore_file(file_path):
+            if _matches_target_file(file_path, target_files) and not should_ignore_file(
+                file_path
+            ):
                 filtered_parts.append(file_header)
                 filtered_parts.append(file_path)
-                filtered_parts.append(''.join(parts[content_start:content_end]))
+                filtered_parts.append("".join(parts[content_start:content_end]))
 
             i = content_end
         else:
             i += 1
 
-    return ''.join(filtered_parts)
+    return "".join(filtered_parts)
 
 
 def get_filtered_file_count(diff: str) -> tuple:
@@ -160,7 +164,7 @@ def get_filtered_file_count(diff: str) -> tuple:
         return (0, 0, 0)
 
     # Find all file paths
-    file_pattern = r'diff --git a/(.*?) b/'
+    file_pattern = r"diff --git a/(.*?) b/"
     all_files = re.findall(file_pattern, diff)
 
     total_files = len(all_files)
@@ -184,7 +188,7 @@ def get_changed_files(diff: str, include_ignored: bool = True) -> List[str]:
     if not diff or diff.startswith("Error"):
         return []
 
-    file_pattern = r'diff --git a/(.*?) b/'
+    file_pattern = r"diff --git a/(.*?) b/"
     files = re.findall(file_pattern, diff)
     if include_ignored:
         return files

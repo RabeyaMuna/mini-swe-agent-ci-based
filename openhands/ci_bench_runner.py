@@ -21,9 +21,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import our modules
 from data_loader import CIBenchDataLoader
+from interactive_agent import execute_openhands_agent
 from prompt_formatter import PromptFormatter
 from scripts.model_registry import configure_model_environment, resolve_model_alias
-from interactive_agent import execute_openhands_agent
 
 # Shared paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -134,7 +134,9 @@ class OpenHandsMemoryAdapter:
         }
 
 
-def _ci_problem_from_issue(issue_data: dict[str, Any], for_baseline: bool = False) -> dict[str, Any]:
+def _ci_problem_from_issue(
+    issue_data: dict[str, Any], for_baseline: bool = False
+) -> dict[str, Any]:
     """
     Create the CI problem passed to OpenHands.
 
@@ -154,8 +156,12 @@ def _ci_problem_from_issue(issue_data: dict[str, Any], for_baseline: bool = Fals
         from prompt_formatter import PromptFormatter
 
         log_detail = issue_data.get('ci_failure', {})
-        baseline_ci_summary = CIBenchDataLoader._format_processed_ci_failure(log_detail, baseline_mode=True)
-        baseline_description = PromptFormatter.format_baseline_ci_failure(baseline_ci_summary)
+        baseline_ci_summary = CIBenchDataLoader._format_processed_ci_failure(
+            log_detail, baseline_mode=True
+        )
+        baseline_description = PromptFormatter.format_baseline_ci_failure(
+            baseline_ci_summary
+        )
 
         return {
             'source': 'ci failure',
@@ -405,7 +411,9 @@ def _ci_problems_for_openhands(
                 for index, problem in enumerate(decomposed, 1)
             ]
         else:
-            problems = memory_result.get('problems') or [_ci_problem_from_issue(issue_data)]
+            problems = memory_result.get('problems') or [
+                _ci_problem_from_issue(issue_data)
+            ]
 
         # Add memory-guided repair plan as additional problem
         if memory_result.get('repair_plan'):
@@ -497,9 +505,8 @@ def run_single_issue(
         'has_memory': memory_result['repair_plan'] is not None,
         'has_decomposed_problems': bool(decomposed_issue),
         'problem_count': len(openhands_task['problems']),
-        'status': agent_result.get('status') or (
-            'success' if agent_result.get('patch') else 'no_patch'
-        ),
+        'status': agent_result.get('status')
+        or ('success' if agent_result.get('patch') else 'no_patch'),
         'total_cost': agent_result.get('total_cost', 0.0),
         'trajectory': agent_result.get('trajectory', []),
     }

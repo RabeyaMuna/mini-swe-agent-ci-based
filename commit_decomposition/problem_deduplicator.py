@@ -38,10 +38,9 @@ def calculate_similarity(problem1: Dict, problem2: Dict) -> float:
             score += word_overlap * 0.3
 
     # Same failure family
-    if (
-        problem1.get("failure_type") == problem2.get("failure_type")
-        and problem1.get("issue_type") == problem2.get("issue_type")
-    ):
+    if problem1.get("failure_type") == problem2.get("failure_type") and problem1.get(
+        "issue_type"
+    ) == problem2.get("issue_type"):
         score += 0.2
 
     # Same validation command
@@ -51,7 +50,9 @@ def calculate_similarity(problem1: Dict, problem2: Dict) -> float:
     return score
 
 
-def cluster_similar_problems(problems: List[Dict], threshold: float = 0.7) -> List[List[int]]:
+def cluster_similar_problems(
+    problems: List[Dict], threshold: float = 0.7
+) -> List[List[int]]:
     """
     Cluster problems by similarity
 
@@ -157,7 +158,9 @@ OUTPUT JSON (valid JSON only, no markdown):
         return similar_problems[0]
 
 
-def deduplicate_problems(problems: List[Dict], analyzer, similarity_threshold: float = 0.7) -> List[Dict]:
+def deduplicate_problems(
+    problems: List[Dict], analyzer, similarity_threshold: float = 0.7
+) -> List[Dict]:
     """
     Main function: Cluster and merge similar problems
 
@@ -187,7 +190,7 @@ def deduplicate_problems(problems: List[Dict], analyzer, similarity_threshold: f
             deduplicated.append(problems[cluster[0]])
         else:
             # Multiple similar problems, merge with LLM
-            print(f"    Merging cluster {i+1}: {len(cluster)} similar problems")
+            print(f"    Merging cluster {i + 1}: {len(cluster)} similar problems")
             similar_probs = [problems[idx] for idx in cluster]
             merged = merge_problems_with_llm(similar_probs, analyzer)
             deduplicated.append(merged)
