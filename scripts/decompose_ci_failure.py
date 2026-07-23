@@ -6571,7 +6571,7 @@ def main():
         help="Path to eval issues (legacy mode)",
     )
     parser.add_argument(
-        "--output-dir", default="data/trs", help="Output directory for memory files"
+        "--output-dir", default="data", help="Output directory for memory files"
     )
     parser.add_argument(
         "--model",

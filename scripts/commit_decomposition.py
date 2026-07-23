@@ -13,7 +13,7 @@ Strategy:
 4. If overlapping → group together
 
 Output:
-- data/trs/commit_decomposed_issues.json - Decomposed by commit
+- data/commit_decomposed_issues.json - Decomposed by commit
 """
 
 import json
@@ -250,7 +250,7 @@ def main():
     print("\nDone decomposing!")
 
     # Save output
-    output_dir = PROJECT_ROOT / "data" / "trs"
+    output_dir = PROJECT_ROOT / "data"
     output_file = output_dir / "commit_decomposed_issues.json"
 
     with open(output_file, "w") as f:

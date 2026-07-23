@@ -28,7 +28,7 @@ fi
 MODE=${MODE:-baseline}
 SLICE=${SLICE:-}
 EVAL_ISSUES=${EVAL_ISSUES:-data/trs/eval_set.jsonl}
-DECOMPOSED=${DECOMPOSED:-data/trs/decomposed_issues.json}
+DECOMPOSED=${DECOMPOSED:-data/decomposed_issues.json}
 OUTPUT_DIR=${OUTPUT_DIR:-results/openhands-api}
 
 echo -e "\n${YELLOW}Configuration:${NC}"

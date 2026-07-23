@@ -87,7 +87,7 @@ def main():
     parser.add_argument(
         "--output",
         type=Path,
-        default=PROJECT_ROOT / "data" / "trs" / "commit_decomposed_issues.json",
+        default=PROJECT_ROOT / "data" / "commit_decomposed_issues.json",
         help="Output file path",
     )
     parser.add_argument(

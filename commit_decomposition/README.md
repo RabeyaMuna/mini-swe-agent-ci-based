@@ -40,7 +40,7 @@ bash commit_decomposition/test_run.sh
 ```bash
 python3 commit_decomposition/run_commit_decomposition.py \
     --dataset data/trs/filtered_issues.jsonl \
-    --output data/trs/commit_decomposed_issues.json
+    --output data/commit_decomposed_issues.json
 ```
 
 ### Run on Specific Issue
@@ -48,7 +48,7 @@ python3 commit_decomposition/run_commit_decomposition.py \
 ```bash
 python3 commit_decomposition/run_commit_decomposition.py \
     --issue-id 113 \
-    --output data/trs/commit_decomposed_issues.json
+    --output data/commit_decomposed_issues.json
 ```
 
 ### Limit Number of Issues
@@ -56,7 +56,7 @@ python3 commit_decomposition/run_commit_decomposition.py \
 ```bash
 python3 commit_decomposition/run_commit_decomposition.py \
     --limit 10 \
-    --output data/trs/commit_decomposed_issues.json
+    --output data/commit_decomposed_issues.json
 ```
 
 ## Output Format
