@@ -92,7 +92,7 @@ from minisweagent.run.benchmarks.utils.patch_merger import (
 from minisweagent.utils.log import add_file_handler, logger
 from minisweagent.utils.project_env import load_project_env
 from minisweagent.utils.serialize import UNSET, recursive_merge
-from scripts.model_registry import configure_model_environment, resolve_model_alias
+from utilities.model_registry import configure_model_environment, resolve_model_alias
 
 # ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG_FILE = builtin_config_dir / "benchmarks" / "cibench.yaml"

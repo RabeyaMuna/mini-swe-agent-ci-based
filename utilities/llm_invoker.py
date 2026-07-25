@@ -1,0 +1,485 @@
+"""
+utilities/llm_invoker.py - Robust LLM invocation with comprehensive retry logic
+
+Centralizes retry logic for LLM API calls with handling for:
+- Rate limits (exponential backoff)
+- Timeouts (retry with increased timeout)
+- Connection errors (brief retry)
+- Empty responses
+- Malformed JSON
+
+Import and use across all scripts for consistent error handling.
+"""
+
+import json
+import logging
+import os
+import time
+from typing import Any, Callable, Literal
+
+try:
+    import demjson3  # type: ignore
+except Exception:
+    demjson3 = None  # type: ignore
+
+LOGGER = logging.getLogger(__name__)
+
+# Minimal health check prompt to test API connectivity
+HEALTH_CHECK_PROMPT = "Reply with exactly: OK"
+
+# JSON parsing instructions for repair prompts
+STRICT_JSON_RULES = """
+CRITICAL: Return ONLY valid JSON. No markdown, no code blocks, no explanations.
+Your entire response must be parseable by json.loads().
+""".strip()
+
+
+def _load_json_flexible(content: str) -> Any:
+    """
+    Flexibly parse JSON from LLM output.
+
+    Tries multiple parsing strategies:
+    1. Standard json.loads
+    2. Extract from markdown code blocks
+    3. demjson3 for lenient parsing
+
+    Returns:
+        Parsed JSON object/array, or [] if all attempts fail
+    """
+    if not content or not content.strip():
+        return []
+
+    content = content.strip()
+    last_json_err = None
+    last_demjson3_err = None
+
+    # Try standard JSON parse
+    try:
+        return json.loads(content)
+    except Exception as e:
+        last_json_err = e
+
+    # Try extracting from markdown code blocks
+    try:
+        import re
+        patterns = [
+            r"```json\s*\n(.*?)\n```",
+            r"```\s*\n(.*?)\n```",
+            r"^\s*\[.*\]\s*$",
+            r"^\s*\{.*\}\s*$",
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, content, re.DOTALL)
+            if matches:
+                candidate = matches[0].strip()
+                objects = json.loads(candidate)
+                if isinstance(objects, list) and len(objects) > 1:
+                    return objects
+                if len(objects) == 1:
+                    return objects[0]
+    except Exception:
+        pass
+
+    # Try demjson3 for lenient parsing
+    try:
+        if demjson3 is not None:
+            return demjson3.decode(content)
+    except Exception as exc:
+        last_demjson3_err = exc
+
+    # All parsing failed
+    preview = content[:500] if len(content) > 500 else content
+    parse_error = ValueError(
+        f"JSON parse failed: json={last_json_err}; demjson3={last_demjson3_err}\n"
+        f"Content preview (first 500 chars):\n{preview}"
+    )
+    LOGGER.warning("%s", parse_error)
+    return []
+
+
+def _check_api_health(llm: Any, verbose: bool = False) -> bool:
+    """
+    Quick health check to see if API is responsive.
+
+    Sends a minimal prompt to test connectivity.
+    Returns True if API responds, False otherwise.
+
+    Args:
+        llm: LLM instance
+        verbose: Print status messages
+
+    Returns:
+        True if API is healthy, False otherwise
+    """
+    try:
+        if verbose:
+            print("          -> Testing API connectivity with health check...")
+
+        # Use a minimal prompt to check connectivity (very fast)
+        response = llm.invoke(HEALTH_CHECK_PROMPT)
+        content = str(getattr(response, "content", response) or "").strip()
+
+        # Any response means API is back
+        if content:
+            if verbose:
+                print("          -> ✅ API is responsive!")
+            return True
+        else:
+            if verbose:
+                print("          -> ❌ API returned empty response")
+            return False
+
+    except Exception as e:
+        if verbose:
+            print(f"          -> ❌ API still unreachable: {type(e).__name__}")
+        return False
+
+
+def invoke_llm_with_retry(
+    llm: Any,
+    prompt: str,
+    max_tokens: int | None = None,
+    parse_json: bool = True,
+    json_repair_prompt_template: str | None = None,
+    max_rate_limit_retries: int = 3,
+    rate_limit_backoff_base: int = 60,
+    max_timeout_retries: int = 2,
+    timeout_multiplier: float = 2.0,
+    max_connection_retries: int = 5,
+    connection_retry_delay: int = 10,
+    verbose: bool = True,
+    _retry_count: int = 0,
+    _rate_limit_retry: int = 0,
+    _connection_retry: int = 0,
+) -> Any:
+    """
+    Invoke LLM with comprehensive retry logic and error handling.
+
+    Args:
+        llm: Language model instance with .invoke() method
+        prompt: The prompt to send to the LLM
+        max_tokens: Maximum tokens for response (optional)
+        parse_json: Whether to parse response as JSON (default: True)
+        json_repair_prompt_template: Custom repair prompt template with {content} placeholder
+        max_rate_limit_retries: Maximum retries for rate limit errors (default: 3)
+        rate_limit_backoff_base: Base wait time in seconds for rate limits (default: 60)
+        max_timeout_retries: Maximum retries for timeout errors (default: 2)
+        timeout_multiplier: Timeout multiplier for retries (default: 2.0)
+        max_connection_retries: Maximum retries for connection errors (default: 5)
+        connection_retry_delay: Base wait time in seconds for connection retries with exponential backoff (default: 10)
+                                First retry: 10s, second: 20s, third: 40s, fourth: 80s, fifth: 160s
+        verbose: Print status messages (default: True)
+        _retry_count: Internal - current timeout retry count
+        _rate_limit_retry: Internal - current rate limit retry count
+        _connection_retry: Internal - current connection retry count
+
+    Returns:
+        - If parse_json=True: Parsed JSON object/array or [] on failure
+        - If parse_json=False: Raw string content or "" on failure
+        - Special return value "SPLIT_REQUIRED" signals caller should split input
+
+    Retry Strategy:
+        - Rate limits: Exponential backoff (60s, 120s, 180s, ...)
+        - Timeouts: Retry once with increased timeout, then return SPLIT_REQUIRED
+        - Connection errors: Brief wait (5s) and retry up to 2 times
+        - Empty content: Check finish_reason, return SPLIT_REQUIRED if length limit
+        - Malformed JSON: One repair attempt with small prompt
+    """
+    prompt_size_kb = len(prompt) / 1024
+
+    if verbose and prompt_size_kb > 80:
+        print(f"        WARNING  Large prompt: {prompt_size_kb:.1f}KB - may cause API errors")
+
+    # ============================================================
+    # STEP 1: Invoke LLM with error handling
+    # ============================================================
+    try:
+        try:
+            response = (
+                llm.invoke(prompt, max_tokens=max_tokens)
+                if max_tokens
+                else llm.invoke(prompt)
+            )
+        except TypeError:
+            # Some LLMs don't support max_tokens parameter
+            response = llm.invoke(prompt)
+
+        content = str(getattr(response, "content", response) or "").strip()
+
+    except Exception as exc:
+        error_msg = str(exc)
+        error_type = type(exc).__name__
+
+        # --------------------------------------------------------
+        # ERROR TYPE 1: Rate Limit
+        # --------------------------------------------------------
+        if "rate limit" in error_msg.lower():
+            if _rate_limit_retry < max_rate_limit_retries:
+                wait_time = rate_limit_backoff_base * (_rate_limit_retry + 1)
+
+                if verbose:
+                    print(f"        FAIL Rate limit (attempt {_rate_limit_retry + 1}/{max_rate_limit_retries})")
+                    print(f"          -> Waiting {wait_time} seconds before retry...")
+
+                LOGGER.warning(
+                    f"Rate limit hit, waiting {wait_time}s before retry "
+                    f"{_rate_limit_retry + 1}/{max_rate_limit_retries}: {exc}"
+                )
+
+                time.sleep(wait_time)
+
+                if verbose:
+                    print(f"          -> Retrying after {wait_time}s wait...")
+
+                return invoke_llm_with_retry(
+                    llm=llm,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    parse_json=parse_json,
+                    json_repair_prompt_template=json_repair_prompt_template,
+                    max_rate_limit_retries=max_rate_limit_retries,
+                    rate_limit_backoff_base=rate_limit_backoff_base,
+                    max_timeout_retries=max_timeout_retries,
+                    timeout_multiplier=timeout_multiplier,
+                    max_connection_retries=max_connection_retries,
+                    connection_retry_delay=connection_retry_delay,
+                    verbose=verbose,
+                    _retry_count=_retry_count,
+                    _rate_limit_retry=_rate_limit_retry + 1,
+                    _connection_retry=_connection_retry,
+                )
+            else:
+                if verbose:
+                    print(f"        FAIL Rate limit persists after {max_rate_limit_retries} retries")
+                    print("          -> Giving up on this chunk")
+
+                LOGGER.error(f"Rate limit persists after {max_rate_limit_retries} retries, giving up")
+                return [] if parse_json else ""
+
+        # --------------------------------------------------------
+        # ERROR TYPE 2: Timeout
+        # --------------------------------------------------------
+        elif "timeout" in error_msg.lower() or "Timeout" in error_type:
+            if _retry_count < max_timeout_retries:
+                if verbose:
+                    print(f"        FAIL API Timeout (attempt {_retry_count + 1}): {error_type}")
+                    print(f"          Prompt size: {prompt_size_kb:.1f}KB")
+                    print(f"          -> Retrying with increased timeout ({timeout_multiplier}x)...")
+
+                LOGGER.warning(f"LLM API timeout on attempt {_retry_count + 1}, retrying with increased timeout: {exc}")
+
+                # Temporarily increase timeout
+                original_timeout = int(os.getenv("LITELLM_TIMEOUT", "900"))
+                new_timeout = int(original_timeout * timeout_multiplier)
+                os.environ["LITELLM_TIMEOUT"] = str(new_timeout)
+
+                try:
+                    time.sleep(2)  # Brief pause before retry
+                    result = invoke_llm_with_retry(
+                        llm=llm,
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        parse_json=parse_json,
+                        json_repair_prompt_template=json_repair_prompt_template,
+                        max_rate_limit_retries=max_rate_limit_retries,
+                        rate_limit_backoff_base=rate_limit_backoff_base,
+                        max_timeout_retries=max_timeout_retries,
+                        timeout_multiplier=timeout_multiplier,
+                        max_connection_retries=max_connection_retries,
+                        connection_retry_delay=connection_retry_delay,
+                        verbose=verbose,
+                        _retry_count=_retry_count + 1,
+                        _rate_limit_retry=_rate_limit_retry,
+                        _connection_retry=_connection_retry,
+                    )
+                    return result
+                finally:
+                    # Restore original timeout
+                    os.environ["LITELLM_TIMEOUT"] = str(original_timeout)
+            else:
+                if verbose:
+                    print(f"        FAIL API Timeout (attempt {_retry_count + 1}): {error_type}")
+                    print(f"          Prompt size: {prompt_size_kb:.1f}KB")
+                    print("          -> Timeout persists after retry, splitting chunk...")
+
+                LOGGER.warning(f"LLM API timeout after retry, triggering split: {exc}")
+                return "SPLIT_REQUIRED"
+
+        # --------------------------------------------------------
+        # ERROR TYPE 3: Connection/Network Errors
+        # --------------------------------------------------------
+        elif any(keyword in error_msg.lower() for keyword in [
+            "peer closed connection",
+            "connection",
+            "network",
+            "incomplete chunked",
+            "openrouterexception",
+            "apierror"
+        ]):
+            if _connection_retry < max_connection_retries:
+                # Exponential backoff: 10s, 20s, 40s, 80s, 160s
+                max_wait_time = connection_retry_delay * (2 ** _connection_retry)
+
+                if verbose:
+                    print(f"        FAIL API Connection Error (attempt {_connection_retry + 1}/{max_connection_retries})")
+                    print(f"          Error: {error_type}: {str(exc)[:200]}")
+                    print(f"          -> Adaptive wait: checking connection every 5s (max {max_wait_time}s)...")
+
+                LOGGER.warning(
+                    f"Connection error, adaptive wait up to {max_wait_time}s before retry "
+                    f"{_connection_retry + 1}/{max_connection_retries}: {exc}"
+                )
+
+                # Adaptive waiting: check health every 5 seconds
+                elapsed = 0
+                check_interval = 5
+                while elapsed < max_wait_time:
+                    time.sleep(check_interval)
+                    elapsed += check_interval
+
+                    # Check if API is back
+                    if _check_api_health(llm, verbose=verbose):
+                        if verbose:
+                            print(f"          -> Connection restored after {elapsed}s! Retrying now...")
+                        break
+                    else:
+                        if verbose and elapsed < max_wait_time:
+                            print(f"          -> Still waiting... ({elapsed}s/{max_wait_time}s)")
+
+                if elapsed >= max_wait_time and verbose:
+                    print(f"          -> Retrying after full {max_wait_time}s wait...")
+
+                return invoke_llm_with_retry(
+                    llm=llm,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    parse_json=parse_json,
+                    json_repair_prompt_template=json_repair_prompt_template,
+                    max_rate_limit_retries=max_rate_limit_retries,
+                    rate_limit_backoff_base=rate_limit_backoff_base,
+                    max_timeout_retries=max_timeout_retries,
+                    timeout_multiplier=timeout_multiplier,
+                    max_connection_retries=max_connection_retries,
+                    connection_retry_delay=connection_retry_delay,
+                    verbose=verbose,
+                    _retry_count=_retry_count,
+                    _rate_limit_retry=_rate_limit_retry,
+                    _connection_retry=_connection_retry + 1,
+                )
+            else:
+                if verbose:
+                    print(f"        FAIL Connection error persists after {max_connection_retries} retries")
+                    print(f"          Error: {error_type}: {str(exc)[:200]}")
+                    print("          -> Giving up on this chunk")
+
+                LOGGER.error(f"Connection error persists after {max_connection_retries} retries: {exc}")
+                return [] if parse_json else ""
+
+        # --------------------------------------------------------
+        # ERROR TYPE 4: Malformed/Truncated JSON
+        # --------------------------------------------------------
+        elif "Unable to get json response" in error_msg or "Expecting value" in error_msg:
+            if verbose:
+                print("        FAIL API returned malformed/truncated JSON")
+                print(f"          Prompt size: {prompt_size_kb:.1f}KB")
+                print("          -> Chunk too large, reduce max_files_per_chunk")
+
+            LOGGER.error(f"Malformed JSON response: {exc}")
+            return [] if parse_json else ""
+
+        # --------------------------------------------------------
+        # ERROR TYPE 5: Other API Errors
+        # --------------------------------------------------------
+        else:
+            if verbose:
+                print(f"        FAIL API Error: {error_type}: {str(exc)[:200]}")
+
+            LOGGER.error(f"LLM API call failed: {error_type}: {exc}")
+            return [] if parse_json else ""
+
+    # ============================================================
+    # STEP 2: Handle empty content
+    # ============================================================
+    if not content:
+        error_details = ""
+        finish_reason = None
+
+        # Extract error details from response
+        if hasattr(response, "error"):
+            error_details = f"Error: {response.error}"
+        elif hasattr(response, "raw_response") and response.raw_response:
+            raw = response.raw_response
+            if hasattr(raw, "error"):
+                error_details = f"Error: {raw.error}"
+            if hasattr(raw.choices[0], "finish_reason"):
+                finish_reason = raw.choices[0].finish_reason
+                error_details += f" | Finish reason: {finish_reason}"
+
+        if verbose:
+            print("        FAIL LLM returned empty content")
+            print(f"          Prompt size: {len(prompt)} chars ({prompt_size_kb:.1f}KB)")
+            if error_details:
+                print(f"          {error_details}")
+
+        # Special handling for length limit
+        if finish_reason == "length":
+            if verbose:
+                print("          -> Returning 'SPLIT_REQUIRED' signal for auto-retry")
+            LOGGER.warning("Length limit hit, chunk needs splitting")
+            return "SPLIT_REQUIRED"
+
+        LOGGER.warning(f"LLM empty content. Prompt size: {len(prompt)} chars. {error_details}")
+        return [] if parse_json else ""
+
+    # ============================================================
+    # STEP 3: Return raw content if JSON parsing not requested
+    # ============================================================
+    if not parse_json:
+        return content
+
+    # ============================================================
+    # STEP 4: Parse JSON
+    # ============================================================
+    parsed = _load_json_flexible(content)
+
+    # Successfully parsed
+    if parsed not in (None, [], {}):
+        return parsed
+
+    # ============================================================
+    # STEP 5: Attempt JSON repair
+    # ============================================================
+    LOGGER.warning(f"Initial JSON parse failed, attempting repair. Content preview: {content[:200]}")
+
+    # Use custom repair prompt template if provided
+    if json_repair_prompt_template:
+        repair_prompt = json_repair_prompt_template.format(content=content[:24000])
+    else:
+        repair_prompt = f"""{STRICT_JSON_RULES}
+
+Repair the following model output into valid JSON only.
+Preserve all recoverable keys and values.
+If the output is truncated, close the current JSON structure conservatively and omit incomplete trailing items.
+
+--- MODEL OUTPUT TO REPAIR ---
+{content[:24000]}
+"""
+
+    try:
+        repaired_response = llm.invoke(repair_prompt)
+        repaired_content = str(getattr(repaired_response, "content", repaired_response) or "").strip()
+        repaired = _load_json_flexible(repaired_content)
+
+        if repaired not in (None, [], {}):
+            LOGGER.info("Recovered malformed JSON with repair prompt")
+            return repaired
+    except Exception as exc:
+        LOGGER.warning("JSON repair prompt failed: %s", exc)
+
+    LOGGER.warning(f"All JSON parsing attempts failed. Returning empty. Original content length: {len(content)}")
+    return parsed  # Returns [] since parsing failed
+
+
+# Convenience alias for backward compatibility
+invoke_json = invoke_llm_with_retry

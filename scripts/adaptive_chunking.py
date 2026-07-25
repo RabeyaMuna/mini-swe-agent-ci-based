@@ -49,7 +49,7 @@ class ChunkingStrategy:
         Raises:
             Exception: If all retry attempts fail
         """
-        from scripts.model_token_config import (
+        from utilities.model_token_config import (
             get_fallback_chunk_size,
             get_input_chunk_tokens,
             get_output_safe_tokens,
@@ -225,7 +225,7 @@ def should_chunk_input(text: str, model_name: str | None = None) -> tuple[bool, 
     Returns:
         Tuple of (should_chunk: bool, recommended_chunk_size: int)
     """
-    from scripts.model_token_config import (
+    from utilities.model_token_config import (
         calculate_safe_input_limit,
         get_output_safe_tokens,
     )
@@ -244,7 +244,7 @@ def should_chunk_input(text: str, model_name: str | None = None) -> tuple[bool, 
 
 # Example usage
 if __name__ == "__main__":
-    from scripts.model_token_config import get_model_config
+    from utilities.model_token_config import get_model_config
 
     print("=" * 80)
     print("ADAPTIVE CHUNKING STRATEGY")
@@ -262,7 +262,7 @@ if __name__ == "__main__":
         current_size = config["input_chunk_tokens"]
         print("  Fallback sequence:")
         for i in range(5):
-            from scripts.model_token_config import get_fallback_chunk_size
+            from utilities.model_token_config import get_fallback_chunk_size
 
             current_size = get_fallback_chunk_size(current_size, model_name)
             print(f"    Attempt {i + 2}: {current_size:,} tokens")
@@ -275,7 +275,7 @@ if __name__ == "__main__":
     print("\nINPUT/OUTPUT VALIDATION:")
     print("-" * 80)
 
-    from scripts.model_token_config import validate_input_output_fit
+    from utilities.model_token_config import validate_input_output_fit
 
     test_cases = [
         ("minimax-m2.5", 150_000, 16_000),

@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from data_loader import CIBenchDataLoader
 from interactive_agent import execute_openhands_agent
 from prompt_formatter import PromptFormatter
-from scripts.model_registry import configure_model_environment, resolve_model_alias
+from utilities.model_registry import configure_model_environment, resolve_model_alias
 
 # Shared paths
 PROJECT_ROOT = Path(__file__).parent.parent

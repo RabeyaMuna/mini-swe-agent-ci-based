@@ -11,6 +11,7 @@ from typing import List
 IGNORED_PATTERNS = [
     r"^\.github/",  # GitHub workflow/action files
     r"(^|/)[^/]+\.json$",  # JSON files
+    r"(^|/)[^/]+\.md$",  # Markdown files
 ]
 
 

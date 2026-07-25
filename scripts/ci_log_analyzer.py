@@ -6,7 +6,7 @@ import re
 import tempfile
 import time
 from typing import Any
-from scripts.model_token_config import get_input_chunk_tokens
+from utilities.model_token_config import get_input_chunk_tokens
 
 # ── Optional third-party dependencies ─────────────────────────────────────────
 try:

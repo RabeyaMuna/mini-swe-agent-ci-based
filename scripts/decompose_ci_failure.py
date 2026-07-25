@@ -36,7 +36,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from scripts.model_token_config import get_model_config
+from utilities.model_token_config import get_model_config
+from utilities.error_handler import save_error_to_execption
 
 from deterministic_diff_parser import (
     chunk_structured_diff,
@@ -55,15 +56,31 @@ from minisweagent.run.benchmarks.utils.ci_context import (  # noqa: E402
 from scripts.ci_workflow_aware_retrieval import (  # noqa: E402
     analyze_workflow_from_benchmark,
 )
-from scripts.model_registry import (  # noqa: E402
+from utilities.dependency_evidence import (  # noqa: E402
+    build_dependency_graph_from_structured_diff,
+)
+from utilities.llm_invoker import invoke_llm_with_retry  # noqa: E402
+from utilities.model_registry import (  # noqa: E402
     configure_model_environment,
     resolve_model_alias,
 )
 
-try:
-    import demjson3  # type: ignore
-except Exception:
-    demjson3 = None  # type: ignore
+# Import prompt templates
+from prompt_template.backward_decomposition import (  # noqa: E402
+    build_classification_prompt_with_dependencies,
+    build_classification_prompt_regular,
+    build_cluster_merge_prompt,
+    build_atomic_prompt,
+    build_full_dependency_prompt,
+    build_validation_group_dependency_prompt,
+)
+from prompt_template.memory_build import (  # noqa: E402
+    build_l2_full_sequence_prompt,
+    build_l2_validation_group_prompt,
+    build_l3_full_extraction_prompt,
+    build_l3_validation_group_prompt,
+    build_l3_cross_validation_deps_prompt,
+)
 
 
 # Load memory issue IDs from workflow_validation_cache.json
@@ -226,7 +243,7 @@ class LitellmModel:
             # Auto-detect max_tokens based on model if not specified
             if max_tokens is None:
                 try:
-                    from scripts.model_token_config import get_output_safe_tokens
+                    from utilities.model_token_config import get_output_safe_tokens
 
                     max_tokens = get_output_safe_tokens(self.model_name)
                     LOGGER.debug(
@@ -442,150 +459,32 @@ def _load_llm_json(content: str) -> Any:
 
 
 def _invoke_json(
-    llm: Any, prompt: str, max_tokens: int | None = None, retry_count: int = 0
+    llm: Any, prompt: str, max_tokens: int | None = None, retry_count: int = 0, rate_limit_retry: int = 0
 ) -> Any:
-    """Invoke LLM and parse JSON with robust error handling.
-
-    Args:
-        llm: Language model instance
-        prompt: The prompt to send
-        max_tokens: Maximum tokens for response
-        retry_count: Current retry attempt (0 = first attempt, 1 = timeout retry)
     """
-    # Check prompt size upfront
-    prompt_size_kb = len(prompt) / 1024
-    if prompt_size_kb > 80:
-        print(
-            f"        WARNING  Large prompt: {prompt_size_kb:.1f}KB - may cause API errors"
-        )
+    DEPRECATED: Wrapper around utilities.llm_invoker.invoke_llm_with_retry
 
-    try:
-        try:
-            response = (
-                llm.invoke(prompt, max_tokens=max_tokens)
-                if max_tokens
-                else llm.invoke(prompt)
-            )
-        except TypeError:
-            response = llm.invoke(prompt)
-        content = str(getattr(response, "content", response) or "").strip()
-    except Exception as exc:
-        error_msg = str(exc)
+    This function is kept for backward compatibility. New code should use
+    invoke_llm_with_retry from utilities.llm_invoker directly.
 
-        # Provide specific guidance based on error type
-        if "Unable to get json response" in error_msg or "Expecting value" in error_msg:
-            print("        FAIL API returned malformed/truncated JSON")
-            print(f"          Prompt size: {prompt_size_kb:.1f}KB")
-            print("          -> Chunk too large, reduce max_files_per_chunk")
-        elif "rate limit" in error_msg.lower():
-            print("        FAIL Rate limit - increase delay (currently 3s)")
-        elif "timeout" in error_msg.lower() or "Timeout" in str(type(exc).__name__):
-            # Smart timeout handling: retry once with increased timeout, then split
-            if retry_count == 0:
-                # First timeout: retry with 2x timeout
-                print(
-                    f"        FAIL API Timeout (attempt {retry_count + 1}): {type(exc).__name__}"
-                )
-                print(f"          Prompt size: {prompt_size_kb:.1f}KB")
-                print("          -> Retrying with increased timeout (2x)...")
-                LOGGER.warning(
-                    f"LLM API timeout on first attempt, retrying with increased timeout: {exc}"
-                )
-
-                # Temporarily increase timeout
-                original_timeout = int(os.getenv("LITELLM_TIMEOUT", "900"))
-                os.environ["LITELLM_TIMEOUT"] = str(original_timeout * 2)
-
-                try:
-                    time.sleep(2)  # Brief pause before retry
-                    result = _invoke_json(
-                        llm, prompt, max_tokens=max_tokens, retry_count=1
-                    )
-                    return result
-                finally:
-                    # Restore original timeout
-                    os.environ["LITELLM_TIMEOUT"] = str(original_timeout)
-            else:
-                # Second timeout: split the chunk
-                print(
-                    f"        FAIL API Timeout (attempt {retry_count + 1}): {type(exc).__name__}"
-                )
-                print(f"          Prompt size: {prompt_size_kb:.1f}KB")
-                print("          -> Timeout persists after retry, splitting chunk...")
-                LOGGER.warning(f"LLM API timeout after retry, triggering split: {exc}")
-                return "SPLIT_REQUIRED"  # Signal to caller to split chunk and retry
-        else:
-            print(f"        FAIL API Error: {type(exc).__name__}: {str(exc)[:200]}")
-
-        LOGGER.error(f"LLM API call failed: {type(exc).__name__}: {exc}")
-        return []  # Return empty, continue processing other chunks
-
-    if not content:
-        # Get detailed error info if available
-        error_details = ""
-        finish_reason = None
-        if hasattr(response, "error"):
-            error_details = f"Error: {response.error}"
-        elif hasattr(response, "raw_response") and response.raw_response:
-            raw = response.raw_response
-            if hasattr(raw, "error"):
-                error_details = f"Error: {raw.error}"
-            if hasattr(raw.choices[0], "finish_reason"):
-                finish_reason = raw.choices[0].finish_reason
-                error_details += f" | Finish reason: {finish_reason}"
-
-        print("        FAIL LLM returned empty content")
-        print(
-            f"          Prompt size: {len(prompt)} chars ({len(prompt) / 1024:.1f}KB)"
-        )
-        if error_details:
-            print(f"          {error_details}")
-
-        # Special handling for length limit: return signal to re-split
-        if finish_reason == "length":
-            print("          -> Returning 'SPLIT_REQUIRED' signal for auto-retry")
-            LOGGER.warning("Length limit hit, chunk needs splitting")
-            return "SPLIT_REQUIRED"  # Signal to caller to split chunk
-
-        LOGGER.warning(
-            f"LLM empty content. Prompt size: {len(prompt)} chars. {error_details}"
-        )
-        return []
-
-    parsed = _load_llm_json(content)
-    if parsed not in (None, [], {}):
-        return parsed
-
-    # One repair pass helps when the model produced almost-valid JSON or was
-    # wrapped/truncated. Keep this prompt small.
-    LOGGER.warning(
-        f"Initial JSON parse failed, attempting repair. Content preview: {content[:200]}"
+    The centralized retry logic in utilities/llm_invoker.py provides:
+    - Rate limit handling with exponential backoff
+    - Timeout handling with increased timeout retry
+    - Connection error handling (peer closed, network issues)
+    - Empty response handling
+    - Malformed JSON repair attempts
+    """
+    # Map old parameters to new centralized function
+    # Note: retry_count and rate_limit_retry are used internally by the new function
+    return invoke_llm_with_retry(
+        llm=llm,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        parse_json=True,
+        verbose=True,
+        _retry_count=retry_count,
+        _rate_limit_retry=rate_limit_retry,
     )
-    repair_prompt = f"""{STRICT_JSON_RULES}
-
-Repair the following model output into valid JSON only.
-Preserve all recoverable keys and values.
-If the output is truncated, close the current JSON structure conservatively and omit incomplete trailing items.
-
---- MODEL OUTPUT TO REPAIR ---
-{content[:24000]}
-"""
-    try:
-        repaired_response = llm.invoke(repair_prompt)
-        repaired_content = str(
-            getattr(repaired_response, "content", repaired_response) or ""
-        ).strip()
-        repaired = _load_llm_json(repaired_content)
-        if repaired not in (None, [], {}):
-            LOGGER.info("Recovered malformed JSON with repair prompt")
-            return repaired
-    except Exception as exc:
-        LOGGER.warning("JSON repair prompt failed: %s", exc)
-
-    LOGGER.warning(
-        f"All JSON parsing attempts failed. Returning empty. Original content length: {len(content)}"
-    )
-    return parsed
 
 
 def _repo_checkout_path(issue: dict[str, Any]) -> str | None:
@@ -1649,89 +1548,13 @@ Problem {idx}:
 """.strip()
         )
 
-    prompt = f"""You are analyzing a cluster of SIMILAR problems to decide if they should be MERGED.
-
-VALIDATION: {validation_cmd}
-CLUSTER SIZE: {len(cluster)} problems
-
-PROBLEMS:
-{chr(10).join(problems_text)}
-
----
-
-YOUR TASK: Decide ONE of these actions:
-
-1. **MERGE** - All problems are essentially the SAME
-   - Use when: Problems describe the same underlying issue in different files
-   - Root causes are IDENTICAL (not just similar)
-   - Fixes follow the EXACT SAME pattern
-   - Example: "All files missing type hints for function parameters"
-
-2. **PARTIAL_MERGE** - Some problems are same, others are distinct
-   - Use when: Cluster has sub-groups of identical problems
-   - Example: Problems 1,2,3 are same (merge), Problems 4,5 are different (separate)
-
-3. **SEPARATE** - All problems are DISTINCT
-   - Use when: Problems have different root causes or require different fixes
-   - Even if similar, they're fundamentally different issues
-   - Example: "Missing type hint" vs "Incorrect type hint"
-
-MERGE CRITERIA (ALL must be true to merge):
-OK Root causes express the SAME underlying issue
-OK Fixes use the SAME pattern/approach
-OK Files can be treated as "same problem in multiple places"
-OK No interdependencies within cluster
-
-SEPARATE if ANY true:
-FAIL Root causes are DIFFERENT
-FAIL Fixes require DIFFERENT approaches
-FAIL Problems have different complexity levels
-
-OUTPUT VALID JSON ONLY:
-
-For MERGE:
-{{
-  "action": "merge",
-  "reasoning": "Why all problems are the same",
-  "merged_problem": {{
-    "problem": "Unified description of what failed",
-    "root_cause": "Unified description of root cause",
-    "how_fixed": "Unified description of fix pattern",
-    "why_fix_works": "Why this fix solves all instances"
-  }}
-}}
-
-For PARTIAL_MERGE:
-{{
-  "action": "partial_merge",
-  "reasoning": "Why some merge, others separate",
-  "sub_groups": [
-    {{
-      "problem_indices": [1, 2, 3],
-      "action": "merge",
-      "merged_problem": {{
-        "problem": "...",
-        "root_cause": "...",
-        "how_fixed": "...",
-        "why_fix_works": "..."
-      }}
-    }},
-    {{
-      "problem_indices": [4],
-      "action": "separate",
-      "reason": "Different root cause"
-    }}
-  ]
-}}
-
-For SEPARATE:
-{{
-  "action": "separate",
-  "reasoning": "Why problems should stay separate"
-}}
-
-IMPORTANT: Be CONSERVATIVE. When in doubt, SEPARATE.
-"""
+    # Use imported prompt template
+    prompt = build_cluster_merge_prompt(
+        validation_cmd=validation_cmd,
+        cluster_size=len(cluster),
+        problems_text=chr(10).join(problems_text),
+        strict_json_rules=STRICT_JSON_RULES,
+    )
 
     try:
         decision = _invoke_json(llm, prompt)
@@ -2411,174 +2234,18 @@ def _build_atomic_prompt(
     chunk: dict[str, Any],
     changes_data: dict[str, Any],
 ) -> str:
-    change_type = chunk.get("change_type", "unknown")
-    change_type_context = {
-        "config": "These are CONFIGURATION file changes (.toml, .yaml, .json, .ini). Pay special attention to CI setup, installation commands, tool settings, plugin configurations, and dependency specifications.",
-        "dependency": "These are DEPENDENCY-related changes (imports, packages, requirements). Focus on package installations, version updates, and import fixes.",
-        "code": "These are SOURCE CODE changes (.py, .rst, .md). Focus on code logic, formatting, type annotations, and documentation fixes.",
-    }.get(change_type, "")
-
-    effective_validation_cmd = (
-        val_info.get("validation_cmd") or chunk.get("validation_cmd") or ""
+    """Build atomic problem extraction prompt using imported template."""
+    return build_atomic_prompt(
+        ci_context=ci_context,
+        failed_validation_order=failed_validation_order,
+        validation_order=validation_order,
+        val_info=val_info,
+        chunk=chunk,
+        changes_data=changes_data,
+        dependency_context=_dependency_context_for_prompt(chunk),
+        cascading_context=_cascading_classification_context(chunk),
+        strict_json_rules=STRICT_JSON_RULES,
     )
-    failure_type = chunk.get("failure_type", "")
-
-    return f"""Analyze this validation group and create atomic CI repair problems.
-
-CI FAILURE CONTEXT:
-{_compact_json(ci_context, 6000)}
-
-VALIDATION CONTEXT:
-- validation_order: {validation_order}
-- validation_cmd: {effective_validation_cmd}
-- validates: {val_info.get("validates", "Code quality/formatting")}
-- failure_type: {failure_type}
-- issue_type_hint: {chunk.get("issue_type", "")}
-- change_type: {change_type.upper()}
-- FAILED_VALIDATION_ORDER: {failed_validation_order} (CI stopped here)
-- is_cascading: {chunk.get("is_cascading", False)}
-- dependency_type: {chunk.get("dependency_type", "")}
-- cascade_explanation: {chunk.get("cascade_explanation", "")}
-
-{change_type_context}
-
-CHANGES:
-{json.dumps(changes_data, indent=2)}
-
-{_dependency_context_for_prompt(chunk)}
-
-{_cascading_classification_context(chunk)}
-
-TASK:
-Infer the actual CI step problem fixed by these before/after changes.
-
-This group contains only {change_type.upper()} changes. Preserve concrete details from those changes. CI steps may include setup, installation,
-dependency resolution, environment preparation, formatting, linting, type checking, tests, docs checks, build steps, and workflow-local commands.
-
-DECISION PROCESS:
-
-1. Identify the CI step being repaired.
-- validation_cmd may be an install/setup command, not only a final checker.
-- Package metadata, dependency files, lockfiles, workflow setup, environment config, and tool installation changes belong to the relevant setup/
-install CI step.
-- Source, docs, and test changes belong to the validator that directly checks them.
-- Prefer the CI step that would fail without this specific change.
-
-2. Decide merge vs split.
-Merge changes into one atomic problem when one explanation clearly covers all affected files:
-- same validation_cmd, validator, or tool family
-- same repair family or developer mental model
-- variants of the same failure family
-- repeated instances of the same validator problem across multiple files
-
-Split changes into separate atomic problems when one explanation would hide important differences:
-- different CI step or validator concern
-- materially different repair strategy
-- setup/config/dependency enablement mixed with source/docs/test fixes
-- same directory or validator, but different problem family, root cause, or repair family
-
-3. Handle repeated failures across files dynamically.
-- Same validator plus same repair family across many files is one repeated problem pattern, even when files have variants.
-- Formatter/linter/doc-style variants are usually one problem when the same tool normalizes them, such as RST heading underline length, trailing
-whitespace, blank-line spacing, list/table spacing, import ordering, docstring style, quote style, or repeated lint codes.
-- For bulk changes, group by directory scope, file type, validator, and repair family.
-- Mention directory scope and important variants in problem/root_cause/how_fixed.
-- Do not list every file in prose because affected_files already contains exact paths.
-
-4. Keep setup/install enablement separate.
-- Examples: invalid pyproject metadata, missing dependency, wrong extras, incompatible tool version, broken pip/poetry install config, workflow
-setup command mismatch.
-- If setup changes only enable a later formatter, linter, type checker, or test command, report the setup/install issue separately from later
-validation violations.
-
-5. Handle cascading fixes.
-- Cascading means one change caused or required another related change.
-- If all affected files share the same CI validation and repair family, they may be one atomic problem.
-- If related files are caught by different CI validations or require different repair strategies, split them into separate atomic problems.
-- For cascading problems, explain the triggering relationship in problem, root_cause, how_fixed, or why_fix_works.
-
-6. Handle merge-conflict cleanup correctly.
-- Git conflict markers and conflict resolution mechanics are not CI problems.
-- Never use "merge conflict" or "conflict resolution" as failure_type, issue_type, problem, root_cause, or how_fixed.
-- Do not discard real fixes because they appear near removed conflict markers.
-- Analyze the final before/after content around the conflict and classify the CI-relevant change that remained after resolution.
-- If conflict resolution selected or combined code/docs/config that fixes a formatter, linter, type, test, setup, dependency, or docs validation
-issue, report that real validation/setup problem.
-- If the only change is conflict marker removal with no CI-relevant behavior, formatting, config, docs, dependency, or workflow change, do not
-create a problem for that change.
-
-QUALITY RULES:
-- Each problem must have a specific root cause and fix that applies to every affected file.
-- Be specific about packages, symbols, config keys, validators, commands, before/after states, directories, and affected file kinds.
-- Do not mention line numbers.
-- Do not use vague phrasing like "fixed issues" or "updated files".
-- affected_files must include only files directly involved in that problem's fix.
-- If no valid CI problem can be extracted, return {{"atomic_problems": []}}.
-
-EXAMPLES:
-- MERGE: RST formatting failures in docs/api/*.rst with variants including section underline length mismatches, trailing whitespace, and blank-
-line spacing normalization.
-- MERGE: Ruff unused imports removed across several Python modules.
-- SEPARATE: Ruff source-code errors and pyproject Ruff configuration changes.
-- SEPARATE: RST formatting cleanup and broken docs reference/import targets.
-- SEPARATE: Dependency/setup change that enables the formatter and formatter violations in docs files.
-- SEPARATE: Formatter plugin version bump in pyproject.toml that enables the docs formatter, and RST formatting violations in docs files.
-
-FIELD GUIDANCE:
-- problem: 1-2 sentences describing what failed. Mention directory scope, file types, and important variants when relevant. If this is a cascading
-problem, explain the relationship.
-- root_cause: 1-2 sentences explaining what violated which rule, requirement, or expectation. For cascading problems, explain how the dependency
-change triggered this fix.
-- how_fixed: 1-2 sentences describing what changed and why it was necessary. Include variants when one atomic problem covers multiple variants.
-For cascading problems, explain what format/behavior changed in the dependency.
-- why_fix_works: 1-2 sentences explaining how the new state satisfies the CI step or validator or handles the new format/behavior from
-dependencies.
-- issue_type: Specific failure subtype, error code, rule, or validator-specific category. Be precise, such as "RST Formatter: Section Underline
-Length Mismatch", "Ruff: Unsorted Import", "Dependency: Package Version Mismatch", "Test Parser Logic Update (Cascading)", or "Test Failure:
-Assertion Mismatch".
-- problem_type: "primary" when affected_files are visible in CI failure context; otherwise "hidden".
-
-OUTPUT FORMAT:
-{{
-  "atomic_problems": [
-    {{
-      "problem_id": 1,
-      "validation_order": {validation_order},
-      "validation_cmd": {json.dumps(effective_validation_cmd)},
-      "failure_type": {json.dumps(failure_type)},
-      "issue_type": "specific_error_code_or_type",
-      "problem": "Brief description of what broke",
-      "root_cause": "Why it failed",
-      "how_fixed": "What changed",
-      "why_fix_works": "Why the fix solves it",
-      "affected_files": ["file1.py", "file2.py"],
-      "problem_type": "primary",
-      "is_cascading": {json.dumps(chunk.get("is_cascading", False))},
-      "dependency_type": {json.dumps(chunk.get("dependency_type", ""))},
-      "cascade_explanation": {json.dumps(chunk.get("cascade_explanation", ""))}
-    }}
-  ]
-}}
-
-OUTPUT REQUIREMENTS:
-- Return only a JSON object with the "atomic_problems" array.
-- If no problems can be extracted, return {{"atomic_problems": []}}.
-- problem_id must be an integer starting at 1 and incrementing by 1.
-- validation_order must be the integer validation_order from VALIDATION CONTEXT.
-- validation_cmd must exactly match validation_cmd from VALIDATION CONTEXT.
-- failure_type must match failure_type from VALIDATION CONTEXT unless the value is empty.
-- affected_files must be an array of file path strings from CHANGES.
-- Do not include files that are not directly involved in the problem.
-- problem_type must be either "primary" or "hidden".
-- is_cascading must be a boolean matching the value from CLASSIFICATION CONTEXT.
-- dependency_type must be a string (empty string if not cascading).
-- cascade_explanation must be a string (empty string if not cascading).
-- String fields must be non-empty for every returned problem: issue_type, problem, root_cause, how_fixed, why_fix_works.
-- Do not include JavaScript-style comments in JSON.
-- Do not include markdown, explanations, or text outside the JSON object.
-
-  {STRICT_JSON_RULES}
-  """
 
 
 def _extract_atomic_problems(result: Any) -> list[dict[str, Any]]:
@@ -3587,9 +3254,147 @@ def _add_missing_file_fallbacks(
     return valid
 
 
+def _estimate_chunk_tokens(chunk_files: Any) -> int:
+    """
+    Estimate token count for a chunk based on file content.
+    Uses the same estimation as utilities/diff_chunker.py
+    """
+    from utilities.diff_chunker import estimate_tokens
+
+    files = chunk_files.values() if isinstance(chunk_files, dict) else chunk_files
+    total_tokens = 0
+
+    for file_info in files:
+        # Estimate tokens from changes
+        changes = file_info.get("changes", [])
+        for change in changes:
+            before_text = change.get("before", "")
+            after_text = change.get("after", "")
+            total_tokens += estimate_tokens(before_text + after_text)
+
+        # Add overhead for file metadata
+        total_tokens += 50  # File name, structure, etc.
+
+    return total_tokens
+
+
+def _split_structured_chunk_by_size(
+    chunk: dict[str, Any],
+    target_max_tokens: int = 50000,
+) -> list[dict[str, Any]]:
+    """
+    Split structured chunk into smaller chunks based on token size.
+
+    Strategy:
+    1. Estimate tokens for each file
+    2. Bin-packing algorithm to group files under target size
+    3. Ensure balanced splits
+
+    Args:
+        chunk: Structured chunk with files and metadata
+        target_max_tokens: Maximum tokens per chunk (default: 50k)
+
+    Returns:
+        List of sub-chunks, each under target_max_tokens
+    """
+    from utilities.diff_chunker import estimate_tokens
+
+    files = chunk.get("files", [])
+    files_list = list(files.items()) if isinstance(files, dict) else list(files)
+
+    if not files_list:
+        return []
+
+    # Calculate token size for each file
+    file_sizes = []
+    for file_key, file_info in files_list:
+        file_tokens = 0
+        changes = file_info.get("changes", [])
+        for change in changes:
+            before_text = change.get("before", "")
+            after_text = change.get("after", "")
+            file_tokens += estimate_tokens(before_text + after_text)
+        file_tokens += 50  # Metadata overhead
+        file_sizes.append((file_key, file_info, file_tokens))
+
+    # Sort by size (largest first) for better bin packing
+    file_sizes.sort(key=lambda x: x[2], reverse=True)
+
+    # Bin packing: Group files into chunks under target size
+    sub_chunks = []
+    current_chunk_files = []
+    current_chunk_tokens = 0
+
+    for file_key, file_info, file_tokens in file_sizes:
+        # If single file exceeds target, give it its own chunk
+        if file_tokens > target_max_tokens:
+            if current_chunk_files:
+                sub_chunks.append(current_chunk_files)
+                current_chunk_files = []
+                current_chunk_tokens = 0
+
+            sub_chunks.append([(file_key, file_info)])
+            continue
+
+        # If adding this file would exceed target, start new chunk
+        if current_chunk_tokens + file_tokens > target_max_tokens and current_chunk_files:
+            sub_chunks.append(current_chunk_files)
+            current_chunk_files = []
+            current_chunk_tokens = 0
+
+        current_chunk_files.append((file_key, file_info))
+        current_chunk_tokens += file_tokens
+
+    # Add remaining files
+    if current_chunk_files:
+        sub_chunks.append(current_chunk_files)
+
+    # If only one chunk, fall back to simple half-split
+    if len(sub_chunks) <= 1:
+        half = len(files_list) // 2
+        if half == 0:
+            half = 1
+        sub_chunks = [files_list[:half], files_list[half:]]
+
+    # Convert to structured chunks
+    def change_count(file_records: Any) -> int:
+        return sum(len(f[1].get("changes", [])) for f in file_records)
+
+    def with_metadata(chunk_files: list) -> dict[str, Any]:
+        if isinstance(files, dict):
+            chunk_files_dict = dict(chunk_files)
+        else:
+            chunk_files_dict = [f[1] for f in chunk_files]
+
+        return {
+            "dependency_cluster": chunk.get("dependency_cluster"),
+            "dependency_explanation": chunk.get("dependency_explanation"),
+            "is_partial_cluster": chunk.get("is_partial_cluster", True),
+            "files": chunk_files_dict,
+            "total_files": len(chunk_files),
+            "total_changes": change_count(chunk_files),
+            "estimated_tokens": _estimate_chunk_tokens(chunk_files_dict),
+        }
+
+    result_chunks = [with_metadata(sc) for sc in sub_chunks if sc]
+
+    # Log split details
+    print(f"      Smart split: {len(files_list)} files → {len(result_chunks)} chunks")
+    for i, rc in enumerate(result_chunks, 1):
+        print(f"        Chunk {i}: {rc.get('total_files', 0)} files, ~{rc.get('estimated_tokens', 0):,} tokens")
+
+    return result_chunks
+
+
 def _split_structured_chunk(
     chunk: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    DEPRECATED: Simple half-split without size awareness.
+    Use _split_structured_chunk_by_size for smarter splitting.
+
+    Kept for backward compatibility.
+    """
     files = chunk.get("files", [])
     files_list = list(files.items()) if isinstance(files, dict) else list(files)
     half = len(files_list) // 2
@@ -3815,125 +3620,18 @@ def _classify_chunk_with_dependencies(
         dependency_contexts
     )
 
-    prompt = f"""Classify each changed file by the CI step that would catch or require the fixed issue.
-
-  ## INPUT
-
-  CI failure context:
-  {json.dumps(visible_failure_context, indent=2)}
-
-  FILES VISIBLE IN CI FAILURE LOGS (primary errors):
-  {json.dumps(ci_visible_files, indent=2) if ci_visible_files else "[]"}
-
-  Available validations:
-  {json.dumps(formatted_validations, indent=2)}
-
-  Changed files, chunk {chunk_index}/{total_chunks} ({files_in_chunk} files):
-  {format_structured_for_llm(chunk, max_changes_per_file=1)}
-
-  ## DEPENDENCY CONTEXT
-
-  The chunk contains files with caller → callee relationships.
-  Use this to decide if related files should be grouped together.
-
-  {dependency_info}
-
-  ## TASK
-
-  Classify files by CI validation step, USING dependency context for better decisions.
-
-  CLASSIFICATION BASIS:
-  1. CI failure context: visible/primary failures
-  2. Ground-truth diff: complete repair
-  3. Workflow validation sequence: all CI steps
-  4. Dependency relationships: caller → callee connections
-
-  For every file:
-  1. Inspect the provided before/after change data
-  2. Decide what CI validation the change fixes
-  3. Choose validation_order from VALIDATIONS
-  4. Set validation_cmd to the exact effective_cmd from VALIDATIONS
-  5. Group files with the same CI step + failure_type + issue_type
-  6. Determine visibility as primary or hidden
-
-  DEPENDENCY-AWARE DECISIONS:
-
-  CRITICAL: Dependency context helps UNDERSTAND the problem, but each file is STILL classified by the CI validation that catches its specific change!
-
-  Use dependency context to:
-  1. Understand WHY changes happened (root cause)
-  2. Identify cascading relationships, their changes before and after and the changes related to each other to identify the problems properly.
-  3. Link related problems across validations
-
-  BUT: Each file must be classified by WHICH CI validation would catch it!
-
-  Example:
-    Dependency: exit_code_test.py READS ref-exit-codes/*.rst
-
-    Analysis:
-    - RST files changed format (caught by docstrfmt - validation 17)
-    - Test file adapted assertions (caught by Black/pytest - validation 7)
-    - They are RELATED (cascading), but different validations!
-
-    Correct classification:
-    - Group 1: RST files → validation 17 (docstrfmt)
-      * is_cascading: true
-      * cascade_explanation: "docstrfmt upgrade triggered test adaptation"
-
-    - Group 2: Test file → validation 7 (Black/test validation)
-      * is_cascading: true
-      * cascade_explanation: "Test adapted to new RST format from validation 17"
-      * DO NOT put test in docstrfmt validation!
-
-  Rules for file → validation mapping:
-  - Config files → Config validation (taplo, etc.)
-  - Test files → Test validation (Black, pytest, etc.)
-  - RST/docs → Doc validation (docstrfmt)
-  - Python code → Python validation (Black, mypy, ruff)
-
-  Cascading means: Related problems across different validations
-  - Mark related groups with is_cascading=true
-  - Use cascade_explanation to explain relationship
-  - But classify each file by its ACTUAL CI validation!
-
-  VISIBILITY RULE:
-  - visibility="primary" if at least one file in the group appears in FILES VISIBLE IN CI FAILURE LOGS or is directly implicated by CI failure
-  context
-  - visibility="hidden" otherwise
-
-  ## OUTPUT FORMAT
-
-  Return ONLY a JSON array with this format:
-
-  [
-    {{
-      "validation_order": <INT>,
-      "validation_cmd": "<exact command from VALIDATIONS>",
-      "failure_type": "<category>",
-      "issue_type": "<specific>",
-      "change_type": "<code|dependency|config>",
-      "visibility": "<primary|hidden>",
-      "files": [...],
-      "total_files": <int>,
-      "is_cascading": <true|false>,
-      "dependency_type": "<dependency relationship type or empty string>",
-      "cascade_explanation": "<explanation or empty string>"
-    }}
-  ]
-
-  REQUIREMENTS:
-  - Return valid JSON only. Do not include markdown or commentary.
-  - validation_order must be an INTEGER from VALIDATIONS.
-  - validation_cmd must exactly match an effective_cmd from VALIDATIONS.
-  - visibility must be "primary" or "hidden".
-  - Every changed file in this chunk must appear exactly once.
-  - Do not include files that are not in this chunk.
-  - For cascading groups, explain the trigger in cascade_explanation.
-  - For independent groups, dependency_type and cascade_explanation must be empty strings.
-  - If uncertain between cascading and independent, prefer independent unless dependency context clearly shows one change triggered the other.
-
-  {STRICT_JSON_RULES}
-  """
+    # Use imported prompt template
+    prompt = build_classification_prompt_with_dependencies(
+        ci_failure_context=visible_failure_context,
+        ci_visible_files=ci_visible_files,
+        formatted_validations=formatted_validations,
+        chunk_index=chunk_index,
+        total_chunks=total_chunks,
+        files_in_chunk=files_in_chunk,
+        formatted_chunk=format_structured_for_llm(chunk, max_changes_per_file=1),
+        dependency_info=dependency_info,
+        strict_json_rules=STRICT_JSON_RULES,
+    )
 
     try:
         output_safe_tokens = _classification_output_tokens(
@@ -4066,121 +3764,17 @@ def _classify_chunk_regular(
     ]
     formatted_validations = _format_validation_sequence(validation_sequence)
 
-    prompt = f"""Classify each changed file by the CI step that would catch or require the fixed issue.
-
-## INPUT
-
-CI failure context:
-{json.dumps(visible_failure_context, indent=2)}
-
-FILES VISIBLE IN CI FAILURE LOGS (primary errors):
-{json.dumps(ci_visible_files, indent=2) if ci_visible_files else "[]"}
-
-Available validations:
-{json.dumps(formatted_validations, indent=2)}
-
-Changed files, chunk {chunk_index}/{total_chunks} ({files_in_chunk} files):
-{format_structured_for_llm(chunk, max_changes_per_file=2)}
-
-## TASK
-
-CLASSIFICATION BASIS:
-Use all three evidence sources together:
-1. CI failure context: identifies visible/primary failures, but may stop at the
-   first failure and may not show later broken steps.
-2. Ground-truth diff: shows the complete repair, including hidden setup,
-   dependency, tooling, config, source, docs, test, build, and workflow fixes.
-3. Full workflow validation sequence: shows setup, install, dependency,
-   tooling, validation, docs, test, build, and workflow-local CI steps.
-
-Do NOT classify only from CI logs. CI logs are incomplete.
-A changed file absent from logs can still be a required hidden fix if the diff
-and workflow show it supports any CI step.
-
-For every file:
-1. Inspect before/after changes
-2. Decide what CI setup, installation, dependency, or validation failure the change fixes
-3. Choose validation_order from VALIDATIONS
-4. Set validation_cmd to effective_cmd from the chosen VALIDATIONS item
-   (effective_cmd is the canonical CI command already extracted from the workflow)
-5. Group files with same effective CI step + failure_type + issue_type
-6. Determine if file was VISIBLE in CI logs or HIDDEN
-
-IMPORTANT CONTEXT:
-- CI logs often show only the first failure, but the ground-truth diff is the
-  complete repair needed for the whole CI workflow.
-- A file absent from CI logs can still be a required hidden fix for setup,
-  installation, dependency resolution, tool behavior, formatting, linting,
-  typing, tests, docs, build, or workflow execution.
-- Do not discard a changed file unless the before/after change is completely
-  unrelated to this project's CI setup, dependencies, tooling, validations, or
-  repair path.
-
-Use two levels:
-- failure_type: broad category (Type Checking, Linting, Formatting, etc.)
-- issue_type: specific failure (missing annotation, unused import, etc.)
-
-Config/dependency/tooling files must be classified dynamically:
-- Treat package metadata, dependency files, lockfiles, workflow setup,
-  environment config, tool config, and tool/plugin version changes as
-  CI-relevant unless the diff proves otherwise.
-- Infer the supported CI step from the changed package/tool/config key, nearby
-  source/docs/test changes, and each VALIDATIONS item's effective_cmd,
-  validates, source, and evidence.
-- If a config/dependency/tooling change prepares or installs a tool, classify
-  it under the effective_cmd that performs or depends on that setup.
-- If a config change directly alters formatter/linter/type-checker/test/docs
-  validator behavior, classify it under that validator's effective_cmd.
-- If a dependency or tool version bump enables later validation fixes to pass,
-  classify it as a hidden prerequisite under the most directly related setup,
-  dependency, tooling, or enabled validation step.
-- Keep setup/dependency/tooling prerequisites separate from source/docs/test
-  validation fixes unless the same file change truly belongs to the same
-  failure family.
-- Distinguish executor files from root-cause files. Workflow files and local
-  actions may run commands, while project config/dependency/source files may be
-  the actual repair target. Use the CI evidence and the diff together.
-
-VISIBILITY CLASSIFICATION:
-- "primary" = file appears in "FILES VISIBLE IN CI FAILURE LOGS" above
-- "hidden" = file does NOT appear in CI logs (enablement fix, cascaded fix)
-- For setup/install failures, a config/dependency file can be primary when the
-  CI evidence says that file's configuration caused the setup/install command
-  to fail, even if the visible file list names the workflow action.
-
-## OUTPUT
-
-Return JSON array:
-[
-  {{
-    "validation_order": <INT>,
-    "validation_cmd": "<exact>",
-    "failure_type": "<category>",
-    "issue_type": "<specific>",
-    "change_type": "<code|dependency|config>",
-    "visibility": "<primary|hidden>",
-    "files": [...],
-    "total_files": <int>
-  }}
-]
-
-REQUIREMENTS:
-- Array only (no wrapper)
-- validation_order = INTEGER from VALIDATIONS
-- validation_cmd = effective_cmd from VALIDATIONS. This is the canonical CI
-  command/step that catches or requires the fix.
-- visibility must be either "primary" or "hidden"
-- EVERY SINGLE FILE from the changed files list MUST appear in at least one group.
-- Do NOT drop files because they are absent from CI logs or look unrelated to
-  the first visible failure.
-- If classification is uncertain, place the file in the most relevant
-  CI step group and mark visibility as "hidden".
-- Config/dependency/tooling/workflow changes MUST be classified as hidden
-  prerequisites when they support any CI setup, dependency resolution, tool
-  behavior, or later validation.
-
-{STRICT_JSON_RULES}
-"""
+    # Use imported prompt template
+    prompt = build_classification_prompt_regular(
+        ci_failure_context=visible_failure_context,
+        ci_visible_files=ci_visible_files,
+        formatted_validations=formatted_validations,
+        chunk_index=chunk_index,
+        total_chunks=total_chunks,
+        files_in_chunk=files_in_chunk,
+        formatted_chunk=format_structured_for_llm(chunk, max_changes_per_file=2),
+        strict_json_rules=STRICT_JSON_RULES,
+    )
 
     try:
         output_safe_tokens = _classification_output_tokens(
@@ -4219,7 +3813,7 @@ REQUIREMENTS:
     except Exception as e:
         if _is_token_limit_error(e):
             print(
-                f"    WARNING Token limit hit with {files_in_chunk} files, splitting in half..."
+                f"    WARNING Token limit hit with {files_in_chunk} files"
             )
 
             # Can't split further
@@ -4227,28 +3821,35 @@ REQUIREMENTS:
                 print("    FAIL Cannot split 1 file further, skipping")
                 return []
 
-            chunk1, chunk2 = _split_structured_chunk(chunk)
+            # Use smart size-aware splitting
+            print("    -> Using smart size-aware splitting...")
 
-            # Recursively process both halves
-            result1 = classify_chunk_with_fallback(
-                chunk1,
-                chunk_index,
-                total_chunks,
-                visible_failure_context,
-                validation_sequence,
-                llm,
-            )
+            # Calculate target based on model's context window
+            model_name = getattr(llm, "memci_model_key", None) or getattr(llm, "model_name", None)
+            config = get_model_config(model_name)
+            target_tokens = config.get("max_input_tokens", 100000) // 2  # Conservative split
 
-            result2 = classify_chunk_with_fallback(
-                chunk2,
-                chunk_index,
-                total_chunks,
-                visible_failure_context,
-                validation_sequence,
-                llm,
-            )
+            sub_chunks = _split_structured_chunk_by_size(chunk, target_max_tokens=target_tokens)
 
-            return result1 + result2
+            if not sub_chunks:
+                print("    FAIL Could not split chunk")
+                return []
+
+            # Recursively process all sub-chunks
+            all_results = []
+            for i, sub_chunk in enumerate(sub_chunks, 1):
+                print(f"    -> Processing sub-chunk {i}/{len(sub_chunks)}...")
+                sub_result = classify_chunk_with_fallback(
+                    sub_chunk,
+                    chunk_index,
+                    total_chunks,
+                    visible_failure_context,
+                    validation_sequence,
+                    llm,
+                )
+                all_results.extend(sub_result)
+
+            return all_results
         else:
             # Other error - log and return empty
             print(f"    FAIL Chunk {chunk_index} failed: {str(e)[:100]}")
@@ -4281,9 +3882,8 @@ def analyze_diff_chunks(
 
     # Step 0.5: Build dependency graph (NEW!)
     print("  Step 0.5: Building file dependency graph...")
-    from dependency_detector import build_dependency_graph
 
-    dependency_graph = build_dependency_graph(
+    dependency_graph = build_dependency_graph_from_structured_diff(
         structured_diff, repo_path=benchmark_context.get("repo_path")
     )
     total_clusters = len(dependency_graph.get("clusters", []))
@@ -4677,163 +4277,11 @@ def _stage2_dependencies_full_llm(problems: list[dict], llm) -> dict:
             }
         )
 
-    prompt = f"""Deep analysis of problem interdependencies and relationships.
-
-PROBLEMS:
-{json.dumps(problems_summary, indent=2)}
-
-TASK: Analyze how these problems relate to each other.
-
-CONTEXT-AWARE DEPENDENCY ANALYSIS:
-
-CASCADING METADATA:
-Some problems include is_cascading, dependency_type, and cascade_explanation.
-These fields are evidence from earlier classification/deep analysis. Use them
-to reason about interdependency, but do not treat them as automatic edges.
-
-When cascading metadata is present:
-- Identify which problem is the source/enabler that changed behavior,
-  configuration, tooling, dependency, docs, tests, or code.
-- Identify which problem is the dependent/adaptation problem.
-- Create a dependency only when problem/root_cause/how_fixed supports it.
-- Direction should be source/enabler -> dependent/adaptation.
-- Keep the existing output schema exactly as shown below.
-
-For EACH pair of problems, ask:
-
-1. BLOCKING Dependencies ("A must be fixed before B can be addressed"):
-   - Does problem A block problem B?
-   - Would fixing A allow B to be detected/fixed?
-   - Are they in a validation sequence where A runs before B?
-
-   Examples:
-   - Config problem blocks validation (must install tool before it can validate)
-   - Import error blocks type checking (must fix imports before types can be checked)
-   - Formatting blocks parsing (must format before parser can read it)
-
-2. CAUSALITY ("Fixing A causes/reveals B"):
-   - Does fixing A reveal new problems?
-   - Would A's fix change what B looks like?
-   - Does A's root cause create the conditions for B?
-
-   Examples:
-   - Enabling a linter reveals new linting issues
-   - Fixing imports reveals type errors that were hidden
-   - Adding dependencies reveals compatibility issues
-
-3. SHARED Context ("A and B affect each other"):
-   - Do they modify the same files?
-   - Do they fix different aspects of the same root issue?
-   - Would fixing A require considering B?
-
-   Examples:
-   - Two problems in same file that interact
-   - Config change + code change that must align
-   - Test + implementation that must stay in sync
-
-4. SIDE Effects ("Fixing A might affect B"):
-   - Could A's fix break or change B?
-   - Do they share assumptions?
-   - Would fixing A first make B easier/harder?
-
-5. INDEPENDENT ("A and B are unrelated"):
-   - Can be fixed in any order
-   - Don't interact or depend on each other
-   - Separate validation stages, files, concerns
-
-RELATIONSHIP TYPES:
-
-Based on analysis above, identify these relationship types:
-
-- "blocks": A must be fixed before B (strict dependency)
-- "enables": Fixing A allows B to be detected (enablement)
-- "reveals": Fixing A uncovers B (causality)
-- "requires": A and B must be fixed together (shared context)
-- "affects": Fixing A changes B (side effect)
-- "independent": No relationship (can fix in any order)
-
-For EACH relationship, provide:
-- Type (one of above)
-- Direction (from -> to)
-- Reason (WHY this relationship exists, based on root_cause/how_fixed)
-- Strength (strong/medium/weak based on how critical the relationship is)
-
-REPAIR ORDER ANALYSIS:
-
-CRITICAL: Validation order and problem_type define the base repair sequence:
-1. PRIMARY problems (problem_type="primary") ALWAYS come first - these are CI failures
-2. HIDDEN problems (problem_type="hidden") ALWAYS come after - these are consecutive validations
-3. Within each group, RESPECT validation_order (validation 8 before validation 11)
-4. Dependencies can ONLY reorder within same validation_order + problem_type group
-
-Example correct order:
-  Problem A: validation_order=8, problem_type="primary"     <- 1st (primary, earliest validation)
-  Problem B: validation_order=8, problem_type="primary"     <- 2nd (primary, same validation, use deps)
-  Problem C: validation_order=11, problem_type="hidden"     <- 3rd (hidden, later validation)
-  Problem D: validation_order=11, problem_type="hidden"     <- 4th (hidden, same validation, use deps)
-
-WRONG order (NEVER do this):
-  FAIL Hidden before primary
-  FAIL validation_order=11 before validation_order=8
-  FAIL Ignoring validation sequence for "semantic dependencies"
-
-Based on dependencies, determine WITHIN each (problem_type, validation_order) group:
-1. Which problems should be fixed first (block others in same group)
-2. Which are intermediate (depend on some, enable others in same group)
-3. Which can be in any order (independent within same group)
-
-OUTPUT FORMAT:
-{{
-  "dependency_edges": [
-    {{
-      "from": 1,
-      "to": 3,
-      "type": "blocks",
-      "reason": "Config file must declare tool before validation can run it",
-      "strength": "strong"
-    }},
-    {{
-      "from": 2,
-      "to": 4,
-      "type": "reveals",
-      "reason": "Fixing formatter config reveals formatting issues in code",
-      "strength": "medium"
-    }},
-    {{
-      "from": 5,
-      "to": 6,
-      "type": "affects",
-      "reason": "Both modify same file - changes may interact",
-      "strength": "weak"
-    }}
-  ],
-  "repair_order": [1, 2, 3, 4, 5, 6],
-  "repair_stages": {{
-    "stage_1_foundational": [1],
-    "stage_2_intermediate": [2, 3],
-    "stage_3_dependent": [4],
-    "stage_4_independent": [5, 6]
-  }},
-  "problem_groups": [
-    {{
-      "problems": [5, 6],
-      "relationship": "shared file context",
-      "recommendation": "Consider fixing together to avoid conflicts"
-    }}
-  ],
-  "reasoning": "Detailed explanation of the dependency structure and repair strategy"
-}}
-
-IMPORTANT:
-- Analyze based on actual content (root_cause, how_fixed), not just keywords
-- Think about what a developer would need to know about problem interactions
-- Use cascading metadata as evidence, but infer direction and relationship type
-  from the problem content
-- Identify both obvious (validation order) and subtle (semantic) dependencies
-- Be specific in reasons - explain WHY the relationship exists
-- Consider the real-world implications of fix order
-
-{STRICT_JSON_RULES}"""
+    # Use imported prompt template
+    prompt = build_full_dependency_prompt(
+        problems=problems_summary,
+        strict_json_rules=STRICT_JSON_RULES,
+    )
 
     try:
         time.sleep(3)  # Rate limiting
@@ -4942,73 +4390,12 @@ def _analyze_validation_dependencies_llm(
             }
         )
 
-    prompt = f"""Analyze dependencies within this validation group.
-
-Validation: {validation_cmd}
-Problems in this validation:
-{json.dumps(problems_data, indent=2)}
-
-TASK: Identify dependencies between these problems.
-
-CASCADING METADATA:
-Some problems include is_cascading, dependency_type, and cascade_explanation.
-These fields are evidence from earlier classification/deep analysis. Use them
-to reason about interdependency, but do not treat them as automatic edges.
-
-When cascading metadata is present:
-- Identify which problem is the source/enabler that changed behavior,
-  configuration, tooling, dependency, docs, tests, or code.
-- Identify which problem is the dependent/adaptation problem.
-- Create a dependency only when problem/root_cause/how_fixed supports it.
-- Direction should be source/enabler -> dependent/adaptation.
-- Keep the existing output schema exactly as shown below.
-
-Analyze TWO types of relationships:
-
-1. FILE-BASED DEPENDENCIES:
-   - How do file changes link to each other?
-   - Does changing file A affect file B?
-   - Do files share context (same module, same functionality)?
-
-   Examples:
-   - Config file (pyproject.toml) affects code files
-   - Import changes affect files that import from them
-   - Files in same module/package interact
-
-2. PROBLEM-BASED DEPENDENCIES:
-   - How does one problem link to another?
-   - Does fixing problem A enable/reveal/block problem B?
-   - Are they part of same logical fix?
-
-   Examples:
-   - Fixing imports enables type checking
-   - Config change enables linter to run
-   - One problem reveals another (cascade)
-
-OUTPUT format:
-{{
-  "dependencies": [
-    {{
-      "from": 1,
-      "to": 2,
-      "type": "blocks|enables|reveals|affects",
-      "reason": "Explain how problem 'from' relates to problem 'to'",
-      "file_link": "Optional: Explain file-based connection",
-      "strength": "strong|medium|weak"
-    }}
-  ]
-}}
-
-Rules:
-- Only include ACTUAL dependencies (not forced)
-- Explain both file-based AND problem-based reasoning
-- Use cascading metadata as evidence, but infer direction and relationship type
-  from the problem content
-- If no dependencies exist, return: {{"dependencies": []}}
-- Be specific - explain WHY the dependency exists
-- ALWAYS return valid JSON object with "dependencies" key
-
-{STRICT_JSON_RULES}"""
+    # Use imported prompt template
+    prompt = build_validation_group_dependency_prompt(
+        validation_cmd=validation_cmd,
+        problems_data=problems_data,
+        strict_json_rules=STRICT_JSON_RULES,
+    )
 
     time.sleep(2)  # Rate limiting
     response = _invoke_json(llm, prompt)
@@ -5466,69 +4853,14 @@ def _l2_tier1_single_pass(
             }
         )
 
-    prompt = f"""Generate L2 REPAIR SEQUENCE for CI failure resolution.
-
-Issue: {issue_id}
-Repo: {repo}
-
-Problems to fix:
-{json.dumps(problems_for_llm, indent=2)}
-
-Dependencies:
-{json.dumps(dependencies, indent=2)}
-
-Create optimal repair sequence in this EXACT format:
-{{
-  "problems": [
-    {{
-      "problem_id": 1,
-      "verification_cmd": "python -m mypy py",
-      "failure_type": "type_checking",
-      "problem": "Clear description [error_code]",
-      "root_cause": "Technical explanation. Scope: affected area",
-      "fix_strategy": "Single comprehensive paragraph explaining: what to change, how to fix it, and why it works. Use the how_fixed and why_fixed_works from input data, combining them naturally into one flowing explanation.",
-      "pattern_detected": null or {{
-        "type": "bulk_formatting",
-        "rule": "Pattern description",
-        "scope": "X files"
-      }},
-      "files": ["path/to/file-1.ext", "path/to/file-2.ext", ...],
-      "estimated_time_minutes": 5
-    }},
-    // Repeat for each problem in repair order
-  ],
-  "total_problems": <number of problems in repair sequence>,
-}}
-
-CRITICAL: fix_strategy must be a natural, flowing paragraph that:
-1. Starts with WHAT and HOW to fix (from input how_fixed)
-2. Continues with WHY it works (from input why_fixed_works)
-3. NO labels like "Why this works:" - just natural sentences
-4. Example: "Added .strip() method call to ensure whitespace is removed. The .strip() method removes leading/trailing whitespace, ensuring the value satisfies type expectations."
-
-CRITICAL ORDERING RULES (MUST FOLLOW):
-1. PRIMARY problems (problem_type="primary") MUST come FIRST
-   - These are CI failures visible in logs
-   - Fix these before any hidden problems
-
-2. HIDDEN problems (problem_type="hidden") come AFTER primary
-   - These are consecutive validations that never ran
-   - Fix in validation_order sequence
-
-3. Within each group (primary/hidden):
-   - Respect validation_order (lower order = earlier in sequence)
-   - Use dependencies to break ties (if problem A depends on B, do B first)
-   - Independent problems at same validation can be in any order
-
-4. NEVER reorder such that hidden comes before primary
-5. NEVER violate validation sequence (validation_order 8 must come before 11)
-
-OTHER RULES:
-- "files": Array of ACTUAL file paths from diff (max 50), NO speculation or patterns
-- Detect patterns for bulk operations (>10 files)
-- Be specific and actionable
-
-{STRICT_JSON_RULES}"""
+    # Use imported prompt template
+    prompt = build_l2_full_sequence_prompt(
+        issue_id=issue_id,
+        repo=repo,
+        problems=problems_for_llm,
+        dependencies=dependencies,
+        strict_json_rules=STRICT_JSON_RULES,
+    )
 
     try:
         time.sleep(3)  # Rate limiting
@@ -5578,39 +4910,12 @@ def _l2_tier2_grouped_llm(
                 }
             )
 
-        prompt = f"""Organize repair sequence for validation: {validation_cmd}
-
-Problems in this validation ({len(group_problems)}):
-{json.dumps(problems_for_llm, indent=2)}
-
-Generate L2 entries for these problems in this EXACT format:
-{{
-  "problems": [
-    {{
-      "problem_id": <original_id>,
-      "verification_cmd": "{validation_cmd}",
-      "failure_type": "...",
-      "problem": "Clear description",
-      "root_cause": "Technical explanation. Scope: affected area",
-      "fix_strategy": "Single comprehensive paragraph: what to change, how to fix it, and why it works. Combine how_fixed and why_fixed_works from input naturally.",
-      "pattern_detected": null or {{
-        "type": "bulk_formatting",
-        "rule": "Pattern description",
-        "scope": "X files"
-      }},
-      "files": ["path/to/file.ext", ...],
-      "estimated_time_minutes": 5
-    }}
-  ]
-}}
-
-CRITICAL: fix_strategy must combine input data naturally:
-- Take how_fixed: "Added .strip() method call..."
-- Take why_fixed_works: "The .strip() method removes whitespace..."
-- Combine: "Added .strip() method call to ensure whitespace is removed. The .strip() method removes leading/trailing whitespace, ensuring the value satisfies type expectations."
-- NO labels, just natural flowing text
-
-{STRICT_JSON_RULES}"""
+        # Use imported prompt template
+        prompt = build_l2_validation_group_prompt(
+            validation_cmd=validation_cmd,
+            problems=problems_for_llm,
+            strict_json_rules=STRICT_JSON_RULES,
+        )
 
         try:
             time.sleep(2)
@@ -5807,61 +5112,11 @@ def _stage5_generate_l3_llm(
 def _stage5_l3_single_pass(l2_problems: list[dict], llm) -> list[dict]:
     """Single-pass L3 generation for small/normal-sized data."""
 
-    prompt = f"""Analyze CI failure patterns and extract UNIVERSAL PROBLEM PATTERNS (L3).
-
-L2 Repair Sequence:
-{json.dumps(l2_problems, indent=2)}
-
-Task: Extract distinct, independent problem patterns with universal fixes.
-
-CRITICAL RULES:
-1. Each INDEPENDENT problem = separate entry
-2. Only link problems if there's ACTUAL dependency
-3. No forced grouping - mypy != mdformat (separate entries)
-4. Extract universal fixes that apply to similar future problems
-5. **IGNORE Git workflow issues** - DO NOT create patterns for merge conflicts
-   - Merge conflict markers are Git problems, NOT CI validation problems
-   - Focus on ACTUAL validation issues (type errors, formatting, imports, etc.)
-
-Output JSON ARRAY of distinct patterns:
-[
-  {{
-    "pattern_id": "numpy_private_type_annotation",
-    "failure_type": "type checking",
-    "verification_cmd": "python -m mypy py",
-    "failure_pattern": "Private numpy type annotations fail without plugin",
-    "problem": "< what is the problem, why it occurs, root cause >",
-    "universal_fix": {{
-      "approach": "Replace private types with public equivalents",
-      "steps": [
-        "1. Identify private type imports",
-        "2. Find public equivalent (e.g., DTypeLike -> np.dtype[Any])",
-        "3. Update annotations",
-        "4. Remove plugin config"
-      ],
-      "applies_to": ["numpy private types", "pandas private types"]
-    }},
-    "examples": [
-      {{
-        "file": "ndarrays_arithmetic.py",
-        "before": "dtype: DTypeLike = np.int64",
-        "after": "dtype: np.dtype[Any] = np.int64"
-      }}
-    ],
-    "dependent_problems": [
-      {{
-        "pattern_id": "pyproject_plugin_config",
-        "relationship": "requires_config_change",
-        "rationale": "Code change requires matching config update"
-      }}
-    ]
-  }}
-]
-
-For EACH distinct validation/problem type, create separate entry.
-Include dependencies ONLY if they actually exist.
-
-{STRICT_JSON_RULES}"""
+    # Use imported prompt template
+    prompt = build_l3_full_extraction_prompt(
+        l2_problems=l2_problems,
+        strict_json_rules=STRICT_JSON_RULES,
+    )
 
     try:
         time.sleep(3)  # Rate limiting
@@ -5942,51 +5197,12 @@ def _extract_patterns_for_validation_group(
 ) -> list[dict]:
     """Extract patterns for a single validation group using LLM."""
 
-    prompt = f"""Extract universal patterns from this validation group.
-
-Validation: {validation_cmd}
-Problems in this validation:
-{json.dumps(problems, indent=2)}
-
-Task: Identify DISTINCT problem patterns within this validation.
-
-For EACH distinct pattern, extract:
-1. Pattern ID (unique identifier)
-2. Failure pattern (what breaks)
-3. Problem (why it occurs, root cause)
-4. Universal fix (approach + steps)
-5. Examples (before/after)
-
-Output JSON array of patterns:
-[
-  {{
-    "pattern_id": "descriptive_unique_id",
-    "failure_type": "type_checking",
-    "verification_cmd": "{validation_cmd}",
-    "failure_pattern": "Brief description of what fails",
-    "problem": "Why this happens, root cause, context",
-    "universal_fix": {{
-      "approach": "High-level fix strategy",
-      "steps": ["Step 1", "Step 2", "Step 3"],
-      "applies_to": ["Similar cases where this applies"]
-    }},
-    "examples": [
-      {{
-        "file": "example_file.py",
-        "before": "code before",
-        "after": "code after"
-      }}
-    ],
-    "dependent_problems": []
-  }}
-]
-
-IMPORTANT:
-- Group similar problems into ONE pattern (e.g., all F401 unused imports = 1 pattern)
-- Separate patterns for different issues (F401 != E501)
-- Extract universal fixes that apply to similar future problems
-
-{STRICT_JSON_RULES}"""
+    # Use imported prompt template
+    prompt = build_l3_validation_group_prompt(
+        validation_cmd=validation_cmd,
+        problems=problems,
+        strict_json_rules=STRICT_JSON_RULES,
+    )
 
     time.sleep(2)  # Rate limiting
     response = _invoke_json(llm, prompt)
@@ -6018,35 +5234,11 @@ def _identify_cross_pattern_dependencies(patterns: list[dict], llm) -> list[dict
             }
         )
 
-    prompt = f"""Analyze dependencies between these patterns from different validations.
-
-Patterns:
-{json.dumps(pattern_summaries, indent=2)}
-
-Task: Identify which patterns depend on others.
-
-Look for:
-1. Config changes that enable/affect other patterns
-2. Code changes that require config updates
-3. Sequential dependencies (A must be fixed before B works)
-4. Related patterns affecting same functionality
-
-Output format:
-{{
-  "dependencies": [
-    {{
-      "from_pattern": "pattern_id_1",
-      "to_pattern": "pattern_id_2",
-      "relationship": "enables|requires|affects",
-      "rationale": "Why this dependency exists"
-    }}
-  ]
-}}
-
-Only include dependencies that ACTUALLY exist.
-Empty array if no cross-pattern dependencies.
-
-{STRICT_JSON_RULES}"""
+    # Use imported prompt template
+    prompt = build_l3_cross_validation_deps_prompt(
+        pattern_summaries=pattern_summaries,
+        strict_json_rules=STRICT_JSON_RULES,
+    )
 
     time.sleep(2)  # Rate limiting
     response = _invoke_json(llm, prompt)
@@ -6621,7 +5813,9 @@ def main():
     errors = []
     processed_ids = set()
     l2_sequences_path = output_dir / "l2_repair_sequences.json"
-    decomposed_issues_path = output_dir / "decomposed_issues.json"
+
+    # Always save/load decomposed_issues.json from data/ root, not output_dir
+    decomposed_issues_path = Path("data") / "decomposed_issues.json"
 
     decomposed_cache = _load_decomposed_cache(decomposed_issues_path)
     results, processed_ids = _load_existing_l2_results(l2_sequences_path)
@@ -6817,6 +6011,18 @@ def main():
         if "error" in decomposed_result:
             errors.append(decomposed_result)
             results.append(decomposed_result)
+
+            # Save error to execption directory using utility
+            try:
+                # The error data is already in decomposed_result, just save it
+                from utilities.error_handler import EXECPTION_DIR
+                EXECPTION_DIR.mkdir(exist_ok=True)
+                error_file = EXECPTION_DIR / f"{issue_id}.json"
+                with open(error_file, "w") as f:
+                    json.dump(decomposed_result, f, indent=2)
+                print(f"  ERROR saved to: {error_file}")
+            except Exception as save_error:
+                print(f"  WARNING: Could not save error to execption directory: {save_error}")
         else:
             # Run full L1/L2/L3 pipeline (unless --skip-memory)
             if not args.skip_memory:

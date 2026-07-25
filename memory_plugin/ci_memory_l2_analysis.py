@@ -14,8 +14,8 @@ import re
 import signal
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from scripts.model_token_config import get_l2_common_candidates
-from scripts.model_token_config import get_l2_consecutive_candidates
+from utilities.model_token_config import get_l2_common_candidates
+from utilities.model_token_config import get_l2_consecutive_candidates
 
 try:
     import numpy as np

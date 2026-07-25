@@ -24,6 +24,8 @@ Usage:
 import re
 from typing import Dict, List, Any
 
+MAX_CHANGE_TOKENS_PER_CHUNK = 70_000
+
 
 def parse_diff_to_structured(diff: str) -> Dict[str, Any]:
     """
@@ -239,7 +241,7 @@ def _chunk_by_dependency_and_tokens(
     Returns:
         List of chunks with dependency contexts
     """
-    from model_token_config import get_model_config
+    from utilities.model_token_config import get_model_config
 
     # Get model limits
     model_config = get_model_config(model_name)
@@ -248,14 +250,19 @@ def _chunk_by_dependency_and_tokens(
         model_config.get("context_window", 100000),
     )
 
-    # Target: Use 50% of context for safety (leaves room for CI context + instructions + output)
+    # Use 50% of context for safety. The diff/change payload also has a hard
+    # ceiling because very large structured outputs become unreliable even when
+    # the model context window can fit them.
     target_chunk_tokens = int(max_input_tokens * 0.5)
+    change_target_tokens = min(target_chunk_tokens, MAX_CHANGE_TOKENS_PER_CHUNK)
 
     print(
-        f"[Chunking] Model: {model_name}, Target chunk size: {target_chunk_tokens} tokens"
+        f"[Chunking] Model: {model_name}, Target prompt size: {target_chunk_tokens} tokens, "
+        f"Target change payload: {change_target_tokens} tokens"
     )
 
     chunks = []
+    pending_independent_chunks: List[Dict[str, Any]] = []
     file_path_to_info = {f["path"]: f for f in files}
     all_changed_files = set(file_path_to_info.keys())
 
@@ -281,22 +288,6 @@ def _chunk_by_dependency_and_tokens(
             cluster, filtered_edges, file_path_to_info
         )
 
-        if dependency_contexts:
-            caller_group_chunks = _split_cluster_by_caller_groups(
-                cluster_files=cluster_files,
-                dependency_contexts=dependency_contexts,
-                file_path_to_info=file_path_to_info,
-            )
-            if len(caller_group_chunks) > 1:
-                print(
-                    f"[Chunking] Split dependency cluster with {len(cluster_files)} files "
-                    f"into {len(caller_group_chunks)} caller-group chunks"
-                )
-                for sub_chunk in caller_group_chunks:
-                    sub_chunk["chunk_index"] = len(chunks) + 1
-                    chunks.append(sub_chunk)
-                continue
-
         # Build initial chunk
         chunk = {
             "files": cluster_files,
@@ -311,11 +302,34 @@ def _chunk_by_dependency_and_tokens(
         # Estimate token size
         estimated_tokens = _estimate_chunk_tokens(chunk)
         chunk["estimated_tokens"] = estimated_tokens
+        change_tokens = _estimate_chunk_change_tokens(chunk)
+        chunk["change_tokens"] = change_tokens
 
-        if estimated_tokens <= target_chunk_tokens:
+        if (
+            not dependency_contexts
+            and estimated_tokens <= target_chunk_tokens
+            and change_tokens <= change_target_tokens
+        ):
+            pending_independent_chunks.append(chunk)
+            continue
+
+        if pending_independent_chunks:
+            chunks.extend(
+                _pack_independent_chunks_by_tokens(
+                    pending_independent_chunks,
+                    target_chunk_tokens,
+                    change_target_tokens,
+                )
+            )
+            pending_independent_chunks = []
+
+        if (
+            estimated_tokens <= target_chunk_tokens
+            and change_tokens <= change_target_tokens
+        ):
             # Fits! Keep entire cluster together ✅
             print(
-                f"[Chunking] Cluster with {len(cluster_files)} files (~{estimated_tokens} tokens max) fits in one chunk"
+                f"[Chunking] Cluster with {len(cluster_files)} files (~{estimated_tokens} tokens max, ~{change_tokens} change tokens) fits in one chunk"
             )
             print(
                 f"[Chunking]   Classification: ~{len(cluster_files) * 50 + 8000} tokens, Deep analysis: ~{chunk.get('total_changes', 0) * 10 + 8500} tokens"
@@ -323,21 +337,58 @@ def _chunk_by_dependency_and_tokens(
             chunk["chunk_index"] = len(chunks) + 1
             chunks.append(chunk)
         else:
+            if dependency_contexts:
+                caller_group_chunks = _split_cluster_by_caller_groups(
+                    cluster_files=cluster_files,
+                    dependency_contexts=dependency_contexts,
+                    file_path_to_info=file_path_to_info,
+                )
+                if len(caller_group_chunks) > 1:
+                    bounded_caller_chunks = []
+                    caller_chunks_fit = True
+                    for sub_chunk in caller_group_chunks:
+                        sub_chunk["estimated_tokens"] = _estimate_chunk_tokens(
+                            sub_chunk
+                        )
+                        sub_chunk["change_tokens"] = _estimate_chunk_change_tokens(
+                            sub_chunk
+                        )
+                        if (
+                            sub_chunk["estimated_tokens"] > target_chunk_tokens
+                            or sub_chunk["change_tokens"] > change_target_tokens
+                        ):
+                            caller_chunks_fit = False
+                            break
+                        bounded_caller_chunks.append(sub_chunk)
+
+                    if caller_chunks_fit:
+                        print(
+                            f"[Chunking] Split dependency cluster with {len(cluster_files)} files "
+                            f"into {len(bounded_caller_chunks)} caller-group chunks"
+                        )
+                        chunks.extend(bounded_caller_chunks)
+                        continue
+
             # Too large! Need smart split
             print(
-                f"[Chunking] WARNING: Cluster with {len(cluster_files)} files (~{estimated_tokens} tokens max) exceeds limit ({target_chunk_tokens}), splitting..."
+                f"[Chunking] WARNING: Cluster with {len(cluster_files)} files (~{estimated_tokens} tokens max, ~{change_tokens} change tokens) exceeds limits (prompt target {target_chunk_tokens}, change target {change_target_tokens}), splitting..."
             )
             print(
                 "[Chunking]   Reason: Classification or deep analysis prompt too large"
             )
-            sub_chunks = _split_cluster_by_tokens(
-                cluster,
-                cluster_files,
-                dependency_contexts,
-                filtered_edges,
-                file_path_to_info,
-                target_chunk_tokens,
-            )
+            if dependency_contexts:
+                sub_chunks = _split_cluster_by_tokens(
+                    cluster,
+                    cluster_files,
+                    dependency_contexts,
+                    filtered_edges,
+                    file_path_to_info,
+                    change_target_tokens,
+                )
+            else:
+                sub_chunks = _split_files_by_change_tokens(
+                    cluster_files, change_target_tokens
+                )
 
             for sub_chunk in sub_chunks:
                 sub_chunk["chunk_index"] = len(chunks) + 1
@@ -345,11 +396,128 @@ def _chunk_by_dependency_and_tokens(
 
             print(f"[Chunking] Split into {len(sub_chunks)} sub-chunks")
 
+    if pending_independent_chunks:
+        chunks.extend(
+            _pack_independent_chunks_by_tokens(
+                pending_independent_chunks,
+                target_chunk_tokens,
+                change_target_tokens,
+            )
+        )
+
     # Add total_chunks to all
     total_chunks = len(chunks)
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks, start=1):
+        chunk["chunk_index"] = index
         chunk["total_chunks"] = total_chunks
 
+    return chunks
+
+
+def _pack_independent_chunks_by_tokens(
+    independent_chunks: List[Dict[str, Any]],
+    target_chunk_tokens: int,
+    change_target_tokens: int,
+) -> List[Dict[str, Any]]:
+    """Pack independent dependency clusters while staying under token budgets."""
+    packed_chunks: List[Dict[str, Any]] = []
+    current_files: List[Dict] = []
+    current_clusters: List[str] = []
+
+    def flush_current() -> None:
+        if not current_files:
+            return
+        chunk = {
+            "files": list(current_files),
+            "total_files": len(current_files),
+            "total_changes": sum(
+                f.get("total_changes", len(f.get("changes", [])))
+                for f in current_files
+            ),
+            "dependency_cluster": list(current_clusters),
+            "dependency_contexts": [],
+            "chunk_info": "Packed independent dependency clusters",
+        }
+        chunk["estimated_tokens"] = _estimate_chunk_tokens(chunk)
+        chunk["change_tokens"] = _estimate_chunk_change_tokens(chunk)
+        packed_chunks.append(chunk)
+
+    for chunk in independent_chunks:
+        candidate_files = current_files + list(chunk.get("files", []))
+        candidate = {
+            "files": candidate_files,
+            "total_files": len(candidate_files),
+            "total_changes": sum(
+                f.get("total_changes", len(f.get("changes", [])))
+                for f in candidate_files
+            ),
+            "dependency_contexts": [],
+        }
+        candidate_tokens = _estimate_chunk_tokens(candidate)
+        candidate_change_tokens = _estimate_chunk_change_tokens(candidate)
+
+        if current_files and (
+            candidate_tokens > target_chunk_tokens
+            or candidate_change_tokens > change_target_tokens
+        ):
+            flush_current()
+            current_files = []
+            current_clusters = []
+
+        current_files.extend(chunk.get("files", []))
+        current_clusters.extend(chunk.get("dependency_cluster", []))
+
+    flush_current()
+
+    if packed_chunks:
+        print(
+            f"[Chunking] Packed {len(independent_chunks)} independent cluster(s) "
+            f"into {len(packed_chunks)} token-bounded chunk(s)"
+        )
+
+    return packed_chunks
+
+
+def _split_files_by_change_tokens(
+    files: List[Dict[str, Any]], target_tokens: int
+) -> List[Dict[str, Any]]:
+    """Split files into chunks by actual change payload token estimate."""
+    chunks: List[Dict[str, Any]] = []
+    current_files: List[Dict[str, Any]] = []
+    current_tokens = 0
+
+    def flush_current() -> None:
+        if not current_files:
+            return
+        chunk = {
+            "files": list(current_files),
+            "total_files": len(current_files),
+            "total_changes": sum(
+                f.get("total_changes", len(f.get("changes", [])))
+                for f in current_files
+            ),
+            "dependency_cluster": [
+                f.get("path", "") for f in current_files if f.get("path")
+            ],
+            "dependency_contexts": [],
+            "is_partial_cluster": True,
+            "chunk_info": "Token split without dependency context",
+        }
+        chunk["estimated_tokens"] = _estimate_chunk_tokens(chunk)
+        chunk["change_tokens"] = _estimate_chunk_change_tokens(chunk)
+        chunks.append(chunk)
+
+    for file_info in files:
+        file_tokens = _estimate_file_tokens(file_info)
+        if current_files and current_tokens + file_tokens > target_tokens:
+            flush_current()
+            current_files = []
+            current_tokens = 0
+
+        current_files.append(file_info)
+        current_tokens += file_tokens
+
+    flush_current()
     return chunks
 
 
@@ -528,10 +696,24 @@ def _estimate_chunk_tokens(chunk: Dict[str, Any]) -> int:
     return max_tokens
 
 
+def _estimate_chunk_change_tokens(chunk: Dict[str, Any]) -> int:
+    """Estimate tokens for the actual before/after change payload in a chunk."""
+    return sum(_estimate_file_tokens(file_info) for file_info in chunk.get("files", []))
+
+
 def _estimate_file_tokens(file_info: Dict[str, Any]) -> int:
-    """Estimate tokens for a single file."""
+    """Estimate tokens for a single file's actual change payload."""
+    from utilities.diff_chunker import estimate_tokens
+
+    file_tokens = estimate_tokens(str(file_info.get("path", ""))) + 10
     changes = file_info.get("changes", [])
-    return len(changes) * 10  # ~10 tokens per change
+    for change in changes:
+        before_text = str(change.get("before", "") or "")
+        after_text = str(change.get("after", "") or "")
+        file_tokens += estimate_tokens(before_text)
+        file_tokens += estimate_tokens(after_text)
+        file_tokens += 8
+    return file_tokens
 
 
 def _split_cluster_by_tokens(

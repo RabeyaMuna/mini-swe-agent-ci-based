@@ -2,15 +2,24 @@
 prepare_memory_train_test_split.py
 ===================================
 Analyze entire CI repair dataset, compute similarity, and split into:
-- 30% memory set (most representative issues -> saved as L2 memory)
+- 30% memory set (earliest/most representative issues -> saved as L2 memory)
 - 70% evaluation set (testing issues that will use the 30% as PREVIOUS EXPERIENCE)
 
+UPDATED: Now uses built-in commit_date field for temporal-aware splitting!
+
 Usage:
+    # Temporal-aware split (RECOMMENDED - uses commit_date from dataset):
     python scripts/prepare_memory_train_test_split.py \
-        --dataset data/trs/filtered_issues.jsonl \
-        --output-dir data/trs \
+        --repos agno,flower,camel \
+        --output-dir data/trs_temporal \
         --memory-ratio 0.3 \
-        --similarity-threshold 0.5
+        --temporal-split
+
+    # Original similarity-based (may have temporal leakage):
+    python scripts/prepare_memory_train_test_split.py \
+        --repos agno,flower,camel \
+        --output-dir data/trs \
+        --memory-ratio 0.3
 """
 
 from __future__ import annotations
@@ -18,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,6 +54,52 @@ def _issue_id(issue: Dict[str, Any]) -> str:
         or issue.get("original_issue_id")
         or ""
     )
+
+
+def _parse_timestamp(ts_str: Optional[str]) -> Optional[datetime]:
+    """Parse ISO timestamp string to datetime."""
+    if not ts_str:
+        return None
+    try:
+        return datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def _augment_with_commit_dates(
+    issues: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Use commit_date field from dataset (already present in HuggingFace dataset).
+
+    The dataset now includes commit_date field and is pre-sorted oldest→newest.
+    """
+    augmented = []
+    missing_count = 0
+
+    for issue in issues:
+        # Use commit_date field from dataset (standardize to commit_timestamp)
+        commit_date = issue.get('commit_date')
+
+        if commit_date:
+            issue['commit_timestamp'] = commit_date
+            augmented.append(issue)
+        else:
+            # Rare case: commit_date missing
+            missing_count += 1
+            console.print(f"[yellow]Warning: Issue {_issue_id(issue)} missing commit_date[/yellow]")
+            augmented.append(issue)
+
+    if missing_count > 0:
+        console.print(
+            f"[yellow]Missing commit_date: {missing_count}/{len(issues)}[/yellow]"
+        )
+    else:
+        console.print(
+            f"[green]All {len(issues)} issues have commit_date ✓[/green]"
+        )
+
+    return augmented
 
 
 def _matches_repo_filter(issue: Dict[str, Any], repo_filter: List[str]) -> bool:
@@ -406,15 +462,32 @@ def _compute_similarity_within_repo(
 
 
 def _select_representative_issues(
-    similarity_matrix: np.ndarray, repo_indices: List[int], memory_ratio: float = 0.3
+    similarity_matrix: np.ndarray,
+    repo_indices: List[int],
+    memory_ratio: float = 0.3,
+    issues: Optional[List[Dict[str, Any]]] = None,
+    use_temporal: bool = False,
 ) -> Tuple[List[int], List[int]]:
     """
     Select most representative issues for memory set.
 
-    Strategy:
+    Strategy (similarity-based - ORIGINAL):
     1. Compute average similarity for each issue (how similar to others)
     2. Select top memory_ratio% with highest avg similarity
     3. These are "representative" issues that capture common patterns
+
+    Strategy (temporal-aware - RECOMMENDED):
+    1. Sort issues by commit timestamp (ascending - oldest first)
+    2. Take earliest memory_ratio% as memory set
+    3. Remaining become eval set
+    4. This guarantees NO temporal leakage
+
+    Args:
+        similarity_matrix: Pairwise similarity matrix
+        repo_indices: Global indices of issues in this repo
+        memory_ratio: Ratio of issues for memory (0-1)
+        issues: Full issue list (needed for temporal mode)
+        use_temporal: If True, use chronological split instead of similarity
 
     Returns:
         memory_indices: Issue indices for memory set
@@ -422,6 +495,64 @@ def _select_representative_issues(
     """
     n_issues = len(repo_indices)
     n_memory = max(1, int(n_issues * memory_ratio))
+
+    if use_temporal and issues is not None:
+        # TEMPORAL MODE: Sort by timestamp chronologically
+        console.print("  [cyan]Using temporal-aware split (chronological)[/cyan]")
+
+        # Get issues with timestamps
+        issues_with_ts = []
+        for local_idx, global_idx in enumerate(repo_indices):
+            issue = issues[global_idx]
+            ts = issue.get('commit_timestamp')
+            if ts:
+                dt = _parse_timestamp(ts)
+                if dt:
+                    issues_with_ts.append((local_idx, global_idx, dt))
+
+        if not issues_with_ts:
+            console.print(
+                "  [yellow]No timestamps available, falling back to similarity[/yellow]"
+            )
+            use_temporal = False
+        elif len(issues_with_ts) < n_issues:
+            console.print(
+                f"  [yellow]Only {len(issues_with_ts)}/{n_issues} have timestamps[/yellow]"
+            )
+
+        if use_temporal:
+            # Sort by timestamp (oldest first)
+            issues_with_ts.sort(key=lambda x: x[2])
+
+            # Take earliest as memory
+            memory_local = [local_idx for local_idx, _, _ in issues_with_ts[:n_memory]]
+            eval_local = [local_idx for local_idx, _, _ in issues_with_ts[n_memory:]]
+
+            # Convert to global indices
+            memory_indices = [repo_indices[i] for i in memory_local]
+            eval_indices = [repo_indices[i] for i in eval_local]
+
+            # Report date ranges
+            mem_dates = [dt for _, _, dt in issues_with_ts[:n_memory]]
+            eval_dates = [dt for _, _, dt in issues_with_ts[n_memory:]]
+
+            if mem_dates and eval_dates:
+                mem_range = f"{min(mem_dates).date()} to {max(mem_dates).date()}"
+                eval_range = f"{min(eval_dates).date()} to {max(eval_dates).date()}"
+                console.print(f"  Memory dates: [{mem_range}]")
+                console.print(f"  Eval dates: [{eval_range}]")
+
+                # Validate no overlap
+                if max(mem_dates) >= min(eval_dates):
+                    console.print("  [yellow]Warning: Date ranges overlap slightly[/yellow]")
+                else:
+                    gap_days = (min(eval_dates) - max(mem_dates)).days
+                    console.print(f"  [green]Temporal gap: {gap_days} days[/green]")
+
+            return memory_indices, eval_indices
+
+    # SIMILARITY MODE (original)
+    console.print("  [cyan]Using similarity-based split[/cyan]")
 
     # Compute average similarity for each issue
     avg_similarity = similarity_matrix.mean(axis=1)
@@ -445,6 +576,7 @@ def _save_split_datasets(
     memory_indices: List[int],
     eval_indices: List[int],
     output_dir: Path,
+    use_temporal: bool = False,
 ):
     """Save memory and evaluation datasets (both full issues and ID lists)."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -477,15 +609,36 @@ def _save_split_datasets(
         json.dump(eval_ids, f, indent=2)
     logger.info(f"Saved {len(eval_ids)} eval IDs to {eval_ids_path}")
 
-    # Metadata
+    # Metadata with date ranges if temporal
+    memory_timestamps = [
+        ts for idx in memory_indices
+        if (ts := issues[idx].get('commit_timestamp'))
+    ]
+    eval_timestamps = [
+        ts for idx in eval_indices
+        if (ts := issues[idx].get('commit_timestamp'))
+    ]
+
     metadata = {
         "total_issues": len(issues),
         "memory_set_size": len(memory_indices),
         "eval_set_size": len(eval_indices),
         "memory_ratio": len(memory_indices) / len(issues),
         "split_by_repo": True,
-        "selection_strategy": "highest_avg_similarity",
+        "selection_strategy": "chronological" if use_temporal else "highest_avg_similarity",
     }
+
+    if use_temporal and memory_timestamps and eval_timestamps:
+        metadata["memory_date_range"] = {
+            "earliest": min(memory_timestamps),
+            "latest": max(memory_timestamps),
+        }
+        metadata["eval_date_range"] = {
+            "earliest": min(eval_timestamps),
+            "latest": max(eval_timestamps),
+        }
+        metadata["temporal_leakage_prevented"] = True
+
     metadata_path = output_dir / "split_metadata.json"
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
@@ -559,16 +712,22 @@ def main(
         "ci-benchmark-user/ci-repair-bench",
         help="HuggingFace dataset name (used if --dataset not provided)",
     ),
+    temporal_split: bool = typer.Option(
+        False,
+        "--temporal-split",
+        help="Use chronological split instead of similarity-based (RECOMMENDED to prevent temporal leakage). Uses built-in commit_date field from dataset.",
+    ),
 ):
     """
-    Analyze CI repair dataset and split into memory/evaluation sets based on similarity.
+    Analyze CI repair dataset and split into memory/evaluation sets.
 
     Process:
     1. Load all issues from dataset
-    2. Compute embeddings for each issue
-    3. Group by repository
-    4. For each repo, compute similarity and select most representative issues for memory
-    5. Save memory set (30%) and evaluation set (70%)
+    2. (Optional) Load commit timestamps for temporal-aware splitting
+    3. Compute embeddings for each issue
+    4. Group by repository
+    5. For each repo, select memory vs eval (chronological OR similarity-based)
+    6. Save memory set (30%) and evaluation set (70%)
     """
     console.print("[bold cyan]Starting Memory/Eval Split Analysis[/bold cyan]")
     if dataset:
@@ -577,6 +736,14 @@ def main(
         console.print(f"Dataset: {hf_dataset} (HuggingFace)")
     console.print(f"Output: {output_dir}")
     console.print(f"Memory ratio: {memory_ratio:.1%}")
+
+    if temporal_split:
+        console.print("[green]Mode: Temporal-aware (chronological split)[/green]")
+        console.print("[cyan]Using built-in commit_date field from dataset[/cyan]")
+    else:
+        console.print("[yellow]Mode: Similarity-based (may have temporal leakage)[/yellow]")
+        console.print("[yellow]Consider using --temporal-split to prevent leakage[/yellow]")
+
     console.print()
 
     # 1. Load dataset (HuggingFace by default, or local JSONL if provided)
@@ -585,8 +752,14 @@ def main(
     else:
         all_issues = _load_from_huggingface(hf_dataset)
 
-    # 1.5. Load decomposed issues (REUSE existing decomposition!)
-    decomposed_cache_path = output_dir / "decomposed_issues.json"
+    # 1.5. Use commit_date field if temporal mode
+    if temporal_split:
+        console.print("\n[cyan]Using commit_date from dataset for temporal split...[/cyan]")
+        all_issues = _augment_with_commit_dates(all_issues)
+
+    # 1.6. Load decomposed issues (REUSE existing decomposition!)
+    # Always look in data/ root, not data/trs/
+    decomposed_cache_path = Path("data") / "decomposed_issues.json"
     console.print("\n[cyan]Checking for decomposed issues...[/cyan]")
     decomposed_dict = _load_or_create_decomposed_issues(
         all_issues, decomposed_cache_path, force_recompute=False
@@ -634,27 +807,33 @@ def main(
 
     console.print("\n[cyan]Selecting representative issues per repository:[/cyan]")
     for repo_key, repo_indices in sorted(repo_groups.items()):
+        console.print(f"\n{repo_key}:")
+
         # Compute similarity within this repo
         similarity_matrix = _compute_similarity_within_repo(embeddings, repo_indices)
 
-        # Select memory vs eval
+        # Select memory vs eval (with temporal awareness if enabled)
         memory_indices, eval_indices = _select_representative_issues(
-            similarity_matrix, repo_indices, memory_ratio
+            similarity_matrix,
+            repo_indices,
+            memory_ratio,
+            issues=issues,
+            use_temporal=temporal_split,
         )
 
         all_memory_indices.extend(memory_indices)
         all_eval_indices.extend(eval_indices)
 
         console.print(
-            f"  {repo_key}: "
-            f"{len(memory_indices)} memory, "
-            f"{len(eval_indices)} eval "
+            f"  Split: {len(memory_indices)} memory, {len(eval_indices)} eval "
             f"(avg_sim={similarity_matrix.mean():.3f})"
         )
 
     # 5. Save datasets
     console.print("\n[cyan]Saving split datasets...[/cyan]")
-    _save_split_datasets(issues, all_memory_indices, all_eval_indices, output_dir)
+    _save_split_datasets(
+        issues, all_memory_indices, all_eval_indices, output_dir, use_temporal=temporal_split
+    )
 
     # 6. Save similarity analysis
     _save_similarity_analysis(

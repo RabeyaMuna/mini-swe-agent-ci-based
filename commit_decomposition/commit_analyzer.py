@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +16,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import litellm
 from dotenv import load_dotenv
 
+from prompt_template import build_commit_analysis_prompt, build_file_selection_prompt
+from utilities.diff_chunker import chunk_diff_by_files, estimate_tokens, merge_groups
+
 load_dotenv()
+
+DEFAULT_SELECTION_CHUNK_TOKENS = 60_000
+DEFAULT_ANALYSIS_CHUNK_TOKENS = 40_000
 
 
 class CommitAnalyzer:
@@ -27,190 +33,6 @@ class CommitAnalyzer:
             "MEMCI_LLM_MODEL", "openrouter/minimax/minimax-m2.5"
         )
 
-    def analyze_commit_group(
-        self,
-        group: Dict,
-        commit_diff: str,
-        ci_logs: Any,
-        relevant_validations: List[Dict],
-    ) -> Dict:
-        """
-        Analyze a commit group to extract:
-        1. Problem identification
-        2. Root cause
-        3. Fix strategy
-        4. Repair plan
-
-        Args:
-            group: Commit group info with commits, files, etc.
-            commit_diff: Git diff for this group
-            ci_logs: CI failure logs
-            relevant_validations: Validation commands relevant to changed files
-
-        Returns:
-            Decomposition with problems, root causes, fix strategies, repair plans
-        """
-        # Format commit info
-        commit_info = self._format_commit_info(group.get("commits", []))
-
-        # Extract CI failure info
-        ci_failure_info = self._extract_ci_failure(ci_logs)
-
-        # Format validations
-        validations_str = json.dumps(relevant_validations, indent=2)
-        sha_success = group.get("sha_success") or "unknown"
-        sha_fail = group.get("sha_fail") or "unknown"
-        commit_number = group.get("commit_number", 1)
-        total_commits = group.get("total_commits", 1)
-        chunk_number = group.get("chunk_number", 1)
-        total_chunks = group.get("total_chunks", 1)
-        files_in_chunk = group.get("files_in_chunk", [])
-        changed_files = group.get("changed_files", [])
-        validated_changed_files = group.get("validated_changed_files", [])
-        ci_metadata = group.get("ci_metadata") or {}
-        current_commit = (group.get("commits") or [{}])[0]
-        commit_sha = current_commit.get("sha", "unknown")
-        commit_message = current_commit.get("message", "")
-        commit_sha_json = json.dumps(commit_sha)
-        commit_message_json = json.dumps(commit_message)
-        commit_metadata = {
-            "commit_sha": commit_sha,
-            "commit_message": commit_message,
-            "author": current_commit.get("author", ""),
-            "date": current_commit.get("date", ""),
-            "html_url": current_commit.get("html_url", ""),
-            "commit_number": commit_number,
-            "total_commits": total_commits,
-            "chunk_number": chunk_number,
-            "total_chunks": total_chunks,
-            "changed_files": changed_files,
-            "validated_changed_files": validated_changed_files,
-            "sha_success": sha_success,
-            "sha_fail": sha_fail,
-        }
-
-        chunk_info = ""
-        if total_chunks > 1:
-            chunk_info = f"\n- Chunk {chunk_number}/{total_chunks} of this commit (files: {', '.join(files_in_chunk[:5])}{'...' if len(files_in_chunk) > 5 else ''})"
-
-        ci_metadata_str = json.dumps(ci_metadata, indent=2)
-
-        # Build LLM prompt
-        prompt = f"""You are analyzing commits SEQUENTIALLY to understand how a CI failure evolved.
-
-CONTEXT:
-- Repository: Known to PASS CI at {sha_success} and FAIL CI at {sha_fail}
-- Total commits between success and failure: {total_commits}
-- Currently analyzing: Commit {commit_number}/{total_commits}{chunk_info}
-
-COMMIT BEING ANALYZED:
-{commit_info}
-
-COMMIT METADATA:
-{json.dumps(commit_metadata, indent=2)}
-
-RELEVANT CHANGES IN THIS {"CHUNK" if total_chunks > 1 else "COMMIT"}:
-{commit_diff}
-
-STRUCTURED CI FAILURE:
-{ci_failure_info}
-
-CI METADATA FOR THIS COMMIT:
-{ci_metadata_str}
-
-Use these CI metadata fields directly:
-- workflow_run_exists: whether any workflow run metadata exists for this commit
-- workflow_names: workflow names found for this commit
-- jobs_executed: jobs that executed and their conclusions
-- failed_jobs: failed jobs for this commit
-- step_names_executed: steps that executed and their conclusions
-- failed_steps: failed steps for this commit
-- current_jobs_fixed: jobs that passed in this commit
-- current_failed_jobs: jobs that failed in this commit
-
-RELEVANT CI VALIDATION STEPS:
-{validations_str}
-
-TASK - COMMIT-BASED CI TRANSITION ANALYSIS:
-
-1. Identify the CURRENT CI failure at sha_fail.
-   CI stops at the first failing validation step. Use STRUCTURED CI FAILURE only as primary first-failure evidence: failed job, failed step, exact error, failed tool, validation command, and implicated file/line when available.
-
-2. Read the full CI validation sequence.
-   RELEVANT CI VALIDATION STEPS are all checks that can apply to these files, including steps CI may not have reached because it stopped at the first failure. Analyze the diff against both the known CI failure and every listed CI verification step. A commit can fix the logged failure, fix a hidden/later validation, introduce a different validation problem, or be relevant only because another CI verification would check it.
-
-3. Analyze this commit's diff only and group changed hunks by failure family.
-   Group changes together when they share the same validation command, failure type, root cause, repair strategy, and related files changed for the same reason.
-   Split changes when they map to different validations, different root causes, config/dependency enablement versus source/test fixes, or a fix that also introduces another problem.
-
-4. Treat sha_success as the known passing baseline and sha_fail as the failing target.
-   The final successful repair trajectory should explain all commits needed to move from the failing state back to passing CI. For this single commit, report only problems/fixes supported by the diff and validation rules.
-
-For each problem object, provide:
-
-1. "files": List of files affected.
-2. "failure_type": Broad validation family, such as "format", "lint", "type_check", "test", "build", "install", "import", "docs", or "unknown".
-3. "issue_type": Specific issue family, such as "missing_return_annotation", "import_order", "dependency_version", or "assertion_update".
-4. "problem": The CI problem or fix being described, with step/job and line numbers when available.
-5. "root_cause": The underlying technical cause.
-6. "changes_made": What this commit changed in the code.
-7. "introduces": What problems or validation challenges this commit introduced, if any. Use "" if none.
-8. "fixes": What this commit fixed and why these changes fix it. Use "" if it fixes nothing.
-9. "current_failed_jobs": Failed job/step records from CI METADATA for this commit, including validation_cmd when available, or [].
-10. "current_fixed_jobs": Jobs from CI METADATA that passed in this commit, or [].
-11. "validation_cmd": The exact CI command that verifies the fixed or introduced issue.
-
-OUTPUT JSON FORMAT (valid JSON only, no markdown):
-{{
-  "commit_sha": {commit_sha_json},
-  "commit_message": {commit_message_json},
-  "current_jobs_fixed": [],
-  "current_failed_jobs": [],
-  "problems": [
-    {{
-      "files": ["inflatable_test.py"],
-      "failure_type": "type_check",
-      "issue_type": "missing_return_annotation",
-      "problem": "mypy fails because test_get_object_id lacks an explicit return type.",
-      "root_cause": "The project type-checking configuration requires test functions to declare -> None.",
-      "changes_made": "Added '-> None' to test_get_object_id.",
-      "introduces": "",
-      "fixes": "Fixes the mypy validation because the test function now satisfies strict return type requirements.",
-      "current_failed_jobs": [],
-      "current_fixed_jobs": [],
-      "validation_cmd": "python -m mypy inflatable_test.py"
-    }}
-  ]
-}}
-
-IMPORTANT RULES:
-1. STRUCTURED CI FAILURE shows only the known first failing step at sha_fail. Do not assume later validation steps passed or are irrelevant.
-2. Check every changed hunk against the structured CI failure and every relevant validation step, not only the logged failure.
-3. Do not claim a fix unless the diff directly explains why the validation would now pass.
-4. Do not claim a new problem unless the diff directly violates a validation rule or explains the current CI failure.
-5. If the commit is unrelated to validated CI behavior, return the top-level commit fields with "problems": [].
-6. Same failure family must be one problem object, even if many files changed.
-7. Different validators, root causes, or repair strategies must be separate problem objects.
-8. Use plural field names exactly: "current_failed_jobs" and "current_fixed_jobs".
-9. Do not invent current_failed_jobs/current_fixed_jobs. They must come from CI METADATA for this commit.
-10. Return ONLY valid JSON, no markdown, no comments, and no placeholder entries.
-11. If no relevant changes, return {{"commit_sha": {commit_sha_json}, "commit_message": {commit_message_json}, "current_jobs_fixed": [], "current_failed_jobs": [], "problems": []}}"""
-
-        # Call LLM
-        try:
-            response = self._call_llm(prompt)
-            result = self._parse_response(response)
-            import pdb
-
-            pdb.set_trace()
-            return self._normalize_commit_analysis(result, group)
-        except Exception as e:
-            print(f"    ERROR: LLM analysis failed: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return {"problems": [], "error": str(e)}
-
     def select_relevant_files(
         self,
         *,
@@ -218,65 +40,274 @@ IMPORTANT RULES:
         changed_files: List[str],
         commit_diff: str,
         structured_ci_failure: Dict,
-        ci_metadata: Dict,
         relevant_validations: List[Dict],
+        relationship_context: List[Dict] = None,
     ) -> Dict:
-        """Use LLM to select changed files relevant to CI failure or validation based on actual changes."""
-
-        prompt = f"""Analyze the ACTUAL CHANGES in this commit's diff to select files whose changes are directly or indirectly relevant to the current CI failure or any CI verification step.
-
-COMMIT METADATA:
-{json.dumps(commit_metadata, indent=2)}
-
-COMMIT DIFF (contains all changed files and their changes):
-{commit_diff}
-
-STRUCTURED CI FAILURE:
-{json.dumps(structured_ci_failure, indent=2)}
-
-RELEVANT CI VALIDATION STEPS:
-{json.dumps(relevant_validations, indent=2)}
-
-TASK:
-Analyze the DIFF to determine which file changes are relevant for commit-based CI decomposition.
-
-Select files when their changes (visible in the DIFF):
-- DIRECTLY fix or introduce the issue mentioned in STRUCTURED CI FAILURE
-- Are validated by the failed validation command or any CI validation step in RELEVANT CI VALIDATION STEPS
-- Modify code, tests, config, dependencies, or tool settings that could affect any validation step's behavior
-- Change type annotations, imports, function signatures, or code structure checked by CI tools (mypy, pylint, black, isort, pytest, etc.)
-
-IMPORTANT:
-- Analyze the actual changes in each file from the DIFF, not just file names
-- A file changing only version numbers or unrelated content should NOT be selected if the change doesn't affect any validation
-- Multiple pyproject.toml files with identical dependency bumps may all be relevant if they affect the same validation tools, or has direct or indirect impact on the CI validations.
-
-Do not select files when:
-- The changes are completely unrelated to any failed validation or listed CI verification command
-- The file changes cannot affect any validation step's outcome (e.g., comments-only changes when no doc validator failed)
-
-OUTPUT JSON ONLY:
-{{
-  "selected_files": ["path/to/file.py"],
-  "reasoning": "brief explanation of why these files were selected based on their actual changes"
-}}"""
+        """Select changed files relevant to CI validation."""
+        max_chunk_tokens = self._get_input_chunk_tokens(DEFAULT_SELECTION_CHUNK_TOKENS)
+        chunks = self._diff_chunks(commit_diff, changed_files, max_chunk_tokens)
+        print(
+            f"    File selection diff: ~{estimate_tokens(commit_diff):,} tokens, "
+            f"{len(chunks)} chunk(s)"
+        )
 
         try:
-            response = self._call_llm(prompt)
-            result = self._parse_response(response)
-            import pdb
+            all_groups = []
+            for i, chunk in enumerate(chunks, 1):
+                print(
+                    f"      Selecting files from chunk {i}/{len(chunks)}: "
+                    f"{len(chunk['files'])} file(s)"
+                )
+                prompt = build_file_selection_prompt(
+                    commit_metadata,
+                    chunk["files"],
+                    chunk["diff"],
+                    structured_ci_failure,
+                    relevant_validations,
+                    relationship_context,
+                )
+                chunk_result = self._call_json(prompt)
+                all_groups.extend(chunk_result.get("selected_groups", []))
 
-            pdb.set_trace()
-            selected = self._resolve_selected_files(
-                result.get("selected_files", []), changed_files
+            # Resolve file paths
+            selected_groups = self._resolve_selected_groups(
+                merge_groups(all_groups), changed_files
+            )
+            selected_groups = self._organize_groups_by_validation(
+                selected_groups, relevant_validations
             )
             return {
-                "selected_files": selected,
-                "reasoning": result.get("reasoning", ""),
+                "selected_groups": selected_groups,
+                "reasoning": "",
             }
+
         except Exception as e:
-            print(f"    Warning: relevant file selection failed: {e}")
-            return {"selected_files": [], "reasoning": ""}
+            print(f"    ERROR: File selection failed: {e}")
+            # Fallback: select all files (safer than returning empty)
+            return {
+                "selected_groups": [{
+                    "files": changed_files,
+                    "failure_type": "unknown",
+                    "issue_type": "unknown",
+                    "validation_cmd": "",
+                    "reason": f"Fallback due to error: {e}",
+                }],
+                "reasoning": f"Error during selection, selected all files: {e}",
+            }
+
+    def analyze_commit_group(
+        self,
+        group: Dict,
+        commit_diff: str,
+        relevant_validations: List[Dict],
+    ) -> Dict:
+        """Analyze a selected commit/file group into CI problem events."""
+        commit_info = self._format_commit_info(group.get("commits", []))
+        sha_success = group.get("sha_success") or "unknown"
+        sha_fail = group.get("sha_fail") or "unknown"
+        commit_number = group.get("commit_number", 1)
+        total_commits = group.get("total_commits", 1)
+        selected_groups = group.get("selected_groups", [])
+        ci_metadata = group.get("ci_metadata") or {}
+        structured_ci_failure = group.get("structured_ci_failure") or {}
+        current_commit = (group.get("commits") or [{}])[0]
+        commit_sha = current_commit.get("sha", "unknown")
+        max_chunk_tokens = self._get_input_chunk_tokens(DEFAULT_ANALYSIS_CHUNK_TOKENS)
+        chunks = self._diff_chunks(
+            commit_diff, group.get("files_in_chunk", []), max_chunk_tokens
+        )
+        print(
+            f"    Commit analysis diff: ~{estimate_tokens(commit_diff):,} tokens, "
+            f"{len(chunks)} chunk(s)"
+        )
+
+        try:
+            all_problems = []
+            for i, chunk in enumerate(chunks, 1):
+                print(f"      Analyzing commit chunk {i}/{len(chunks)}")
+                prompt = build_commit_analysis_prompt(
+                    commit_info=commit_info,
+                    commit_diff=chunk["diff"],
+                    commit_sha=commit_sha,
+                    sha_success=sha_success,
+                    sha_fail=sha_fail,
+                    commit_number=commit_number,
+                    total_commits=total_commits,
+                    chunk_number=i,
+                    total_chunks=len(chunks),
+                    files_in_chunk=chunk["files"],
+                    selected_groups=selected_groups,
+                    ci_failure_info=structured_ci_failure,
+                    ci_metadata=ci_metadata,
+                    relevant_validations=relevant_validations,
+                )
+                chunk_result = self._call_json(prompt)
+
+                all_problems.extend(chunk_result.get("problems", []))
+
+            result = {
+                "commit_sha": commit_sha,
+                "problems": self._consolidate_problem_events(
+                    all_problems, relevant_validations
+                ),
+            }
+            return result
+
+        except Exception as e:
+            print(f"    ERROR: LLM analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"problems": [], "error": str(e)}
+
+    def _diff_chunks(
+        self, commit_diff: str, files: List[str], max_tokens: int
+    ) -> List[Dict]:
+        """Return one full-diff chunk or file-based chunks when needed."""
+        if estimate_tokens(commit_diff) <= max_tokens:
+            return [{"files": files or [], "diff": commit_diff}]
+        return chunk_diff_by_files(commit_diff, max_tokens_per_chunk=max_tokens)
+
+    def _organize_groups_by_validation(
+        self, groups: List[Dict], validation_sequence: List[Dict]
+    ) -> List[Dict]:
+        """Merge and order selected groups by validation command/failure family."""
+        validation_order = self._validation_order_by_cmd(validation_sequence)
+        merged: Dict[tuple, Dict] = {}
+
+        for group in groups or []:
+            validation_cmd = group.get("validation_cmd", "")
+            failure_type = group.get("failure_type", "")
+            key = (
+                validation_order.get(validation_cmd, 9999),
+                validation_cmd,
+                failure_type,
+            )
+            if key not in merged:
+                merged[key] = {
+                    "validation_order": key[0],
+                    "failure_type": failure_type,
+                    "validation_cmd": validation_cmd,
+                    "groups": [],
+                }
+
+            subgroups = group.get("groups") or [
+                {
+                    "files": group.get("files", []),
+                    "issue_type": group.get("issue_type", ""),
+                    "reason": group.get("reason", ""),
+                }
+            ]
+            for subgroup in subgroups:
+                subgroup_files = subgroup.get("files", []) or []
+                merged[key]["groups"].append(
+                    {
+                        "files": subgroup_files,
+                        "issue_type": subgroup.get("issue_type", ""),
+                        "reason": subgroup.get("reason", ""),
+                    }
+                )
+
+        return [merged[key] for key in sorted(merged)]
+
+    def _consolidate_problem_events(
+        self, problems: List[Dict], validation_sequence: List[Dict]
+    ) -> List[Dict]:
+        """Merge chunk-level problem events within validation/failure groups."""
+        validation_order = self._validation_order_by_cmd(validation_sequence)
+        grouped: Dict[tuple, Dict] = {}
+
+        for problem in problems or []:
+            if not isinstance(problem, dict):
+                continue
+            validation_cmd = problem.get("validation_cmd", "")
+            failure_type = problem.get("failure_type", "")
+            issue_type = problem.get("issue_type", "")
+            fixed = bool(problem.get("fixed"))
+            introduced = bool(problem.get("introduced"))
+            key = (
+                validation_order.get(validation_cmd, 9999),
+                validation_cmd,
+                failure_type,
+                issue_type,
+                fixed,
+                introduced,
+            )
+            item = grouped.setdefault(
+                key,
+                {
+                    "files": [],
+                    "failure_type": failure_type,
+                    "issue_type": issue_type,
+                    "problem": [],
+                    "root_cause": [],
+                    "changes_made": [],
+                    "introduced": introduced,
+                    "fixed": fixed,
+                    "fix_strategy": [],
+                    "why_this_fix_works": [],
+                    "repair": [],
+                    "validation_cmd": validation_cmd,
+                },
+            )
+            for file_path in problem.get("files", []) or []:
+                if file_path not in item["files"]:
+                    item["files"].append(file_path)
+            for field in [
+                "problem",
+                "root_cause",
+                "changes_made",
+                "fix_strategy",
+                "why_this_fix_works",
+                "repair",
+            ]:
+                value = problem.get(field, "")
+                if value and value not in item[field]:
+                    item[field].append(value)
+
+        consolidated = []
+        for key in sorted(grouped):
+            item = grouped[key]
+            fixed = item["fixed"]
+            consolidated.append(
+                {
+                    "files": item["files"],
+                    "failure_type": item["failure_type"],
+                    "issue_type": item["issue_type"],
+                    "problem": self._join_unique(item["problem"]),
+                    "root_cause": self._join_unique(item["root_cause"]),
+                    "changes_made": self._join_unique(item["changes_made"]),
+                    "introduced": item["introduced"],
+                    "fixed": fixed,
+                    "fix_strategy": self._join_unique(item["fix_strategy"])
+                    if fixed
+                    else "",
+                    "why_this_fix_works": self._join_unique(
+                        item["why_this_fix_works"]
+                    )
+                    if fixed
+                    else "",
+                    "repair": self._join_unique(item["repair"]) if fixed else "",
+                    "validation_cmd": item["validation_cmd"],
+                }
+            )
+        return consolidated
+
+    def _validation_order_by_cmd(self, validation_sequence: List[Dict]) -> Dict[str, int]:
+        """Map validation commands to CI order."""
+        order_by_cmd = {}
+        for item in validation_sequence or []:
+            order = item.get("order")
+            if order is None:
+                continue
+            for field in ["validation_cmd", "installation_cmd"]:
+                cmd = item.get(field, "")
+                if cmd:
+                    order_by_cmd[cmd] = int(order)
+        return order_by_cmd
+
+    def _join_unique(self, values: List[str]) -> str:
+        """Join unique non-empty strings in original order."""
+        return "\n\n".join(dict.fromkeys(v for v in values if v))
 
     def _resolve_selected_files(
         self, selected_files: List[str], changed_files: List[str]
@@ -308,48 +339,28 @@ OUTPUT JSON ONLY:
 
         return resolved
 
-    def _normalize_commit_analysis(self, result: Dict, group: Dict) -> Dict:
-        """Normalize LLM output to the commit-level schema."""
-        commits = group.get("commits") or [{}]
-        commit = commits[0]
-        commit_sha = result.get("commit_sha") or commit.get("sha", "unknown")
-        commit_message = result.get("commit_message") or commit.get("message", "")
-        ci_metadata = group.get("ci_metadata") or {}
-        current_jobs_fixed = ci_metadata.get("current_jobs_fixed", [])
-        current_failed_jobs = ci_metadata.get("current_failed_jobs", [])
-
-        normalized = {
-            "commit_sha": commit_sha,
-            "commit_message": commit_message,
-            "current_jobs_fixed": current_jobs_fixed,
-            "current_failed_jobs": current_failed_jobs,
-            "problems": [],
-        }
-
-        for problem in result.get("problems", []) or []:
-            if not isinstance(problem, dict):
+    def _resolve_selected_groups(
+        self, selected_groups: List[Dict], changed_files: List[str]
+    ) -> List[Dict]:
+        """Map LLM-selected grouped paths back to exact changed file paths."""
+        resolved_groups = []
+        for group in selected_groups or []:
+            if not isinstance(group, dict):
                 continue
-            normalized["problems"].append(
+            files = self._resolve_selected_files(group.get("files", []), changed_files)
+            if not files:
+                continue
+            resolved_groups.append(
                 {
-                    "files": problem.get("files", []),
-                    "failure_type": problem.get("failure_type", ""),
-                    "issue_type": problem.get("issue_type", ""),
-                    "problem": problem.get("problem", ""),
-                    "root_cause": problem.get("root_cause", ""),
-                    "changes_made": problem.get("changes_made", ""),
-                    "introduces": problem.get("introduces", ""),
-                    "fixes": problem.get("fixes", ""),
-                    "current_failed_jobs": current_failed_jobs,
-                    "current_fixed_jobs": current_jobs_fixed,
-                    "validation_cmd": problem.get("validation_cmd", ""),
-                    "commit_sha": commit_sha,
-                    "commit_message": commit_message,
-                    "sha_success": group.get("sha_success"),
-                    "sha_fail": group.get("sha_fail"),
+                    "files": files,
+                    "failure_type": group.get("failure_type", ""),
+                    "issue_type": group.get("issue_type", ""),
+                    "validation_cmd": group.get("validation_cmd", ""),
+                    "reason": group.get("reason", ""),
                 }
             )
 
-        return normalized
+        return resolved_groups
 
     def _format_commit_info(self, commits: List[Dict]) -> str:
         """Format commit information for prompt"""
@@ -366,51 +377,6 @@ OUTPUT JSON ONLY:
             lines.append(f"  Message: {message}")
 
         return "\n".join(lines)
-
-    def _extract_ci_failure(self, ci_logs: Any) -> str:
-        """Extract relevant CI failure information"""
-        if isinstance(ci_logs, str):
-            # Simple string logs
-            lines = ci_logs.split("\n")
-            # Find error lines
-            error_lines = [
-                l for l in lines if "error" in l.lower() or "failed" in l.lower()
-            ]
-            if error_lines:
-                return "\n".join(error_lines[:10])  # First 10 error lines
-            return ci_logs[:2000]  # First 2000 chars
-
-        elif isinstance(ci_logs, list):
-            # List of log entries
-            all_logs = []
-            for entry in ci_logs:
-                if isinstance(entry, dict):
-                    log = entry.get("log", "")
-                    all_logs.append(log)
-                else:
-                    all_logs.append(str(entry))
-
-            combined = "\n".join(all_logs)
-            lines = combined.split("\n")
-            error_lines = [
-                l for l in lines if "error" in l.lower() or "failed" in l.lower()
-            ]
-            if error_lines:
-                return "\n".join(error_lines[:10])
-            return combined[:2000]
-
-        elif isinstance(ci_logs, dict):
-            compact = {
-                "error_context": ci_logs.get("error_context", []),
-                "relevant_files": ci_logs.get("relevant_files", []),
-                "error_types": ci_logs.get("error_types", []),
-                "failed_job": ci_logs.get("failed_job", []),
-                "sha_fail": ci_logs.get("sha_fail"),
-                "id": ci_logs.get("id"),
-            }
-            return json.dumps(compact, indent=2)
-
-        return str(ci_logs)[:2000]
 
     def _call_llm(self, prompt: str) -> str:
         """Call LLM API"""
@@ -443,6 +409,10 @@ OUTPUT JSON ONLY:
         except Exception as e:
             raise Exception(f"LLM API call failed: {e}")
 
+    def _call_json(self, prompt: str) -> Dict:
+        """Call the model and parse a JSON object."""
+        return self._parse_response(self._call_llm(prompt))
+
     def _get_model_credentials(self, model_name: str) -> tuple:
         """Get API credentials based on model type"""
         lowered = str(model_name or "").lower()
@@ -470,14 +440,23 @@ OUTPUT JSON ONLY:
     def _get_max_tokens(self, model_name: str) -> int:
         """Get max tokens based on model"""
         try:
-            from scripts.model_token_config import get_output_safe_tokens
+            from utilities.model_token_config import get_output_safe_tokens
 
             return get_output_safe_tokens(model_name)
-        except:
+        except Exception:
             # Fallback
             if "glm" in str(model_name).lower():
                 return 120000  # GLM supports large output
             return 16000  # Default
+
+    def _get_input_chunk_tokens(self, fallback: int) -> int:
+        """Get model-aware input chunk size, capped by the caller's target."""
+        try:
+            from utilities.model_token_config import get_input_chunk_tokens
+
+            return min(fallback, get_input_chunk_tokens(self.model_name))
+        except Exception:
+            return fallback
 
     def _parse_response(self, response: str) -> Dict:
         """Parse LLM response as JSON"""
@@ -501,7 +480,7 @@ OUTPUT JSON ONLY:
             if start >= 0 and end > start:
                 try:
                     return json.loads(response[start:end])
-                except:
+                except json.JSONDecodeError:
                     pass
 
             print(f"    WARNING: Could not parse LLM response as JSON: {e}")

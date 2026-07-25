@@ -5,7 +5,7 @@ This module defines input/output token limits for different models to optimize
 chunking and LLM analysis for larger inputs and outputs.
 
 Usage:
-    from scripts.model_token_config import get_model_config
+    from utilities.model_token_config import get_model_config
 
     config = get_model_config("glm-5.2")
     max_input_tokens = config["input_chunk_tokens"]

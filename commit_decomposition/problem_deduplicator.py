@@ -162,39 +162,15 @@ def deduplicate_problems(
     problems: List[Dict], analyzer, similarity_threshold: float = 0.7
 ) -> List[Dict]:
     """
-    Main function: Cluster and merge similar problems
+    Deduplication is intentionally disabled for commit-based grouping.
 
     Args:
         problems: List of all problems
         analyzer: CommitAnalyzer for LLM access
-        similarity_threshold: How similar to consider merging (0.7 = 70%)
+        similarity_threshold: Unused while deduplication is disabled
 
     Returns:
-        Deduplicated list of problems
+        Original problem list
     """
-    if len(problems) <= 1:
-        return problems
-
-    print(f"    Deduplicating {len(problems)} problems...")
-
-    # Cluster similar problems
-    clusters = cluster_similar_problems(problems, similarity_threshold)
-
-    print(f"    Found {len(clusters)} clusters")
-
-    # Merge each cluster
-    deduplicated = []
-    for i, cluster in enumerate(clusters):
-        if len(cluster) == 1:
-            # Single problem, keep as is
-            deduplicated.append(problems[cluster[0]])
-        else:
-            # Multiple similar problems, merge with LLM
-            print(f"    Merging cluster {i + 1}: {len(cluster)} similar problems")
-            similar_probs = [problems[idx] for idx in cluster]
-            merged = merge_problems_with_llm(similar_probs, analyzer)
-            deduplicated.append(merged)
-
-    print(f"    Reduced from {len(problems)} to {len(deduplicated)} problems")
-
-    return deduplicated
+    _ = analyzer, similarity_threshold
+    return problems

@@ -9,7 +9,6 @@ Simplified production-ready version:
 4. Final LLM organization step
 """
 
-import json
 import sys
 from pathlib import Path
 from typing import Dict, List
@@ -22,42 +21,23 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from commit_decomposition.commit_analyzer import CommitAnalyzer
 from commit_decomposition.trajectory_builder import organize_trajectory_with_llm
 from commit_decomposition.github_fetcher import GitHubFetcher
-from commit_decomposition.problem_deduplicator import deduplicate_problems
 from commit_decomposition.ci_command_resolver import enrich_ci_metadata_commands
 from commit_decomposition.diff_filter import (
     filter_diff,
     filter_diff_to_files,
     get_changed_files,
     get_filtered_file_count,
+    should_ignore_file,
 )
-from commit_decomposition.diff_chunker import chunk_commit_diff
-
+from utilities.ci_cache import (
+    load_structured_ci_failure as load_cached_structured_ci_failure,
+    load_validation_sequence as load_cached_validation_sequence,
+)
+from utilities.dependency_evidence import dependency_graph_evidence
 
 def load_structured_ci_failure(sha_fail: str, issue_id: str = "") -> Dict:
-    """Load structured CI failure details from data/log_details.json."""
-    log_details_path = PROJECT_ROOT / "data" / "log_details.json"
-    if not log_details_path.exists():
-        return {}
-
-    try:
-        with open(log_details_path) as f:
-            log_details = json.load(f)
-    except Exception as e:
-        print(f"  Warning: Could not load log_details.json: {e}")
-        return {}
-
-    if not isinstance(log_details, list):
-        return {}
-
-    for entry in log_details:
-        if not isinstance(entry, dict):
-            continue
-        if sha_fail and str(entry.get("sha_fail") or "") == str(sha_fail):
-            return entry
-        if issue_id and str(entry.get("id") or "") == str(issue_id):
-            return entry
-
-    return {}
+    """Load structured CI failure details from data/trs/log_details.json."""
+    return load_cached_structured_ci_failure(sha_fail, issue_id)
 
 
 def compact_ci_metadata(ci_metadata: Dict) -> Dict:
@@ -127,8 +107,7 @@ def validation_candidate_files(
     candidates = []
     for file_path in changed_files:
         path = str(file_path)
-        name = Path(path).name
-        if path.startswith(".github/") or name.endswith(".json"):
+        if should_ignore_file(path):
             continue
         candidates.append(path)
 
@@ -143,6 +122,174 @@ def merge_file_lists(*file_lists: List[str]) -> List[str]:
             if file_path not in merged:
                 merged.append(file_path)
     return merged
+
+
+def files_from_groups(groups: List[Dict]) -> List[str]:
+    """Flatten grouped file selections while preserving group/file order."""
+    return merge_file_lists(*(files_from_group(group) for group in groups or []))
+
+
+def files_from_group(group: Dict) -> List[str]:
+    """Return all files represented by a selected validation/failure group."""
+    if group.get("files"):
+        return group.get("files", [])
+    return merge_file_lists(
+        *(subgroup.get("files", []) for subgroup in group.get("groups", []) or [])
+    )
+
+
+def deterministic_validation_groups(
+    files: List[str], validation_sequence: List[Dict]
+) -> List[Dict]:
+    """Group missed files by obvious validator scope from CI commands."""
+    groups_by_key: Dict[tuple, Dict] = {}
+
+    def find_validation(*needles: str) -> str:
+        lowered_needles = [needle.lower() for needle in needles if needle]
+        for validation in validation_sequence:
+            text = " ".join(
+                [
+                    str(validation.get("validation_cmd") or ""),
+                    str(validation.get("validates") or ""),
+                    str(validation.get("source") or ""),
+                ]
+            ).lower()
+            if all(needle in text for needle in lowered_needles):
+                return str(validation.get("validation_cmd") or "")
+        return ""
+
+    def add_group(file_path: str, failure_type: str, issue_type: str, cmd: str, reason: str):
+        key = (failure_type, issue_type, cmd)
+        group = groups_by_key.setdefault(
+            key,
+            {
+                "files": [],
+                "failure_type": failure_type,
+                "issue_type": issue_type,
+                "validation_cmd": cmd,
+                "reason": reason,
+            },
+        )
+        group["files"].append(file_path)
+
+    for file_path in files:
+        path = str(file_path)
+        suffix = Path(path).suffix
+        is_examples_or_benchmarks = path.startswith(("examples/", "benchmarks/"))
+        is_framework_python = path.startswith(("framework/py/", "py/flwr/"))
+
+        if is_examples_or_benchmarks and suffix == ".py":
+            add_group(
+                path,
+                "format",
+                "black_formatting",
+                find_validation("black", "../examples")
+                or find_validation("black", "../benchmarks"),
+                "Python examples/benchmarks files are checked by the examples Black validation.",
+            )
+        elif is_examples_or_benchmarks and suffix in {".md", ".mdx"}:
+            add_group(
+                path,
+                "format",
+                "markdown_formatting",
+                find_validation("mdformat", "../examples"),
+                "Examples Markdown files are checked by the examples mdformat validation.",
+            )
+        elif is_examples_or_benchmarks and suffix == ".toml":
+            add_group(
+                path,
+                "format",
+                "toml_formatting",
+                find_validation("taplo", "../examples")
+                or find_validation("taplo", "../benchmarks"),
+                "Examples/benchmarks TOML files are checked by the examples taplo validation.",
+            )
+        elif path.startswith(("framework/docs/source/", "docs/source/")) and suffix == ".rst":
+            add_group(
+                path,
+                "format",
+                "rst_formatting",
+                find_validation("docstrfmt", "docs/source"),
+                "RST documentation files are checked by docstrfmt.",
+            )
+        elif path.startswith(("framework/docs/source/", "docs/source/")) and suffix in {
+            ".md",
+            ".mdx",
+        }:
+            add_group(
+                path,
+                "format",
+                "markdown_formatting",
+                find_validation("mdformat", "docs/source"),
+                "Documentation Markdown files are checked by mdformat.",
+            )
+        elif suffix == ".toml":
+            add_group(
+                path,
+                "format",
+                "toml_formatting",
+                find_validation("taplo"),
+                "TOML files are checked by taplo formatting validation.",
+            )
+        elif is_framework_python and suffix == ".py":
+            add_group(
+                path,
+                "unknown",
+                "framework_python_validation",
+                "",
+                "Framework Python files are checked by multiple validators; detailed analysis must infer the exact validator from the diff.",
+            )
+        else:
+            add_group(
+                path,
+                "unknown",
+                "validation_scope_candidate",
+                "",
+                "Changed file passed hard filtering but was not selected by the LLM; keep it for detailed CI validation analysis.",
+            )
+
+    return list(groups_by_key.values())
+
+
+def _bounded_text(text: str, limit: int = 8000) -> str:
+    """Keep prompt context bounded while preserving the start of the evidence."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n... <truncated group diff> ..."
+
+
+def build_selected_group_context(
+    full_diff: str,
+    selected_groups: List[Dict],
+    *,
+    repo_path: str | None = None,
+) -> List[Dict]:
+    """Build LLM-facing validation/failure clusters with combined diffs."""
+    enriched = []
+    for group in selected_groups or []:
+        files = files_from_group(group)
+        group_diff = filter_diff_to_files(full_diff, files)
+        dependency_context = dependency_graph_evidence(group_diff, repo_path=repo_path)
+        validation_cmd = str(group.get("validation_cmd") or "").strip()
+        enriched.append(
+            {
+                "validation_order": group.get("validation_order"),
+                "validation_cmd": validation_cmd,
+                "failure_type": group.get("failure_type", ""),
+                "groups": group.get("groups")
+                or [
+                    {
+                        "files": files,
+                        "issue_type": group.get("issue_type", ""),
+                        "reason": group.get("reason", ""),
+                    }
+                ],
+                "diff": _bounded_text(group_diff),
+                "dependency_context": dependency_context,
+            }
+        )
+
+    return enriched
 
 
 def extract_validation_sequence_from_ci_metadata(
@@ -190,26 +337,7 @@ def extract_validation_sequence_from_ci_metadata(
 def generate_and_cache_validation(
     issue_id: str, issue_data: Dict, github_fetcher, analyzer
 ) -> Dict:
-    """
-    Generate validation sequence using ci_workflow_aware_retrieval.py and cache it
-
-    Args:
-        issue_id: Issue ID
-        issue_data: Issue data with repo info
-        github_fetcher: GitHubFetcher instance
-        analyzer: CommitAnalyzer instance (has LLM)
-
-    Returns:
-        Dict with validation_sequence, failure_info, workflow_path
-    """
-    from ci_workflow_aware_retrieval import (
-        build_dependent_file_prompt,
-        build_validation_sequence_prompt,
-        _load_json,
-        _normalize_dependent_files,
-        _normalize_validation_sequence,
-    )
-
+    """Generate validation sequence from workflow content and cache it."""
     repo_owner = issue_data.get("repo_owner", "")
     repo_name = issue_data.get("repo_name", "")
     sha_fail = issue_data.get("sha_fail", "")
@@ -224,12 +352,9 @@ def generate_and_cache_validation(
         }
 
     print(f"    Generating validation sequence from workflow at {sha_fail[:8]}...")
-
-    # Fetch workflow content from sha_fail
     workflow_content = github_fetcher.get_file_content(
         repo_owner, repo_name, workflow_path, sha_fail
     )
-
     if not workflow_content:
         print(f"    Could not fetch workflow file: {workflow_path}")
         return {
@@ -238,117 +363,23 @@ def generate_and_cache_validation(
             "workflow_path": workflow_path,
         }
 
-    # Generate validation sequence using LLM
-    try:
-        # Step 1: Ask LLM which dependent files are needed
-        import litellm
+    result = load_cached_validation_sequence(
+        issue_id,
+        sha_fail,
+        workflow_content=workflow_content,
+        workflow_path=workflow_path,
+        repo_path=issue_data.get("repo_path") or issue_data.get("checkout_path") or "",
+        llm=analyzer._call_llm,
+        save=True,
+    )
+    validation_sequence = result.get("validation_sequence", [])
+    print(f"    Generated {len(validation_sequence)} validation steps")
 
-        # Create a simple LLM caller that works with litellm
-        class SimpleLLM:
-            def __init__(self, model_name):
-                self.model_name = model_name
-
-            def invoke(self, prompt):
-                response = litellm.completion(
-                    model=self.model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                )
-                return response.choices[0].message.content
-
-        simple_llm = SimpleLLM(analyzer.model_name)
-
-        # Get dependent files
-        dependent_prompt = build_dependent_file_prompt(workflow_path, workflow_content)
-        dependent_raw = simple_llm.invoke(dependent_prompt)
-        dependent_files = _normalize_dependent_files(
-            _load_json(dependent_raw, {"dependent_files": []})
-        )
-
-        print(f"    Found {len(dependent_files)} dependent files")
-
-        # Step 2: Fetch dependent file contents from GitHub
-        dependent_file_contents = []
-        for dep in dependent_files:
-            dep_path = dep["path"]
-            content = github_fetcher.get_file_content(
-                repo_owner, repo_name, dep_path, sha_fail
-            )
-            found = bool(content)
-            status = "✓" if found else "✗"
-            print(f"      {status} {dep_path}")
-
-            dependent_file_contents.append(
-                {
-                    "path": dep_path,
-                    "reason": dep.get("reason", ""),
-                    "found": found,
-                    "content": content or "",
-                }
-            )
-
-        # Step 3: Generate validation sequence using prompts directly
-        validation_prompt = build_validation_sequence_prompt(
-            workflow_path, workflow_content, dependent_file_contents
-        )
-        validation_raw = simple_llm.invoke(validation_prompt)
-
-        print("    [DEBUG] Validation LLM response (first 500 chars):")
-        print(f"    {str(validation_raw)[:500]}")
-
-        validation_sequence = _normalize_validation_sequence(
-            _load_json(validation_raw, [])
-        )
-        print(f"    Generated {len(validation_sequence)} validation steps")
-
-        # Save to cache
-        cache_path = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
-        if cache_path.exists():
-            with open(cache_path) as f:
-                cache = json.load(f)
-        else:
-            cache = []
-
-        # Add new entry
-        cache_entry = {
-            "issue_id": issue_id,
-            "id": issue_id,
-            "sha_fail": sha_fail,
-            "workflow_path": workflow_path,
-            "validation_sequence": validation_sequence,
-            "failure_info": "",
-            "generated_at": str(Path(__file__).stat().st_mtime),
-        }
-
-        # Remove old entry if exists
-        cache = [
-            c for c in cache if str(c.get("issue_id") or c.get("id")) != str(issue_id)
-        ]
-        cache.append(cache_entry)
-
-        # Save
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_path, "w") as f:
-            json.dump(cache, f, indent=2)
-
-        print(f"    Saved validation sequence to cache: {cache_path}")
-
-        return {
-            "validation_sequence": validation_sequence,
-            "failure_info": "",
-            "workflow_path": workflow_path,
-        }
-
-    except Exception as e:
-        print(f"    Error generating validation sequence: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return {
-            "validation_sequence": [],
-            "failure_info": "",
-            "workflow_path": workflow_path,
-        }
+    return {
+        "validation_sequence": validation_sequence,
+        "failure_info": result.get("failure_info", ""),
+        "workflow_path": workflow_path,
+    }
 
 
 def load_validation_cache(
@@ -361,32 +392,17 @@ def load_validation_cache(
         validation_sequence: List of CI validation steps
         failure_info: What failed (cached, survives log expiry)
     """
-    cache_path = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
     issue_data = issue_data or {}
     sha_fail = str(issue_data.get("sha_fail") or "")
 
     # Try cache first
-    if cache_path.exists():
-        with open(cache_path) as f:
-            cache = json.load(f)
-
-        # Find entry for this issue
-        for entry in cache:
-            entry_issue_id = str(entry.get("issue_id") or entry.get("id") or "")
-            entry_sha_fail = str(entry.get("sha_fail") or "")
-            if entry_issue_id == str(issue_id) or (
-                sha_fail and entry_sha_fail == sha_fail
-            ):
-                print(
-                    f"  Found validation sequence in cache: {len(entry.get('validation_sequence', []))} steps"
-                )
-                return {
-                    "validation_sequence": entry.get("validation_sequence", []),
-                    "failure_info": (
-                        entry.get("failure_info") or entry.get("failure_summary", "")
-                    ),
-                    "workflow_path": entry.get("workflow_path", ""),
-                }
+    cached = load_cached_validation_sequence(issue_id, sha_fail)
+    if cached.get("validation_sequence"):
+        print(
+            "  Found validation sequence in cache: "
+            f"{len(cached.get('validation_sequence', []))} steps"
+        )
+        return cached
 
     # Not in cache - generate and save it
     if issue_data and github_fetcher and analyzer:
@@ -458,7 +474,7 @@ def decompose_issue(
     sha_success = issue.get("sha_success", "")
     repo_owner = issue.get("repo_owner", "")
     repo_name = issue.get("repo_name", "")
-
+    repo_path = issue.get("repo_path") or issue.get("checkout_path")
     print(f"\n  Processing issue {issue_id}")
     print(f"    Repository: {repo_owner}/{repo_name}")
     print(f"    sha_success: {sha_success[:12]}")
@@ -479,9 +495,9 @@ def decompose_issue(
 
     # 2. Analyze each commit
     all_problems = []
+    commit_analyses = []
     validation_sequence = validation_cache.get("validation_sequence", [])
     workflow_path = validation_cache.get("workflow_path", "")
-    ci_failure_info = validation_cache.get("failure_info", "")
     structured_failure = load_structured_ci_failure(sha_fail, issue_id)
     if structured_failure:
         print("    Using structured CI failure info from data/log_details.json")
@@ -490,15 +506,6 @@ def decompose_issue(
     # Flag to track if validation_sequence needs to be built from first commit's CI metadata
     needs_validation_from_metadata = not validation_sequence
 
-    # Use cached failure info if logs are missing (90-day expiry)
-    if structured_failure:
-        ci_logs = structured_failure
-    elif not issue.get("logs") or len(str(issue.get("logs", ""))) < 100:
-        print("    Using cached CI failure info (logs expired or missing)")
-        ci_logs = ci_failure_info
-    else:
-        ci_logs = issue.get("logs", "")
-
     for i, commit in enumerate(commits, 1):
         commit_sha = commit["sha"]
         print(f"    Analyzing commit {i}/{len(commits)}: {commit_sha[:8]}")
@@ -506,7 +513,17 @@ def decompose_issue(
         # First fetch commit diff and changed-file information.
         full_diff = get_commit_diff(repo_owner, repo_name, commit_sha, github_fetcher)
         changed_files = get_changed_files(full_diff, include_ignored=True)
-        validated_changed_files = get_changed_files(full_diff, include_ignored=False)
+        hard_filtered_diff = filter_diff(full_diff)
+        validated_changed_files = get_changed_files(
+            hard_filtered_diff, include_ignored=True
+        )
+        total_files, hard_remaining_files, hard_ignored_files = (
+            get_filtered_file_count(full_diff)
+        )
+        print(
+            f"      Changed files: {total_files}; hard-filtered ignored: "
+            f"{hard_ignored_files}; remaining for LLM: {hard_remaining_files}"
+        )
 
         # Then fetch workflow/job/step metadata for this commit.
         ci_metadata = github_fetcher.get_commit_ci_metadata(
@@ -579,30 +596,98 @@ def decompose_issue(
             "problems": [],
         }
 
+        selection_metadata = dict(commit_analysis["commit_metadata"])
+        selection_metadata["changed_files"] = validated_changed_files
+        selection_metadata["validated_changed_files"] = validated_changed_files
+        preselection_context = build_selected_group_context(
+            full_diff,
+            [
+                {
+                    "files": validated_changed_files,
+                    "failure_type": "unknown",
+                    "issue_type": "unknown",
+                    "validation_cmd": "",
+                    "reason": (
+                        "Pre-selection dependency context for all changed files "
+                        "remaining after hard filtering."
+                    ),
+                }
+            ],
+            repo_path=repo_path,
+        )
+
         selected = analyzer.select_relevant_files(
-            commit_metadata=commit_analysis["commit_metadata"],
-            changed_files=changed_files,
-            commit_diff=full_diff,
+            commit_metadata=selection_metadata,
+            changed_files=validated_changed_files,
+            commit_diff=hard_filtered_diff,
             structured_ci_failure=structured_failure,
-            ci_metadata=compact_metadata,
             relevant_validations=validation_sequence,
+            relationship_context=preselection_context,
         )
-        selected_files = selected.get("selected_files", [])
+        selected_groups = selected.get("selected_groups", [])
+        llm_group_files = files_from_groups(selected_groups)
+        print(
+            f"      LLM-selected groups: {len(selected_groups)} "
+            f"({len(llm_group_files)} file(s))"
+        )
         candidate_files = validation_candidate_files(
-            changed_files, validation_sequence, structured_failure
+            validated_changed_files, validation_sequence, structured_failure
         )
-        selected_files = merge_file_lists(selected_files, candidate_files)
+        missed_candidate_files = [
+            file_path
+            for file_path in candidate_files
+            if file_path not in set(llm_group_files)
+        ]
+        deterministic_groups = deterministic_validation_groups(
+            missed_candidate_files, validation_sequence
+        )
+        if not selected_groups:
+            selected_groups = [
+                {
+                    "files": candidate_files,
+                    "failure_type": "unknown",
+                    "issue_type": "unknown",
+                    "validation_cmd": "",
+                    "reason": (
+                        "Fallback group for CI-relevant candidate files when the "
+                        "selector did not return explicit groups."
+                    ),
+                }
+            ]
+            selection_source = "fallback candidates"
+        else:
+            if deterministic_groups:
+                selected_groups = selected_groups + deterministic_groups
+                selection_source = "LLM groups + validation-scope groups"
+            else:
+                selection_source = "LLM groups"
+        selected_groups = analyzer._organize_groups_by_validation(
+            selected_groups, validation_sequence
+        )
+        selected_files = files_from_groups(selected_groups)
+        print(
+            f"      Candidate files after hard filter: {len(candidate_files)}; "
+            f"final selected for analysis: {len(selected_files)} "
+            f"({selection_source})"
+        )
+        selected_group_context = build_selected_group_context(
+            full_diff,
+            selected_groups,
+            repo_path=repo_path,
+        )
         if selected_files:
-            commit_analysis["selected_files"] = selected_files
+            commit_analysis["selected_groups"] = selected_group_context
             commit_analysis["selection_reasoning"] = selected.get("reasoning", "")
             print(
                 f"      Selected {len(selected_files)} relevant file(s) "
-                f"({len(selected.get('selected_files', []))} LLM, "
-                f"{len(candidate_files)} non-ignored candidates)"
+                f"({len(llm_group_files)} LLM-grouped, "
+                f"{len(files_from_groups(deterministic_groups))} validation-scope, "
+                f"{len(candidate_files)} fallback candidates)"
             )
 
         # Filter out irrelevant files (.github/workflows, CI configs, etc.)
-        total_files, included_files, ignored_files = get_filtered_file_count(full_diff)
+        included_files = hard_remaining_files
+        ignored_files = hard_ignored_files
         primary_diff = filter_diff_to_files(full_diff, selected_files)
         if not primary_diff.strip():
             primary_diff = filter_diff_to_files(full_diff, primary_failure_files)
@@ -619,89 +704,70 @@ def decompose_issue(
                 print(f"      Excluded {relevance_excluded} file(s) as not CI-relevant")
             ignored_files = hard_ignored
         else:
-            filtered_diff = filter_diff(full_diff)
+            filtered_diff = hard_filtered_diff
             included_files = len(get_changed_files(filtered_diff, include_ignored=True))
             ignored_files = total_files - included_files
 
         if ignored_files > 0:
             print(
-                f"      Filtered: {total_files} files → {included_files} files (ignored {ignored_files} .github/.json files)"
+                f"      Filtered: {total_files} files → {included_files} files "
+                f"(ignored {ignored_files} hard-ignored files)"
             )
 
         if not filtered_diff or filtered_diff.strip() == "":
             print("      No relevant files after filtering, skipping")
+            commit_analysis["skipped"] = True
+            commit_analysis["skip_reason"] = "No relevant files after filtering"
+            commit_analyses.append(commit_analysis)
             continue
 
-        # Check if we need to chunk this commit (if too large)
-        # Chunk by files if needed, but keep context that this is ONE commit
-        chunks = chunk_commit_diff(
-            filtered_diff, max_tokens=12000, max_files_per_chunk=40
+        print(
+            f"      Analyzing commit with {len(selected_group_context)} "
+            "selected validation/failure group(s)"
+        )
+        analysis_result = analyzer.analyze_commit_group(
+            group={
+                "commits": [commit],
+                "type": "single_commit",
+                "commit_number": i,
+                "total_commits": len(commits),
+                "files_in_chunk": selected_files,
+                "changed_files": changed_files,
+                "validated_changed_files": validated_changed_files,
+                "selected_groups": selected_group_context,
+                "sha_success": sha_success,
+                "sha_fail": sha_fail,
+                "ci_metadata": compact_metadata,
+                "structured_ci_failure": structured_failure,
+            },
+            commit_diff=filtered_diff,
+            relevant_validations=validation_sequence,
         )
 
-        if len(chunks) > 1:
-            print(f"      Large commit - split into {len(chunks)} chunks for analysis")
-        else:
-            print("      Analyzing commit changes...")
-
-        # Analyze each chunk of this commit
         commit_problems = []
-        for chunk_idx, chunk in enumerate(chunks):
-            chunk_files = chunk.get("files", [])
-            file_count = chunk.get("file_count", len(chunk_files))
-
-            if len(chunks) > 1:
-                print(
-                    f"        Chunk {chunk_idx + 1}/{len(chunks)}: {file_count} file(s)"
-                )
-
-            # LLM analysis on this chunk
-            analysis_result = analyzer.analyze_commit_group(
-                group={
-                    "commits": [commit],
-                    "type": "single_commit",
-                    "commit_number": i,
-                    "total_commits": len(commits),
-                    "chunk_number": chunk_idx + 1,
-                    "total_chunks": len(chunks),
-                    "files_in_chunk": chunk_files,
-                    "changed_files": changed_files,
-                    "validated_changed_files": validated_changed_files,
-                    "sha_success": sha_success,
-                    "sha_fail": sha_fail,
-                    "ci_metadata": compact_metadata,
-                    "structured_ci_failure": structured_failure,
-                },
-                commit_diff=chunk["diff"],
-                ci_logs=ci_logs,
-                relevant_validations=validation_sequence,
+        for problem in analysis_result.get("problems", []):
+            problem["commit"] = commit_sha[:8]
+            problem["commit_sha"] = problem.get("commit_sha") or commit_sha
+            problem["commit_message"] = problem.get("commit_message") or commit.get(
+                "message", ""
             )
-
-            # Collect problems from this chunk
-            for problem in analysis_result.get("problems", []):
-                problem["commit"] = commit_sha[:8]
-                problem["commit_sha"] = problem.get("commit_sha") or commit_sha
-                problem["commit_message"] = problem.get("commit_message") or commit.get(
-                    "message", ""
-                )
-                problem["commit_number"] = i
-                commit_problems.append(problem)
+            problem["commit_number"] = i
+            commit_problems.append(problem)
 
         # Add all problems from this commit
         commit_analysis["problems"] = commit_problems
+        commit_analysis["total_problems"] = len(commit_problems)
+        commit_analyses.append(commit_analysis)
         all_problems.extend(commit_problems)
 
     print(f"    Total problems found: {len(all_problems)}")
 
-    # 3. Deduplicate similar problems
-    if len(all_problems) > 1:
-        deduplicated = deduplicate_problems(
-            all_problems, analyzer, similarity_threshold=0.7
-        )
-        all_problems = deduplicated
-
-    # 4. Final LLM organization (if we have problems)
+    # 3. Final LLM consolidation (if we have problems)
+    # Keep all commit-level records until this point so the final pass can group
+    # by validation sequence, failure type, and validation command with full
+    # evidence from the repair trajectory.
     if all_problems:
-        print("    Organizing repair trajectory...")
+        print("    Consolidating repair trajectory...")
         organized = organize_trajectory_with_llm(
             all_problems=all_problems,
             validation_sequence=validation_sequence,

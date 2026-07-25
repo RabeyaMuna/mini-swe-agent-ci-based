@@ -9,7 +9,7 @@ Analyzes core benchmark characteristics (no CI categories):
 - Number of distinct problems per pull request
 
 Usage:
-    python scripts/simple_benchmark_stats.py --input data/decomposed_issues.json
+    python scripts/simple_benchmark_stats.py --input data/trs/decomposed_issues.json
 """
 
 import argparse
@@ -287,7 +287,7 @@ def main():
     parser = argparse.ArgumentParser(description="Compute simple benchmark statistics")
     parser.add_argument(
         "--input",
-        default="data/decomposed_issues.json",
+        default="data/trs/decomposed_issues.json",
         help="Path to decomposed_issues.json",
     )
     parser.add_argument(

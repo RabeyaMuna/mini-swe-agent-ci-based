@@ -28,7 +28,7 @@ from commit_decomposition.commit_based_decomposer import (
 )
 from commit_decomposition.commit_analyzer import CommitAnalyzer
 from commit_decomposition.github_fetcher import GitHubFetcher
-from scripts.model_registry import configure_model_environment
+from utilities.model_registry import configure_model_environment
 
 
 def load_issues_from_huggingface(issue_id: str = None) -> list:
@@ -93,6 +93,10 @@ def main():
     parser.add_argument(
         "--model", type=str, help="LLM model to use (default: from env MEMCI_LLM_MODEL)"
     )
+    parser.add_argument("--repo-owner", type=str, help="Override issue repo owner")
+    parser.add_argument("--repo-name", type=str, help="Override issue repo name")
+    parser.add_argument("--sha-fail", type=str, help="Override issue failing SHA")
+    parser.add_argument("--sha-success", type=str, help="Override issue passing SHA")
 
     args = parser.parse_args()
 
@@ -148,9 +152,23 @@ def main():
     }
 
     for i, issue in enumerate(issues, 1):
+        issue = dict(issue)
+        overrides = {
+            "repo_owner": args.repo_owner,
+            "repo_name": args.repo_name,
+            "sha_fail": args.sha_fail,
+            "sha_success": args.sha_success,
+        }
+        applied_overrides = {
+            key: value for key, value in overrides.items() if value is not None
+        }
+        issue.update(applied_overrides)
+
         issue_id = issue.get("id", "unknown")
         print(f"\n[{i}/{len(issues)}] Issue {issue_id}")
         print("-" * 70)
+        if applied_overrides:
+            print(f"  Applied overrides: {json.dumps(applied_overrides)}")
 
         # Load validation cache (has validation_sequence + failure_info)
         # Pass issue data, github_fetcher, and analyzer to generate if not in cache
