@@ -655,7 +655,7 @@ results/
 
 3. **Missing memory files**: Make sure you ran Step 3 (Build L1/L2/L3) before evaluation
 
-4. **Wrong memory root**: 
+4. **Wrong memory root**:
    - For backward decomposition: `--memory-root data/back_trs`
    - For forward decomposition: `--memory-root data/fwr_trs`
 

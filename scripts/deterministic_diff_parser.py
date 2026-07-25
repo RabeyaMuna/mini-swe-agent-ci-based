@@ -431,8 +431,7 @@ def _pack_independent_chunks_by_tokens(
             "files": list(current_files),
             "total_files": len(current_files),
             "total_changes": sum(
-                f.get("total_changes", len(f.get("changes", [])))
-                for f in current_files
+                f.get("total_changes", len(f.get("changes", []))) for f in current_files
             ),
             "dependency_cluster": list(current_clusters),
             "dependency_contexts": [],
@@ -493,8 +492,7 @@ def _split_files_by_change_tokens(
             "files": list(current_files),
             "total_files": len(current_files),
             "total_changes": sum(
-                f.get("total_changes", len(f.get("changes", [])))
-                for f in current_files
+                f.get("total_changes", len(f.get("changes", []))) for f in current_files
             ),
             "dependency_cluster": [
                 f.get("path", "") for f in current_files if f.get("path")

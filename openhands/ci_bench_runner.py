@@ -20,10 +20,11 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import our modules
+from utilities.model_registry import configure_model_environment, resolve_model_alias
+
 from data_loader import CIBenchDataLoader
 from interactive_agent import execute_openhands_agent
 from prompt_formatter import PromptFormatter
-from utilities.model_registry import configure_model_environment, resolve_model_alias
 
 # Shared paths
 PROJECT_ROOT = Path(__file__).parent.parent

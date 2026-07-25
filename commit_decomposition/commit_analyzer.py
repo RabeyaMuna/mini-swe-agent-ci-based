@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -85,13 +85,15 @@ class CommitAnalyzer:
             print(f"    ERROR: File selection failed: {e}")
             # Fallback: select all files (safer than returning empty)
             return {
-                "selected_groups": [{
-                    "files": changed_files,
-                    "failure_type": "unknown",
-                    "issue_type": "unknown",
-                    "validation_cmd": "",
-                    "reason": f"Fallback due to error: {e}",
-                }],
+                "selected_groups": [
+                    {
+                        "files": changed_files,
+                        "failure_type": "unknown",
+                        "issue_type": "unknown",
+                        "validation_cmd": "",
+                        "reason": f"Fallback due to error: {e}",
+                    }
+                ],
                 "reasoning": f"Error during selection, selected all files: {e}",
             }
 
@@ -156,6 +158,7 @@ class CommitAnalyzer:
         except Exception as e:
             print(f"    ERROR: LLM analysis failed: {e}")
             import traceback
+
             traceback.print_exc()
             return {"problems": [], "error": str(e)}
 
@@ -281,9 +284,7 @@ class CommitAnalyzer:
                     "fix_strategy": self._join_unique(item["fix_strategy"])
                     if fixed
                     else "",
-                    "why_this_fix_works": self._join_unique(
-                        item["why_this_fix_works"]
-                    )
+                    "why_this_fix_works": self._join_unique(item["why_this_fix_works"])
                     if fixed
                     else "",
                     "repair": self._join_unique(item["repair"]) if fixed else "",
@@ -292,7 +293,9 @@ class CommitAnalyzer:
             )
         return consolidated
 
-    def _validation_order_by_cmd(self, validation_sequence: List[Dict]) -> Dict[str, int]:
+    def _validation_order_by_cmd(
+        self, validation_sequence: List[Dict]
+    ) -> Dict[str, int]:
         """Map validation commands to CI order."""
         order_by_cmd = {}
         for item in validation_sequence or []:

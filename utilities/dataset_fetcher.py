@@ -72,7 +72,9 @@ def matches_repo_filter(record: dict[str, Any], repos: str | list[str] | None) -
 
     # Parse repo filters
     if isinstance(repos, str):
-        repo_filters = [repo.strip().lower() for repo in repos.split(",") if repo.strip()]
+        repo_filters = [
+            repo.strip().lower() for repo in repos.split(",") if repo.strip()
+        ]
     else:
         repo_filters = [str(repo).strip().lower() for repo in repos if repo]
 
@@ -86,9 +88,9 @@ def matches_repo_filter(record: dict[str, Any], repos: str | list[str] | None) -
 
     # Build all possible repo representations
     repo_representations = [
-        repo_name,                          # "flower"
-        repo_full,                          # "adap/flower"
-        f"{repo_owner}/{repo_name}",        # "adap/flower"
+        repo_name,  # "flower"
+        repo_full,  # "adap/flower"
+        f"{repo_owner}/{repo_name}",  # "adap/flower"
     ]
 
     # Match against any filter
@@ -266,7 +268,9 @@ def main() -> None:
 
     print()
     print("Run the benchmark with:")
-    print(f"  mini-swe-agent cibench --dataset {args.out} --output results/baseline --no-memory-enabled")
+    print(
+        f"  mini-swe-agent cibench --dataset {args.out} --output results/baseline --no-memory-enabled"
+    )
     print(f"  mini-swe-agent cibench --dataset {args.out} --output results/l1_l2_l3 \\")
     print("      --memory-enabled --memory-root data/trs --memory-ablation L1+L2+L3")
 

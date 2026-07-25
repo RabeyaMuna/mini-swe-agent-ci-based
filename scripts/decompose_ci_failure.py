@@ -37,7 +37,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from utilities.model_token_config import get_model_config
-from utilities.error_handler import save_error_to_execption
 
 from deterministic_diff_parser import (
     chunk_structured_diff,
@@ -459,7 +458,11 @@ def _load_llm_json(content: str) -> Any:
 
 
 def _invoke_json(
-    llm: Any, prompt: str, max_tokens: int | None = None, retry_count: int = 0, rate_limit_retry: int = 0
+    llm: Any,
+    prompt: str,
+    max_tokens: int | None = None,
+    retry_count: int = 0,
+    rate_limit_retry: int = 0,
 ) -> Any:
     """
     DEPRECATED: Wrapper around utilities.llm_invoker.invoke_llm_with_retry
@@ -3337,7 +3340,10 @@ def _split_structured_chunk_by_size(
             continue
 
         # If adding this file would exceed target, start new chunk
-        if current_chunk_tokens + file_tokens > target_max_tokens and current_chunk_files:
+        if (
+            current_chunk_tokens + file_tokens > target_max_tokens
+            and current_chunk_files
+        ):
             sub_chunks.append(current_chunk_files)
             current_chunk_files = []
             current_chunk_tokens = 0
@@ -3381,7 +3387,9 @@ def _split_structured_chunk_by_size(
     # Log split details
     print(f"      Smart split: {len(files_list)} files → {len(result_chunks)} chunks")
     for i, rc in enumerate(result_chunks, 1):
-        print(f"        Chunk {i}: {rc.get('total_files', 0)} files, ~{rc.get('estimated_tokens', 0):,} tokens")
+        print(
+            f"        Chunk {i}: {rc.get('total_files', 0)} files, ~{rc.get('estimated_tokens', 0):,} tokens"
+        )
 
     return result_chunks
 
@@ -3812,9 +3820,7 @@ def _classify_chunk_regular(
 
     except Exception as e:
         if _is_token_limit_error(e):
-            print(
-                f"    WARNING Token limit hit with {files_in_chunk} files"
-            )
+            print(f"    WARNING Token limit hit with {files_in_chunk} files")
 
             # Can't split further
             if files_in_chunk <= 1:
@@ -3825,11 +3831,17 @@ def _classify_chunk_regular(
             print("    -> Using smart size-aware splitting...")
 
             # Calculate target based on model's context window
-            model_name = getattr(llm, "memci_model_key", None) or getattr(llm, "model_name", None)
+            model_name = getattr(llm, "memci_model_key", None) or getattr(
+                llm, "model_name", None
+            )
             config = get_model_config(model_name)
-            target_tokens = config.get("max_input_tokens", 100000) // 2  # Conservative split
+            target_tokens = (
+                config.get("max_input_tokens", 100000) // 2
+            )  # Conservative split
 
-            sub_chunks = _split_structured_chunk_by_size(chunk, target_max_tokens=target_tokens)
+            sub_chunks = _split_structured_chunk_by_size(
+                chunk, target_max_tokens=target_tokens
+            )
 
             if not sub_chunks:
                 print("    FAIL Could not split chunk")
@@ -6016,13 +6028,16 @@ def main():
             try:
                 # The error data is already in decomposed_result, just save it
                 from utilities.error_handler import EXECPTION_DIR
+
                 EXECPTION_DIR.mkdir(exist_ok=True)
                 error_file = EXECPTION_DIR / f"{issue_id}.json"
                 with open(error_file, "w") as f:
                     json.dump(decomposed_result, f, indent=2)
                 print(f"  ERROR saved to: {error_file}")
             except Exception as save_error:
-                print(f"  WARNING: Could not save error to execption directory: {save_error}")
+                print(
+                    f"  WARNING: Could not save error to execption directory: {save_error}"
+                )
         else:
             # Run full L1/L2/L3 pipeline (unless --skip-memory)
             if not args.skip_memory:

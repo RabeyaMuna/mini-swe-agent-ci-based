@@ -43,16 +43,18 @@ class FileSelectionPromptBuilder:
             Prompt string ready for LLM
         """
         # Format validations concisely
-        validations = '\n'.join([
-            f"  - {v.get('cmd', v.get('validation_cmd', 'unknown'))}"
-            for v in relevant_validations[:10]
-        ])
+        validations = "\n".join(
+            [
+                f"  - {v.get('cmd', v.get('validation_cmd', 'unknown'))}"
+                for v in relevant_validations[:10]
+            ]
+        )
 
         # Extract failure info
-        failure_job = structured_ci_failure.get('failed_job', 'unknown')
-        failure_step = structured_ci_failure.get('failed_step', 'unknown')
-        failure_file = structured_ci_failure.get('file', 'not specified')
-        failure_error = structured_ci_failure.get('error_message', '')[:200]
+        failure_job = structured_ci_failure.get("failed_job", "unknown")
+        failure_step = structured_ci_failure.get("failed_step", "unknown")
+        failure_file = structured_ci_failure.get("file", "not specified")
+        failure_error = structured_ci_failure.get("error_message", "")[:200]
 
         failure_info = f"""- Job: {failure_job}
 - Step: {failure_step}
@@ -60,13 +62,13 @@ class FileSelectionPromptBuilder:
 - Error: {failure_error}"""
 
         # Truncate diff if needed
-        diff_text = commit_diff[:max_diff_tokens * 4]  # ~4 chars per token
+        diff_text = commit_diff[: max_diff_tokens * 4]  # ~4 chars per token
         truncated = " ... (truncated)" if len(commit_diff) > len(diff_text) else ""
 
         # Format file list
-        files_display = ', '.join(changed_files[:20])
+        files_display = ", ".join(changed_files[:20])
         if len(changed_files) > 20:
-            files_display += f' ... +{len(changed_files) - 20} more'
+            files_display += f" ... +{len(changed_files) - 20} more"
 
         return f"""Select files whose changes affect CI validation.
 
@@ -105,8 +107,8 @@ EXAMPLE:
 
 ---
 
-COMMIT: {commit_metadata.get('sha', 'unknown')[:8]}
-MESSAGE: {commit_metadata.get('message', '')[:100]}
+COMMIT: {commit_metadata.get("sha", "unknown")[:8]}
+MESSAGE: {commit_metadata.get("message", "")[:100]}
 
 FILES ({len(changed_files)}): {files_display}
 
@@ -165,10 +167,12 @@ Output JSON only (no markdown, no text outside JSON):"""
         Returns:
             Prompt string
         """
-        validations = '\n'.join([
-            f"  - {v.get('cmd', v.get('validation_cmd', 'unknown'))}"
-            for v in relevant_validations[:8]
-        ])
+        validations = "\n".join(
+            [
+                f"  - {v.get('cmd', v.get('validation_cmd', 'unknown'))}"
+                for v in relevant_validations[:8]
+            ]
+        )
 
         failure_summary = (
             f"{structured_ci_failure.get('failed_step', 'unknown')} "
@@ -184,7 +188,7 @@ OUTPUT JSON:
   ]
 }}
 
-FILES IN CHUNK: {', '.join(chunk_files)}
+FILES IN CHUNK: {", ".join(chunk_files)}
 
 DIFF:
 {chunk_diff[:6000]}
@@ -223,15 +227,17 @@ Output JSON only:"""
         Returns:
             Prompt string
         """
-        validations = '\n'.join([
-            f"  - {v.get('cmd', v.get('validation_cmd', 'unknown'))}"
-            for v in relevant_validations[:8]
-        ])
+        validations = "\n".join(
+            [
+                f"  - {v.get('cmd', v.get('validation_cmd', 'unknown'))}"
+                for v in relevant_validations[:8]
+            ]
+        )
 
-        failure_job = structured_ci_failure.get('failed_job', 'unknown')
-        failure_step = structured_ci_failure.get('failed_step', 'unknown')
-        failure_file = structured_ci_failure.get('file', 'not specified')
-        failure_error = structured_ci_failure.get('error_message', '')[:150]
+        failure_job = structured_ci_failure.get("failed_job", "unknown")
+        failure_step = structured_ci_failure.get("failed_step", "unknown")
+        failure_file = structured_ci_failure.get("file", "not specified")
+        failure_error = structured_ci_failure.get("error_message", "")[:150]
 
         failure_info = f"""- Job: {failure_job}
 - Step: {failure_step}
@@ -247,7 +253,7 @@ OUTPUT JSON:
   ]
 }}
 
-COMMIT: {commit_metadata.get('sha', 'unknown')[:8]} ({len(changed_files)} files)
+COMMIT: {commit_metadata.get("sha", "unknown")[:8]} ({len(changed_files)} files)
 
 CHANGES:
 {changes_summary}
@@ -293,11 +299,11 @@ class CommitAnalysisPromptBuilder:
         Returns:
             Prompt string
         """
-        files_str = ', '.join(changed_files[:10])
+        files_str = ", ".join(changed_files[:10])
         if len(changed_files) > 10:
-            files_str += f' ... +{len(changed_files) - 10} more'
+            files_str += f" ... +{len(changed_files) - 10} more"
 
-        validations_str = '\n'.join([f"  - {v}" for v in validations[:5]])
+        validations_str = "\n".join([f"  - {v}" for v in validations[:5]])
 
         return f"""Analyze commit for CI problems.
 
@@ -340,7 +346,7 @@ def truncate_text(text: str, max_length: int = 200, suffix: str = "...") -> str:
     """
     if not text or len(text) <= max_length:
         return text
-    return text[:max_length - len(suffix)] + suffix
+    return text[: max_length - len(suffix)] + suffix
 
 
 def format_validations(validations: List[Dict], max_count: int = 10) -> str:
@@ -359,13 +365,13 @@ def format_validations(validations: List[Dict], max_count: int = 10) -> str:
     """
     lines = []
     for v in validations[:max_count]:
-        cmd = v.get('cmd', v.get('validation_cmd', v.get('command', 'unknown')))
+        cmd = v.get("cmd", v.get("validation_cmd", v.get("command", "unknown")))
         lines.append(f"  - {cmd}")
 
     if len(validations) > max_count:
         lines.append(f"  ... and {len(validations) - max_count} more")
 
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def extract_failure_info(structured_ci_failure: Dict) -> Dict[str, str]:
@@ -379,9 +385,9 @@ def extract_failure_info(structured_ci_failure: Dict) -> Dict[str, str]:
         Dict with: job, step, file, line, error
     """
     return {
-        'job': structured_ci_failure.get('failed_job', 'unknown'),
-        'step': structured_ci_failure.get('failed_step', 'unknown'),
-        'file': structured_ci_failure.get('file', 'not specified'),
-        'line': str(structured_ci_failure.get('line', 'not specified')),
-        'error': truncate_text(structured_ci_failure.get('error_message', ''), 200),
+        "job": structured_ci_failure.get("failed_job", "unknown"),
+        "step": structured_ci_failure.get("failed_step", "unknown"),
+        "file": structured_ci_failure.get("file", "not specified"),
+        "line": str(structured_ci_failure.get("line", "not specified")),
+        "error": truncate_text(structured_ci_failure.get("error_message", ""), 200),
     }

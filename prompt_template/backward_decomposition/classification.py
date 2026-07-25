@@ -22,7 +22,9 @@ def build_classification_prompt_with_dependencies(
     """Build classification prompt with dependency context."""
 
     ci_failure_context_json = json.dumps(ci_failure_context, indent=2)
-    ci_visible_files_json = json.dumps(ci_visible_files, indent=2) if ci_visible_files else "[]"
+    ci_visible_files_json = (
+        json.dumps(ci_visible_files, indent=2) if ci_visible_files else "[]"
+    )
     formatted_validations_json = json.dumps(formatted_validations, indent=2)
 
     prompt = f"""Classify each changed file by the CI step that would catch or require the fixed issue.
@@ -161,7 +163,9 @@ def build_classification_prompt_regular(
     """Build regular classification prompt without dependencies."""
 
     ci_failure_context_json = json.dumps(ci_failure_context, indent=2)
-    ci_visible_files_json = json.dumps(ci_visible_files, indent=2) if ci_visible_files else "[]"
+    ci_visible_files_json = (
+        json.dumps(ci_visible_files, indent=2) if ci_visible_files else "[]"
+    )
     formatted_validations_json = json.dumps(formatted_validations, indent=2)
 
     prompt = f"""Classify each changed file by the CI step that would catch or require the fixed issue.

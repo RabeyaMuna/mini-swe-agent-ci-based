@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from datasets import load_dataset
 from rich.console import Console
-from rich.table import Table
 
 console = Console()
 
@@ -37,14 +36,16 @@ def split_chronologically(
     """
     if not group_by_repo:
         # Global chronological split
-        sorted_issues = sorted(dataset, key=lambda x: x.get('commit_date', ''))
+        sorted_issues = sorted(dataset, key=lambda x: x.get("commit_date", ""))
         cutoff = int(len(sorted_issues) * memory_ratio)
         return sorted_issues[:cutoff], sorted_issues[cutoff:]
 
     # Per-repository chronological split
     repos = defaultdict(list)
     for issue in dataset:
-        repo = f"{issue.get('repo_owner', 'unknown')}/{issue.get('repo_name', 'unknown')}"
+        repo = (
+            f"{issue.get('repo_owner', 'unknown')}/{issue.get('repo_name', 'unknown')}"
+        )
         repos[repo].append(issue)
 
     memory_set = []
@@ -100,12 +101,14 @@ def create_split_from_huggingface(
     if repo_filter:
         repo_filter_lower = [r.lower() for r in repo_filter]
         if verbose:
-            console.print(f"[yellow]Filtering by repos: {', '.join(repo_filter)}[/yellow]")
+            console.print(
+                f"[yellow]Filtering by repos: {', '.join(repo_filter)}[/yellow]"
+            )
 
         filtered_dataset = []
         for issue in dataset:
-            repo_name = issue.get('repo_name', '').lower()
-            repo_owner = issue.get('repo_owner', '').lower()
+            repo_name = issue.get("repo_name", "").lower()
+            repo_owner = issue.get("repo_owner", "").lower()
             repo_full = f"{repo_owner}/{repo_name}"
 
             if any(f in repo_name or f in repo_full for f in repo_filter_lower):
@@ -128,29 +131,33 @@ def create_split_from_huggingface(
 
     # Save memory set
     memory_path = output_path / "memory_set.jsonl"
-    with open(memory_path, 'w') as f:
+    with open(memory_path, "w") as f:
         for issue in memory_set:
-            f.write(json.dumps(issue) + '\n')
+            f.write(json.dumps(issue) + "\n")
 
     # Save eval set
     eval_path = output_path / "eval_set.jsonl"
-    with open(eval_path, 'w') as f:
+    with open(eval_path, "w") as f:
         for issue in eval_set:
-            f.write(json.dumps(issue) + '\n')
+            f.write(json.dumps(issue) + "\n")
 
     # Save IDs
-    memory_ids = [str(issue['id']) for issue in memory_set]
-    eval_ids = [str(issue['id']) for issue in eval_set]
+    memory_ids = [str(issue["id"]) for issue in memory_set]
+    eval_ids = [str(issue["id"]) for issue in eval_set]
 
-    with open(output_path / "memory_issue_ids.json", 'w') as f:
+    with open(output_path / "memory_issue_ids.json", "w") as f:
         json.dump(memory_ids, f, indent=2)
 
-    with open(output_path / "eval_issue_ids.json", 'w') as f:
+    with open(output_path / "eval_issue_ids.json", "w") as f:
         json.dump(eval_ids, f, indent=2)
 
     # Create metadata
-    memory_dates = [issue['commit_date'] for issue in memory_set if issue.get('commit_date')]
-    eval_dates = [issue['commit_date'] for issue in eval_set if issue.get('commit_date')]
+    memory_dates = [
+        issue["commit_date"] for issue in memory_set if issue.get("commit_date")
+    ]
+    eval_dates = [
+        issue["commit_date"] for issue in eval_set if issue.get("commit_date")
+    ]
 
     metadata = {
         "total_issues": len(dataset),
@@ -174,7 +181,7 @@ def create_split_from_huggingface(
             "latest": max(eval_dates),
         }
 
-    with open(output_path / "split_metadata.json", 'w') as f:
+    with open(output_path / "split_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
     if verbose:
@@ -183,13 +190,15 @@ def create_split_from_huggingface(
         console.print(f"[green]✓ Saved to {output_path}[/green]")
 
     return {
-        'memory': memory_set,
-        'eval': eval_set,
-        'metadata': metadata,
+        "memory": memory_set,
+        "eval": eval_set,
+        "metadata": metadata,
     }
 
 
-def load_split(data_dir: str = "data") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def load_split(
+    data_dir: str = "data",
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Load existing memory and eval splits from disk.
 
@@ -207,7 +216,7 @@ def load_split(data_dir: str = "data") -> Tuple[List[Dict[str, Any]], List[Dict[
     # Load memory
     memory_path = data_path / "memory_set.jsonl"
     if memory_path.exists():
-        with open(memory_path, 'r') as f:
+        with open(memory_path, "r") as f:
             for line in f:
                 if line.strip():
                     memory_set.append(json.loads(line))
@@ -215,7 +224,7 @@ def load_split(data_dir: str = "data") -> Tuple[List[Dict[str, Any]], List[Dict[
     # Load eval
     eval_path = data_path / "eval_set.jsonl"
     if eval_path.exists():
-        with open(eval_path, 'r') as f:
+        with open(eval_path, "r") as f:
             for line in f:
                 if line.strip():
                     eval_set.append(json.loads(line))

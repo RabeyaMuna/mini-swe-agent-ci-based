@@ -35,6 +35,7 @@ from utilities.ci_cache import (
 )
 from utilities.dependency_evidence import dependency_graph_evidence
 
+
 def load_structured_ci_failure(sha_fail: str, issue_id: str = "") -> Dict:
     """Load structured CI failure details from data/trs/log_details.json."""
     return load_cached_structured_ci_failure(sha_fail, issue_id)
@@ -158,7 +159,9 @@ def deterministic_validation_groups(
                 return str(validation.get("validation_cmd") or "")
         return ""
 
-    def add_group(file_path: str, failure_type: str, issue_type: str, cmd: str, reason: str):
+    def add_group(
+        file_path: str, failure_type: str, issue_type: str, cmd: str, reason: str
+    ):
         key = (failure_type, issue_type, cmd)
         group = groups_by_key.setdefault(
             key,
@@ -204,7 +207,10 @@ def deterministic_validation_groups(
                 or find_validation("taplo", "../benchmarks"),
                 "Examples/benchmarks TOML files are checked by the examples taplo validation.",
             )
-        elif path.startswith(("framework/docs/source/", "docs/source/")) and suffix == ".rst":
+        elif (
+            path.startswith(("framework/docs/source/", "docs/source/"))
+            and suffix == ".rst"
+        ):
             add_group(
                 path,
                 "format",
@@ -517,8 +523,8 @@ def decompose_issue(
         validated_changed_files = get_changed_files(
             hard_filtered_diff, include_ignored=True
         )
-        total_files, hard_remaining_files, hard_ignored_files = (
-            get_filtered_file_count(full_diff)
+        total_files, hard_remaining_files, hard_ignored_files = get_filtered_file_count(
+            full_diff
         )
         print(
             f"      Changed files: {total_files}; hard-filtered ignored: "

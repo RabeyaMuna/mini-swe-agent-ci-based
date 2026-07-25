@@ -40,7 +40,9 @@ def dependency_graph_evidence(
 ) -> dict[str, Any]:
     """Return prompt-ready dependency evidence for a raw git diff."""
     graph = build_dependency_graph_for_diff(diff, repo_path=repo_path)
-    return summarize_dependency_graph(graph, max_edges=max_edges, max_clusters=max_clusters)
+    return summarize_dependency_graph(
+        graph, max_edges=max_edges, max_clusters=max_clusters
+    )
 
 
 def summarize_dependency_graph(

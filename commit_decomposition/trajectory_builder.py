@@ -39,7 +39,9 @@ def build_repair_trajectory(per_commit_analysis: List[Dict]) -> List[Dict]:
                 "problem": problem.get("problem", ""),
                 "root_cause": problem.get("root_cause", ""),
                 "changes_made": problem.get("changes_made", ""),
-                "introduced": problem.get("introduced", bool(problem.get("introduces"))),
+                "introduced": problem.get(
+                    "introduced", bool(problem.get("introduces"))
+                ),
                 "fixed": problem.get("fixed", bool(problem.get("fixes"))),
                 "fix_strategy": problem.get("fix_strategy", ""),
                 "why_this_fix_works": problem.get("why_this_fix_works", ""),

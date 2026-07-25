@@ -61,7 +61,7 @@ def main(
     # Parse repos
     repo_filter = None
     if repos:
-        repo_filter = [r.strip() for r in repos.split(',')]
+        repo_filter = [r.strip() for r in repos.split(",")]
 
     # Create split
     result = create_split_from_huggingface(
@@ -78,8 +78,8 @@ def main(
     print("=" * 60)
     print(f"\nMemory: {len(result['memory'])} issues")
     print(f"Eval:   {len(result['eval'])} issues")
-    print(f"\nNext step: Decompose ONLY memory data:")
-    print(f"  python scripts/decompose_ci_failure.py \\")
+    print("\nNext step: Decompose ONLY memory data:")
+    print("  python scripts/decompose_ci_failure.py \\")
     print(f"      --input {output_dir}/memory_set.jsonl \\")
     print(f"      --output {output_dir}/memory_decomposed.json")
     print()

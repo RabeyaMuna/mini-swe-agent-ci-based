@@ -23,7 +23,7 @@ from utilities.llm_invoker import invoke_llm_with_retry
 
 LOGGER = logging.getLogger(__name__)
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 def estimate_item_tokens(item: Any) -> int:
@@ -67,11 +67,14 @@ def get_model_token_limits(llm: Any) -> dict[str, int]:
         Dict with 'max_input_tokens' and 'safe_input_tokens'
     """
     # Try to get from model config
-    model_name = getattr(llm, "memci_model_key", None) or getattr(llm, "model_name", None)
+    model_name = getattr(llm, "memci_model_key", None) or getattr(
+        llm, "model_name", None
+    )
 
     # Import here to avoid circular dependency
     try:
         from utilities.model_token_config import get_model_config
+
         config = get_model_config(model_name)
         return {
             "max_input_tokens": config.get("max_input_tokens", 100000),
@@ -148,7 +151,7 @@ def split_items_by_tokens(
     if len(chunks) == 1 and len(items) > 1:
         half = len(items) // 2
         chunks = [items[:half], items[half:]]
-        LOGGER.info(f"Bin packing resulted in 1 chunk, using half-split instead")
+        LOGGER.info("Bin packing resulted in 1 chunk, using half-split instead")
 
     return chunks
 
@@ -239,7 +242,9 @@ def invoke_with_chunking_fallback(
 
     if verbose:
         if _depth == 0:
-            LOGGER.info(f"{indent}Processing {len(items)} items (~{total_tokens:,} tokens)")
+            LOGGER.info(
+                f"{indent}Processing {len(items)} items (~{total_tokens:,} tokens)"
+            )
         else:
             LOGGER.info(
                 f"{indent}Recursive depth {_depth}: {len(items)} items "
@@ -264,14 +269,20 @@ def invoke_with_chunking_fallback(
             # Handle SPLIT_REQUIRED signal
             if result == "SPLIT_REQUIRED":
                 if len(items) == 1:
-                    LOGGER.warning(f"{indent}SPLIT_REQUIRED but only 1 item, cannot split further")
+                    LOGGER.warning(
+                        f"{indent}SPLIT_REQUIRED but only 1 item, cannot split further"
+                    )
                     return []
 
                 if verbose:
-                    LOGGER.info(f"{indent}LLM returned SPLIT_REQUIRED, splitting chunk...")
+                    LOGGER.info(
+                        f"{indent}LLM returned SPLIT_REQUIRED, splitting chunk..."
+                    )
 
                 # Split and retry
-                sub_chunks = split_items_by_tokens(items, target_tokens // 2, estimate_tokens_fn)
+                sub_chunks = split_items_by_tokens(
+                    items, target_tokens // 2, estimate_tokens_fn
+                )
 
                 return _process_chunks_recursively(
                     llm=llm,
@@ -300,7 +311,14 @@ def invoke_with_chunking_fallback(
             error_msg = str(e).lower()
             is_size_error = any(
                 keyword in error_msg
-                for keyword in ["token", "length", "limit", "too long", "maximum", "context"]
+                for keyword in [
+                    "token",
+                    "length",
+                    "limit",
+                    "too long",
+                    "maximum",
+                    "context",
+                ]
             )
 
             if is_size_error and len(items) > 1:
@@ -308,7 +326,9 @@ def invoke_with_chunking_fallback(
                     LOGGER.warning(f"{indent}Size error detected, splitting chunk...")
 
                 # Split and retry
-                sub_chunks = split_items_by_tokens(items, target_tokens // 2, estimate_tokens_fn)
+                sub_chunks = split_items_by_tokens(
+                    items, target_tokens // 2, estimate_tokens_fn
+                )
 
                 return _process_chunks_recursively(
                     llm=llm,
@@ -329,7 +349,9 @@ def invoke_with_chunking_fallback(
 
     # Items don't fit, need to split proactively
     if verbose:
-        LOGGER.info(f"{indent}Proactive split: {total_tokens:,} > {target_tokens:,} tokens")
+        LOGGER.info(
+            f"{indent}Proactive split: {total_tokens:,} > {target_tokens:,} tokens"
+        )
 
     sub_chunks = split_items_by_tokens(items, target_tokens, estimate_tokens_fn)
 
@@ -363,7 +385,9 @@ def _process_chunks_recursively(
 ) -> List[Any]:
     """Helper to process multiple chunks recursively."""
     if combine_results_fn is None:
-        combine_results_fn = lambda a, b: a + b  # Default: extend
+
+        def combine_results_fn(a, b):
+            return a + b  # Default: extend
 
     all_results = []
 

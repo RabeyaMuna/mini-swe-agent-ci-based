@@ -79,56 +79,48 @@ from utilities.chronological_splitter import (
 
 __all__ = [
     # Diff chunking
-    'estimate_tokens',
-    'chunk_diff_by_files',
-    'summarize_commit_changes',
-    'decide_chunking_strategy',
-    'merge_groups',
-
+    "estimate_tokens",
+    "chunk_diff_by_files",
+    "summarize_commit_changes",
+    "decide_chunking_strategy",
+    "merge_groups",
     # Prompt building
-    'FileSelectionPromptBuilder',
-    'CommitAnalysisPromptBuilder',
-    'truncate_text',
-    'format_validations',
-    'extract_failure_info',
-
+    "FileSelectionPromptBuilder",
+    "CommitAnalysisPromptBuilder",
+    "truncate_text",
+    "format_validations",
+    "extract_failure_info",
     # CI cache
-    'load_structured_ci_failure',
-    'load_validation_sequence',
-    'save_structured_ci_failure_cache',
-    'save_validation_sequence_cache',
-
+    "load_structured_ci_failure",
+    "load_validation_sequence",
+    "save_structured_ci_failure_cache",
+    "save_validation_sequence_cache",
     # Dataset fetching
-    'fetch_dataset',
-    'filter_by_repos',
-    'save_issues_to_jsonl',
-    'matches_repo_filter',
-
+    "fetch_dataset",
+    "filter_by_repos",
+    "save_issues_to_jsonl",
+    "matches_repo_filter",
     # LLM invocation with retry logic
-    'invoke_llm_with_retry',
-    'invoke_json',
-
+    "invoke_llm_with_retry",
+    "invoke_json",
     # LLM chunking with fallback
-    'invoke_with_chunking_fallback',
-    'split_items_by_tokens',
-    'estimate_item_tokens',
-    'get_model_token_limits',
-
+    "invoke_with_chunking_fallback",
+    "split_items_by_tokens",
+    "estimate_item_tokens",
+    "get_model_token_limits",
     # Model configuration
-    'configure_model_environment',
-    'resolve_model_alias',
-    'get_model_config',
-
+    "configure_model_environment",
+    "resolve_model_alias",
+    "get_model_config",
     # Error handling
-    'save_error_to_execption',
-    'load_error_from_execption',
-    'has_error_in_execption',
-    'clear_error_from_execption',
-    'get_all_errors',
-    'create_error_dict',
-
+    "save_error_to_execption",
+    "load_error_from_execption",
+    "has_error_in_execption",
+    "clear_error_from_execption",
+    "get_all_errors",
+    "create_error_dict",
     # Chronological splitting (temporal leakage prevention)
-    'split_chronologically',
-    'create_split_from_huggingface',
-    'load_split',
+    "split_chronologically",
+    "create_split_from_huggingface",
+    "load_split",
 ]
