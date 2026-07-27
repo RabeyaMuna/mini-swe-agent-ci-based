@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-LOG_DETAILS_PATH = PROJECT_ROOT / "data" / "back_trs" / "log_details.json"
+LOG_DETAILS_PATH = PROJECT_ROOT / "data" / "log_details.json"  # Standardized location
 VALIDATION_CACHE_PATH = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
 
 
@@ -30,7 +30,7 @@ def load_structured_ci_failure(
         return {}
 
     try:
-        from scripts.ci_log_analyzer import CILogAnalyzer
+        from utilities.ci_log_analyzer import CILogAnalyzer
 
         analyzer = CILogAnalyzer(
             logs=logs,
@@ -73,7 +73,9 @@ def load_validation_sequence(
         return empty_validation_result(workflow_path)
 
     try:
-        from scripts.ci_workflow_aware_retrieval import analyze_workflow_from_benchmark
+        from utilities.ci_workflow_aware_retrieval import (
+            analyze_workflow_from_benchmark,
+        )
 
         generated = analyze_workflow_from_benchmark(
             workflow_content=workflow_content,

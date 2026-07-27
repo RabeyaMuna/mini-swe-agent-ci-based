@@ -37,7 +37,7 @@ from utilities.dependency_evidence import dependency_graph_evidence
 
 
 def load_structured_ci_failure(sha_fail: str, issue_id: str = "") -> Dict:
-    """Load structured CI failure details from data/trs/log_details.json."""
+    """Load structured CI failure details from data/log_details.json (standardized location)."""
     return load_cached_structured_ci_failure(sha_fail, issue_id)
 
 

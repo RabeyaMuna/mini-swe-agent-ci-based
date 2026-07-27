@@ -78,10 +78,13 @@ from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.benchmarks.utils.common import ProgressTrackingAgent
-from minisweagent.run.benchmarks.utils.ci_context import (
-    build_ci_context,
-    save_memory_after_patch,
-)
+
+# TODO: Refactor to call ci_log_analyzer and ci_workflow_aware_retrieval directly
+# ci_context.py was removed as it was redundant orchestration layer
+# from minisweagent.run.benchmarks.utils.ci_context import (
+#     build_ci_context,
+#     save_memory_after_patch,
+# )
 from minisweagent.run.benchmarks.utils.patch_merger import (
     merge_duplicate_patches,
     detect_duplicate_patches,
@@ -151,6 +154,13 @@ AUTOMATED_TOOLS = [
         "install_command": "pip install docformatter",
         "fix_command": "docformatter --in-place --recursive {{file_or_dir}}",
         "file_pattern": "*.py",
+    },
+    {
+        "tool": "docstrfmt",
+        "purpose": "RST documentation and docstring formatter",
+        "install_command": "pip install docstrfmt",
+        "fix_command": "docstrfmt {{file_or_dir}}",
+        "file_pattern": ["*.rst", "*.py"],
     },
     {
         "tool": "mdformat",

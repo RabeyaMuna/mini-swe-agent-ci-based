@@ -5,7 +5,7 @@
 set -e
 
 # Configuration
-DATASET="${1:-data/trs/log_details.json}"
+DATASET="${1:-data/log_details.json}"  # Standardized location
 OUTPUT_ROOT="${2:-results}"
 MEMORY_ROOT="${3:-data/trs}"
 WORKERS="${4:-1}"

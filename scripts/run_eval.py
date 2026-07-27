@@ -27,7 +27,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MEMORY_SEED = PROJECT_ROOT / "data" / "trs" / "memory_seed_issues.json"
-LOG_DETAILS = PROJECT_ROOT / "data" / "trs" / "log_details.json"
+LOG_DETAILS = PROJECT_ROOT / "data" / "log_details.json"  # Standardized location
 MEMORY_ROOT = PROJECT_ROOT / "data" / "trs"
 RESULTS_ROOT = PROJECT_ROOT / "results"
 
@@ -139,58 +139,47 @@ Examples:
 
   # Dry run
   python3 scripts/run_eval.py --issue-ids 111 --dry-run
-        """
+        """,
     )
 
     parser.add_argument(
-        "--issue-ids",
-        type=str,
-        help="Comma-separated issue IDs (e.g., 111,121,145)"
+        "--issue-ids", type=str, help="Comma-separated issue IDs (e.g., 111,121,145)"
     )
     parser.add_argument(
         "--issue-ids-file",
         type=str,
-        help="Path to JSON file containing issue IDs (e.g., data/trs/eval_issue_ids.json)"
+        help="Path to JSON file containing issue IDs (e.g., data/trs/eval_issue_ids.json)",
     )
     parser.add_argument(
-        "--repos",
-        type=str,
-        help="Comma-separated repo names (e.g., camel,flower)"
+        "--repos", type=str, help="Comma-separated repo names (e.g., camel,flower)"
     )
     parser.add_argument(
         "--exclude-memory",
         action="store_true",
-        help="Exclude issues used to build memory"
+        help="Exclude issues used to build memory",
     )
     parser.add_argument(
-        "--max-issues",
-        type=int,
-        help="Maximum number of issues to run"
+        "--max-issues", type=int, help="Maximum number of issues to run"
     )
     parser.add_argument(
         "--ablation",
         type=str,
         default="L1+L2+L3",
         choices=["BASELINE", "L1", "L1+L2", "L1+L2+L3"],
-        help="Memory ablation level: BASELINE=no memory, L1=file-level, L1+L2=+sequences, L1+L2+L3=full (default: L1+L2+L3)"
+        help="Memory ablation level: BASELINE=no memory, L1=file-level, L1+L2=+sequences, L1+L2+L3=full (default: L1+L2+L3)",
     )
     parser.add_argument(
-        "--workers",
-        type=int,
-        default=1,
-        help="Number of parallel workers (default: 1)"
+        "--workers", type=int, default=1, help="Number of parallel workers (default: 1)"
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print what would run without executing"
+        "--dry-run", action="store_true", help="Print what would run without executing"
     )
 
     args = parser.parse_args()
 
-    print("="*80)
+    print("=" * 80)
     print("MINI-SWE-AGENT EVALUATION")
-    print("="*80)
+    print("=" * 80)
 
     # Parse issue IDs
     issue_ids = None
@@ -201,6 +190,7 @@ Examples:
         # Load from file
         import json
         from pathlib import Path
+
         ids_file = Path(args.issue_ids_file)
         if not ids_file.exists():
             print(f"ERROR: Issue IDs file not found: {ids_file}")
@@ -210,7 +200,9 @@ Examples:
             # Convert to strings
             issue_ids = [str(id) for id in issue_ids]
         print(f"Loaded {len(issue_ids)} issue IDs from {ids_file}")
-        print(f"Issue IDs: {', '.join(issue_ids[:10])}{'...' if len(issue_ids) > 10 else ''}")
+        print(
+            f"Issue IDs: {', '.join(issue_ids[:10])}{'...' if len(issue_ids) > 10 else ''}"
+        )
 
     # Parse repos
     repos = None
@@ -269,21 +261,31 @@ Examples:
     # Build command
     cmd = [
         sys.executable,
-        "-m", "minisweagent.run.benchmarks.cibench",
-        "--dataset", str(temp_dataset),
-        "--split", "train",
-        "--output", str(output_dir),
-        "--workers", str(args.workers),
+        "-m",
+        "minisweagent.run.benchmarks.cibench",
+        "--dataset",
+        str(temp_dataset),
+        "--split",
+        "train",
+        "--output",
+        str(output_dir),
+        "--workers",
+        str(args.workers),
     ]
 
     # Add memory flags ONLY if not baseline
     if args.ablation != "BASELINE":
-        cmd.extend([
-            "--memory-enabled",
-            "--memory-root", str(MEMORY_ROOT),
-            "--memory-ablation", args.ablation,
-            "--memory-top-k", "3",
-        ])
+        cmd.extend(
+            [
+                "--memory-enabled",
+                "--memory-root",
+                str(MEMORY_ROOT),
+                "--memory-ablation",
+                args.ablation,
+                "--memory-top-k",
+                "3",
+            ]
+        )
 
     cmd.append("--no-save-memory")
 
@@ -302,9 +304,9 @@ Examples:
         return
 
     # Run
-    print("="*80)
+    print("=" * 80)
     print(f"RUNNING EVALUATION: {args.ablation}")
-    print("="*80)
+    print("=" * 80)
     print()
 
     try:
@@ -321,20 +323,20 @@ Examples:
             temp_dataset.unlink()
 
     print()
-    print("="*80)
+    print("=" * 80)
     print("EVALUATION COMPLETE")
-    print("="*80)
+    print("=" * 80)
     print(f"Results saved to: {output_dir}/")
     print()
     print("Directory structure:")
     print(f"  {output_dir}/")
     print(f"    ├── {selected[0].get('sha_fail', 'SHA')[:8]}.../")
-    print(f"    │   ├── preds.json")
-    print(f"    │   ├── run_instance.log")
-    print(f"    │   └── ...")
+    print("    │   ├── preds.json")
+    print("    │   ├── run_instance.log")
+    print("    │   └── ...")
     if len(selected) > 1:
         print(f"    ├── {selected[1].get('sha_fail', 'SHA')[:8]}.../")
-        print(f"    └── ...")
+        print("    └── ...")
 
 
 if __name__ == "__main__":
