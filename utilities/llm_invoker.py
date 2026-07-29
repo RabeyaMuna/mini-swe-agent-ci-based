@@ -10,7 +10,7 @@ Centralizes retry logic for LLM API calls with handling for:
 
 Import and use across all scripts for consistent error handling.
 """
-
+import re
 import json
 import logging
 import os
@@ -29,8 +29,14 @@ HEALTH_CHECK_PROMPT = "Reply with exactly: OK"
 
 # JSON parsing instructions for repair prompts
 STRICT_JSON_RULES = """
-CRITICAL: Return ONLY valid JSON. No markdown, no code blocks, no explanations.
-Your entire response must be parseable by json.loads().
+CRITICAL JSON FORMAT:
+- Return ONLY raw JSON starting with { or [
+- NO markdown code fences (```json or ```)
+- NO backticks of any kind
+- NO explanations or text outside the JSON
+- Your FIRST character must be { or [
+- Your LAST character must be } or ]
+- Must be parseable by json.loads() directly
 """.strip()
 
 
@@ -50,6 +56,19 @@ def _load_json_flexible(content: str) -> Any:
         return []
 
     content = content.strip()
+
+    # Strip markdown code fence if present (common LLM behavior)
+    # Handle: ```json {...} ``` or ``` {...} ```
+    if content.startswith("```"):
+        lines = content.split('\n')
+        if lines[0].startswith("```"):
+            # Remove first line (```json or ```)
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            # Remove last line (```)
+            lines = lines[:-1]
+        content = '\n'.join(lines).strip()
+
     last_json_err = None
     last_demjson3_err = None
 
@@ -61,24 +80,32 @@ def _load_json_flexible(content: str) -> Any:
 
     # Try extracting from markdown code blocks
     try:
-        import re
 
+        # More flexible patterns to handle various markdown formats
         patterns = [
-            r"```json\s*\n(.*?)\n```",
-            r"```\s*\n(.*?)\n```",
-            r"^\s*\[.*\]\s*$",
-            r"^\s*\{.*\}\s*$",
+            r"```json\s*(.*?)\s*```",         # ```json ... ```
+            r"```\s*(.*?)\s*```",              # ``` ... ```
+            r"^`{1,3}json\s*(.*?)`{1,3}$",    # Handle 1-3 backticks
+            r"^\s*\[.*\]\s*$",                 # Raw array
+            r"^\s*\{.*\}\s*$",                 # Raw object
         ]
 
         for pattern in patterns:
-            matches = re.findall(pattern, content, re.DOTALL)
+            matches = re.findall(pattern, content, re.DOTALL | re.MULTILINE)
             if matches:
                 candidate = matches[0].strip()
-                objects = json.loads(candidate)
-                if isinstance(objects, list) and len(objects) > 1:
+                # Skip if candidate is empty or only whitespace
+                if not candidate:
+                    continue
+                try:
+                    objects = json.loads(candidate)
+                    if isinstance(objects, list) and len(objects) > 1:
+                        return objects
+                    if len(objects) == 1:
+                        return objects[0]
                     return objects
-                if len(objects) == 1:
-                    return objects[0]
+                except json.JSONDecodeError:
+                    continue  # Try next pattern
     except Exception:
         pass
 

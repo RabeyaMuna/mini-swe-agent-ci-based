@@ -66,6 +66,7 @@ from utilities.dependency_evidence import (  # noqa: E402
     build_dependency_graph_from_structured_diff,
 )
 from utilities.llm_invoker import invoke_llm_with_retry  # noqa: E402
+from utilities.llm_model import LitellmModel  # noqa: E402
 from utilities.model_registry import (  # noqa: E402
     configure_model_environment,
     resolve_model_alias,
@@ -126,6 +127,7 @@ def _get_model_aware_limits(model_name: str | None = None) -> dict[str, int]:
     - findings_batch: 30% of input (batch mode processes multiple items)
     - max_files_per_chunk: Based on model capacity (80 for minimax, 150 for GLM)
     - max_changes_per_chunk: Based on model capacity (400 for minimax, 800 for GLM)
+    - atomic_analysis_threshold: 50% for complete validation group analysis
 
     Results (vs old limits):
     - minimax-m2.5: 200k/160k/120k chars, 80 files, 400 changes (6-8x larger)
@@ -145,6 +147,9 @@ def _get_model_aware_limits(model_name: str | None = None) -> dict[str, int]:
             "max_files_per_chunk": config["decompose_max_files_per_chunk"],
             "max_changes_per_chunk": config["decompose_max_changes_per_chunk"],
             "output_safe_tokens": config["output_safe_tokens"],
+            # Atomic analysis threshold (50% of input capacity)
+            "atomic_analysis_threshold_chars": int(config["input_chunk_chars"] * 0.5),
+            "max_input_tokens": config.get("max_input_tokens", 200000),
         }
     except Exception as e:
         LOGGER.warning(
@@ -158,6 +163,8 @@ def _get_model_aware_limits(model_name: str | None = None) -> dict[str, int]:
             "max_files_per_chunk": 80,
             "max_changes_per_chunk": 400,
             "output_safe_tokens": 7000,
+            "atomic_analysis_threshold_chars": 100000,  # Conservative fallback
+            "max_input_tokens": 200000,
         }
 
 
@@ -170,294 +177,16 @@ def _classification_output_tokens(model_name: str | None = None) -> int:
 LOGGER = logging.getLogger(__name__)
 STRICT_JSON_RULES = """### Output Rules (STRICT) - CRITICAL FOR PARSING
 - Output MUST be ONLY valid JSON - nothing else.
-- Start your response immediately with { or [ - NO text before.
-- End your response with } or ] - NO text after.
-- Do NOT wrap in triple backticks (```json or ```).
-- Do NOT add explanations, comments, or markdown.
-- Do NOT start with phrases like "Looking at this", "Here is", "json", etc.
+- Your FIRST character MUST be { or [ - ABSOLUTELY NO text before.
+- Your LAST character MUST be } or ] - ABSOLUTELY NO text after.
+- Do NOT wrap in ANY backticks: NO ``` or ```json or ` - NONE AT ALL.
+- Do NOT add explanations, comments, markdown, or any text outside the JSON.
+- Do NOT start with phrases like "Looking at this", "Here is", "json", "```json", etc.
 - Use double quotes for all JSON keys and string values.
 - Do not emit trailing commas.
-- Your entire response will be passed directly to json.loads() - ensure it's valid JSON."""
+- Your entire response will be passed DIRECTLY to json.loads() - it MUST parse perfectly."""
 
 load_dotenv(PROJECT_ROOT / ".env", override=False)
-
-
-class LitellmModel:
-    """Small invoke-compatible wrapper for decomposition scripts."""
-
-    def __init__(self, model_name: str):
-        self.model_name = self._normalize_model_name(model_name)
-        self.api_key, self.api_base = self._model_credentials(self.model_name)
-
-    @staticmethod
-    def _normalize_model_name(model_name: str) -> str:
-        raw_model_name = str(model_name or "").strip()
-        resolved = resolve_model_alias(model_name)
-        if resolved:
-            return resolved
-        return raw_model_name
-
-    @staticmethod
-    def _model_credentials(model_name: str) -> tuple[str | None, str | None]:
-        lowered = str(model_name or "").lower()
-
-        if lowered.startswith("openrouter/"):
-            if "minimax" in lowered:
-                return (
-                    os.getenv("OPENROUTER_API_KEY"),
-                    os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
-                )
-            return (
-                os.getenv("OPENROUTER_API_KEY"),
-                os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
-            )
-
-        if "glm" in lowered or "z-ai" in lowered:
-            return (
-                os.getenv("GLM_API_KEY"),
-                os.getenv("GLM_BASE_URL") or "https://api.z.ai/api/paas/v4",
-            )
-
-        if "minimax" in lowered:
-            return (
-                os.getenv("OPENROUTER_API_KEY"),
-                os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
-            )
-
-        return (
-            os.getenv("OPENROUTER_API_KEY"),
-            os.getenv("OPENROUTER_BASE_URL"),
-        )
-
-    def invoke(self, prompt: Any, max_tokens: int | None = None):
-        if isinstance(prompt, list):
-            messages = [
-                {
-                    "role": "user",
-                    "content": str(getattr(message, "content", message)),
-                }
-                for message in prompt
-            ]
-        else:
-            messages = [{"role": "user", "content": str(prompt)}]
-
-        try:
-            start_time = time.time()
-
-            # Auto-detect max_tokens based on model if not specified
-            if max_tokens is None:
-                try:
-                    max_tokens = get_output_safe_tokens(self.model_name)
-                    LOGGER.debug(
-                        f"Auto-detected max_tokens={max_tokens} for model={self.model_name}"
-                    )
-                except Exception:
-                    max_tokens = 16000  # Fallback
-            if str(self.model_name).lower().startswith("zai/"):
-                max_tokens = min(int(max_tokens), 120000)
-
-            completion_kwargs = {
-                "model": self.model_name,
-                "messages": messages,
-                "temperature": 0,
-                "max_tokens": max_tokens,
-                "timeout": int(os.getenv("LITELLM_TIMEOUT", "600")),
-            }
-            if self.api_key:
-                completion_kwargs["api_key"] = self.api_key
-            if self.api_base:
-                completion_kwargs["api_base"] = self.api_base
-
-            response = litellm.completion(**completion_kwargs)
-
-            elapsed = time.time() - start_time
-
-            # Check for error or length finish_reason
-            finish_reason = getattr(response.choices[0], "finish_reason", None)
-
-            # DEBUG: Always log finish_reason and token usage
-            usage = getattr(response, "usage", None)
-            if usage:
-                prompt_tokens = getattr(usage, "prompt_tokens", "?")
-                completion_tokens = getattr(usage, "completion_tokens", "?")
-                total_tokens = getattr(usage, "total_tokens", "?")
-                print(
-                    f"      [API] finish_reason={finish_reason}, tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
-                )
-            else:
-                print(f"      [API] finish_reason={finish_reason}, no usage data")
-
-            if finish_reason == "error":
-                error_msg = getattr(response, "error", "Unknown error")
-                if hasattr(response, "_hidden_params"):
-                    error_msg += f" | Details: {response._hidden_params}"
-                LOGGER.error(f"LLM error after {elapsed:.1f}s. Error: {error_msg}")
-                print(f"    FAIL LLM Error ({elapsed:.1f}s): {error_msg}")
-            elif finish_reason == "length":
-                # Log detailed info for length errors
-                LOGGER.warning(
-                    f"Hit length limit: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
-                )
-                print("    WARNING Length limit hit!")
-                print(
-                    f"       Tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
-                )
-                print(f"       max_tokens setting: {max_tokens or 16000}")
-                print(
-                    "       Chunk too large - reduce max_changes_per_chunk or simplify prompt"
-                )
-
-            class Result:
-                content = response.choices[0].message.content or ""
-                raw_response = response
-
-            return Result()
-        except Exception as e:
-            LOGGER.error(f"LiteLLM API call failed: {type(e).__name__}: {e}")
-            print(f"    FAIL API Error: {type(e).__name__}: {str(e)[:200]}")
-
-            class Result:
-                content = ""
-                error = str(e)
-                raw_response = None
-
-            return Result()
-
-    def __call__(self, prompt: Any):
-        """Make LitellmModel callable for compatibility with CILogAnalyzer."""
-        result = self.invoke(prompt)
-        return result.content
-
-
-def _extract_json_from_text(content: str) -> str:
-    """Extract JSON from LLM response that may include markdown fences or explanatory text."""
-    content = str(content or "").strip()
-
-    # Try to extract JSON from markdown code blocks
-    json_fence_pattern = r"```(?:json)?\s*\n?(.*?)\n?```"
-    match = re.search(json_fence_pattern, content, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-
-    # Try to find JSON object/array boundaries
-    # Look for outermost { } or [ ]
-    first_brace = content.find("{")
-    first_bracket = content.find("[")
-
-    if first_brace == -1 and first_bracket == -1:
-        return content
-
-    # Determine which comes first
-    if first_brace != -1 and (first_bracket == -1 or first_brace < first_bracket):
-        # Start with {, find matching }
-        start = first_brace
-        open_char, close_char = "{", "}"
-    else:
-        # Start with [, find matching ]
-        start = first_bracket
-        open_char, close_char = "[", "]"
-
-    # Find the matching closing bracket/brace
-    depth = 0
-    in_string = False
-    escape_next = False
-
-    for i in range(start, len(content)):
-        char = content[i]
-
-        if escape_next:
-            escape_next = False
-            continue
-
-        if char == "\\":
-            escape_next = True
-            continue
-
-        if char == '"' and not escape_next:
-            in_string = not in_string
-            continue
-
-        if not in_string:
-            if char == open_char:
-                depth += 1
-            elif char == close_char:
-                depth -= 1
-                if depth == 0:
-                    return content[start : i + 1]
-
-    # If we didn't find a match, return original
-    return content
-
-
-def _clean_malformed_json(content: str) -> str:
-    """Clean common LLM JSON formatting mistakes before parsing."""
-    content = str(content or "").strip()
-    content = re.sub(r"```(?:json)?\s*\n?(.*?)\n?```", r"\1", content, flags=re.DOTALL)
-    content = re.sub(r",(\s*[}\]])", r"\1", content)
-    content = re.sub(r",\s*,", ",", content)
-    content = re.sub(r"}\s*{", "}, {", content)
-    content = re.sub(r"}\s*\[", "}, [", content)
-    content = re.sub(r"]\s*{", "], {", content)
-    return content.strip()
-
-
-def _load_llm_json(content: str) -> Any:
-    """Parse raw LLM JSON. Handles markdown fences and explanatory text."""
-    content = str(content or "").strip()
-
-    if not content:
-        return []
-
-    candidates = [
-        content,
-        _extract_json_from_text(content),
-        _clean_malformed_json(content),
-        _clean_malformed_json(_extract_json_from_text(content)),
-    ]
-
-    last_json_err: Any = None
-    last_demjson3_err: Any = "demjson3 is not installed"
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            last_json_err = exc
-
-        # Some models emit several JSON objects back-to-back instead of an array.
-        try:
-            decoder = json.JSONDecoder()
-            objects = []
-            idx = 0
-            while idx < len(candidate):
-                tail = candidate[idx:].lstrip()
-                if not tail:
-                    break
-                obj, end = decoder.raw_decode(tail)
-                objects.append(obj)
-                idx += len(candidate[idx:]) - len(tail) + end
-            if len(objects) > 1:
-                return objects
-            if len(objects) == 1:
-                return objects[0]
-        except Exception:
-            pass
-
-        try:
-            if demjson3 is not None:
-                return demjson3.decode(candidate)
-        except Exception as exc:
-            last_demjson3_err = exc
-
-    preview = content[:500] if len(content) > 500 else content
-    parse_error = ValueError(
-        f"JSON parse failed: json={last_json_err}; demjson3={last_demjson3_err}\n"
-        f"Content preview (first 500 chars):\n{preview}"
-    )
-    LOGGER.warning("%s", parse_error)
-    return []
 
 
 def _invoke_json(
@@ -1090,8 +819,14 @@ def merge_chunks_by_validation(
 
     # Now attach changes to each validation group
     for val_group in validation_groups.values():
+        val_order = val_group.get("validation_order", "?")
+        group_files = val_group.get("all_files", [])
+        print(f"[DEBUG] Validation {val_order}: {len(group_files)} files in all_files")
+        if group_files:
+            print(f"[DEBUG]   Sample files: {group_files[:3]}")
+
         group_dependency_contexts = []
-        for file_path in val_group["all_files"]:
+        for file_path in group_files:
             if file_path in file_changes_lookup:
                 # Add all changes for this file
                 file_changes = file_changes_lookup[file_path]
@@ -1101,6 +836,8 @@ def merge_chunks_by_validation(
                     change_with_file["file"] = file_path
                     val_group["all_changes"].append(change_with_file)
             group_dependency_contexts.extend(chunk_dependency_lookup.get(file_path, []))
+
+        print(f"[DEBUG] Validation {val_order}: {len(val_group['all_changes'])} changes added")
 
         # Build caller → callee dependency contexts from graph edges
         caller_callee_contexts = _build_caller_callee_contexts(
@@ -1179,71 +916,12 @@ def merge_chunks_by_validation(
     }
 
 
-def _chunk_validation_changes(
-    val_group: dict[str, Any],
-    max_changes_per_chunk: int | None = None,
-    model_name: str | None = None,
-) -> list[dict[str, Any]]:
-    """
-    Chunk a single validation if it has too many changes.
-
-    Now DEPENDENCY-AWARE:
-    - If dependency contexts exist: Keep caller + callees together in one chunk
-    - If no dependencies: Use regular change-based chunking
-
-    Model-aware limits: minimax=400 changes, GLM=800 changes per chunk.
-
-    Args:
-        val_group: Validation group dict
-        max_changes_per_chunk: Max changes per chunk (None = auto-detect from model)
-        model_name: Model name for auto-detection
-
-    Returns: List of chunks, where each chunk is a subset of val_group
-    """
-    # Auto-detect max_changes if not specified
-    if max_changes_per_chunk is None:
-        model_limits = _get_model_aware_limits(model_name)
-        max_changes_per_chunk = model_limits["max_changes_per_chunk"]
-
-    all_changes = val_group.get("all_changes", [])
-    dependency_contexts = val_group.get("dependency_contexts", [])
-
-    if len(all_changes) <= max_changes_per_chunk:
-        # Small enough, return as single chunk
-        return [val_group]
-
-    # DEPENDENCY-AWARE CHUNKING: Group changes by dependency relationships
-    if dependency_contexts:
-        return _chunk_by_dependencies(
-            val_group, dependency_contexts, max_changes_per_chunk
-        )
-
-    # NO DEPENDENCIES: Use regular change-based chunking
-    chunks = []
-    for start_idx in range(0, len(all_changes), max_changes_per_chunk):
-        chunk_changes = all_changes[start_idx : start_idx + max_changes_per_chunk]
-
-        chunk = _copy_validation_chunk_metadata(
-            val_group,
-            {
-                "validation_cmd": val_group.get("validation_cmd", ""),
-                "failure_type": val_group.get("failure_type", ""),
-                "issue_type": val_group.get("issue_type", ""),
-                "all_files": val_group.get("all_files", []),  # Keep full file list
-                "all_changes": chunk_changes,
-                "chunk_info": f"Changes {start_idx + 1}-{start_idx + len(chunk_changes)} of {len(all_changes)} total",
-            },
-        )
-        chunks.append(chunk)
-
-    return chunks
-
-
 def _copy_validation_chunk_metadata(
     source: dict[str, Any], target: dict[str, Any]
 ) -> dict[str, Any]:
     """Preserve classification/dependency metadata on deep-analysis chunks."""
     for key in [
+        "validation_order",
         "change_type",
         "visibility",
         "is_cascading",
@@ -1371,12 +1049,10 @@ def _chunk_by_dependencies(
     )  # Fallback to full group if no chunks created
 
 
-# DEPRECATED: Use model-aware limits from get_model_config() instead
-# These are kept for backwards compatibility but should not be used directly
-ATOMIC_ANALYSIS_MAX_PROMPT_CHARS = 48000  # DEPRECATED: use model config
-ATOMIC_ANALYSIS_MAX_OUTPUT_TOKENS = 16000  # DEPRECATED: use model config
-VALIDATION_MERGE_MAX_PROMPT_CHARS = 32000  # DEPRECATED: use model config
-VALIDATION_MERGE_MAX_OUTPUT_TOKENS = 8000  # DEPRECATED: use model config
+# ============================================================================
+# REMOVED: Old hardcoded limits replaced with model-aware configuration
+# Use _get_model_aware_limits() to get current model's actual limits
+# ============================================================================
 
 
 def _compact_text(value: Any, limit: int = 1200) -> str:
@@ -1587,114 +1263,89 @@ Problem {idx}:
     )
 
     try:
-        decision = _invoke_json(llm, prompt)
+        # Get model-aware max tokens for merge decision output
+        # The issue is NOT token limit - it's the LLM stopping early (finish_reason=stop)
+        # So we give it FULL capacity and add better instructions to complete JSON
+        model_limits = _get_model_aware_limits(getattr(llm, "model_name", None))
+        merge_max_tokens = model_limits["output_safe_tokens"]  # Use FULL capacity!
 
-        # Process decision
-        if decision.get("action") == "merge":
-            # Create merged problem
-            all_files = []
-            for prob in cluster:
-                all_files.extend(prob.get("affected_files", []))
+        print(f"        [DEBUG] Merge max_tokens={merge_max_tokens} for {len(cluster)} problems")
 
-            merged_prob = decision.get("merged_problem", {})
-            merged = {
-                "affected_files": list(dict.fromkeys(all_files)),  # Deduplicate
-                "problem": merged_prob.get("problem", cluster[0].get("problem")),
-                "root_cause": merged_prob.get(
-                    "root_cause", cluster[0].get("root_cause")
-                ),
-                "how_fixed": merged_prob.get("how_fixed", cluster[0].get("how_fixed")),
-                "why_fix_works": merged_prob.get(
-                    "why_fix_works",
-                    merged_prob.get("why_fixed_works", cluster[0].get("why_fix_works")),
-                ),
-                "failure_type": cluster[0].get("failure_type"),
-                "issue_type": cluster[0].get("issue_type"),
-                "validation_cmd": cluster[0].get("validation_cmd"),
-                "validation_order": cluster[0].get("validation_order"),
-                "problem_type": cluster[0].get("problem_type"),
-                "is_cascading": cluster[0].get("is_cascading", False),
-                "dependency_type": cluster[0].get("dependency_type", ""),
-                "cascade_explanation": cluster[0].get("cascade_explanation", ""),
-                "is_merged": True,
-                "merged_from": [p.get("problem_id", i) for i, p in enumerate(cluster)],
-                "merge_count": len(cluster),
-            }
+        decision = _invoke_json(llm, prompt, max_tokens=merge_max_tokens)
 
-            return {
-                "action": "merge",
-                "result": [merged],
-                "reasoning": decision.get("reasoning", ""),
-            }
+        # NEW STRUCTURE: Process unified response
+        # decision = {"problems": [{"merged_problems": [1,2], ...}, ...]}
+        output_problems = decision.get("problems", [])
 
-        elif decision.get("action") == "partial_merge":
-            # Process sub-groups
-            result = []
-            for sub_group in decision.get("sub_groups", []):
-                indices = sub_group.get("problem_indices", [])
-                # Convert 1-based indices to 0-based
-                sub_problems = [
-                    cluster[i - 1] for i in indices if 0 < i <= len(cluster)
-                ]
-
-                if sub_group.get("action") == "merge" and len(sub_problems) > 1:
-                    # Merge this sub-group
-                    all_files = []
-                    for prob in sub_problems:
-                        all_files.extend(prob.get("affected_files", []))
-
-                    merged_prob = sub_group.get("merged_problem", {})
-                    merged = {
-                        "affected_files": list(dict.fromkeys(all_files)),
-                        "problem": merged_prob.get(
-                            "problem", sub_problems[0].get("problem")
-                        ),
-                        "root_cause": merged_prob.get(
-                            "root_cause", sub_problems[0].get("root_cause")
-                        ),
-                        "how_fixed": merged_prob.get(
-                            "how_fixed", sub_problems[0].get("how_fixed")
-                        ),
-                        "why_fix_works": merged_prob.get(
-                            "why_fix_works",
-                            merged_prob.get(
-                                "why_fixed_works",
-                                sub_problems[0].get("why_fix_works"),
-                            ),
-                        ),
-                        "failure_type": sub_problems[0].get("failure_type"),
-                        "issue_type": sub_problems[0].get("issue_type"),
-                        "validation_cmd": sub_problems[0].get("validation_cmd"),
-                        "validation_order": sub_problems[0].get("validation_order"),
-                        "problem_type": sub_problems[0].get("problem_type"),
-                        "is_cascading": sub_problems[0].get("is_cascading", False),
-                        "dependency_type": sub_problems[0].get("dependency_type", ""),
-                        "cascade_explanation": sub_problems[0].get(
-                            "cascade_explanation", ""
-                        ),
-                        "is_merged": True,
-                        "merged_from": [
-                            p.get("problem_id", i) for i, p in enumerate(sub_problems)
-                        ],
-                        "merge_count": len(sub_problems),
-                    }
-                    result.append(merged)
-                else:
-                    # Keep separate
-                    result.extend(sub_problems)
-
-            return {
-                "action": "partial_merge",
-                "result": result,
-                "reasoning": decision.get("reasoning", ""),
-            }
-
-        else:  # separate
+        if not output_problems:
+            # Fallback: keep all separate
+            print("    [WARN] Empty LLM response, keeping problems separate")
             return {
                 "action": "separate",
                 "result": cluster,
-                "reasoning": decision.get("reasoning", ""),
+                "reasoning": "Empty response from LLM",
             }
+
+        # Build result from output_problems
+        result = []
+        total_merged = 0
+
+        for out_prob in output_problems:
+            merged_indices = out_prob.get("merged_problems", [])
+
+            if not merged_indices:
+                # Skip empty entries
+                continue
+
+            # Get actual problems from cluster (1-based → 0-based)
+            source_problems = [
+                cluster[idx - 1] for idx in merged_indices
+                if 0 < idx <= len(cluster)
+            ]
+
+            if not source_problems:
+                continue
+
+            if len(merged_indices) > 1:
+                # MERGED: Multiple problems combined
+                all_files = []
+                for prob in source_problems:
+                    all_files.extend(prob.get("affected_files", []))
+
+                merged = {
+                    "affected_files": list(dict.fromkeys(all_files)),  # Deduplicate
+                    "problem": out_prob.get("problem", source_problems[0].get("problem")),
+                    "root_cause": out_prob.get("root_cause", source_problems[0].get("root_cause")),
+                    "how_fixed": out_prob.get("how_fixed", source_problems[0].get("how_fixed")),
+                    "why_fix_works": out_prob.get("why_fix_works", source_problems[0].get("why_fix_works")),
+                    "failure_type": source_problems[0].get("failure_type"),
+                    "issue_type": source_problems[0].get("issue_type"),
+                    "validation_cmd": source_problems[0].get("validation_cmd"),
+                    "validation_order": source_problems[0].get("validation_order"),
+                    "problem_type": source_problems[0].get("problem_type"),
+                    "is_cascading": source_problems[0].get("is_cascading", False),
+                    "dependency_type": source_problems[0].get("dependency_type", ""),
+                    "cascade_explanation": source_problems[0].get("cascade_explanation", ""),
+                    "is_merged": True,
+                    "merged_from": [p.get("problem_id", idx) for idx, p in enumerate(source_problems)],
+                    "merge_count": len(source_problems),
+                }
+                result.append(merged)
+                total_merged += len(source_problems)
+
+            else:
+                # DISTINCT: Single problem kept as-is
+                result.append(source_problems[0])
+
+        # Simple stats: just count how many were actually merged
+        merged_count = sum(1 for p in result if p.get("is_merged", False))
+
+        return {
+            "result": result,
+            "merged_count": merged_count,
+            "total_input": len(cluster),
+            "total_output": len(result),
+        }
 
     except Exception as e:
         print(f"    [WARN] LLM merge decision failed: {e}, keeping problems separate")
@@ -1751,7 +1402,7 @@ def _cluster_and_merge_problems(
 
     # Step 2: LLM merge decisions for multi-problem clusters
     optimized = []
-    merge_stats = {"merged": 0, "partial": 0, "separate": 0}
+    merge_stats = {"merged": 0, "separate": 0}
 
     for cluster in clusters:
         if len(cluster) == 1:
@@ -1763,17 +1414,17 @@ def _cluster_and_merge_problems(
         print(f"        Analyzing cluster of {len(cluster)} problems...")
         decision = _llm_merge_decision(cluster, validation_cmd, llm)
 
-        if decision["action"] == "merge":
-            merge_stats["merged"] += len(cluster)
-            print(f"          OK MERGED {len(cluster)} problems -> 1")
-        elif decision["action"] == "partial_merge":
-            merge_stats["partial"] += 1
-            print(
-                f"          PARTIAL PARTIAL MERGE: {len(cluster)} -> {len(decision['result'])}"
-            )
+        # Stats and logging
+        total_input = decision["total_input"]
+        total_output = decision["total_output"]
+        merged_count = decision["merged_count"]
+
+        if merged_count > 0:
+            merge_stats["merged"] += total_input - total_output + merged_count
+            print(f"          ✓ MERGED: {total_input} problems -> {total_output} (saved {total_input - total_output})")
         else:
-            merge_stats["separate"] += len(cluster)
-            print(f"          -> KEPT SEPARATE: {decision.get('reasoning', '')[:80]}")
+            merge_stats["separate"] += total_input
+            print(f"          → KEPT SEPARATE: {total_input} problems remain distinct")
 
         optimized.extend(decision["result"])
         time.sleep(0.5)  # Rate limiting
@@ -1781,8 +1432,6 @@ def _cluster_and_merge_problems(
     print(f"      Optimization: {len(problems)} -> {len(optimized)} problems")
     if merge_stats["merged"] > 0:
         print(f"        Merged: {merge_stats['merged']} problems")
-    if merge_stats["partial"] > 0:
-        print(f"        Partial merges: {merge_stats['partial']}")
     if merge_stats["separate"] > 0:
         print(f"        Kept separate: {merge_stats['separate']}")
 
@@ -2048,79 +1697,129 @@ def _cascading_classification_context(chunk: dict[str, Any]) -> str:
     """
     Format classification results for deep analysis.
 
-    Passes the classification decision (cascading vs independent) to deep analysis
-    so it can generate better root cause explanations.
-
-    ALWAYS returns context - for both cascading AND independent changes!
+    Provides complete classification context including:
+    - Files in THIS validation group with their classifications
+    - Cross-validation relationships (if cascading)
+    - Guidance for root cause analysis
     """
     is_cascading = chunk.get("is_cascading", False)
-
-    if not is_cascading:
-        # INDEPENDENT changes - no dependency trigger
-        return """
-## CLASSIFICATION CONTEXT (from classification analysis)
-
-This validation group was identified as INDEPENDENT during classification:
-- is_cascading: False
-- No dependency relationships triggered these changes
-- These are standalone fixes within this validation
-
-IMPORTANT: Analyze these changes as INDEPENDENT problems:
-- root_cause should focus on the DIRECT validation failure (not dependency triggers)
-- how_fixed should explain what was wrong and what was corrected
-- Do NOT look for cascading relationships or dependency triggers
-
-Example for independent change:
-- problem: "Incorrect comparison operator used for literal comparison"
-- root_cause: "Code used 'is' operator for literal comparison which violates Ruff F632 rule requiring '==' for value comparisons"
-- how_fixed: "Replaced 'is' with '==' operator for literal comparison"
-- why_fix_works: "The '==' operator correctly compares values rather than object identity, satisfying Ruff's comparison requirements"
-
-These are direct fixes to validation failures, NOT cascading adaptations!
-"""
-
-    # CASCADING changes - dependency-triggered
     dependency_type = chunk.get("dependency_type", "")
     cascade_explanation = chunk.get("cascade_explanation", "")
+    issue_type = chunk.get("issue_type", "")
+    validation_order = chunk.get("validation_order", "?")
+    files = chunk.get("files", [])
 
-    if not dependency_type or not cascade_explanation:
-        # Has is_cascading=True but missing details - treat as independent
-        return """
-## CLASSIFICATION CONTEXT (from classification analysis)
+    # Build context showing THIS validation group's classification
+    context_parts = [
+        "## CLASSIFICATION CONTEXT",
+        "",
+        f"THIS validation group (validation {validation_order}):",
+        f"  - Classified issue_type: {issue_type}",
+        f"  - Files in this group: {len(files)} file(s)",
+        f"  - Cascading: {is_cascading}",
+    ]
 
-This validation group was marked as cascading but details are incomplete.
-Analyze as INDEPENDENT changes focusing on the direct validation failure.
-"""
+    if is_cascading and dependency_type and cascade_explanation:
+        context_parts.extend([
+            f"  - Dependency type: {dependency_type}",
+            f"  - Cascade relationship: {cascade_explanation}",
+            "",
+            "CRITICAL FOR ROOT CAUSE ANALYSIS:",
+            "- The cascade_explanation tells you which OTHER validation triggered this",
+            "- Analyze BEFORE/AFTER changes to understand the trigger",
+            "- Root cause should explain the DEPENDENCY CHANGE that required adaptation",
+            "- Different files in THIS group may have DIFFERENT root causes if they",
+            "  were triggered by DIFFERENT dependencies!",
+            "",
+            "ANALYSIS PROCESS:",
+            "1. For EACH file in CHANGES, check dependency_context",
+            "2. Identify WHICH dependency (if any) triggered that specific file",
+            "3. Group files by ROOT CAUSE (which dependency triggered them)",
+            "4. Files triggered by DIFFERENT dependencies = SEPARATE problems",
+        ])
+    else:
+        context_parts.extend([
+            "",
+            "INDEPENDENT validation group:",
+            "- No dependency triggers from other validations",
+            "- Root cause should focus on DIRECT validation failure",
+            "- Analyze BEFORE/AFTER to understand what violated the validation rule",
+            "",
+            "ANALYSIS PROCESS:",
+            "1. For EACH file, identify WHY it failed this validation",
+            "2. Group files by ROOT CAUSE",
+            "3. Files with DIFFERENT failure reasons = SEPARATE problems",
+        ])
 
-    return f"""
-## CLASSIFICATION CONTEXT (from classification analysis)
+    return "\n".join(context_parts)
 
-This validation group was identified as CASCADING during classification:
-- is_cascading: True
-- Dependency Type: {dependency_type}
-- Cascading Relationship: {cascade_explanation}
 
-CRITICAL: Use this cascading information in your problem analysis!
+def _build_cross_validation_context(chunk: dict[str, Any], all_validation_groups: list[dict[str, Any]] | None) -> str:
+    """
+    Build context showing related validations with their ACTUAL CHANGES.
 
-When writing root_cause and how_fixed:
-1. Explain the dependency trigger (what changed in the caller/dependency)
-2. Explain the cascading effect (why callees needed to adapt)
-3. Show the cause-effect relationship
+    Provides COMPLETE context by including:
+    - Other validation groups' classifications
+    - Their files and BEFORE/AFTER changes
+    - How they relate to files in THIS validation
+    """
+    if not all_validation_groups:
+        return ""
 
-Example for READS dependency:
-- problem: "Test assertions updated to validate new RST title format"
-- root_cause: "RST documentation files changed from underline-only (====) to overline+underline (####) title format due to docstrfmt 1.7.0 upgrade. Test file exit_code_test.py reads and validates these RST files, requiring test assertions to adapt to the new format."
-- how_fixed: "Updated test assertions in exit_code_test.py to expect and validate the new overline+underline title format instead of underline-only format"
-- why_fix_works: "Test assertions now correctly validate the RST title format enforced by docstrfmt 1.7.0, ensuring documentation formatting compliance"
+    current_validation = chunk.get("validation_order", "?")
+    cascade_explanation = chunk.get("cascade_explanation", "").lower()
 
-Example for CONFIGURES dependency:
-- problem: "Type annotations updated after mypy plugin removal"
-- root_cause: "framework/pyproject.toml removed numpy.typing.mypy_plugin configuration. This plugin previously provided DTypeLike type hints. Without the plugin, mypy no longer recognizes DTypeLike, requiring code to use standard types."
-- how_fixed: "Replaced DTypeLike type annotations with Any in ndarrays_arithmetic.py to maintain mypy compatibility without the numpy typing plugin"
-- why_fix_works: "Any is a standard Python type that works without plugin support, allowing mypy type checking to pass"
+    # Find validations mentioned in cascade explanation
+    related_validations = []
+    for group in all_validation_groups:
+        val_order = group.get("validation_order")
+        if val_order == current_validation:
+            continue  # Skip self
 
-The cascading explanation shows the REAL root cause (dependency change) not just surface symptoms!
-"""
+        # Check if mentioned in cascade explanation
+        if str(val_order) in cascade_explanation:
+            related_validations.append(group)
+
+    if not related_validations:
+        return ""
+
+    context_parts = [
+        "",
+        "## RELATED VALIDATION GROUPS (that may have triggered files in THIS validation)",
+        ""
+    ]
+
+    for group in related_validations[:3]:  # Top 3 most relevant
+        val_order = group.get("validation_order", "?")
+        issue_type = group.get("issue_type", "unknown")
+        files = group.get("files", [])
+
+        context_parts.extend([
+            f"VALIDATION {val_order}:",
+            f"  Classification: {issue_type}",
+            f"  Files ({len(files)}): {', '.join(files[:3])}{'...' if len(files) > 3 else ''}",
+        ])
+
+        # Show sample changes from this validation group to understand what triggered
+        all_changes = group.get("all_changes", [])
+        if all_changes:
+            context_parts.append("  Key changes:")
+            for change in all_changes[:2]:  # Show 2 sample changes
+                file = change.get("file", "")
+                before = _compact_text(change.get("before", ""), 60)
+                after = _compact_text(change.get("after", ""), 60)
+                context_parts.append(f'    {file}: "{before}" → "{after}"')
+
+        context_parts.append("")
+
+    context_parts.extend([
+        "USE THIS TO UNDERSTAND ROOT CAUSES:",
+        "- Check dependency_context to see which files in THIS validation were triggered by which validation above",
+        "- Files triggered by DIFFERENT validations = DIFFERENT root causes = SEPARATE problems",
+        "- Example: If app.py triggered by validation 3, exit_code_test.py triggered by validation 16 → 2 problems",
+    ])
+
+    return "\n".join(context_parts)
 
 
 def _caller_callee_context_for_prompt(contexts: list[dict[str, Any]]) -> str:
@@ -2255,27 +1954,31 @@ Use dependency_file_changes to make this determination accurately!
 """
 
 
-def _build_atomic_prompt(
-    *,
-    ci_context: dict[str, Any],
-    failed_validation_order: Any,
-    validation_order: Any,
-    val_info: dict[str, Any],
+def _full_cascading_context(
     chunk: dict[str, Any],
-    changes_data: dict[str, Any],
+    all_validation_groups: list[dict[str, Any]] | None,
 ) -> str:
-    """Build atomic problem extraction prompt using imported template."""
-    return build_atomic_prompt(
-        ci_context=ci_context,
-        failed_validation_order=failed_validation_order,
-        validation_order=validation_order,
-        val_info=val_info,
-        chunk=chunk,
-        changes_data=changes_data,
-        dependency_context=_dependency_context_for_prompt(chunk),
-        cascading_context=_cascading_classification_context(chunk),
-        strict_json_rules=STRICT_JSON_RULES,
-    )
+    """Classification/cascading context plus related-validation context, combined."""
+    cascading_context = _cascading_classification_context(chunk)
+    cross_validation_context = _build_cross_validation_context(chunk, all_validation_groups)
+    if cross_validation_context:
+        cascading_context = cascading_context + "\n" + cross_validation_context
+    return cascading_context
+
+
+def _repair_problem_id_key(problem: dict[str, Any]) -> None:
+    """
+    Repair the common LLM slip of naming the id key "problem_N" (after the
+    item's position in the list) instead of the literal "problem_id" the
+    schema asks for. Safe to rename: the value gets overwritten with a
+    sequential id downstream regardless (see analyze_validation_groups_with_reasoning).
+    """
+    if "problem_id" in problem:
+        return
+    for key in list(problem.keys()):
+        if re.fullmatch(r"problem_\d+", key):
+            problem["problem_id"] = problem.pop(key)
+            return
 
 
 def _extract_atomic_problems(result: Any) -> list[dict[str, Any]]:
@@ -2291,6 +1994,8 @@ def _extract_atomic_problems(result: Any) -> list[dict[str, Any]]:
 
     valid_problems = []
     for problem in candidates if isinstance(candidates, list) else []:
+        if isinstance(problem, dict):
+            _repair_problem_id_key(problem)
         if isinstance(problem, dict) and "problem_id" in problem:
             valid_problems.append(problem)
         elif isinstance(problem, dict):
@@ -2298,19 +2003,6 @@ def _extract_atomic_problems(result: Any) -> list[dict[str, Any]]:
                 f"      WARNING: Skipping malformed problem (missing problem_id): {list(problem.keys())[:3]}"
             )
     return valid_problems
-
-
-def _atomic_chunk_requires_split(
-    prompt: str, changes: list[dict[str, Any]], model_name: str | None = None
-) -> bool:
-    """Check if chunk needs splitting based on model-aware limits."""
-    model_limits = _get_model_aware_limits(model_name)
-    max_prompt_chars = model_limits["diff_chunk_chars"]  # Use model-aware limit
-    max_changes = 200  # Conservative change limit
-
-    return (len(prompt) > max_prompt_chars or len(changes) > max_changes) and len(
-        changes
-    ) > 1
 
 
 def _split_count_for_atomic_chunk(
@@ -2354,594 +2046,215 @@ def _split_change_chunk_evenly(
     return sub_chunks
 
 
-def _analyze_split_atomic_chunk(
-    *,
-    chunk: dict[str, Any],
-    chunk_label: str,
-    validation_order: Any,
-    val_info: dict[str, Any],
-    ci_context: dict[str, Any],
-    failed_validation_order: Any,
-    llm: Any,
-    depth: int,
-    reason: str,
-    min_changes_to_split: int = 10,
-) -> list[dict[str, Any]]:
+def _fits_model_capacity(
+    prompt: str, chunk: dict[str, Any], model_limits: dict[str, Any]
+) -> tuple[bool, str]:
+    """
+    Single source of truth for whether a chunk's prompt fits model capacity.
+
+    Checks input (50% of input capacity) and output (80% of safe output
+    tokens, estimated from the group's file count) budgets. Returns
+    (True, "") when it fits, else (False, human-readable reason).
+    """
+    prompt_size = len(prompt)
+    input_tokens = prompt_size / 4  # Rough estimate
+    input_threshold = model_limits["atomic_analysis_threshold_chars"] / 4  # 50% of input capacity
+
+    # Derived from all_changes (not all_files): splitting only narrows
+    # all_changes, so all_files would stay stuck at the parent group's full
+    # count and never shrink as chunks get split smaller.
     changes = chunk.get("all_changes", [])
-    change_type = chunk.get("change_type", "unknown")
+    num_files = len({c.get("file", "") for c in changes if c.get("file")})
+    estimated_output_tokens = (num_files * 1000) + 500
+    output_safe_limit = model_limits["output_safe_tokens"] * 0.80  # 80% safety margin
 
-    # Special handling for config changes: they can be split even with fewer changes
-    # because they tend to generate very verbose output
-    effective_min_split = 2 if change_type == "config" else min_changes_to_split
+    print(f"      Input: {prompt_size:,} chars (~{input_tokens:,.0f} tokens) vs {input_threshold:,.0f} threshold")
+    print(f"      Output: ~{estimated_output_tokens:,.0f} tokens ({num_files} files) vs {output_safe_limit:,.0f} limit")
 
-    if len(changes) <= effective_min_split:
-        print(
-            f"      WARNING: Chunk too small to split further ({len(changes)} changes, min={effective_min_split} for {change_type})"
-        )
-        if change_type == "config" and len(changes) > 1:
-            print(
-                "        Config changes hit output limit but cannot split further - trying with reduced prompt"
-            )
-            # For config, try one more time with simplified prompt (reduce CI context)
-            # This is a last-resort fallback
-        print("        Returning empty to avoid infinite recursion")
-        return []
+    input_ok = input_tokens <= input_threshold
+    output_ok = estimated_output_tokens <= output_safe_limit
+    if input_ok and output_ok:
+        return True, ""
 
-    max_recursion_depth = 5
-    if depth >= max_recursion_depth:
-        print(f"      WARNING: Max recursion depth ({max_recursion_depth}) reached")
-        print(
-            f"        Chunk {chunk_label} with {len(changes)} changes cannot be processed"
-        )
-        return []
-
-    model_name = getattr(llm, "model_name", None)
-    model_limits = _get_model_aware_limits(model_name)
-    target_chunk_size = model_limits["diff_chunk_chars"] // 2
-
-    prompt = _build_atomic_prompt(
-        ci_context=ci_context,
-        failed_validation_order=failed_validation_order,
-        validation_order=validation_order,
-        val_info=val_info,
-        chunk=chunk,
-        changes_data=_atomic_changes_data(chunk),
-    )
-    indent = "  " * depth
-    num_splits = _split_count_for_atomic_chunk(len(prompt), len(changes), model_name)
-
-    print(f"      {indent}{reason} for {chunk_label}; smart splitting analysis:")
-    print(f"      {indent}  Current size: {len(prompt)} chars, {len(changes)} changes")
-    print(
-        f"      {indent}  Target size per chunk: {target_chunk_size} chars (model: {model_name or 'default'})"
-    )
-    print(
-        f"      {indent}  Estimated splits needed: {max(2, (len(prompt) // target_chunk_size) + 1)}"
-    )
-    print(f"      {indent}  -> Splitting into {num_splits} sub-chunks")
-
-    sub_chunks = _split_change_chunk_evenly(chunk, num_splits)
-    split_problems = []
-    start_idx = 0
-    for sub_idx, sub_chunk in enumerate(sub_chunks, 1):
-        sub_change_count = len(sub_chunk.get("all_changes", []))
-        end_idx = start_idx + sub_change_count - 1
-        print(
-            f"      {indent}  Sub-chunk {sub_idx}: {sub_change_count} changes (indices {start_idx}-{end_idx})"
-        )
-        print(
-            f"      {indent}-> Processing sub-chunk {sub_idx}/{num_splits} (depth {depth + 1})..."
-        )
-        start_idx = end_idx + 1
-
-        try:
-            sub_problems = _analyze_atomic_chunk(
-                chunk=sub_chunk,
-                chunk_label=f"{chunk_label}.{sub_idx}",
-                validation_order=validation_order,
-                val_info=val_info,
-                ci_context=ci_context,
-                failed_validation_order=failed_validation_order,
-                llm=llm,
-                depth=depth + 1,
-            )
-        except Exception as exc:
-            print(
-                f"      {indent}  FAIL ERROR in sub-chunk {sub_idx}: {type(exc).__name__}: {str(exc)[:200]}"
-            )
-            sub_problems = []
-
-        if not sub_problems:
-            print(f"      {indent}  [WARN] Sub-chunk {sub_idx} returned 0 problems")
-        else:
-            print(
-                f"      {indent}  OK Sub-chunk {sub_idx} returned {len(sub_problems)} problems"
-            )
-        split_problems.extend(sub_problems)
-
-        sleep_time = min(2**depth, 8)
-        if sub_idx < len(sub_chunks):
-            print(f"      {indent}  Waiting {sleep_time}s before next sub-chunk...")
-            time.sleep(sleep_time)
-
-    print(
-        f"      {indent}Split complete: {len(split_problems)} total problems from {num_splits} sub-chunks"
-    )
-    return split_problems
-
-
-def _analyze_atomic_chunk(
-    *,
-    chunk: dict[str, Any],
-    chunk_label: str,
-    validation_order: Any,
-    val_info: dict[str, Any],
-    ci_context: dict[str, Any],
-    failed_validation_order: Any,
-    llm: Any,
-    depth: int = 0,
-) -> list[dict[str, Any]]:
-    changes = chunk.get("all_changes", [])
-    model_name = getattr(llm, "model_name", None)
-    model_limits = _get_model_aware_limits(model_name)
-
-    prompt = _build_atomic_prompt(
-        ci_context=ci_context,
-        failed_validation_order=failed_validation_order,
-        validation_order=validation_order,
-        val_info=val_info,
-        chunk=chunk,
-        changes_data=_atomic_changes_data(chunk),
-    )
-
-    print(f"      Calling LLM for {chunk_label}")
-    print(f"        Prompt size: {len(prompt)} chars, {len(changes)} changes")
-
-    # Use model-aware limits for splitting decision
-    max_prompt_chars = model_limits["diff_chunk_chars"]
-    max_output_tokens = model_limits["output_safe_tokens"]
-
-    if _atomic_chunk_requires_split(prompt, changes, model_name):
-        if len(prompt) > max_prompt_chars:
-            print(
-                f"        Proactive split: prompt too large ({len(prompt)} chars > {max_prompt_chars} limit)"
-            )
-        else:
-            print(
-                f"        Proactive split: too many changes ({len(changes)} changes, max 200)"
-            )
-        result = "SPLIT_REQUIRED"
+    if not input_ok and not output_ok:
+        reason = f"Both input ({input_tokens:,.0f} > {input_threshold:,.0f}) and output ({estimated_output_tokens:,.0f} > {output_safe_limit:,.0f}) exceed limits"
+    elif not input_ok:
+        reason = f"Input tokens ({input_tokens:,.0f}) exceed 50% threshold ({input_threshold:,.0f})"
     else:
-        result = _invoke_json(llm, prompt, max_tokens=max_output_tokens)
+        reason = f"Output tokens ({estimated_output_tokens:,.0f}) exceed safe limit ({output_safe_limit:,.0f})"
+    return False, reason
 
-    if result == "SPLIT_REQUIRED" and len(changes) > 1:
-        return _analyze_split_atomic_chunk(
-            chunk=chunk,
-            chunk_label=chunk_label,
-            validation_order=validation_order,
-            val_info=val_info,
-            ci_context=ci_context,
-            failed_validation_order=failed_validation_order,
-            llm=llm,
-            depth=depth,
-            reason="Token limit",
+
+def _split_chunk_for_capacity(
+    chunk: dict[str, Any], prompt_size: int, model_limits: dict[str, Any], model_name: str | None
+) -> list[dict[str, Any]]:
+    """
+    Single splitting strategy, tried in priority order:
+    1. By change_type (config/dependency/code) when more than one is present.
+    2. Dependency-aware (keeping caller + callees together) when dependency
+       contexts exist.
+    3. Evenly by change count.
+
+    Returns [] when there's only one change left (caller treats as terminal).
+    """
+    changes = chunk.get("all_changes", [])
+    if len(changes) <= 1:
+        return []
+
+    change_type_groups = _group_changes_by_type(changes)
+    non_empty_types = [t for t in ("config", "dependency", "code") if change_type_groups[t]]
+
+    if len(non_empty_types) > 1:
+        print(
+            f"      Splitting by type: {len(change_type_groups['config'])} config, "
+            f"{len(change_type_groups['dependency'])} dependency, "
+            f"{len(change_type_groups['code'])} code"
         )
+        return [
+            {**chunk, "all_changes": change_type_groups[change_type], "change_type": change_type}
+            for change_type in non_empty_types
+        ]
 
-    problems = _extract_atomic_problems(result)
-    if changes and not problems:
-        return _retry_empty_atomic_chunk(
-            chunk=chunk,
-            chunk_label=chunk_label,
-            validation_order=validation_order,
-            val_info=val_info,
-            ci_context=ci_context,
-            failed_validation_order=failed_validation_order,
-            prompt=prompt,
-            llm=llm,
-            depth=depth,
-        )
-    return problems
+    num_splits = _split_count_for_atomic_chunk(prompt_size, len(changes), model_name)
+
+    dependency_contexts = chunk.get("dependency_contexts") or []
+    if dependency_contexts:
+        max_changes_per_chunk = max(1, len(changes) // num_splits)
+        sub_chunks = _chunk_by_dependencies(chunk, dependency_contexts, max_changes_per_chunk)
+        if len(sub_chunks) > 1:
+            return sub_chunks
+
+    return _split_change_chunk_evenly(chunk, num_splits)
 
 
-def _retry_empty_atomic_chunk(
-    *,
+MAX_SPLIT_DEPTH = 5
+
+
+def _build_atomic_prompt_for(
     chunk: dict[str, Any],
-    chunk_label: str,
-    validation_order: Any,
     val_info: dict[str, Any],
     ci_context: dict[str, Any],
     failed_validation_order: Any,
-    prompt: str,
-    llm: Any,
-    depth: int,
-) -> list[dict[str, Any]]:
-    changes = chunk.get("all_changes", [])
-    print(
-        f"      WARNING {chunk_label} has {len(changes)} changes but returned 0 problems"
+) -> str:
+    """Build the atomic-extraction prompt for one chunk (no size logic)."""
+    all_validation_groups = chunk.get("_all_validation_groups")
+    return build_atomic_prompt(
+        ci_context=ci_context,
+        failed_validation_order=failed_validation_order,
+        val_info=val_info,
+        chunk=chunk,
+        changes_data=_atomic_changes_data(chunk),
+        dependency_context=_dependency_context_for_prompt(chunk),
+        cascading_context=_full_cascading_context(chunk, all_validation_groups),
+        strict_json_rules=STRICT_JSON_RULES,
+        all_validation_groups=all_validation_groups,
     )
 
+
+def _split_chunk_and_requeue(
+    chunk: dict[str, Any],
+    prompt_size: int,
+    depth: int,
+    model_limits: dict[str, Any],
+    model_name: str | None,
+    queue: list[tuple[dict[str, Any], int]],
+) -> None:
+    """Split a chunk and push each piece back onto the work queue at depth+1."""
+    for sub_chunk in _split_chunk_for_capacity(chunk, prompt_size, model_limits, model_name):
+        sub_chunk["_all_validation_groups"] = chunk.get("_all_validation_groups")
+        sub_chunk.setdefault("dependency_contexts", chunk.get("dependency_contexts", []))
+        sub_chunk.setdefault("change_type", chunk.get("change_type", "unknown"))
+        queue.append((sub_chunk, depth + 1))
+
+
+def _save_debug_prompt(chunk: dict[str, Any], chunk_label: str, prompt: str) -> None:
     debug_file = (
         PROJECT_ROOT
         / "data"
         / "trs"
-        / f"debug_prompt_val{validation_order}_{chunk_label.replace('.', '_')}.txt"
+        / f"debug_prompt_val{chunk.get('validation_order', '?')}_{chunk_label.replace('.', '_')}.txt"
     )
     debug_file.parent.mkdir(parents=True, exist_ok=True)
     debug_file.write_text(prompt, encoding="utf-8")
-    print(f"        Saved prompt to: {debug_file}")
-
-    if len(changes) <= 5 or depth >= 5:
-        if len(changes) <= 5:
-            print(
-                f"      WARNING: Chunk too small to split further ({len(changes)} changes)"
-            )
-        return []
-
-    print(
-        f"      {'  ' * depth}RETRY: Malformed response, applying smart split strategy"
-    )
-    return _analyze_split_atomic_chunk(
-        chunk=chunk,
-        chunk_label=f"{chunk_label}.retry",
-        validation_order=validation_order,
-        val_info=val_info,
-        ci_context=ci_context,
-        failed_validation_order=failed_validation_order,
-        llm=llm,
-        depth=depth,
-        reason="RETRY",
-        min_changes_to_split=5,
-    )
+    print(f"      Saved debug: {debug_file}")
 
 
-def _normalize_problem_defaults(
-    problem: dict[str, Any],
+def _build_atomic_problems(
     *,
-    validation_order: Any,
-    val_group: dict[str, Any],
-) -> dict[str, Any]:
-    problem["validation_order"] = problem.get("validation_order") or validation_order
-    problem["validation_cmd"] = problem.get("validation_cmd") or val_group.get(
-        "validation_cmd", ""
-    )
-    problem["failure_type"] = problem.get("failure_type") or val_group.get(
-        "failure_type", ""
-    )
-    problem["issue_type"] = problem.get("issue_type") or val_group.get("issue_type", "")
-    problem["problem_type"] = problem.get("problem_type") or val_group.get(
-        "visibility", ""
-    )
-    if not problem.get("problem_type"):
-        problem["problem_type"] = "primary"
-    problem["is_cascading"] = bool(
-        problem.get("is_cascading", val_group.get("is_cascading", False))
-    )
-    problem["dependency_type"] = str(
-        problem.get("dependency_type", val_group.get("dependency_type", "")) or ""
-    )
-    problem["cascade_explanation"] = str(
-        problem.get("cascade_explanation", val_group.get("cascade_explanation", ""))
-        or ""
-    )
-    if not isinstance(problem.get("affected_files"), list):
-        problem["affected_files"] = []
-    problem["affected_files"] = list(
-        dict.fromkeys(
-            str(file_path)
-            for file_path in problem.get("affected_files", [])
-            if file_path
-        )
-    )
-    for key in ["problem", "root_cause", "how_fixed", "why_fix_works"]:
-        problem[key] = str(problem.get(key, "") or "").strip()
-    if not problem["why_fix_works"] and problem.get("why_fixed_works"):
-        problem["why_fix_works"] = str(problem.get("why_fixed_works") or "").strip()
-    return problem
-
-
-def _problem_merge_summaries(
-    problems: list[dict[str, Any]], val_group: dict[str, Any]
-) -> list[dict[str, Any]]:
-    return [
-        {
-            "local_id": idx,
-            "problem_type": problem.get("problem_type", ""),
-            "validation_cmd": problem.get(
-                "validation_cmd", val_group.get("validation_cmd", "")
-            ),
-            "failure_type": problem.get(
-                "failure_type", val_group.get("failure_type", "")
-            ),
-            "issue_type": problem.get("issue_type", ""),
-            "problem": _compact_text(problem.get("problem", ""), 600),
-            "root_cause": _compact_text(problem.get("root_cause", ""), 600),
-            "how_fixed": _compact_text(problem.get("how_fixed", ""), 600),
-            "why_fix_works": _compact_text(problem.get("why_fix_works", ""), 600),
-            "is_cascading": problem.get("is_cascading", False),
-            "dependency_type": problem.get("dependency_type", ""),
-            "cascade_explanation": _compact_text(
-                problem.get("cascade_explanation", ""), 400
-            ),
-            "affected_files": problem.get("affected_files", [])[:12],
-            "affected_files_count": len(problem.get("affected_files", [])),
-        }
-        for idx, problem in enumerate(problems, 1)
-    ]
-
-
-def _build_validation_merge_prompt(
-    *,
-    summaries: list[dict[str, Any]],
-    validation_order: Any,
-    val_group: dict[str, Any],
-    summary_limit: int = VALIDATION_MERGE_MAX_PROMPT_CHARS - 8000,
-) -> str:
-    return f"""Merge atomic problems for one validation group.
-
-VALIDATION:
-- validation_order: {validation_order}
-- validation_cmd: {val_group.get("validation_cmd", "")}
-- failure_type: {val_group.get("failure_type", "")}
-
-CHUNK-LEVEL PROBLEMS:
-{_compact_json(summaries, summary_limit)}
-
-DEPENDENCY CONTEXT:
-{_compact_json(val_group.get("dependency_contexts", []), 6000)}
-
-TASK:
-Analyze the problems above and merge those that represent the same underlying issue and same general repair strategy..
-Return clean atomic problems that are distinct and actionable.
-
-CONTEXT-AWARE MERGE ANALYSIS:
-
-Step 1: UNDERSTAND what each problem is actually about
-- Read the root_cause to understand WHY it failed
-- Read the how_fixed to understand WHAT was changed
-- Read the why_fix_works to understand the MECHANISM
-
-Step 2: COMPARE problems semantically (not just by keywords)
-Ask: "Are these the SAME issue appearing in multiple places, or DIFFERENT issues?"
-
-Consider:
-a) ROOT CAUSE Equivalence:
-   - Do they fail for the same underlying reason?
-   - Would explaining one root cause cover both problems?
-   - Are they consequences of the same missing/wrong pattern?
-
-   MERGE if: The "why it failed" is fundamentally the same
-   SEPARATE if: They fail for different reasons, even if symptoms look similar
-
-b) REPAIR Strategy Equivalence:
-   - Do they get fixed the same way?
-   - Would the same change pattern apply to all affected files?
-   - Does one fix require different reasoning/approach than the other?
-
-   MERGE if: The "how to fix" follows the same logic/approach
-   SEPARATE if: They require different types of changes (even if touching similar files)
-
-c) PATTERN Recognition:
-   - Is this an issue that repeats across multiple locations?
-   - Would fixing all instances require the same understanding?
-   - Are these independent issues that happen to coexist?
-
-   MERGE if: It's the same pattern manifesting in multiple places
-   SEPARATE if: They're coincidentally similar but independently occurring
-
-Step 3: DECIDE based on semantic analysis
-
-MERGE when:
--> All three (root cause + repair + pattern) indicate the SAME underlying issue
--> Combining them into one problem makes conceptual sense
--> A developer would think of these as "the same problem in multiple places"
-
-KEEP SEPARATE when:
--> ANY of the three indicates DIFFERENT issues
--> Merging would confuse two distinct problems
--> A developer would need different mental models to understand each
-
-Step 4: QUALITY CHECK your decision
-
-Test: "If I explain problem A to a developer, does that explanation cover problem B?"
-- If YES -> they're likely the same issue -> MERGE
-- If NO -> they're different issues -> KEEP SEPARATE
-
-IMPORTANT PRINCIPLES:
-
-1. Analyze SEMANTICS, not syntax
-   - Don't merge just because keywords match
-   - Don't separate just because files differ
-   - Focus on: "Is this fundamentally the same issue?"
-
-2. Think like a developer
-   - Would they group these mentally?
-   - Would fixing one give insight to fix the other?
-   - Are these the same bug/requirement manifesting differently?
-
-3. Handle ANY failure/fix type
-   - These principles work for linting, typing, logic, config, dependencies, etc.
-   - No hardcoded patterns - analyze what's actually there
-   - Trust the content of root_cause, how_fixed, why_fix_works
-
-4. Preserve information when merging
-   - Combine all variants in the merged fields
-   - Keep all affected_files from merged problems
-   - Don't lose detail - synthesize it
-
-OUTPUT RULES:
-1. Return distinct atomic problems (merged or separate based on analysis above)
-2. Each problem should be conceptually atomic (one root cause -> one fix approach)
-3. Keep problem, root_cause, how_fixed, why_fix_works to 1-2 sentences each
-4. Combine affected_files from merged problems
-5. Be concise but preserve technical reasoning
-6. Do not mention chunks, merging process, or meta-commentary
-
-OUTPUT FORMAT:
-{{
-  "atomic_problems": [
-    {{
-      "problem_id": 1,
-      "problem_type": "primary or hidden",
-      "validation_order": {validation_order},
-      "validation_cmd": {json.dumps(val_group.get("validation_cmd", ""))},
-      "failure_type": {json.dumps(val_group.get("failure_type", ""))},
-      "issue_type": "",
-      "problem": "",
-      "root_cause": "",
-      "how_fixed": "",
-      "why_fix_works": "",
-      "affected_files": [],
-      "is_cascading": {json.dumps(val_group.get("is_cascading", False))},
-      "dependency_type": {json.dumps(val_group.get("dependency_type", ""))},
-      "cascade_explanation": {json.dumps(val_group.get("cascade_explanation", ""))},
-      "is_merged": true,
-      "merged_from": [1, 2]
-    }}
-  ]
-}}
-
-{STRICT_JSON_RULES}
-"""
-
-
-def _merge_validation_problems(
-    problems: list[dict[str, Any]],
-    *,
-    validation_order: Any,
-    val_group: dict[str, Any],
+    chunk: dict[str, Any],
+    val_info: dict[str, Any],
+    ci_context: dict[str, Any],
+    failed_validation_order: Any,
     llm: Any,
-) -> list[dict[str, Any]]:
-    if len(problems) <= 1:
-        return problems
-
-    problems = _deterministic_merge_repeated_problem_candidates(problems)
-    if len(problems) <= 1:
-        return problems
-
-    model_limits = _get_model_aware_limits(getattr(llm, "model_name", None))
-    merge_prompt_limit = max(
-        VALIDATION_MERGE_MAX_PROMPT_CHARS, model_limits["diff_chunk_chars"] // 4
-    )
-    merge_output_tokens = min(model_limits["output_safe_tokens"], 16_000)
-
-    prompt = _build_validation_merge_prompt(
-        summaries=_problem_merge_summaries(problems, val_group),
-        validation_order=validation_order,
-        val_group=val_group,
-        summary_limit=max(8000, merge_prompt_limit - 12000),
-    )
-
-    if len(prompt) > merge_prompt_limit:
-        print(
-            "      WARNING Validation merge prompt too large; using chunk-level problems"
-        )
-        return problems
-
-    result = _invoke_json(llm, prompt, max_tokens=merge_output_tokens)
-    merged = _extract_atomic_problems(result)
-    if not merged:
-        print("      WARNING Validation-level merge failed; using chunk-level problems")
-        return problems
-    if len(merged) == 1 and not merged[0].get("affected_files"):
-        all_files = []
-        for problem in problems:
-            all_files.extend(problem.get("affected_files", []))
-        merged[0]["affected_files"] = list(dict.fromkeys(all_files))
-    return merged
-
-
-def _deterministic_merge_repeated_problem_candidates(
-    problems: list[dict[str, Any]],
+    model_limits: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """
-    Pre-merge obvious repeated chunk artifacts before LLM merge.
+    Build atomic problems for one validation group.
 
-    This is intentionally narrow: same validation/failure/issue/cascade signature
-    and a formatter/linter/docs-style issue family. The LLM still handles less
-    obvious semantic merges afterward.
+    Works through a queue of chunks, starting with the whole group. Each
+    chunk is measured against model capacity: if it fits, it's sent to the
+    LLM; if not (and it still has more than one change, under
+    MAX_SPLIT_DEPTH), it's split and its pieces are requeued instead. A
+    chunk is also split and requeued if the LLM times out or returns
+    nothing for non-empty changes. A chunk that can no longer be split is
+    sent to the LLM regardless of size.
     """
-    if len(problems) <= 1:
-        return problems
+    model_name = getattr(llm, "model_name", None)
 
-    buckets: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-    for problem in problems:
-        key = (
-            problem.get("validation_order"),
-            problem.get("validation_cmd"),
-            str(problem.get("failure_type", "")).lower(),
-            str(problem.get("issue_type", "")).lower(),
-            bool(problem.get("is_cascading", False)),
-            str(problem.get("dependency_type", "")).lower(),
-            problem.get("problem_type", ""),
-        )
-        buckets.setdefault(key, []).append(problem)
+    dependency_contexts = chunk.get("dependency_contexts", [])
+    if dependency_contexts:
+        print(f"      Including {len(dependency_contexts)} dependency relationship(s)")
 
-    merged: list[dict[str, Any]] = []
-    for group in buckets.values():
-        if len(group) == 1 or not _is_repeated_style_problem(group):
-            merged.extend(group)
+    queue: list[tuple[dict[str, Any], int]] = [(chunk, 0)]
+    all_problems: list[dict[str, Any]] = []
+    processed = 0
+
+    while queue:
+        current, depth = queue.pop(0)
+        changes = current.get("all_changes", [])
+        if not changes:
             continue
 
-        all_files = []
-        merged_from = []
-        for item in group:
-            all_files.extend(item.get("affected_files", []))
-            merged_from.append(item.get("problem_id"))
+        prompt = _build_atomic_prompt_for(current, val_info, ci_context, failed_validation_order)
+        fits, reason = _fits_model_capacity(prompt, current, model_limits)
+        can_split = len(changes) > 1 and depth < MAX_SPLIT_DEPTH
 
-        base = group[0].copy()
-        base["affected_files"] = list(dict.fromkeys(all_files))
-        base["is_merged"] = True
-        base["merged_from"] = [item for item in merged_from if item is not None]
-        base["merge_count"] = len(group)
-        if len(group) > 1:
-            scope = _file_scope_summary(base["affected_files"])
-            base["problem"] = _compact_text(
-                f"{base.get('problem', '')} This repeated pattern affects {len(base['affected_files'])} files across {scope}.",
-                900,
-            )
-            base["how_fixed"] = _compact_text(
-                f"{base.get('how_fixed', '')} The same repair pattern was applied across all affected files.",
-                900,
-            )
-        merged.append(base)
+        if not fits:
+            if can_split:
+                print(f"      ✗ {reason} - splitting ({len(changes)} changes)")
+                _split_chunk_and_requeue(current, len(prompt), depth, model_limits, model_name, queue)
+                continue
+            print(f"      ✗ {reason} - cannot split further, using as-is ({len(changes)} change(s))")
 
-    return merged
+        processed += 1
+        label = f"chunk_{processed}"
+        print(f"      Calling LLM for {label} ({len(changes)} changes)...")
 
+        try:
+            result = _invoke_json(llm, prompt, max_tokens=model_limits["output_safe_tokens"])
 
-def _is_repeated_style_problem(group: list[dict[str, Any]]) -> bool:
-    text = " ".join(
-        str(item.get(field, "")).lower()
-        for item in group
-        for field in ["validation_cmd", "failure_type", "issue_type", "problem"]
-    )
-    return any(
-        marker in text
-        for marker in [
-            "format",
-            "formatter",
-            "docstrfmt",
-            "rst",
-            "ruff",
-            "lint",
-            "black",
-            "mdformat",
-        ]
-    )
+            problems = [] if result == "SPLIT_REQUIRED" else _extract_atomic_problems(result)
+        except Exception as exc:
+            print(f"      ✗ {label} ERROR: {type(exc).__name__}: {str(exc)[:200]}")
+            result, problems = "SPLIT_REQUIRED", []
 
+        needs_retry = result == "SPLIT_REQUIRED" or (changes and not problems)
+        if needs_retry and can_split:
+            if result != "SPLIT_REQUIRED":
+                print(f"      {label}: 0 problems for {len(changes)} changes - saving debug prompt")
+                _save_debug_prompt(current, label, prompt)
+            print(f"      {label}: retrying with split")
+            _split_chunk_and_requeue(current, len(prompt), depth, model_limits, model_name, queue)
+            continue
 
-def _file_scope_summary(files: list[str]) -> str:
-    dirs = sorted(
-        {
-            str(file_path).rsplit("/", 1)[0]
-            for file_path in files
-            if "/" in str(file_path)
-        }
-    )
-    if not dirs:
-        return "the changed files"
-    if len(dirs) == 1:
-        return dirs[0]
-    return ", ".join(dirs[:3]) + (" and related directories" if len(dirs) > 3 else "")
+        if problems:
+            print(f"      ✓ {label}: {len(problems)} problem(s) extracted")
+        all_problems.extend(problems)
+
+        if queue:
+            time.sleep(min(2 ** depth, 8))  # Rate limiting between LLM calls
+
+    return all_problems
 
 
 def _group_changes_by_type(
@@ -2952,6 +2265,13 @@ def _group_changes_by_type(
         "dependency": [],
         "code": [],
     }
+
+    # Debug: Show file paths being classified
+    if changes:
+        print(f"      [DEBUG] Classifying {len(changes)} changes...")
+        sample_files = list(set([c.get("file", "") for c in changes[:5]]))
+        print(f"      [DEBUG] Sample files: {sample_files}")
+
     for change in changes:
         file_path = change.get("file", "")
         before = str(change.get("before", "")).lower()
@@ -2959,78 +2279,54 @@ def _group_changes_by_type(
 
         if file_path.endswith((".toml", ".yaml", ".yml", ".json", ".ini", ".cfg")):
             groups["config"].append(change)
+            print(f"      [DEBUG] Config: {file_path}")
         elif any(term in before or term in after for term in ["import", "package"]):
             groups["dependency"].append(change)
+            print(f"      [DEBUG] Dependency: {file_path}")
         else:
             groups["code"].append(change)
+            # Only print first few code files to avoid spam
+            if len(groups["code"]) <= 3:
+                print(f"      [DEBUG] Code: {file_path}")
+
     return groups
 
 
-def _analyze_change_type_group(
-    *,
+def _filter_dependency_contexts_for_group(
     val_group: dict[str, Any],
-    change_type: str,
-    group_changes: list[dict[str, Any]],
-    validation_order: Any,
-    val_info: dict[str, Any],
-    ci_context: dict[str, Any],
-    failed_validation_order: Any,
-    llm: Any,
-) -> list[dict[str, Any]]:
-    print(
-        f"      Processing {change_type.upper()} group ({len(group_changes)} changes)..."
-    )
-    group_chunk = {
-        **val_group,
-        "all_changes": group_changes,
-        "change_type": change_type,
-    }
-    test_prompt = _build_atomic_prompt(
-        ci_context=ci_context,
-        failed_validation_order=failed_validation_order,
-        validation_order=validation_order,
-        val_info=val_info,
-        chunk=group_chunk,
-        changes_data=_atomic_changes_data(group_chunk),
-    )
+) -> dict[str, Any]:
+    """
+    Filter dependency contexts to ONLY include dependencies involving files in THIS group.
 
-    if len(test_prompt) < ATOMIC_ANALYSIS_MAX_PROMPT_CHARS:
-        chunk_problems = _analyze_atomic_chunk(
-            chunk=group_chunk,
-            chunk_label=f"{change_type}_group",
-            validation_order=validation_order,
-            val_info=val_info,
-            ci_context=ci_context,
-            failed_validation_order=failed_validation_order,
-            llm=llm,
-        )
-        print(f"        {change_type.upper()}: 1 chunk, {len(chunk_problems)} problems")
-        time.sleep(1)
-        return chunk_problems
+    This ensures we only pass relevant dependency info to atomic analysis,
+    keeping token usage focused on what matters for this validation group.
+    """
+    group_files = set(val_group.get("all_files", []))
+    all_dep_contexts = val_group.get("dependency_contexts", [])
 
-    print(f"        {change_type.upper()} group too large, splitting...")
-    problems = []
-    sub_chunks = _chunk_validation_changes(
-        group_chunk,
-        model_name=getattr(llm, "model_name", None),
-    )
-    for sub_idx, sub_chunk in enumerate(sub_chunks, 1):
-        sub_chunk["change_type"] = change_type
-        chunk_problems = _analyze_atomic_chunk(
-            chunk=sub_chunk,
-            chunk_label=f"{change_type}_chunk_{sub_idx}_of_{len(sub_chunks)}",
-            validation_order=validation_order,
-            val_info=val_info,
-            ci_context=ci_context,
-            failed_validation_order=failed_validation_order,
-            llm=llm,
-        )
-        problems.extend(chunk_problems)
-        print(
-            f"        {change_type.upper()} chunk {sub_idx}/{len(sub_chunks)}: {len(chunk_problems)} problems"
-        )
-        time.sleep(1)
-    return problems
+    if not group_files or not all_dep_contexts:
+        return val_group
+
+    filtered_contexts = []
+    for ctx in all_dep_contexts:
+        caller = ctx.get("caller", {})
+        callees = ctx.get("callees", [])
+
+        caller_file = caller.get("file", "")
+        callee_files = {c.get("file", "") for c in callees}
+
+        # Include if caller OR any callee is in THIS group's files
+        if caller_file in group_files or group_files.intersection(callee_files):
+            filtered_contexts.append(ctx)
+
+    # Create filtered copy
+    filtered_group = val_group.copy()
+    filtered_group["dependency_contexts"] = filtered_contexts
+
+    if filtered_contexts:
+        print(f"      Filtered dependency contexts: {len(all_dep_contexts)} → {len(filtered_contexts)} relevant")
+
+    return filtered_group
 
 
 def _analyze_one_validation_group(
@@ -3042,63 +2338,31 @@ def _analyze_one_validation_group(
     failed_validation_order: Any,
     llm: Any,
 ) -> list[dict[str, Any]]:
+    """
+    Analyze one validation group into atomic problems.
+
+    The group is already scoped by validation_cmd + failure_type and carries
+    its own changes and dependency context (from merge_chunks_by_validation);
+    _build_atomic_problems handles capacity checks and splitting internally.
+    """
     print(f"    Validation {val_order}: {val_group.get('validation_cmd', '')}")
+
     validation_order = val_group.get("validation_order", val_order)
     val_info = _validation_info(validation_sequence, validation_order)
-    change_type_groups = _group_changes_by_type(val_group.get("all_changes", []))
+    filtered_group = _filter_dependency_contexts_for_group(val_group)
+    model_limits = _get_model_aware_limits(getattr(llm, "model_name", None))
 
-    print(
-        f"      Grouped: {len(change_type_groups['config'])} config, {len(change_type_groups['dependency'])} dependency, {len(change_type_groups['code'])} code changes"
-    )
-
-    validation_problems = []
-    for change_type in ["config", "dependency", "code"]:
-        group_changes = change_type_groups[change_type]
-        if not group_changes:
-            continue
-        validation_problems.extend(
-            _analyze_change_type_group(
-                val_group=val_group,
-                change_type=change_type,
-                group_changes=group_changes,
-                validation_order=validation_order,
-                val_info=val_info,
-                ci_context=ci_context,
-                failed_validation_order=failed_validation_order,
-                llm=llm,
-            )
-        )
-
-    validation_problems = [
-        _normalize_problem_defaults(
-            problem, validation_order=validation_order, val_group=val_group
-        )
-        for problem in validation_problems
-    ]
-    validation_problems = _merge_validation_problems(
-        validation_problems,
-        validation_order=validation_order,
-        val_group=val_group,
+    all_problems = _build_atomic_problems(
+        chunk=filtered_group,
+        val_info=val_info,
+        ci_context=ci_context,
+        failed_validation_order=failed_validation_order,
         llm=llm,
+        model_limits=model_limits,
     )
 
-    if len(validation_problems) > 1:
-        print(f"      Optimizing {len(validation_problems)} problems via clustering...")
-        validation_problems = _cluster_and_merge_problems(
-            validation_problems,
-            validation_cmd=val_group.get("validation_cmd", ""),
-            llm=llm,
-            similarity_threshold=0.5,
-        )
-
-    validation_problems = [
-        _normalize_problem_defaults(
-            problem, validation_order=validation_order, val_group=val_group
-        )
-        for problem in validation_problems
-    ]
-    print(f"      Validation {val_order}: {len(validation_problems)} merged problems")
-    return validation_problems
+    print(f"      ✓ Total: {len(all_problems)} problem(s)")
+    return all_problems
 
 
 def analyze_validation_groups_with_reasoning(
@@ -3122,11 +2386,32 @@ def analyze_validation_groups_with_reasoning(
     failed_validation_order = _first_failed_validation_order(groups_data)
     print(f"  First failed validation: {failed_validation_order}")
 
+    # Build summary of all validation groups for context
+    # Include classification info AND changes so atomic analysis can see
+    # what triggered files in this validation from other validations
+    all_validation_groups_summary = []
+    for val_order, val_group in sorted(groups_data.items(), key=_validation_group_sort_key):
+        all_validation_groups_summary.append({
+            "validation_order": val_group.get("validation_order", val_order),
+            "validation_cmd": val_group.get("validation_cmd", ""),
+            "failure_type": val_group.get("failure_type", ""),
+            "issue_type": val_group.get("issue_type", ""),
+            "files": val_group.get("all_files", []),
+            "all_changes": val_group.get("all_changes", []),  # Include actual changes!
+            "is_cascading": val_group.get("is_cascading", False),
+            "dependency_type": val_group.get("dependency_type", ""),
+            "cascade_explanation": val_group.get("cascade_explanation", ""),
+        })
+
     all_problems = []
     next_id = 1
     for val_order, val_group in sorted(
         groups_data.items(), key=_validation_group_sort_key
     ):
+        # SIMPLER: Attach all_validation_groups to val_group once
+        # Then it flows down naturally with the chunk
+        val_group["_all_validation_groups"] = all_validation_groups_summary
+
         validation_problems = _analyze_one_validation_group(
             val_order=val_order,
             val_group=val_group,
@@ -3419,154 +2704,12 @@ def _split_structured_chunk_by_size(
     return result_chunks
 
 
-def _split_structured_chunk(
-    chunk: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """
-    DEPRECATED: Simple half-split without size awareness.
-    Use _split_structured_chunk_by_size for smarter splitting.
-
-    Kept for backward compatibility.
-    """
-    files = chunk.get("files", [])
-    files_list = list(files.items()) if isinstance(files, dict) else list(files)
-    half = len(files_list) // 2
-
-    if isinstance(files, dict):
-        chunk1_files = dict(files_list[:half])
-        chunk2_files = dict(files_list[half:])
-    else:
-        chunk1_files = files_list[:half]
-        chunk2_files = files_list[half:]
-
-    def change_count(file_records: Any) -> int:
-        records = (
-            file_records.values() if isinstance(file_records, dict) else file_records
-        )
-        return sum(len(file_info.get("changes", [])) for file_info in records)
-
-    def with_metadata(chunk_files: Any) -> dict[str, Any]:
-        return {
-            "dependency_cluster": chunk.get("dependency_cluster"),
-            "dependency_explanation": chunk.get("dependency_explanation"),
-            "is_partial_cluster": chunk.get("is_partial_cluster", True),
-            "files": chunk_files,
-            "total_files": len(chunk_files),
-            "total_changes": change_count(chunk_files),
-        }
-
-    return (
-        with_metadata(chunk1_files),
-        with_metadata(chunk2_files),
-    )
-
-
 def _is_token_limit_error(error: Exception) -> bool:
     error_msg = str(error).lower()
     return any(
         keyword in error_msg
         for keyword in ["token", "length", "limit", "too long", "maximum"]
     )
-
-
-def _format_caller_callee_for_classification(dependency_contexts: list[dict]) -> str:
-    """
-    Format caller → callee dependency contexts for classification prompt.
-
-    This helps LLM understand relationships between files during classification,
-    so it can decide if related files should be grouped together or kept separate.
-    """
-    if not dependency_contexts:
-        return ""
-
-    formatted_deps = []
-    for ctx in dependency_contexts[:8]:  # Limit to 8 contexts
-        caller = ctx.get("caller", {})
-        callees = ctx.get("callees", [])
-        dep_type = ctx.get("dependency_type", "UNKNOWN")
-
-        if not caller or not callees:
-            continue
-
-        caller_file = caller.get("file", "unknown")
-        caller_changes = caller.get("changes", [])
-        callee_files = [c.get("file", "unknown") for c in callees[:10]]  # Limit callees
-
-        # Format changes summary
-        caller_change_summary = "no changes"
-        if caller_changes:
-            first_change = caller_changes[0]
-            before = _compact_text(first_change.get("before", ""), 100)
-            after = _compact_text(first_change.get("after", ""), 100)
-            caller_change_summary = f'"{before}" → "{after}"'
-
-        formatted_deps.append(f"""
-DEPENDENCY {len(formatted_deps) + 1}:
-  Type: {dep_type}
-  Caller: {caller_file}
-    Role: {caller.get("role", "unknown")}
-    Changes: {caller_change_summary}
-  Callees ({len(callee_files)} files):
-    {", ".join(callee_files[:5])}{"..." if len(callee_files) > 5 else ""}
-
-  Meaning: Caller {dep_type.lower()}s callees
-  Example: If caller changed tool config → callees may adapt to new tool behavior
-""")
-
-    if not formatted_deps:
-        return ""
-
-    return f"""
-## DEPENDENCY CONTEXT (Caller → Callee Relationships)
-
-This chunk contains files with DIRECT CODE DEPENDENCIES:
-
-{"".join(formatted_deps)}
-
-CRITICAL CLASSIFICATION GUIDANCE:
-
-1. **CASCADING Changes** (analyze together):
-   - Caller change TRIGGERED callee adaptations
-   - Example: config upgraded docstrfmt → RST files reformatted
-   - Decision: Classify as ONE problem spanning validations OR assign to primary validation
-
-2. **INDEPENDENT Changes** (analyze separately):
-   - Caller changed, but NOT in a way affecting callees
-   - Example: config changed mdformat, but current files are Black-related
-   - Decision: Classify separately by their actual validation
-
-3. **Test ↔ Code Dependencies**:
-   - If test file READS/TESTS code/docs files, and BOTH changed:
-     * Check: Did code/docs change trigger test update?
-     * If yes: Classify together (cascading)
-     * If no: Classify separately (independent fixes)
-
-4. **Config → Files Dependencies**:
-   - If config CONFIGURES files (tool versions, formatters):
-     * Check config changes: What tool/version changed?
-     * Check if that change affects current validation
-     * Classify based on actual relationship
-
-EXAMPLE DECISION PROCESS:
-
-Scenario: exit_code_test.py (test) READS ref-exit-codes/*.rst (docs)
-- Caller: exit_code_test.py
-- Callees: ref-exit-codes/*.rst
-- Both changed in same commit
-
-Analysis:
-1. What changed in caller? Test assertion updated
-2. What changed in callees? RST title format changed
-3. Relationship: Test validates RST structure
-4. Conclusion: CASCADING - RST format change required test update
-
-Classification:
-- Option A: ONE problem (docstrfmt upgrade with test adaptation)
-- Option B: Assign to primary validation (validation 17 - docstrfmt) with note about test
-
-Choose the option that best matches the ground truth repair intent.
-"""
-
 
 def classify_chunk_with_fallback(
     chunk: dict,
@@ -3707,13 +2850,15 @@ def _format_caller_callee_for_dependency_classification(
     dependency_contexts: list[dict],
 ) -> str:
     """
-    Format caller → callee contexts for dependency-focused classification.
+    Format caller → callee contexts for semantic dependency analysis.
 
-    COMPACT format to avoid token bloat:
-    - Shows caller with 1-2 sample changes
-    - Lists callees (first 3 files + count)
-    - Shows 1 representative callee change
-    - Avoids duplicating full changes (already in chunk)
+    Provides BEFORE/AFTER context for both caller and callees to enable
+    semantic understanding of cascading relationships.
+
+    Shows:
+    - All significant caller changes (up to 5)
+    - Pattern analysis across callees (common changes)
+    - BEFORE/AFTER context for impact analysis
     """
     formatted = []
 
@@ -3729,50 +2874,85 @@ def _format_caller_callee_for_dependency_classification(
         caller_changes = caller.get("changes", [])
         caller_role = caller.get("role", "unknown")
 
-        # Show 1-2 sample caller changes (compact)
-        caller_change_summary = ""
-        if caller_changes:
-            ch = caller_changes[0]  # Just first change
-            before = _compact_text(ch.get("before", ""), 60)
-            after = _compact_text(ch.get("after", ""), 60)
-            caller_change_summary = (
-                f'    Sample: Line {ch.get("line")}: "{before}" → "{after}"'
+        # Show up to 5 significant caller changes (for semantic context)
+        caller_change_details = []
+        for ch in caller_changes[:5]:
+            line_num = ch.get("line", "?")
+            before = _compact_text(ch.get("before", ""), 100)
+            after = _compact_text(ch.get("after", ""), 100)
+            caller_change_details.append(
+                f'    Line {line_num}: "{before}" → "{after}"'
             )
 
-        # Compact callee list: First 3 files + count
-        callee_files_list = []
-        for callee in callees[:3]:  # First 3 only
-            callee_files_list.append(
-                f"    - {callee.get('file', 'unknown')} ({callee.get('role', 'unknown')})"
-            )
+        if len(caller_changes) > 5:
+            caller_change_details.append(f"    ... and {len(caller_changes) - 5} more changes")
 
+        caller_changes_str = "\n".join(caller_change_details) if caller_change_details else "    No changes shown"
+
+        # Analyze PATTERN across callees (first 5 detailed, then summary)
+        callee_pattern_analysis = []
+
+        # Show first 3 callees in detail
+        for callee in callees[:3]:
+            callee_file = callee.get("file", "unknown")
+            callee_role = callee.get("role", "unknown")
+            callee_changes = callee.get("changes", [])
+
+            if callee_changes:
+                # Show first 2 changes from this callee
+                for ch in callee_changes[:2]:
+                    before = _compact_text(ch.get("before", ""), 80)
+                    after = _compact_text(ch.get("after", ""), 80)
+                    callee_pattern_analysis.append(
+                        f'    {callee_file} ({callee_role}) Line {ch.get("line", "?")}: "{before}" → "{after}"'
+                    )
+
+        # Detect common patterns across ALL callees
         if len(callees) > 3:
-            callee_files_list.append(
-                f"    - ... and {len(callees) - 3} more files with similar changes"
-            )
+            callee_pattern_analysis.append(f"\n    PATTERN ACROSS {len(callees)} CALLEES:")
 
-        # Show ONE representative callee change
-        callee_change_sample = ""
-        if callees and callees[0].get("changes"):
-            ch = callees[0]["changes"][0]
-            before = _compact_text(ch.get("before", ""), 60)
-            after = _compact_text(ch.get("after", ""), 60)
-            callee_change_sample = (
-                f'    Representative: Line {ch.get("line")}: "{before}" → "{after}"'
-            )
+            # Analyze if there's a common before/after pattern
+            common_befores = []
+            common_afters = []
+            for callee in callees:
+                for ch in callee.get("changes", [])[:1]:  # First change from each
+                    common_befores.append(_compact_text(ch.get("before", ""), 40))
+                    common_afters.append(_compact_text(ch.get("after", ""), 40))
+
+            # Show pattern if multiple callees exist
+            if common_befores and common_afters:
+                callee_pattern_analysis.append(
+                    f'    Common BEFORE pattern: "{common_befores[0]}" (example from first file)'
+                )
+                callee_pattern_analysis.append(
+                    f'    Common AFTER pattern: "{common_afters[0]}" (example from first file)'
+                )
+                callee_pattern_analysis.append(
+                    f"    ... similar pattern across remaining {len(callees) - 1} files"
+                )
+
+        callee_pattern_str = "\n".join(callee_pattern_analysis) if callee_pattern_analysis else "    No pattern detected"
 
         formatted.append(f"""
 DEPENDENCY {idx}: {dep_type}
 
-Caller: {caller_file} ({caller_role})
-{caller_change_summary}
+CALLER: {caller_file} ({caller_role})
+  BEFORE/AFTER Changes:
+{caller_changes_str}
 
-Callees ({len(callees)} files total):
-{chr(10).join(callee_files_list)}
-{callee_change_sample}
+CALLEES: {len(callees)} files total
+  BEFORE/AFTER Pattern:
+{callee_pattern_str}
 
-Relationship: Caller {dep_type.lower()}s callees
-Analysis needed: Did caller change trigger callee adaptations?
+RELATIONSHIP: Caller {dep_type.lower()}s callees
+
+ANALYSIS TASK:
+1. What semantic change happened in CALLER?
+2. What semantic pattern changed across CALLEES?
+3. Is CALLER change adapting to CALLEE changes (cascading)?
+4. Or are CALLEES adapting to CALLER change (configures/triggers)?
+5. What is the ROOT CAUSE - which change happened first conceptually?
+6. What is the actual PROBLEM being fixed (not just validation name)?
 """)
 
     return "\n".join(formatted) if formatted else "No dependency contexts available"
@@ -4048,7 +3228,39 @@ def decompose_issue(issue: dict, llm) -> dict:
             print("  WARNING: No atomic problems identified")
             return {}
 
-        print(f"  OK Identified {len(atomic_problems)} atomic problems")
+        print(f"  OK Identified {len(atomic_problems)} atomic problems (before merging)")
+
+        # NEW: Auto-cluster and merge similar problems
+        print("  Step 4: Clustering and merging similar problems...")
+        validation_groups_for_merge = defaultdict(list)
+        for prob in atomic_problems:
+            validation_cmd = prob.get("validation_cmd", "unknown")
+            validation_groups_for_merge[validation_cmd].append(prob)
+
+        print(f"    Grouped into {len(validation_groups_for_merge)} validation commands")
+
+        optimized_problems = []
+        for validation_cmd, val_problems in validation_groups_for_merge.items():
+            if len(val_problems) > 1:
+                print(f"    {validation_cmd}: {len(val_problems)} problems")
+                # Apply clustering + LLM merge
+                optimized = _cluster_and_merge_problems(
+                    val_problems,
+                    validation_cmd=validation_cmd,
+                    llm=llm,
+                    similarity_threshold=0.85,  # High threshold for similar problems
+                )
+                print(f"      -> Optimized to {len(optimized)} problems")
+                optimized_problems.extend(optimized)
+            else:
+                # Single problem, keep as-is
+                optimized_problems.extend(val_problems)
+
+        # Reorder after merging
+        print("  Step 5: Reordering by repair trajectory...")
+        final_problems = _reorder_by_repair_trajectory(optimized_problems)
+
+        print(f"  ✓ Final: {len(final_problems)} problems (merged {len(atomic_problems) - len(final_problems)} duplicates)")
 
         # Build final result
         context = benchmark_context.get("context", {})
@@ -4059,9 +3271,10 @@ def decompose_issue(issue: dict, llm) -> dict:
             "sha_fail": issue.get("sha_fail"),
             "repo": issue.get("repo_name", issue.get("repo")),
             "original_error_type": issue.get("error_type"),
-            # Atomic problems from three-step analysis
-            "problems": atomic_problems,
-            "total_problems": len(atomic_problems),
+            # Final problems after merging and reordering
+            "problems": final_problems,
+            "total_problems": len(final_problems),
+            "raw_atomic_problems_count": len(atomic_problems),
             "total_changed_files": len(issue.get("changed_files", [])),
             # Benchmark CI context (cleaned - no redundancy)
             "benchmark_ci_context": {
@@ -5417,28 +4630,27 @@ def main():
             print("  Not found in cache - Running full decomposition...")
             decomposed_result = decompose_issue(issue, llm)
 
-            decomposed_cache[issue_id] = decomposed_result
-            _save_decomposed_cache(decomposed_cache, decomposed_issues_path)
-
-        # Check for errors
+        # Check for errors - save ONLY to execption directory (NOT to decomposed_issues.json)
         if "error" in decomposed_result:
             errors.append(decomposed_result)
-            results.append(decomposed_result)
 
-            # Save error to execption directory using utility
+            # Save error to execption directory ONLY
             try:
-                # The error data is already in decomposed_result, just save it
-
                 EXECPTION_DIR.mkdir(exist_ok=True)
                 error_file = EXECPTION_DIR / f"{issue_id}.json"
                 with open(error_file, "w") as f:
                     json.dump(decomposed_result, f, indent=2)
-                print(f"  ERROR saved to: {error_file}")
+                print(f"  ERROR saved to: execption/{issue_id}.json")
             except Exception as save_error:
                 print(
                     f"  WARNING: Could not save error to execption directory: {save_error}"
                 )
+            # Do NOT add to decomposed_cache or results - errors go to execption/ only!
         else:
+            # Success - save to decomposed_issues.json
+            decomposed_cache[issue_id] = decomposed_result
+            _save_decomposed_cache(decomposed_cache, decomposed_issues_path)
+
             # Run full L1/L2/L3 pipeline (unless --skip-memory)
             if not args.skip_memory:
                 import copy

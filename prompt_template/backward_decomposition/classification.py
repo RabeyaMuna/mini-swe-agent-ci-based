@@ -68,46 +68,79 @@ For every file:
 5. Group files with the same CI step + failure_type + issue_type
 6. Determine visibility as primary or hidden
 
-DEPENDENCY-AWARE DECISIONS:
+DEPENDENCY-AWARE ANALYSIS:
 
-CRITICAL: Dependency context helps UNDERSTAND the problem, but each file is STILL
-classified by the CI validation that catches its specific change!
+The dependency context shows caller → callee relationships with BEFORE/AFTER changes.
+Your task: Analyze caller and callee changes TOGETHER to understand if they create dependency problems.
 
-Use dependency context to:
-1. Understand WHY changes happened (root cause)
-2. Identify cascading relationships, their changes before and after
-3. Link related problems across validations
+## Analysis Steps:
 
-BUT: Each file must be classified by WHICH CI validation would catch it!
+1. **Analyze CALLER and CALLEE Changes TOGETHER**
+   For each dependency, examine BEFORE/AFTER of BOTH sides:
 
-Example:
-  Dependency: exit_code_test.py READS ref-exit-codes/*.rst
+   a) CALLER side:
+      - What did CALLER do BEFORE? (old behavior/logic/usage)
+      - What does CALLER do AFTER? (new behavior/logic/usage)
+      - What does CALLER expect/require from CALLEES?
 
-  Analysis:
-  - RST files changed format (caught by docstrfmt - validation 17)
-  - Test file adapted assertions (caught by Black/pytest - validation 7)
-  - They are RELATED (cascading), but different validations!
+   b) CALLEE side:
+      - What did CALLEES provide BEFORE? (old interface/format/behavior)
+      - What do CALLEES provide AFTER? (new interface/format/behavior)
+      - Did this change break what CALLER expected?
 
-  Correct classification:
-  - Group 1: RST files → validation 17 (docstrfmt)
-    * is_cascading: true
-    * cascade_explanation: "docstrfmt upgrade triggered test adaptation"
+   c) JOINT ANALYSIS (critical!):
+      - Compare CALLER expectations vs CALLEE changes
+      - Does CALLEE's AFTER state break CALLER's BEFORE expectations?
+      - Does CALLER's AFTER state adapt to CALLEE's AFTER state?
+      - Example: If test reads "title from line 1" (CALLER BEFORE) but docs removed
+        title (CALLEE AFTER), then CALLER must adapt → this is a dependency problem!
 
-  - Group 2: Test file → validation 7 (Black/test validation)
-    * is_cascading: true
-    * cascade_explanation: "Test adapted to new RST format from validation 17"
-    * DO NOT put test in docstrfmt validation!
+2. **Identify ROOT CAUSE and CASCADE Direction**
+   Based on the TOGETHER analysis above:
 
-Rules for file → validation mapping:
-- Config files → Config validation (taplo, etc.)
-- Test files → Test validation (Black, pytest, etc.)
-- RST/docs → Doc validation (docstrfmt)
-- Python code → Python validation (Black, mypy, ruff)
+   a) Which change happened FIRST conceptually?
+      - CALLER changed and CALLEES had to follow? (CALLER is root cause)
+      - CALLEES changed and CALLER had to adapt? (CALLEES are root cause)
 
-Cascading means: Related problems across different validations
-- Mark related groups with is_cascading=true
-- Use cascade_explanation to explain relationship
-- But classify each file by its ACTUAL CI validation!
+   b) What PROBLEM was created?
+      - CALLEE change broke CALLER's assumptions → "CALLER adaptation to CALLEE change"
+      - CALLER change required CALLEE updates → "CALLEE alignment with CALLER change"
+
+   c) Determine cascade direction:
+      - Root cause file → "triggers" or "configures" → dependent files
+      - Dependent files → "adapts to" or "follows" → root cause file
+
+3. **Determine TRUE ISSUE TYPE**
+   - Don't just use the validation name (e.g., "Code Formatting")
+   - Analyze WHAT PROBLEM is actually being fixed
+   - Examples of semantic issue types:
+     * "Test adaptation to breaking API change"
+     * "Import path update after module restructure"
+     * "Type annotation fix after dependency upgrade"
+     * "Documentation format migration"
+     * "Configuration alignment with new library version"
+
+4. **Map to CI VALIDATION (Separate from Issue Type!)**
+   - ISSUE TYPE = What problem is being fixed (semantic)
+   - VALIDATION = Which CI step would catch this change (mechanical)
+   - These are DIFFERENT concepts!
+
+   File type → Validation mapping:
+   - Config files (.toml, .yaml, .json) → Config validation (taplo, etc.)
+   - Test files (*_test.py, test_*.py) → Test validation (pytest, black on tests)
+   - Documentation (.rst, .md) → Doc validation (docstrfmt, mdformat)
+   - Python source → Code validation (black, mypy, ruff, pytest)
+   - Proto/generated → Build validation (protoc, codegen)
+
+5. **Classify as Cascading or Independent**
+   Cascading means: Related changes across DIFFERENT validations
+   - Caller in validation A, callees in validation B → cascading=true
+   - Explain which change triggered the other in cascade_explanation
+   - Use semantic analysis from steps 1-2 to explain the trigger
+
+   Independent means: Unrelated changes
+   - No semantic dependency despite file relationship
+   - Both dependency_type and cascade_explanation should be empty strings
 
 VISIBILITY RULE:
 - visibility="primary" if at least one file appears in FILES VISIBLE IN CI FAILURE LOGS
@@ -140,9 +173,19 @@ REQUIREMENTS:
 - visibility must be "primary" or "hidden".
 - Every changed file in this chunk must appear exactly once.
 - Do not include files that are not in this chunk.
-- For cascading groups, explain the trigger in cascade_explanation.
-- For independent groups, dependency_type and cascade_explanation must be empty strings.
-- If uncertain, prefer independent unless dependency context clearly shows one change triggered the other.
+
+CRITICAL - Semantic Issue Type:
+- issue_type must describe the ACTUAL PROBLEM being fixed (semantic meaning)
+- DO NOT just repeat the validation command name
+- Analyze BEFORE/AFTER changes in dependency context to understand root cause
+- Examples: "Test adaptation to API change" NOT "Code formatting"
+- Examples: "Import fix after module restructure" NOT "Type checking"
+
+CRITICAL - Cascading Analysis:
+- For cascading groups, explain the trigger in cascade_explanation based on ACTUAL dependency context
+- Use the BEFORE/AFTER changes provided to determine which change triggered the other
+- For independent groups, dependency_type and cascade_explanation must be empty strings
+- If uncertain, prefer independent unless dependency context clearly shows one change triggered the other
 
 {strict_json_rules}
 """

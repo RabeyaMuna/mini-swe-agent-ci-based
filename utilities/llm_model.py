@@ -1,0 +1,205 @@
+"""
+LitellmModel - Unified LLM Wrapper
+==================================
+
+Provides a consistent interface for LLM calls across the codebase.
+Handles model credentials, token limits, retry logic, and error handling.
+
+Usage:
+    llm = LitellmModel("openrouter/minimax/minimax-m2.5")
+    result = llm.invoke("Your prompt here")
+    content = result.content
+"""
+
+import logging
+import os
+import time
+from typing import Any
+
+import litellm
+
+from utilities.model_registry import resolve_model_alias
+from utilities.model_token_config import get_output_safe_tokens
+
+LOGGER = logging.getLogger(__name__)
+
+
+class LitellmModel:
+    """
+    Small invoke-compatible wrapper for LLM calls.
+
+    Features:
+    - Automatic credential detection based on model name
+    - Auto-detection of token limits based on model
+    - Consistent error handling and logging
+    - Compatible with CILogAnalyzer and other utilities
+    """
+
+    def __init__(self, model_name: str):
+        self.model_name = self._normalize_model_name(model_name)
+        self.api_key, self.api_base = self._model_credentials(self.model_name)
+
+    @staticmethod
+    def _normalize_model_name(model_name: str) -> str:
+        """Normalize and resolve model aliases."""
+        raw_model_name = str(model_name or "").strip()
+        resolved = resolve_model_alias(model_name)
+        if resolved:
+            return resolved
+        return raw_model_name
+
+    @staticmethod
+    def _model_credentials(model_name: str) -> tuple[str | None, str | None]:
+        """Get API credentials based on model name."""
+        lowered = str(model_name or "").lower()
+
+        # OpenRouter models
+        if lowered.startswith("openrouter/"):
+            return (
+                os.getenv("OPENROUTER_API_KEY"),
+                os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
+            )
+
+        # GLM models
+        if "glm" in lowered or "z-ai" in lowered:
+            return (
+                os.getenv("GLM_API_KEY"),
+                os.getenv("GLM_BASE_URL") or "https://api.z.ai/api/paas/v4",
+            )
+
+        # Minimax models (via OpenRouter)
+        if "minimax" in lowered:
+            return (
+                os.getenv("OPENROUTER_API_KEY"),
+                os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
+            )
+
+        # Default to OpenRouter
+        return (
+            os.getenv("OPENROUTER_API_KEY"),
+            os.getenv("OPENROUTER_BASE_URL"),
+        )
+
+    def invoke(self, prompt: Any, max_tokens: int | None = None):
+        """
+        Invoke the LLM with a prompt.
+
+        Args:
+            prompt: String prompt or list of messages
+            max_tokens: Maximum output tokens (auto-detected if None)
+
+        Returns:
+            Result object with .content and .raw_response attributes
+        """
+        # Convert prompt to messages format
+        if isinstance(prompt, list):
+            messages = [
+                {
+                    "role": "user",
+                    "content": str(getattr(message, "content", message)),
+                }
+                for message in prompt
+            ]
+        else:
+            messages = [{"role": "user", "content": str(prompt)}]
+
+        try:
+            start_time = time.time()
+
+            # Auto-detect max_tokens based on model if not specified
+            if max_tokens is None:
+                try:
+                    max_tokens = get_output_safe_tokens(self.model_name)
+                    LOGGER.debug(
+                        f"Auto-detected max_tokens={max_tokens} for model={self.model_name}"
+                    )
+                except Exception:
+                    max_tokens = 16000  # Fallback
+
+            # Special handling for z-ai models
+            if str(self.model_name).lower().startswith("zai/"):
+                max_tokens = min(int(max_tokens), 120000)
+
+            # Build completion kwargs
+            completion_kwargs = {
+                "model": self.model_name,
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "timeout": int(os.getenv("LITELLM_TIMEOUT", "600")),
+            }
+            if self.api_key:
+                completion_kwargs["api_key"] = self.api_key
+            if self.api_base:
+                completion_kwargs["api_base"] = self.api_base
+
+            # Make API call
+            response = litellm.completion(**completion_kwargs)
+            elapsed = time.time() - start_time
+
+            # Check finish_reason
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+
+            # Log token usage
+            usage = getattr(response, "usage", None)
+            if usage:
+                prompt_tokens = getattr(usage, "prompt_tokens", "?")
+                completion_tokens = getattr(usage, "completion_tokens", "?")
+                total_tokens = getattr(usage, "total_tokens", "?")
+                print(
+                    f"      [API] finish_reason={finish_reason}, tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
+                )
+            else:
+                print(f"      [API] finish_reason={finish_reason}, no usage data")
+
+            # Handle error finish_reason
+            if finish_reason == "error":
+                error_msg = getattr(response, "error", "Unknown error")
+                if hasattr(response, "_hidden_params"):
+                    error_msg += f" | Details: {response._hidden_params}"
+                LOGGER.error(f"LLM error after {elapsed:.1f}s. Error: {error_msg}")
+                print(f"    FAIL LLM Error ({elapsed:.1f}s): {error_msg}")
+
+            # Handle length limit
+            elif finish_reason == "length":
+                LOGGER.warning(
+                    f"Hit length limit: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
+                )
+                print("    WARNING Length limit hit!")
+                print(
+                    f"       Tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
+                )
+                print(f"       max_tokens setting: {max_tokens or 16000}")
+                print(
+                    "       Chunk too large - reduce max_changes_per_chunk or simplify prompt"
+                )
+
+            # Return result
+            class Result:
+                content = response.choices[0].message.content or ""
+                raw_response = response
+
+            return Result()
+
+        except Exception as e:
+            LOGGER.error(f"LiteLLM API call failed: {type(e).__name__}: {e}")
+            print(f"    FAIL API Error: {type(e).__name__}: {str(e)[:200]}")
+
+            # Return error result
+            class Result:
+                content = ""
+                error = str(e)
+                raw_response = None
+
+            return Result()
+
+    def __call__(self, prompt: Any):
+        """
+        Make LitellmModel callable for compatibility with CILogAnalyzer.
+
+        Example:
+            llm = LitellmModel("minimax2.5")
+            content = llm("What is 2+2?")
+        """
+        result = self.invoke(prompt)
+        return result.content

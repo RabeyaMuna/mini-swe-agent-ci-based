@@ -9,6 +9,7 @@ import json
 
 # Import L2 prompt from centralized location
 from prompt_template.memory_build import build_l2_prompt
+from utilities.llm_invoker import invoke_llm_with_retry
 
 
 # ========================================
@@ -192,72 +193,6 @@ def sample_l1_for_prompt(l1_memory: Dict, analysis: Dict) -> Dict:
     return sampled
 
 
-def extract_text(response) -> str:
-    """Extract text from LLM response."""
-    if response is None:
-        return ""
-    if isinstance(response, str):
-        return response
-    content = getattr(response, "content", None)
-    if content is None:
-        return getattr(response, "text", "") or str(response)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                if "text" in block:
-                    parts.append(block["text"])
-        return "".join(parts)
-    return str(content)
-
-
-def parse_json_from_text(text: str) -> Dict[str, Any]:
-    """Parse JSON from LLM output, handling code fences and control characters."""
-    import re
-
-    if not text or not str(text).strip():
-        raise ValueError("Empty LLM output")
-
-    text = text.strip()
-
-    # Remove markdown code fences
-    if text.startswith("```"):
-        lines = text.splitlines()
-        in_block = False
-        buf = []
-        for line in lines:
-            if line.strip().startswith("```") and not in_block:
-                in_block = True
-                continue
-            if line.strip().startswith("```") and in_block:
-                break
-            if in_block:
-                buf.append(line)
-        text = "\n".join(buf).strip()
-
-    # Clean invalid control characters (keep only valid JSON whitespace)
-    text = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]", "", text)
-
-    # Try parsing
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        # Save for debugging
-        import tempfile
-
-        debug_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
-        debug_file.write(f"Original error: {e}\n\n")
-        debug_file.write(text)
-        debug_file.close()
-        raise ValueError(
-            f"Failed to parse JSON. Debug saved to: {debug_file.name}"
-        ) from e
-
-
 def generate_l2_with_llm(l1_memory: Dict, llm: Any) -> Dict[str, Any]:
     """
     Use LLM to analyze L1 and generate complete L2.
@@ -288,12 +223,11 @@ def generate_l2_with_llm(l1_memory: Dict, llm: Any) -> Dict[str, Any]:
     # Build prompt with sampled data
     prompt = build_l2_prompt(l1_for_prompt, AUTOMATED_TOOLS, sampling_info)
 
-    # Call LLM
-    response = llm.invoke(prompt)
+    # Call LLM with retry, lenient parsing, and repair-prompt fallback
+    l2_data = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True)
 
-    # Parse response
-    response_text = extract_text(response)
-    l2_data = parse_json_from_text(response_text)
+    if not isinstance(l2_data, dict):
+        raise ValueError("LLM failed to produce valid L2 JSON after retries")
 
     return l2_data
 
@@ -342,8 +276,15 @@ def build_l2_memory(
     if llm is None:
         raise ValueError("LLM is required for L2 generation")
 
-    # LLM analyzes L1 and generates complete L2 data
-    l2_data = generate_l2_with_llm(l1_memory, llm)
+    # LLM analyzes L1 and generates complete L2 data.
+    # Falls back to empty strategies on failure (same pattern as L1/L3) so a
+    # bad LLM response degrades gracefully instead of crashing the pipeline.
+    try:
+        l2_data = generate_l2_with_llm(l1_memory, llm)
+    except Exception as e:
+        print(f"  WARNING: L2 generation failed: {e}")
+        print("  Falling back to empty L2 structure")
+        l2_data = {}
 
     # Build final L2 structure
     l2_memory = {

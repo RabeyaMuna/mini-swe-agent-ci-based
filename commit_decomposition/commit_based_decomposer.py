@@ -783,13 +783,28 @@ def decompose_issue(
     else:
         problem_sequence = all_problems
 
-    # 4. Return result
+    # 4. Collect changed files from all commits
+    all_changed_files = set()
+    for commit_analysis in commit_analyses:
+        all_changed_files.update(commit_analysis.get("changed_files", []))
+
+    # 5. Return result - SAME STRUCTURE as backward decomposition for unified L1/L2/L3 building
     return {
+        # Core identification (matches backward decomposition)
         "issue_id": issue_id,
+        "repo": f"{repo_owner}/{repo_name}",
+        "workflow": validation_cache.get("workflow_path", ""),  # Renamed from workflow_path
+        "changed_files": list(all_changed_files),
+        "decomposed_problems": problem_sequence,  # Renamed from problem_sequence
+
+        # Commit-specific metadata (extra fields for analysis)
         "sha_fail": sha_fail,
         "sha_success": sha_success,
+        "repo_owner": repo_owner,
         "decomposition_type": "commit_based",
         "total_commits": len(commits),
         "total_problems": len(problem_sequence),
-        "problem_sequence": problem_sequence,
+
+        # Dependencies for L1 building
+        "dependencies": {},  # Placeholder - can be enhanced later
     }

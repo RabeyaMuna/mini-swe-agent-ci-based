@@ -86,6 +86,7 @@ LLM_REGISTRY: Dict[str, LLMInfo] = {
 # Aliases for convenience
 MODEL_ALIASES: Dict[str, str] = {
     "minimax-m2.5": "minimax/minimax-m2.5",
+    "minimax2.5": "minimax/minimax-m2.5",  # Added for convenience
     "MiniMax-M2.5": "minimax/minimax-m2.5",
     "MiniMax M2.5": "minimax/minimax-m2.5",
     "glm": "glm-5.2",
@@ -271,7 +272,8 @@ def get_llm(model_key: str) -> ChatOpenAI:
     llm = ChatOpenAI(**kwargs)
 
     # CRITICAL: Attach model_key to LLM object
-    llm.memci_model_key = model_key
+    # Use object.__setattr__ to bypass Pydantic validation
+    object.__setattr__(llm, 'memci_model_key', model_key)
 
     return llm
 

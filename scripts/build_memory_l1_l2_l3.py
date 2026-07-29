@@ -39,25 +39,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from build_memory import build_l2_memory, build_l3_memory
+from utilities.llm_model import LitellmModel
 from utilities.model_registry import configure_model_environment
-
-
-class LitellmModel:
-    """Simple LLM wrapper for build_memory compatibility."""
-
-    def __init__(self, model_name: str):
-        import litellm
-
-        self.model_name = model_name
-        self.litellm = litellm
-
-    def invoke(self, prompt: str) -> Any:
-        response = self.litellm.completion(
-            model=self.model_name,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-        )
-        return response.choices[0].message.content
 
 
 def load_decomposed_issues(path: Path) -> List[Dict[str, Any]]:

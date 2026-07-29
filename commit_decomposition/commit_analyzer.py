@@ -8,30 +8,37 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, List
-
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import litellm
 from dotenv import load_dotenv
-
+from utilities.model_token_config import get_input_chunk_tokens
 from prompt_template import build_commit_analysis_prompt, build_file_selection_prompt
-from utilities.diff_chunker import chunk_diff_by_files, estimate_tokens, merge_groups
+from utilities.diff_chunker import chunk_diff_by_files, estimate_tokens
+from utilities.llm_invoker import invoke_llm_with_retry
+from utilities.model_token_config import get_output_safe_tokens
 
 load_dotenv()
 
-DEFAULT_SELECTION_CHUNK_TOKENS = 60_000
-DEFAULT_ANALYSIS_CHUNK_TOKENS = 40_000
+# Safety threshold: chunk size should not exceed 45% of model's context window
+# This ensures: 45% diff + 30% output + 25% prompt overhead = 100%
+CHUNK_SAFETY_THRESHOLD = 0.45
 
 
 class CommitAnalyzer:
     """Analyzes commits to extract problems and repair plans using LLM"""
 
-    def __init__(self, model_name: str = None):
-        self.model_name = model_name or os.getenv(
-            "MEMCI_LLM_MODEL", "openrouter/minimax/minimax-m2.5"
-        )
+    def __init__(self, llm):
+        """
+        Initialize analyzer with an LLM instance.
+
+        Args:
+            llm: LLM instance from utilities.llm_provider.get_llm()
+        """
+        self.llm = llm
+        # Extract model name for token limit calculations
+        self.model_name = getattr(llm, 'model_name', None) or getattr(llm, 'memci_model_key', 'minimax/minimax-m2.5')
 
     def select_relevant_files(
         self,
@@ -44,7 +51,7 @@ class CommitAnalyzer:
         relationship_context: List[Dict] = None,
     ) -> Dict:
         """Select changed files relevant to CI validation."""
-        max_chunk_tokens = self._get_input_chunk_tokens(DEFAULT_SELECTION_CHUNK_TOKENS)
+        max_chunk_tokens = self._get_safe_chunk_size()
         chunks = self._diff_chunks(commit_diff, changed_files, max_chunk_tokens)
         print(
             f"    File selection diff: ~{estimate_tokens(commit_diff):,} tokens, "
@@ -69,12 +76,9 @@ class CommitAnalyzer:
                 chunk_result = self._call_json(prompt)
                 all_groups.extend(chunk_result.get("selected_groups", []))
 
-            # Resolve file paths
-            selected_groups = self._resolve_selected_groups(
-                merge_groups(all_groups), changed_files
-            )
-            selected_groups = self._organize_groups_by_validation(
-                selected_groups, relevant_validations
+            # Resolve and organize in one pass (no redundant merging)
+            selected_groups = self._resolve_and_organize_groups(
+                all_groups, changed_files, relevant_validations
             )
             return {
                 "selected_groups": selected_groups,
@@ -114,7 +118,7 @@ class CommitAnalyzer:
         structured_ci_failure = group.get("structured_ci_failure") or {}
         current_commit = (group.get("commits") or [{}])[0]
         commit_sha = current_commit.get("sha", "unknown")
-        max_chunk_tokens = self._get_input_chunk_tokens(DEFAULT_ANALYSIS_CHUNK_TOKENS)
+        max_chunk_tokens = self._get_safe_chunk_size()
         chunks = self._diff_chunks(
             commit_diff, group.get("files_in_chunk", []), max_chunk_tokens
         )
@@ -144,7 +148,6 @@ class CommitAnalyzer:
                     relevant_validations=relevant_validations,
                 )
                 chunk_result = self._call_json(prompt)
-
                 all_problems.extend(chunk_result.get("problems", []))
 
             result = {
@@ -169,6 +172,63 @@ class CommitAnalyzer:
         if estimate_tokens(commit_diff) <= max_tokens:
             return [{"files": files or [], "diff": commit_diff}]
         return chunk_diff_by_files(commit_diff, max_tokens_per_chunk=max_tokens)
+
+    def _resolve_and_organize_groups(
+        self,
+        all_groups: List[Dict],
+        changed_files: List[str],
+        validation_sequence: List[Dict],
+    ) -> List[Dict]:
+        """
+        Unified method: Resolve file paths AND organize by validation in one pass.
+
+        Eliminates redundant merging by doing both operations together:
+        1. Merge groups from multiple chunks
+        2. Resolve fuzzy file paths to exact matches
+        3. Order by validation sequence
+        """
+        validation_order = self._validation_order_by_cmd(validation_sequence)
+        merged: Dict[tuple, Dict] = {}
+
+        # Process all groups in one pass
+        for group in all_groups or []:
+            if not isinstance(group, dict):
+                continue
+
+            # Resolve file paths
+            resolved_files = self._resolve_selected_files(
+                group.get("files", []), changed_files
+            )
+            if not resolved_files:
+                continue
+
+            # Merge by validation + failure type
+            validation_cmd = group.get("validation_cmd", "")
+            failure_type = group.get("failure_type", "")
+            key = (
+                validation_order.get(validation_cmd, 9999),
+                validation_cmd,
+                failure_type,
+            )
+
+            if key not in merged:
+                merged[key] = {
+                    "validation_order": key[0],
+                    "failure_type": failure_type,
+                    "validation_cmd": validation_cmd,
+                    "groups": [],
+                }
+
+            # Add resolved files as subgroup
+            merged[key]["groups"].append(
+                {
+                    "files": resolved_files,
+                    "issue_type": group.get("issue_type", ""),
+                    "reason": group.get("reason", ""),
+                }
+            )
+
+        return [merged[key] for key in sorted(merged)]
 
     def _organize_groups_by_validation(
         self, groups: List[Dict], validation_sequence: List[Dict]
@@ -382,32 +442,20 @@ class CommitAnalyzer:
         return "\n".join(lines)
 
     def _call_llm(self, prompt: str) -> str:
-        """Call LLM API"""
+        """Call LLM API using utilities.llm_invoker for consistent handling"""
         try:
-            messages = [{"role": "user", "content": prompt}]
+            # Get model-specific output token limit
+            max_tokens = self._get_output_tokens()
 
-            # Get credentials based on model type
-            api_key, api_base = self._get_model_credentials(self.model_name)
-
-            # Auto-detect max_tokens
-            max_tokens = self._get_max_tokens(self.model_name)
-
-            completion_kwargs = {
-                "model": self.model_name,
-                "messages": messages,
-                "temperature": 0,
-                "max_tokens": max_tokens,
-                "timeout": int(os.getenv("LITELLM_TIMEOUT", "900")),
-            }
-
-            # Add API credentials
-            if api_key:
-                completion_kwargs["api_key"] = api_key
-            if api_base:
-                completion_kwargs["api_base"] = api_base
-
-            response = litellm.completion(**completion_kwargs)
-            return response.choices[0].message.content or ""
+            # Use the centralized LLM invoker with retry logic, rate limiting, etc.
+            response = invoke_llm_with_retry(
+                llm=self.llm,
+                prompt=prompt,
+                max_tokens=max_tokens,  # Use model-aware token limit
+                parse_json=False,  # We'll parse JSON separately in _call_json
+                verbose=False,
+            )
+            return response if isinstance(response, str) else str(response)
 
         except Exception as e:
             raise Exception(f"LLM API call failed: {e}")
@@ -416,50 +464,47 @@ class CommitAnalyzer:
         """Call the model and parse a JSON object."""
         return self._parse_response(self._call_llm(prompt))
 
-    def _get_model_credentials(self, model_name: str) -> tuple:
-        """Get API credentials based on model type"""
-        lowered = str(model_name or "").lower()
+    def _get_safe_chunk_size(self) -> int:
+        """
+        Calculate safe chunk size based on 45% of model's context window.
 
-        # OpenRouter models (MiniMax)
-        if lowered.startswith("openrouter/") or "minimax" in lowered:
-            return (
-                os.getenv("OPENROUTER_API_KEY"),
-                os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-            )
+        This ensures the total prompt (chunk + template + overhead) never exceeds
+        the model's context window, preventing LLM confusion and JSON format errors.
 
-        # GLM models
-        if "glm" in lowered or "z-ai" in lowered or "zai" in lowered:
-            return (
-                os.getenv("GLM_API_KEY"),
-                os.getenv("GLM_BASE_URL", "https://api.z.ai/api/paas/v4"),
-            )
-
-        # Default to OpenRouter
-        return (
-            os.getenv("OPENROUTER_API_KEY"),
-            os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-        )
-
-    def _get_max_tokens(self, model_name: str) -> int:
-        """Get max tokens based on model"""
+        Formula: chunk_size = 45% × context_window
+        Reasoning: 45% chunk + 30% output + 25% prompt overhead = 100%
+        """
         try:
-            from utilities.model_token_config import get_output_safe_tokens
+            from utilities.model_token_config import get_model_config
 
-            return get_output_safe_tokens(model_name)
+            config = get_model_config(self.model_name)
+            context_window = config["input_context_window"]
+            safe_chunk_size = int(context_window * CHUNK_SAFETY_THRESHOLD)
+
+            return safe_chunk_size
         except Exception:
-            # Fallback
-            if "glm" in str(model_name).lower():
-                return 120000  # GLM supports large output
-            return 16000  # Default
+            # Fallback for unknown models: conservative 30k tokens
+            return 30_000
 
     def _get_input_chunk_tokens(self, fallback: int) -> int:
         """Get model-aware input chunk size, capped by the caller's target."""
         try:
-            from utilities.model_token_config import get_input_chunk_tokens
 
             return min(fallback, get_input_chunk_tokens(self.model_name))
         except Exception:
             return fallback
+
+    def _get_output_tokens(self) -> int:
+        """Get model-aware output token limit."""
+        try:
+
+
+            return get_output_safe_tokens(self.model_name)
+        except Exception:
+            # Fallback for unknown models
+            if "glm" in str(self.model_name).lower():
+                return 120000  # GLM supports large output
+            return 16000  # Safe default for most models
 
     def _parse_response(self, response: str) -> Dict:
         """Parse LLM response as JSON"""

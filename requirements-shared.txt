@@ -41,3 +41,4 @@ datasets>=2.0.0
 # Optional: For advanced analysis
 # plotly>=5.22.0
 # bokeh>=3.4.0
+langchain-openai

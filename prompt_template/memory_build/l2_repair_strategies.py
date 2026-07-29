@@ -89,16 +89,36 @@ Step 2: DETERMINE FIX APPROACH
   - "configuration" → MANUAL (config file)
 
 → If CHECK AUTOMATION:
-  a. Count files: use files_metadata.total_count if exists, else len(files)
-  b. Match file extension to tools:
-     - *.rst → docstrfmt
-     - *.py docstrings → docformatter
-     - *.py imports → isort
-     - *.py formatting → black/ruff
-     - *.md → mdformat
-  c. Decide:
-     - Files ≥ 10 AND uniform error → USE AUTOMATION
-     - Files < 10 OR varied errors → MANUAL
+  a. Analyze the PROBLEM FIRST (not just file extension):
+     - Look at L1 failure_type and issue_type
+     - Look at the validator/tool that detected it (from verification_cmd)
+     - Look at the actual error message in L1 problem field
+
+  b. Match PROBLEM to auto-fixable tools:
+     - "format" or "lint" errors → Check if tool has auto-fix
+       * ruff detected error → ruff check --fix (auto-fixes)
+       * black detected error → black (auto-fixes)
+       * isort detected error → isort (auto-fixes)
+       * mdformat detected error → mdformat (auto-fixes)
+       * docstrfmt detected error → docstrfmt (auto-fixes)
+
+     - "type" errors (mypy, pyright) → MANUAL (no auto-fix)
+     - "test" failures (pytest) → MANUAL (semantic issues)
+     - "import" errors → MANUAL (need code understanding)
+     - "dependency" conflicts → CONFIG change (not automation)
+
+  c. Count files: use files_metadata.total_count if exists, else len(files)
+
+  d. Final decision:
+     - Tool CAN auto-fix + Files ≥ 10 + uniform error → USE AUTOMATION
+     - Tool CANNOT auto-fix (mypy, pytest, etc.) → MANUAL
+     - Files < 10 even if auto-fixable → Consider MANUAL (small enough)
+
+  EXAMPLES:
+  - L1 says "ruff: E501 line too long" in 50 files → USE ruff check --fix (automation)
+  - L1 says "mypy: error: Incompatible types" in 3 files → MANUAL (no auto-fix)
+  - L1 says "pytest: AssertionError" → MANUAL (semantic test failure)
+  - L1 says "black would reformat" in 20 files → USE black (automation)
 
 Step 3: BUILD PROBLEM REFERENCE
 → Pattern: "{{failure_type}} in {{location}} ({{error_detail}})"
@@ -148,6 +168,30 @@ CRITICAL DISTINCTIONS:
 - **docformatter** = for *.py docstrings (PEP 257 inside Python files)
 - Example: "heading adornment style" in *.rst files → docstrfmt
 - Example: "docstring not PEP 257" in *.py files → docformatter
+
+CONFIG SPECIFICATION RULES:
+When a fix requires config changes (dependencies, versions, settings), be SPECIFIC:
+
+BAD (vague):
+- "Add click version constraint"
+- "Update dependency"
+- "Fix version conflict"
+
+GOOD (specific):
+- "In pyproject.toml [tool.poetry.dependencies] section: add click = '<8.2.0'"
+- "In requirements.txt: change numpy==1.24.0 to numpy>=2.0.0"
+- "In .pre-commit-config.yaml: update mdformat-beautysh from rev: v0.3.0 to rev: v1.0.0"
+
+INCLUDE in signals:
+- Exact version constraints (e.g., "typer requires click<8.2.0")
+- Config file names (e.g., "pyproject.toml missing constraint")
+- Section names if applicable (e.g., "[tool.poetry.dependencies]")
+
+INCLUDE in key_actions:
+- Exact config file path
+- Exact section/location
+- Exact key and value to set
+- Then code changes (if any)
 
 === TASK ===
 Analyze these L1 problems and generate:
@@ -298,6 +342,13 @@ CRITICAL OUTPUT FORMAT:
 
 Return ONLY valid JSON with this structure:
 
+IMPORTANT JSON FORMATTING:
+- Your FIRST character MUST be {{ - NO text or backticks before
+- Your LAST character MUST be }} - NO text or backticks after
+- Do NOT wrap in backticks: NO ``` or ```json or ` - NONE AT ALL
+- Do NOT add markdown, explanations, or any text outside the JSON
+- The response will be passed DIRECTLY to json.loads() - it MUST parse perfectly
+
 {{
   "issue_id": "{issue_id}",
   "repo": "{repo}",
@@ -326,30 +377,52 @@ Return ONLY valid JSON with this structure:
       "when_to_apply": "<Specific conditions from YOUR L1 - validators, error patterns, file patterns>",
 
       // OBSERVABLE PATTERNS that detect this failure (extract from L1 but format as actual CI log patterns)
+      // CRITICAL: Include config/version info when relevant!
       "signals": [
         "<tool>: <actual_error_message_as_it_appears> at <file>:<line>",
         "<N> files matching <pattern> affected",
+        "Config: <specific_version_constraint_or_setting> in <config_file>",
         "Command '<actual_command>' exits with code <exit_code>"
       ],
 
-      // EXAMPLES of properly formatted signals:
+      // EXAMPLES of properly formatted signals (NOTICE CONFIG INFO):
       // Type error: "mypy: error: Incompatible type [arg-type] at helpers.py:42"
       // Format error: "67 files matching docs/source/**/*.rst with heading adornment errors"
       // Test error: "pytest: AssertionError: assert 200 == 401 in test_auth.py::test_login"
       // Import error: "ImportError: No module named 'numpy.typing' in utils/config.py"
+      // Dependency: "poetry: Dependency conflict - typer requires click<8.2.0 but pyproject.toml has no constraint"
+      // Version: "numpy 2.0 removed DTypeLike - need to update type annotations"
       // Command: "Command 'python -m mypy .' exits with code 1"
 
       "key_actions": [
-        // DECISION TREE based on YOUR L1 data:
-        // IF error is formatting/linting AND automation tool exists AND files > 10:
-        //   "Step 1: Install <tool from AUTOMATED_TOOLS>: <install_command>"
-        //   "Step 2: Run <tool>: <fix_command with actual file paths from L1>"
-        //   "Step 3: Verify: <re-run verification_cmd from L1>"
+        // CRITICAL RULES FOR STEPS:
+        // 1. CONFIG CHANGES FIRST, CODE CHANGES SECOND
+        // 2. For AUTOMATED fixes: exact command + "no manual check unless this fails"
+        // 3. For MANUAL fixes: exact file, line, change needed
+        // 4. Include specific config values (versions, constraints, settings)
         //
-        // ELSE (manual fix):
-        //   "Step 1: Open <actual file from L1 files[0]>"
-        //   "Step 2: <specific code change based on L1 fix_strategy>"
-        //   "Step 3: Verify: <verification_cmd from L1>"
+        // PATTERN A: Config + Code fix (e.g., dependency issues)
+        //   "Step 1: CONFIG - Open <config_file> and modify <section>: set <key>=<value>"
+        //   "Step 2: CODE - Open <source_file> and change <specific_code_location>: <exact_change>"
+        //   "Step 3: Verify: <verification_cmd from L1> (should pass)"
+        //
+        // PATTERN B: Automated fix (formatting/linting, many files)
+        //   "Step 1: Install <tool>: <exact install_command from AUTOMATED_TOOLS>"
+        //   "Step 2: Run automated fix: <exact fix_command with file paths> (fixes automatically, no manual check unless this fails)"
+        //   "Step 3: Verify: <verification_cmd> (should pass)"
+        //
+        // PATTERN C: Manual fix only (semantic changes, few files)
+        //   "Step 1: Open <actual file from L1> at line <line_number if available>"
+        //   "Step 2: Change <old_code> to <new_code> because <reason from L1 fix_strategy>"
+        //   "Step 3: Verify: <verification_cmd from L1> (should pass)"
+        //
+        // EXAMPLES:
+        // Config+Code: "Step 1: CONFIG - Open pyproject.toml [tool.poetry.dependencies] section: add click = '<8.2.0'"
+        //              "Step 2: CODE - Open app.py line 42: change secondary=False to secondary=None"
+        // Automated:   "Step 1: Install: pip install ruff"
+        //              "Step 2: Run: ruff check --fix src/ (fixes automatically, no manual check unless this fails)"
+        // Manual:      "Step 1: Open utils.py line 15"
+        //              "Step 2: Change 'from numpy.typing import DTypeLike' to 'from typing import Any'"
       ],
 
       "pitfalls": [
@@ -371,9 +444,14 @@ REMEMBER:
 
 CRITICAL REQUIREMENTS:
 - ALWAYS include "failure_type" and "validation_cmd" fields in each strategy
-- For AUTOMATION tools: Include exact install command (pip install <tool>) and run command with file paths
-- For MANUAL fixes: Include exact file paths and code changes
-- Use actual tool commands from AUTOMATED_TOOLS list (install_command, fix_command)
+- SIGNALS must include config/version info when relevant (e.g., "click >= 8.2.0 constraint missing")
+- KEY_ACTIONS must follow pattern:
+  * CONFIG changes BEFORE code changes (if both needed)
+  * For AUTOMATED fixes: exact install + run command + "no manual check unless this fails"
+  * For MANUAL fixes: exact file, line number (if available), specific change
+  * Include specific config values (versions, sections, keys)
+- For AUTOMATION tools: Use exact commands from AUTOMATED_TOOLS list (install_command, fix_command)
+- Separate config modification from code modification in steps
 """
 
     return prompt

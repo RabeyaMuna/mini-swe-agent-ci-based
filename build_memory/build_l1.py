@@ -276,14 +276,36 @@ def _add_enabled_relationships(
     # Create a mapping from problem to its enabled problems
     enabled_map = {}
 
-    # Extract dependency edges (format: [[from_id, to_id], ...])
+    # Extract dependency edges (format: [[from_id, to_id], ...] or [{"from": id, "to": id}, ...])
     edges = dependencies.get("dependency_edges", [])
+
+    # Debug: Check edge format
+    if edges and len(edges) > 0:
+        print(f"  [DEBUG] First edge type: {type(edges[0])}, sample: {edges[0]}")
+
     for edge in edges:
-        if len(edge) >= 2:
+        # Handle both list/tuple format and dict format
+        from_id = None
+        to_id = None
+
+        if isinstance(edge, dict):
+            # Dict format: try various key names
+            from_id = edge.get("from") or edge.get("from_id") or edge.get("caller") or edge.get("source")
+            to_id = edge.get("to") or edge.get("to_id") or edge.get("callee") or edge.get("target")
+        elif isinstance(edge, (list, tuple)) and len(edge) >= 2:
+            # List/tuple format
             from_id, to_id = edge[0], edge[1]
+        else:
+            # Unknown format - skip
+            print(f"  [DEBUG] Skipping invalid edge format: {type(edge)} - {edge}")
+            continue
+
+        if from_id and to_id:
             if from_id not in enabled_map:
                 enabled_map[from_id] = []
             enabled_map[from_id].append(to_id)
+        else:
+            print(f"  [DEBUG] Skipping edge with missing IDs: from={from_id}, to={to_id}, edge={edge}")
 
     # Add enabled field to each problem
     problems_with_enabled = []
