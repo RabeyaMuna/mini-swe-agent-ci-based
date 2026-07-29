@@ -389,7 +389,7 @@ def generate_and_cache_validation(
 
 
 def load_validation_cache(
-    issue_id: str, issue_data: Dict = None, github_fetcher=None, analyzer=None
+    issue_id: str, issue_data: Dict | None = None, github_fetcher=None, analyzer=None
 ) -> Dict:
     """
     Load validation data from cache or generate and save it
@@ -788,16 +788,15 @@ def decompose_issue(
     for commit_analysis in commit_analyses:
         all_changed_files.update(commit_analysis.get("changed_files", []))
 
-    # 5. Return result - SAME STRUCTURE as backward decomposition for unified L1/L2/L3 building
+    # 5. Return result - SAME STRUCTURE as backward decomposition
     return {
-        # Core identification (matches backward decomposition)
+        # Core identification (matches backward decomposition EXACTLY)
         "issue_id": issue_id,
         "repo": f"{repo_owner}/{repo_name}",
-        "workflow": validation_cache.get("workflow_path", ""),  # Renamed from workflow_path
-        "changed_files": list(all_changed_files),
-        "decomposed_problems": problem_sequence,  # Renamed from problem_sequence
+        "workflow": validation_cache.get("workflow_path", ""),
+        "problems": problem_sequence,  # ← Changed to "problems" to match backward decomposition
 
-        # Commit-specific metadata (extra fields for analysis)
+        # Metadata (not saved to decomposed_issues.json, only for L1/L2/L3 building)
         "sha_fail": sha_fail,
         "sha_success": sha_success,
         "repo_owner": repo_owner,
@@ -805,6 +804,7 @@ def decompose_issue(
         "total_commits": len(commits),
         "total_problems": len(problem_sequence),
 
-        # Dependencies for L1 building
-        "dependencies": {},  # Placeholder - can be enhanced later
+        # Internal data for L1 building (not in final output)
+        "_changed_files": list(all_changed_files),  # Prefixed with _ to mark as internal
+        "_dependencies": {},  # Internal data for dependency analysis
     }

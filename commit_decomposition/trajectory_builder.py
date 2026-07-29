@@ -343,6 +343,9 @@ DECISION PROCESS:
 - If setup changes only enable a later formatter, linter, type checker, or test
   command, report the setup/install issue separately from later validation
   violations.
+- Setup/config changes are usually "hidden" (config files don't appear in CI
+  error output), while the actual validation failures are "primary" (source
+  files appear in validator error messages).
 
 5. Handle cascading fixes.
 - Cascading means one change caused or required another related change.
@@ -396,8 +399,26 @@ FIELD GUIDANCE:
 - how_fixed: 1-2 sentences describing what changed and why it was necessary.
 - why_fix_works: 1-2 sentences explaining how the new state satisfies the CI
   step or validator.
-- problem_type: "primary" when affected_files are visible in CI failure context;
-  otherwise "hidden".
+- problem_type: CRITICAL CLASSIFICATION RULE (CI execution order):
+  * "primary" = Problems that APPEAR in the initial CI failure logs
+  * "hidden" = Problems that DON'T appear in initial logs but WILL appear
+    in subsequent CI runs after primary problems are fixed
+
+  CI stops at first failure, so "hidden" problems are masked by "primary" ones.
+  The fix commit may address BOTH primary and hidden problems proactively.
+
+  Examples of PRIMARY (visible in initial CI logs):
+  - Type error shown in mypy output → "primary"
+  - Formatting error in black output → "primary"
+  - Import error that makes CI stop → "primary"
+
+  Examples of HIDDEN (would appear AFTER primary is fixed):
+  - Type error in file B (but CI stopped at file A first) → "hidden"
+  - Test failure masked by earlier import error → "hidden"
+  - Lint issue that would show after fixing formatter → "hidden"
+  - Dependency issue revealed after fixing import → "hidden"
+
+  ALL problems are CI-relevant! The distinction is VISIBILITY ORDER.
 
 OUTPUT JSON FORMAT (valid JSON only, no markdown):
 {{
@@ -413,12 +434,27 @@ OUTPUT JSON FORMAT (valid JSON only, no markdown):
       "how_fixed": "What changed",
       "why_fix_works": "Why the fix solves it",
       "affected_files": ["file1.py", "file2.py"],
-      "problem_type": "primary",
+      "problem_type": "primary",  // This file appears in mypy error output
       "is_cascading": false,
       "dependency_type": "",
       "cascade_explanation": ""
     }},
-    // Additional atomic problems if any
+    {{
+      "problem_id": 2,
+      "validation_order": 11,
+      "validation_cmd": "python -m mypy py",
+      "failure_type": "type_check",
+      "issue_type": "config_change",
+      "problem": "Removed numpy.typing.mypy_plugin from pyproject.toml",
+      "root_cause": "Config no longer enables numpy typing support",
+      "how_fixed": "Removed plugin line from [tool.mypy] section",
+      "why_fix_works": "Restoring enables numpy type checking",
+      "affected_files": ["pyproject.toml"],
+      "problem_type": "hidden",  // Config file does NOT appear in mypy error
+      "is_cascading": false,
+      "dependency_type": "",
+      "cascade_explanation": ""
+    }}
   ]
 }}
 

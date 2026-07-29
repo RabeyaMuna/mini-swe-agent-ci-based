@@ -63,7 +63,7 @@ def build_l1_l2_l3_for_commit_decomposition(
     issue_id = decomposed_result.get("issue_id", "unknown")
 
     # Check if decomposition has problems (using unified field name)
-    problems = decomposed_result.get("decomposed_problems", [])
+    problems = decomposed_result.get("problems", [])
     if not problems:
         print(f"  No problems found for issue {issue_id}, skipping L1/L2/L3")
         return decomposed_result
@@ -76,10 +76,10 @@ def build_l1_l2_l3_for_commit_decomposition(
         issue_id=issue_id,
         repo=decomposed_result.get("repo", ""),
         repo_owner=decomposed_result.get("repo_owner", ""),
-        workflow_path=decomposed_result.get("workflow", ""),  # ← Changed from workflow_path
-        decomposed_problems=decomposed_result.get("decomposed_problems", []),  # ← Changed from problems
-        dependencies=decomposed_result.get("dependencies", {}),
-        ground_truth_files=decomposed_result.get("changed_files", []),
+        workflow_path=decomposed_result.get("workflow", ""),
+        decomposed_problems=problems,  # Use the problems we already extracted
+        dependencies=decomposed_result.get("_dependencies", {}),
+        ground_truth_files=decomposed_result.get("_changed_files", []),
         llm=llm,
     )
     print(f"  ✓ L1 generated: {len(l1_memory.get('problems', []))} problems")
@@ -95,29 +95,31 @@ def build_l1_l2_l3_for_commit_decomposition(
     num_patterns = len(l3_memory.get("universal_patterns", []))
     print(f"  ✓ L3 generated: {num_patterns} patterns")
 
-    # Add to result
-    result = dict(decomposed_result)
-    result["l1_memory"] = l1_memory
-    result["l2_memory"] = l2_memory
-    result["l3_memory"] = l3_memory
+    # Save L1/L2/L3 to their own files (NOT added to decomposed_result)
+    _append_to_fwr_trs(
+        l1_memory=l1_memory,
+        l2_memory=l2_memory,
+        l3_memory=l3_memory,
+        issue_id=issue_id,
+        output_dir=output_dir,
+    )
 
-    # Save immediately to fwr_trs/ (append mode)
-    _append_to_fwr_trs(result, output_dir)
-
-    return result
+    # Return clean decomposed result (no L1/L2/L3 embedded)
+    return decomposed_result
 
 
-def _append_to_fwr_trs(result: dict, output_dir: str):
-    """Append result to forward traces memory files (with duplicate filtering)."""
+def _append_to_fwr_trs(
+    l1_memory: dict,
+    l2_memory: dict,
+    l3_memory: dict,
+    issue_id: str,
+    output_dir: str,
+):
+    """Append L1/L2/L3 memory to their respective files (with duplicate filtering)."""
     from pathlib import Path
 
     fwr_trs_dir = Path(output_dir)
     fwr_trs_dir.mkdir(parents=True, exist_ok=True)
-
-    issue_id = result.get("issue_id", "unknown")
-    l1_memory = result.get("l1_memory", {})
-    l2_memory = result.get("l2_memory", {})
-    l3_memory = result.get("l3_memory", {})
 
     # Append L1 (filter out duplicates by issue_id)
     if l1_memory:
@@ -298,13 +300,22 @@ def main():
 
             traceback.print_exc()
 
-    # Save decomposed issues
+    # Save decomposed issues (clean - no L1/L2/L3, no internal fields)
     fwr_trs_dir = Path(args.output_dir)
     fwr_trs_dir.mkdir(parents=True, exist_ok=True)
 
+    # Clean results: remove internal fields (starting with _)
+    clean_results = []
+    for result in results:
+        clean_result = {
+            k: v for k, v in result.items()
+            if not k.startswith("_")  # Remove internal fields
+        }
+        clean_results.append(clean_result)
+
     decomposed_file = fwr_trs_dir / "decomposed_issues.json"
     with open(decomposed_file, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(clean_results, f, indent=2)
 
     print(f"\n{'=' * 80}")
     print("✓ Commit-based decomposition complete!")

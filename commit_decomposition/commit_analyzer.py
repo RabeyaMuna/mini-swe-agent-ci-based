@@ -3,7 +3,6 @@
 commit_analyzer.py - Analyze commits to extract problems, root causes, and repair plans
 """
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -17,6 +16,11 @@ from utilities.model_token_config import get_input_chunk_tokens
 from prompt_template import build_commit_analysis_prompt, build_file_selection_prompt
 from utilities.diff_chunker import chunk_diff_by_files, estimate_tokens
 from utilities.llm_invoker import invoke_llm_with_retry
+from utilities.json_fallback import (
+    parse_json_with_fallback,
+    should_split_and_retry,
+    create_safe_fallback,
+)
 from utilities.model_token_config import get_output_safe_tokens
 
 load_dotenv()
@@ -74,7 +78,28 @@ class CommitAnalyzer:
                     relationship_context,
                 )
                 chunk_result = self._call_json(prompt)
-                all_groups.extend(chunk_result.get("selected_groups", []))
+
+                # Check if parsing failed and should retry with smaller chunks
+                if "parse_error" in chunk_result and len(chunk["files"]) > 10:
+                    print(f"        JSON parse error, re-chunking {len(chunk['files'])} files...")
+                    # Re-chunk more aggressively
+                    smaller_chunks = chunk_diff_by_files(
+                        chunk["diff"],
+                        max_tokens_per_chunk=int(self._get_safe_chunk_size() * 0.3)
+                    )
+                    for sub_chunk in smaller_chunks:
+                        sub_prompt = build_file_selection_prompt(
+                            commit_metadata,
+                            sub_chunk["files"],
+                            sub_chunk["diff"],
+                            structured_ci_failure,
+                            relevant_validations,
+                            relationship_context,
+                        )
+                        sub_result = self._call_json(sub_prompt)
+                        all_groups.extend(sub_result.get("selected_groups", []))
+                else:
+                    all_groups.extend(chunk_result.get("selected_groups", []))
 
             # Resolve and organize in one pass (no redundant merging)
             selected_groups = self._resolve_and_organize_groups(
@@ -148,7 +173,40 @@ class CommitAnalyzer:
                     relevant_validations=relevant_validations,
                 )
                 chunk_result = self._call_json(prompt)
-                all_problems.extend(chunk_result.get("problems", []))
+
+                # Check if parsing failed and should retry with smaller chunks
+                if "parse_error" in chunk_result and len(chunk.get("files", [])) > 10:
+                    print(f"        JSON parse error, re-chunking {len(chunk['files'])} files...")
+                    # Re-chunk more aggressively
+                    smaller_chunks = chunk_diff_by_files(
+                        chunk["diff"],
+                        max_tokens_per_chunk=int(self._get_safe_chunk_size() * 0.3)
+                    )
+                    for sub_idx, sub_chunk in enumerate(smaller_chunks, 1):
+                        # Calculate linear chunk number for sub-chunks
+                        linear_chunk_num = (i - 1) * len(smaller_chunks) + sub_idx
+                        total_linear_chunks = len(chunks) * len(smaller_chunks)
+
+                        sub_prompt = build_commit_analysis_prompt(
+                            commit_info=commit_info,
+                            commit_diff=sub_chunk["diff"],
+                            commit_sha=commit_sha,
+                            sha_success=sha_success,
+                            sha_fail=sha_fail,
+                            commit_number=commit_number,
+                            total_commits=total_commits,
+                            chunk_number=linear_chunk_num,
+                            total_chunks=total_linear_chunks,
+                            files_in_chunk=sub_chunk["files"],
+                            selected_groups=selected_groups,
+                            ci_failure_info=structured_ci_failure,
+                            ci_metadata=ci_metadata,
+                            relevant_validations=relevant_validations,
+                        )
+                        sub_result = self._call_json(sub_prompt)
+                        all_problems.extend(sub_result.get("problems", []))
+                else:
+                    all_problems.extend(chunk_result.get("problems", []))
 
             result = {
                 "commit_sha": commit_sha,
@@ -168,10 +226,30 @@ class CommitAnalyzer:
     def _diff_chunks(
         self, commit_diff: str, files: List[str], max_tokens: int
     ) -> List[Dict]:
-        """Return one full-diff chunk or file-based chunks when needed."""
-        if estimate_tokens(commit_diff) <= max_tokens:
+        """
+        Return one full-diff chunk or file-based chunks when needed.
+
+        Considers both token count AND complexity (file count) to avoid
+        overwhelming the LLM with too many files even if tokens fit.
+        """
+        diff_tokens = estimate_tokens(commit_diff)
+        file_count = len(files or [])
+
+        # Complexity threshold: if >30 files, be more conservative with tokens
+        # This prevents LLM from getting confused and producing malformed JSON
+        if file_count > 50:
+            effective_max = int(max_tokens * 0.4)  # Use only 40% for very complex diffs
+        elif file_count > 30:
+            effective_max = int(max_tokens * 0.5)  # Use 50% for complex diffs
+        elif file_count > 15:
+            effective_max = int(max_tokens * 0.7)  # Use 70% for moderate complexity
+        else:
+            effective_max = max_tokens  # Use full limit for simple diffs
+
+        if diff_tokens <= effective_max:
             return [{"files": files or [], "diff": commit_diff}]
-        return chunk_diff_by_files(commit_diff, max_tokens_per_chunk=max_tokens)
+
+        return chunk_diff_by_files(commit_diff, max_tokens_per_chunk=effective_max)
 
     def _resolve_and_organize_groups(
         self,
@@ -507,30 +585,10 @@ class CommitAnalyzer:
             return 16000  # Safe default for most models
 
     def _parse_response(self, response: str) -> Dict:
-        """Parse LLM response as JSON"""
-        # Remove markdown code blocks if present
-        response = response.strip()
-        if response.startswith("```"):
-            lines = response.split("\n")
-            # Remove first and last lines (```)
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            response = "\n".join(lines)
-
-        try:
-            return json.loads(response)
-        except json.JSONDecodeError as e:
-            # Try to extract JSON from response
-            start = response.find("{")
-            end = response.rfind("}") + 1
-            if start >= 0 and end > start:
-                try:
-                    return json.loads(response[start:end])
-                except json.JSONDecodeError:
-                    pass
-
-            print(f"    WARNING: Could not parse LLM response as JSON: {e}")
-            print(f"    Response preview: {response[:500]}")
-            return {"problems": [], "parse_error": str(e)}
+        """Parse LLM response as JSON with comprehensive fallback"""
+        # Use centralized JSON parsing with fallback strategies
+        return parse_json_with_fallback(
+            response=response,
+            expected_keys=["problems", "selected_groups", "atomic_problems"],
+            fallback_value={"problems": [], "parse_error": "JSON parsing failed"},
+        )

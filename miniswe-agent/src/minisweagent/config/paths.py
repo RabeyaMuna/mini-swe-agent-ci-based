@@ -27,7 +27,7 @@ def get_results_dir(agent_name: str, model_name: str, ablation_level: str):
     """Get results directory for specific configuration.
 
     Args:
-        agent_name: Agent scaffold name ('miniswe-agent' or 'openhands')
+        agent_name: Agent scaffold name (e.g., 'miniswe-agent')
         model_name: Model name ('minimax', 'glm', 'kimi', etc.)
         ablation_level: Memory ablation level ('baseline', 'L1', 'L1_L2', 'L1_L2_L3')
 
