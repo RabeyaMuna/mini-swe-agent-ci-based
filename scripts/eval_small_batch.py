@@ -16,7 +16,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MEMORY_SEED = PROJECT_ROOT / "data" / "trs" / "memory_seed_issues.json"
-LOG_DETAILS = PROJECT_ROOT / "data" / "trs" / "log_details.json"
+LOG_DETAILS = PROJECT_ROOT / "data" / "log_details.json"  # Standardized location
 MEMORY_ROOT = PROJECT_ROOT / "data" / "trs"
 OUTPUT_ROOT = PROJECT_ROOT / "results" / "eval_small_batch"
 
@@ -65,7 +65,7 @@ def main():
         repo = str(item.get("repo_name", "")).lower()
         issue_id = str(item.get("id", "")).strip()
 
-        if (repo in ["camel", "flower"] or "camel" in repo or "flower" in repo):
+        if repo in ["camel", "flower"] or "camel" in repo or "flower" in repo:
             if issue_id and issue_id not in memory_ids:
                 eval_issues.append(dict(item))
 
@@ -77,7 +77,9 @@ def main():
 
     print(f"\nProcessing first {len(batch)} issues:")
     for i, issue in enumerate(batch, 1):
-        print(f"  {i}. Issue {issue.get('id')} - {issue.get('repo_name')} - {issue.get('sha_fail', '')[:8]}")
+        print(
+            f"  {i}. Issue {issue.get('id')} - {issue.get('repo_name')} - {issue.get('sha_fail', '')[:8]}"
+        )
 
     # Save dataset
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -88,21 +90,30 @@ def main():
 
     # Run
     cmd = [
-        sys.executable, "-m", "minisweagent.run.benchmarks.cibench",
-        "--dataset", str(dataset_path),
-        "--split", "train",
-        "--output", str(OUTPUT_ROOT / timestamp),
-        "--workers", "1",
+        sys.executable,
+        "-m",
+        "minisweagent.run.benchmarks.cibench",
+        "--dataset",
+        str(dataset_path),
+        "--split",
+        "train",
+        "--output",
+        str(OUTPUT_ROOT / timestamp),
+        "--workers",
+        "1",
         "--memory-enabled",
-        "--memory-root", str(MEMORY_ROOT),
-        "--memory-ablation", "L1+L2+L3",
-        "--memory-top-k", "3",
+        "--memory-root",
+        str(MEMORY_ROOT),
+        "--memory-ablation",
+        "L1+L2+L3",
+        "--memory-top-k",
+        "3",
         "--no-save-memory",
     ]
 
     print(f"\nRunning: {' '.join(cmd[:4])} ...")
     print(f"Output: {OUTPUT_ROOT / timestamp}")
-    print("="*80)
+    print("=" * 80)
 
     try:
         subprocess.run(cmd, check=True)
@@ -113,7 +124,7 @@ def main():
         print("\nInterrupted")
         sys.exit(1)
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("COMPLETE")
     print(f"Results: {OUTPUT_ROOT / timestamp}")
 

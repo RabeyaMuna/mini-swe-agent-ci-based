@@ -6,12 +6,10 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from decompose_ci_failure import (
-    LitellmModel,
-    _invoke_json,
-)
+from utilities.llm_model import LitellmModel
+from backward_decomposition.decompose_ci_failure import _invoke_json
 
 def main():
     # Load issue 121

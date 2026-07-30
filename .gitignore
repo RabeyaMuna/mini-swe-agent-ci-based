@@ -191,8 +191,14 @@ pyrightconfig.json
 repo/
 results/
 
+# Virtual environments
+/.venv/                  # Root shared tools venv
+miniswe-agent/.venv/     # Mini-SWE-Agent venv
+openhands/.venv/         # OpenHands venv
+
 # Test memory directories
 test_memory/
+/test/
 *_rebuilt/
 data/trs_OLD/
 test_script
@@ -208,3 +214,5 @@ test_script
 # SMOKING_GUN.mddata/ci_dataset.jsonl
 data/
 data/
+repo/
+execption/

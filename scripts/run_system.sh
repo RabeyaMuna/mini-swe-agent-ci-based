@@ -13,7 +13,12 @@ OUTPUT_DIR="data/trs"
 CACHE_DIR="data"
 HF_DATASET="ci-benchmark-user/ci-repair-bench"
 MEMORY_RATIO=0.3
-MODEL="${MEMCI_LLM_MODEL:-openrouter/minimax/minimax-m2.5}"
+MODEL="${MODEL:-}"
+
+if [ -z "$MODEL" ]; then
+    echo "ERROR: MODEL is required. Use MODEL=minimax2.5 or MODEL=glm5.2."
+    exit 1
+fi
 
 echo "================================================================================"
 echo "CI Memory System - Intelligent Workflow"
@@ -50,7 +55,7 @@ else
     echo "OK Step 1 done: filtered_issues.jsonl exists"
     # Count issues
     ISSUE_COUNT=$(wc -l < "$OUTPUT_DIR/filtered_issues.jsonl" | tr -d ' ')
-    echo "  → Contains $ISSUE_COUNT issues"
+    echo "  -> Contains $ISSUE_COUNT issues"
 fi
 
 # Check Step 2: decomposed_issues.json
@@ -74,7 +79,7 @@ else
         NEEDS_STEP_2=true
     else
         echo "OK Step 2 done: decomposed_issues.json exists"
-        echo "  → Contains $DECOMP_COUNT decomposed issues (all done)"
+        echo "  -> Contains $DECOMP_COUNT decomposed issues (all done)"
     fi
 fi
 
@@ -90,8 +95,8 @@ else
     echo "OK Step 3 done: memory_set.jsonl and eval_set.jsonl exist"
     if command -v jq &> /dev/null && [ -f "$OUTPUT_DIR/split_metadata.json" ]; then
         cat "$OUTPUT_DIR/split_metadata.json" | jq -r '
-            "  → Memory: \(.memory_set_size) issues (\(.memory_ratio * 100 | floor)%)",
-            "  → Eval: \(.eval_set_size) issues"
+            "  -> Memory: \(.memory_set_size) issues (\(.memory_ratio * 100 | floor)%)",
+            "  -> Eval: \(.eval_set_size) issues"
         ' 2>/dev/null || true
     fi
 fi
@@ -110,9 +115,9 @@ else
         L1_COUNT=$(cat "$OUTPUT_DIR/failure_memory.json" | jq 'length' 2>/dev/null || echo "?")
         L2_COUNT=$(cat "$OUTPUT_DIR/repo_memory.json" | jq 'length' 2>/dev/null || echo "?")
         L3_COUNT=$(cat "$OUTPUT_DIR/cross_memory.json" | jq 'length' 2>/dev/null || echo "?")
-        echo "  → L1: $L1_COUNT problems"
-        echo "  → L2: $L2_COUNT sequences"
-        echo "  → L3: $L3_COUNT patterns"
+        echo "  -> L1: $L1_COUNT problems"
+        echo "  -> L2: $L2_COUNT sequences"
+        echo "  -> L3: $L3_COUNT patterns"
     fi
 fi
 
@@ -221,14 +226,24 @@ from pathlib import Path
 
 # Load filtered issues
 with open('$OUTPUT_DIR/filtered_issues.jsonl') as f:
-    filtered_ids = set(json.loads(line)['id'] for line in f)
+    filtered_ids = {
+        str(record.get('id') or record.get('instance_id') or record.get('issue_id') or '')
+        for line in f
+        if line.strip()
+        for record in [json.loads(line)]
+    }
+    filtered_ids.discard('')
 
 # Load decomposed issues
 decomp_file = Path('$OUTPUT_DIR/decomposed_issues.json')
 if decomp_file.exists():
     with open(decomp_file) as f:
         decomposed = json.load(f)
-        decomposed_ids = set(str(d.get('original_issue_id')) for d in decomposed)
+        decomposed_ids = {
+            str(d.get('original_issue_id') or d.get('issue_id') or d.get('id') or d.get('instance_id') or '')
+            for d in decomposed
+        }
+        decomposed_ids.discard('')
 else:
     decomposed_ids = set()
 
@@ -240,8 +255,8 @@ if missing:
 
         if [ -n "$MISSING_IDS" ]; then
             MISSING_COUNT=$(echo "$MISSING_IDS" | tr ',' '\n' | wc -l | tr -d ' ')
-            echo "  → Found $MISSING_COUNT missing issues: $MISSING_IDS"
-            echo "  → Decomposing missing issues only..."
+            echo "  -> Found $MISSING_COUNT missing issues: $MISSING_IDS"
+            echo "  -> Decomposing missing issues only..."
             echo ""
 
             # Decompose only missing issues
@@ -254,7 +269,7 @@ if missing:
                     --skip-memory || echo "  Warning: Issue $issue_id failed"
             done
         else
-            echo "  → All issues already decomposed"
+            echo "  -> All issues already decomposed"
         fi
     else
         echo "Fresh decomposition of all issues..."
