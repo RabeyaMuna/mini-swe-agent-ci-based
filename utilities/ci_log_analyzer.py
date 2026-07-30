@@ -464,6 +464,139 @@ CI LOG CHUNK
         return results
 
     # ------------------------------------------------------------------
+    def _check_if_fallback_needed(
+        self, step_payload_json: str, model_name: str
+    ) -> bool:
+        """
+        Check if iterative fallback summarization is needed.
+
+        Returns True if combined chunks exceed 50% of model context limit.
+        """
+        try:
+            # Get model context limit
+            from utilities.model_token_config import get_model_context_limit
+
+            context_limit = get_model_context_limit(model_name)
+
+            # Estimate tokens in payload
+            tokens = self._estimate_tokens(step_payload_json)
+
+            # Add prompt overhead (~2000 tokens)
+            total_tokens = tokens + 2000
+
+            # Check if exceeds 50% of context
+            usage_ratio = total_tokens / context_limit
+
+            if usage_ratio > 0.5:
+                print(f"[FALLBACK] Payload size: {total_tokens:,} tokens ({usage_ratio*100:.1f}% of {context_limit:,})")
+                print(f"[FALLBACK] Enabling iterative summarization")
+                return True
+
+            return False
+        except Exception as e:
+            # If check fails, don't use fallback
+            print(f"[FALLBACK] Check failed: {e}, using standard approach")
+            return False
+
+    # ------------------------------------------------------------------
+    def _iterative_summarization(
+        self, step_name: str, chunks: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """
+        Iterative summarization for large log steps.
+
+        Process chunks incrementally, building up overall failure info.
+        This is a fallback strategy for very large logs that exceed
+        50% of model context limit.
+        """
+        print(f"[FALLBACK] Processing {len(chunks)} chunks iteratively")
+
+        # Start with empty summary
+        accumulated_summary = {
+            "step_name": step_name,
+            "sha_fail": self.sha_fail,
+            "log_content": "",
+            "error_context": [],
+            "relevant_files": [],
+            "error_types": [],
+        }
+
+        # Process chunks in batches
+        for i, chunk in enumerate(chunks):
+            print(f"[FALLBACK] Processing chunk {i+1}/{len(chunks)}")
+
+            # Build incremental prompt
+            prompt = f"""
+You are a CI log analyzer working incrementally.
+
+You have a PARTIAL summary of a CI step failure, and you are receiving ONE MORE CHUNK of log data.
+
+## Current Summary (so far):
+{json.dumps(accumulated_summary, indent=2, ensure_ascii=False)}
+
+## New Chunk to Integrate:
+{json.dumps(chunk, indent=2, ensure_ascii=False)}
+
+## Task:
+Update the summary by integrating information from the new chunk.
+
+Rules:
+- Append new error_context entries (deduplicate similar ones)
+- Add new relevant_files (deduplicate by path)
+- Add new error_types (deduplicate by category+subcategory)
+- Extend log_content with new information
+- Keep step_name and sha_fail unchanged
+
+Output STRICT JSON matching this schema:
+{{
+  "step_name": "{step_name}",
+  "sha_fail": "{self.sha_fail}",
+  "log_content": "...",
+  "error_context": [...],
+  "relevant_files": [...],
+  "error_types": [...]
+}}
+
+Return ONLY JSON, no markdown fences, no extra text.
+"""
+
+            try:
+                response = self.llm.invoke([HumanMessage(content=prompt)]).content
+                content = self.load_json_maybe_fenced(response)
+
+                if not content or not content.strip():
+                    print(f"[FALLBACK] Empty response for chunk {i+1}, skipping")
+                    continue
+
+                try:
+                    updated_summary = json.loads(content)
+                except json.JSONDecodeError:
+                    try:
+                        cleaned = _clean_malformed_json(content)
+                        updated_summary = json.loads(cleaned)
+                    except json.JSONDecodeError:
+                        if demjson3 is not None:
+                            try:
+                                cleaned = _clean_malformed_json(content)
+                                updated_summary = demjson3.decode(cleaned)
+                            except Exception:
+                                print(f"[FALLBACK] JSON parse failed for chunk {i+1}, skipping")
+                                continue
+                        else:
+                            print(f"[FALLBACK] JSON parse failed for chunk {i+1}, skipping")
+                            continue
+
+                # Update accumulated summary
+                accumulated_summary = updated_summary
+
+            except Exception as e:
+                print(f"[FALLBACK] Error processing chunk {i+1}: {e}")
+                continue
+
+        print(f"[FALLBACK] Iterative summarization complete")
+        return accumulated_summary
+
+    # ------------------------------------------------------------------
     def generate_log_summary(self, all_step_outputs) -> list[dict[str, Any]]:
         """
         Generate a structured final error summary from error details,
@@ -480,6 +613,18 @@ CI LOG CHUNK
                 "chunks": chunks,
             }
             step_payload_json = json.dumps(step_payload, indent=2, ensure_ascii=False)
+
+            # Check if fallback needed (payload > 50% of model context)
+            if self._check_if_fallback_needed(step_payload_json, self.model_name):
+                try:
+                    summary = self._iterative_summarization(step_name, chunks)
+                    log_details.append(summary)
+                    continue  # Skip standard processing
+                except Exception as e:
+                    print(f"[FALLBACK] Iterative summarization failed: {e}")
+                    print(f"[FALLBACK] Falling back to standard processing")
+                    # Continue with standard processing below
+
             prompt = f"""
 You are a CI log analyzer.
 

@@ -193,6 +193,11 @@ def supports_large_output(model_name: str | None) -> bool:
     return get_model_config(model_name)["supports_large_output"]
 
 
+def get_model_context_limit(model_name: str | None) -> int:
+    """Get model's total context window size in tokens."""
+    return get_model_config(model_name)["input_context_window"]
+
+
 def requires_multi_stage(model_name: str | None) -> bool:
     """Check if model requires multi-stage processing for large outputs."""
     return get_model_config(model_name)["requires_multi_stage"]

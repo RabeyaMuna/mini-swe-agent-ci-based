@@ -5,7 +5,18 @@ This repository runs CI repair evaluations for two agents:
 - `mini-swe-agent`
 - `openhands`
 
-Each agent can be evaluated with two models:
+## 🤖 LLM Provider Support
+
+**The system supports ANY LLM provider** through [LiteLLM](https://docs.litellm.ai/):
+
+- **Anthropic**: Claude Opus, Sonnet, Haiku
+- **OpenAI**: GPT-4o, GPT-4 Turbo, GPT-3.5
+- **Google**: Gemini Pro, Gemini Flash
+- **Cohere**: Command R+, Command R
+- **Local**: Ollama (Llama, Mistral, CodeLlama, etc.)
+- **100+ providers**: See [LLM Configuration Guide](docs/LLM_CONFIGURATION.md)
+
+Default evaluation models:
 
 - `openrouter/minimax/minimax-m2.5`
 - `openrouter/z-ai/glm-5.2`
@@ -535,6 +546,304 @@ MODEL=glm5.2 openhands/.venv/bin/python openhands/ci_bench_runner.py \
   --memory-root data/fwr_trs \
   --memory-ablation L1+L2+L3
 ```
+
+---
+
+### Codex CLI
+
+Codex is a third evaluation agent that uses the Codex CLI tool.
+
+> **📖 Multi-LLM Support**: Codex supports **any LLM provider** (Claude, GPT, Gemini, Ollama, Cohere, etc.) through LiteLLM. See [LLM Configuration Guide](docs/LLM_CONFIGURATION.md) for complete setup with different models.
+
+#### 1. Install Codex CLI
+
+```bash
+# Install Codex CLI globally
+pip install codex-cli
+
+# Verify installation
+codex --version
+```
+
+For more installation options, see: https://github.com/anthropics/codex
+
+#### 2. Baseline (No Memory)
+
+Run all validation issues with unlimited problems per issue:
+
+```bash
+# MiniMax 2.5 (via OpenRouter)
+export OPENROUTER_API_KEY="your-key-here"
+
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations baseline \
+  --context-model minimax2.5
+
+# GLM 5.2 (via Z-AI)
+export GLM_API_KEY="your-key-here"
+
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations baseline \
+  --context-model glm5.2
+```
+
+**Using other LLM providers:**
+
+```bash
+# Claude Sonnet 4.5
+export ANTHROPIC_API_KEY="your-key-here"
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations baseline \
+  --context-model claude-sonnet-4-5 \
+  
+# GPT-4o
+export OPENAI_API_KEY="your-key-here"
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations baseline \
+  --context-model gpt-4o \
+  
+# Ollama (Local, Free)
+ollama pull llama3.1
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations baseline \
+  --context-model ollama/llama3.1 \
+  ```
+
+#### 3. With Memory (L1+L2+L3) - Backward Decomposition
+
+```bash
+# MiniMax 2.5
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations L1+L2+L3 \
+  --context-model minimax2.5 \
+  --memory-root data/back_trs
+
+# GLM 5.2
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations L1+L2+L3 \
+  --context-model glm5.2 \
+  --memory-root data/back_trs
+```
+
+#### 4. With Memory (L1+L2+L3) - Forward Decomposition
+
+```bash
+# MiniMax 2.5
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations L1+L2+L3 \
+  --context-model minimax2.5 \
+  --memory-root data/fwr_trs
+
+# GLM 5.2
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations L1+L2+L3 \
+  --context-model glm5.2 \
+  --memory-root data/fwr_trs
+```
+
+#### 5. Separate Codex Evaluation Runs
+
+Run baseline, backward-memory, and forward-memory experiments separately. Store
+each run directly under `results/codex/` with this naming convention:
+
+```text
+results/codex/<ablation>_<model>
+results/codex/<ablation>_<model>_<decomposition>
+```
+
+Use the decomposition suffix only when memory is enabled.
+
+Set the model once:
+
+```bash
+MODEL=minimax2.5
+MODEL_NAME=minimax2.5
+```
+
+For GLM, Claude, GPT, Gemini, or another configured LiteLLM model, change only
+the `MODEL`, `MODEL_NAME`, and API key. Use `MODEL_NAME` as a filesystem-safe
+label, for example `openrouter_minimax_m2_5` instead of
+`openrouter/minimax/minimax-m2.5`.
+
+##### Baseline: No Memory
+
+Do not pass `--memory-root` for baseline. Results are saved under the model's
+baseline directory:
+
+```bash
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations baseline \
+  --context-model "${MODEL}" \
+  --model-name "${MODEL_NAME}" \
+  --output-root "results/codex/baseline_${MODEL_NAME}"
+```
+
+Combined predictions:
+
+```text
+results/codex/baseline_<model>/predictions.json
+```
+
+##### Backward Decomposition Memory
+
+Use `data/back_trs` for backward-decomposed memory. Run the memory ablations one
+at a time so each result root includes the ablation name:
+
+```bash
+for LEVEL in L1 L1+L2 L1+L2+L3; do
+  SAFE_LEVEL=$(printf "%s" "${LEVEL}" | tr "[:upper:]+" "[:lower:]_")
+
+  python3 codex/scripts/run_codex_ci_repair.py \
+    --issue-ids-file data/eval_issue_ids.json \
+    --ablations "${LEVEL}" \
+    --context-model "${MODEL}" \
+    --model-name "${MODEL_NAME}" \
+    --memory-root data/back_trs \
+    --output-root "results/codex/${SAFE_LEVEL}_${MODEL_NAME}_backward"
+done
+```
+
+Example prediction files:
+
+```text
+results/codex/l1_<model>_backward/predictions.json
+results/codex/l1_l2_<model>_backward/predictions.json
+results/codex/l1_l2_l3_<model>_backward/predictions.json
+```
+
+##### Forward Decomposition Memory
+
+Use `data/fwr_trs` for forward-decomposed memory:
+
+```bash
+for LEVEL in L1 L1+L2 L1+L2+L3; do
+  SAFE_LEVEL=$(printf "%s" "${LEVEL}" | tr "[:upper:]+" "[:lower:]_")
+
+  python3 codex/scripts/run_codex_ci_repair.py \
+    --issue-ids-file data/eval_issue_ids.json \
+    --ablations "${LEVEL}" \
+    --context-model "${MODEL}" \
+    --model-name "${MODEL_NAME}" \
+    --memory-root data/fwr_trs \
+    --output-root "results/codex/${SAFE_LEVEL}_${MODEL_NAME}_forward"
+done
+```
+
+Example prediction files:
+
+```text
+results/codex/l1_<model>_forward/predictions.json
+results/codex/l1_l2_<model>_forward/predictions.json
+results/codex/l1_l2_l3_<model>_forward/predictions.json
+```
+
+##### Optional: One Memory Level Only
+
+To run only one memory level, set `--ablations` and the matching output root:
+
+```bash
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids-file data/eval_issue_ids.json \
+  --ablations L1+L2+L3 \
+  --context-model "${MODEL}" \
+  --model-name "${MODEL_NAME}" \
+  --memory-root data/back_trs \
+  --output-root "results/codex/l1_l2_l3_${MODEL_NAME}_backward"
+```
+
+This writes:
+
+```text
+results/codex/l1_l2_l3_<model>_backward/predictions.json
+results/codex/l1_l2_l3_<model>_backward/l1_l2_l3/<issue_id>/patch.diff
+```
+
+Even when an issue is decomposed into multiple problem prompts, Codex keeps the
+earlier edits in the same checkout and saves one unified issue patch after all
+problem prompts finish. Each `predictions.json` stores those unified patches for
+later evaluation.
+
+To rebuild a combined file from existing result directories:
+
+```bash
+python3 scripts/consolidate_codex_patches.py \
+  --output-root results/codex/l1_l2_l3_minimax2.5_backward \
+  --all
+```
+
+#### 6. Single Issue Testing
+
+Test a single issue before running the full evaluation:
+
+```bash
+# Test with issue 43
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids 43 \
+  --ablations baseline \
+  --context-model minimax2.5 \
+  --dry-run
+
+# Run it (remove --dry-run)
+python3 codex/scripts/run_codex_ci_repair.py \
+  --issue-ids 43 \
+  --ablations baseline \
+  --context-model minimax2.5 \
+  ```
+
+#### Key Parameters
+
+- **`--issue-ids-file`**: Path to JSON file containing issue IDs (default: `data/eval_issue_ids.json`)
+- **`--issue-ids`**: Comma-separated issue IDs for testing specific issues
+- **`--ablations`**: Comma-separated list: `baseline`, `L1`, `L1+L2`, `L1+L2+L3`
+- **`--context-model`**: LLM model to use (supports 100+ providers via LiteLLM)
+- **`--model-name`**: Model label saved in `predictions.json` (defaults to `--context-model`)
+- **`--memory-root`**: Path to memory data (`data/back_trs` or `data/fwr_trs`)
+- **`--output-root`**: Results directory; include model/decomposition names to keep runs separate
+- **`--generate-missing-analysis`**: Auto-generate CI failure analysis for uncached issues; enabled by default
+- **`--no-generate-missing-analysis`**: Disable generation and require cached analysis only
+- **`--dry-run`**: Generate prompts without executing Codex
+
+#### Output Structure
+
+```
+results/codex/
+├── baseline_minimax2.5/
+│   ├── predictions.json
+│   └── baseline/<issue_id>/
+│       ├── issue_document_problem_1.md
+│       ├── codex_transcript_problem_1.txt
+│       ├── patch.diff                   ← Unified issue fix after all problem prompts
+│       └── result.json
+├── l1_minimax2.5_backward/
+│   ├── predictions.json
+│   └── l1/<issue_id>/
+├── l1_l2_minimax2.5_backward/
+│   ├── predictions.json
+│   └── l1_l2/<issue_id>/
+├── l1_l2_l3_minimax2.5_backward/
+│   ├── predictions.json
+│   └── l1_l2_l3/<issue_id>/
+├── l1_minimax2.5_forward/
+├── l1_l2_minimax2.5_forward/
+└── l1_l2_l3_minimax2.5_forward/
+```
+
+#### Documentation
+
+- **[Complete LLM Configuration Guide](docs/LLM_CONFIGURATION.md)** - All providers, API keys, advanced config
+- **[Quick Start Guide](docs/QUICK_START_LLM.md)** - Common examples and troubleshooting
+- **[CI Repair Runner](codex/docs/ci-repair-runner.md)** - Full runner documentation
+- **[Example Scripts](examples/run_with_different_llms.sh)** - Executable examples
 
 ---
 
