@@ -1,0 +1,1102 @@
+#!/usr/bin/env python3
+"""
+Run Codex CLI over CI-repair benchmark issues using prepared CI documents.
+
+This is intentionally an external runner. It does not change Codex core
+behavior; it prepares the same task document that a user would paste into
+Codex, then invokes `codex exec` from a checked-out failing repository.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATASET = PROJECT_ROOT / "data" / "eval_set.jsonl"
+DEFAULT_ISSUE_IDS_FILE = PROJECT_ROOT / "data" / "eval_issue_ids.json"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "results" / "codex"
+DEFAULT_MEMORY_ROOT = PROJECT_ROOT / "data" / "back_trs"
+DEFAULT_LOG_CACHE = PROJECT_ROOT / "data" / "log_details.json"
+DEFAULT_WORKFLOW_CACHE = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
+
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def load_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def issue_id(issue: dict[str, Any]) -> str:
+    return str(issue.get("instance_id") or issue.get("id") or issue.get("sha_fail"))
+
+
+def repo_slug(issue: dict[str, Any]) -> str:
+    owner = str(issue.get("repo_owner") or "").strip()
+    name = str(issue.get("repo_name") or "").strip()
+    repo = str(issue.get("repo") or "").strip()
+    if owner and name:
+        return f"{owner}/{name}"
+    return repo
+
+
+def load_issues(dataset: Path) -> list[dict[str, Any]]:
+    if dataset.suffix == ".jsonl":
+        rows = []
+        with dataset.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
+        return rows
+
+    data = load_json(dataset, [])
+    if isinstance(data, list):
+        return data
+    raise ValueError(f"Unsupported dataset shape: {dataset}")
+
+
+def load_issue(dataset: Path, wanted_id: str) -> dict[str, Any]:
+    for row in load_issues(dataset):
+        if issue_id(row) == str(wanted_id):
+            return row
+    raise KeyError(f"Issue id not found in {dataset}: {wanted_id}")
+
+
+def load_issue_ids(path: Path) -> list[str]:
+    data = load_json(path, [])
+    if not isinstance(data, list):
+        raise ValueError(f"Issue ids file must be a JSON list: {path}")
+    return [str(item) for item in data if str(item).strip()]
+
+
+def load_huggingface_issues(dataset_name: str) -> list[dict[str, Any]]:
+    try:
+        from utilities.dataset_fetcher import HF_DATASET, fetch_dataset
+    except ImportError as exc:
+        raise RuntimeError(
+            "Fetching issue data from Hugging Face requires the shared "
+            "utilities.dataset_fetcher module and its dependencies. "
+            "Install them or provide data/eval_set.jsonl."
+        ) from exc
+
+    if dataset_name != HF_DATASET:
+        raise ValueError(
+            f"The shared dataset fetcher is configured for {HF_DATASET!r}; "
+            f"got {dataset_name!r}."
+        )
+    return fetch_dataset(split="train", verbose=True)
+
+
+def load_issue_index(dataset: Path, hf_dataset: str | None) -> dict[str, dict[str, Any]]:
+    if dataset.exists():
+        rows = load_issues(dataset)
+    elif hf_dataset:
+        rows = load_huggingface_issues(hf_dataset)
+    else:
+        raise FileNotFoundError(
+            f"Dataset not found: {dataset}. Provide --dataset or --hf-dataset."
+        )
+    return {issue_id(row): row for row in rows}
+
+
+def cache_index(path: Path) -> dict[str, dict[str, Any]]:
+    records = load_json(path, [])
+    if isinstance(records, dict):
+        records = list(records.values())
+
+    index: dict[str, dict[str, Any]] = {}
+    for row in records or []:
+        if not isinstance(row, dict):
+            continue
+        for key in (row.get("id"), row.get("instance_id"), row.get("sha_fail")):
+            if key:
+                index[str(key)] = row
+    return index
+
+
+def prepare_repo_checkout(
+    issue: dict[str, Any],
+    checkout: Path,
+    refresh: bool,
+    dry_run: bool,
+) -> None:
+    """
+    Prepare a repository checkout at the failing commit.
+
+    Simple approach: Clone directly from GitHub to the checkout directory.
+    """
+    sha = str(issue.get("sha_fail") or "").strip()
+    slug = repo_slug(issue)
+    if not slug:
+        raise ValueError(f"Issue {issue_id(issue)} has no repo owner/name")
+    if not sha:
+        raise ValueError(f"Issue {issue_id(issue)} has no sha_fail")
+
+    # Remove old checkout if refresh requested
+    if checkout.exists() and refresh:
+        shutil.rmtree(checkout)
+
+    if dry_run and not (checkout / ".git").exists():
+        checkout.mkdir(parents=True, exist_ok=True)
+        return
+
+    # Clone directly from GitHub
+    if not (checkout / ".git").exists():
+        checkout.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "clone", f"https://github.com/{slug}.git", str(checkout)],
+            check=True,
+        )
+
+    # Try to checkout the commit - if it fails, fetch it first
+    result = subprocess.run(
+        ["git", "checkout", "--force", sha],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        # Commit not in default branch - fetch it
+        print(f"[codex] Commit {sha[:8]} not in default branch, fetching...")
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin", sha],
+            cwd=checkout,
+            capture_output=True,
+            text=True,
+        )
+
+        if fetch_result.returncode != 0:
+            # Try fetching all refs as fallback
+            subprocess.run(
+                ["git", "fetch", "--all", "--tags"],
+                cwd=checkout,
+                capture_output=True,
+            )
+
+        # Try checkout again
+        subprocess.run(
+            ["git", "checkout", "--force", sha],
+            cwd=checkout,
+            check=True,
+        )
+
+    subprocess.run(["git", "clean", "-fdx"], cwd=checkout, check=True)
+
+
+def make_context_llm(model: str | None) -> Any:
+    if not model:
+        return None
+
+    try:
+        import litellm
+        from utilities.model_registry import configure_model_environment, resolve_model_alias
+    except Exception as exc:
+        raise RuntimeError(f"Could not import context LLM dependencies: {exc}") from exc
+
+    model_name = str(resolve_model_alias(model))
+    configure_model_environment(model_name)
+
+    def _call(prompt: str) -> str:
+        response = litellm.completion(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return str(response.choices[0].message.content or "").strip()
+
+    return _call
+
+
+def is_placeholder_analysis(data: dict[str, Any]) -> bool:
+    source = str(data.get("source") or "")
+    return source in {
+        "fallback_log_scan",
+        "missing_workflow_validation_cache",
+    }
+
+
+def is_usable_ci_failure(data: dict[str, Any]) -> bool:
+    if not data or is_placeholder_analysis(data):
+        return False
+    if data.get("error") and not any(
+        data.get(key) for key in ("error_context", "failure_signals", "relevant_files")
+    ):
+        return False
+    return any(
+        data.get(key)
+        for key in ("error_context", "failure_signals", "relevant_files", "error_types")
+    )
+
+
+def is_usable_verification(data: dict[str, Any]) -> bool:
+    if not data or is_placeholder_analysis(data):
+        return False
+    return bool(data.get("validation_sequence"))
+
+
+def load_or_generate_ci_failure(
+    issue: dict[str, Any],
+    result_dir: Path,
+    log_cache: Path,
+    context_llm: Any,
+    context_model: str | None,
+    generate_missing: bool,
+) -> dict[str, Any]:
+    out_json = result_dir / "ci_failure.json"
+    out_md = result_dir / "ci_failure.md"
+    if out_json.exists():
+        cached = load_json(out_json, {})
+        if is_usable_ci_failure(cached):
+            return cached
+
+    index = cache_index(log_cache)
+    analysis = index.get(issue_id(issue)) or index.get(str(issue.get("sha_fail"))) or {}
+    if not is_usable_ci_failure(analysis):
+        if not generate_missing:
+            raise RuntimeError(
+                f"No usable CI failure cache entry for issue {issue_id(issue)} "
+                f"or sha {issue.get('sha_fail')}. Enable generation or precompute "
+                f"{log_cache}."
+            )
+        if context_llm is None:
+            raise RuntimeError(
+                "No CI failure cache entry was found, and generation requires "
+                "--context-model because utilities.ci_log_analyzer is LLM-backed."
+            )
+
+        try:
+            from utilities.ci_log_analyzer import _run_log_analysis
+
+            analysis = _run_log_analysis(issue, context_llm, context_model or "")
+            analysis["source"] = "ci_log_analyzer"
+
+            # Save to shared cache for future runs
+            print(f"[codex] Saving CI failure analysis to cache: {log_cache}")
+            _append_to_cache(log_cache, analysis)
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"CI failure generation failed for issue {issue_id(issue)}: {exc}"
+            ) from exc
+        else:
+            analysis["source"] = analysis.get("source") or "ci_failure_cache"
+
+    write_json(out_json, analysis)
+    write_text(out_md, format_ci_failure_markdown(analysis))
+    return analysis
+
+
+def _append_to_cache(cache_path: Path, new_entry: dict[str, Any]) -> None:
+    """Append a new entry to the cache file, avoiding duplicates."""
+    cache_data = load_json(cache_path, [])
+
+    # Remove any existing entry with same ID
+    entry_id = new_entry.get("id") or new_entry.get("instance_id")
+    if entry_id:
+        cache_data = [x for x in cache_data if x.get("id") != entry_id and x.get("instance_id") != entry_id]
+
+    # Append new entry
+    cache_data.append(new_entry)
+
+    # Save back
+    write_json(cache_path, cache_data)
+
+
+def load_or_generate_verification(
+    issue: dict[str, Any],
+    result_dir: Path,
+    workflow_cache: Path,
+    checkout: Path,
+    context_llm: Any,
+    generate_missing: bool,
+) -> dict[str, Any]:
+    out_json = result_dir / "ci_verification.json"
+    if out_json.exists():
+        cached = load_json(out_json, {})
+        if is_usable_verification(cached):
+            return cached
+
+    index = cache_index(workflow_cache)
+    verification = index.get(issue_id(issue)) or index.get(str(issue.get("sha_fail"))) or {}
+    if not is_usable_verification(verification):
+        if not generate_missing:
+            raise RuntimeError(
+                f"No usable workflow verification cache entry for issue {issue_id(issue)} "
+                f"or sha {issue.get('sha_fail')}. Enable generation or precompute "
+                f"{workflow_cache}."
+            )
+        if context_llm is None:
+            raise RuntimeError(
+                "No workflow verification cache entry was found, and generation "
+                "requires --context-model because "
+                "utilities.ci_workflow_aware_retrieval is LLM-backed."
+            )
+
+        try:
+            from utilities.ci_workflow_aware_retrieval import (
+                analyze_workflow_from_benchmark,
+            )
+
+            verification = analyze_workflow_from_benchmark(
+                workflow_content=str(issue.get("workflow") or ""),
+                workflow_path=str(issue.get("workflow_path") or ""),
+                repo_path=str(checkout),
+                llm=context_llm,
+                issue_id=issue_id(issue),
+                sha_fail=str(issue.get("sha_fail") or ""),
+            )
+            verification["source"] = "ci_workflow_aware_retrieval"
+
+            # Save to shared cache for future runs
+            print(f"[codex] Saving workflow verification to cache: {workflow_cache}")
+            _append_to_cache(workflow_cache, verification)
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Workflow verification generation failed for issue "
+                f"{issue_id(issue)}: {exc}"
+            ) from exc
+        else:
+            verification["source"] = verification.get("source") or "workflow_cache"
+
+    write_json(out_json, verification)
+    return verification
+
+
+class MemoryConfig:
+    def __init__(self, enabled: bool, ablation: str, memory_root: Path, top_k: int) -> None:
+        self.memory_enabled = enabled
+        self.memory_ablation_levels = ablation
+        self.memory_top_k = top_k
+        self.project_result_dir = str(memory_root)
+        self.memory_backend = "json"
+
+
+def load_memory_context(
+    issue: dict[str, Any],
+    ci_failure: dict[str, Any],
+    verification: dict[str, Any],
+    result_dir: Path,
+    memory_root: Path,
+    ablation: str,
+    top_k: int,
+) -> str:
+    if ablation.lower() == "baseline":
+        return ""
+
+    try:
+        from memory_plugin.memory_plugin import MemoryPlugin
+    except Exception as exc:
+        return f"Memory plugin import failed: {exc}"
+
+    relevant_files = []
+    for item in ci_failure.get("relevant_files") or []:
+        if isinstance(item, dict):
+            relevant_files.append(item.get("file") or item.get("path") or "")
+        else:
+            relevant_files.append(str(item))
+    relevant_files = [x for x in relevant_files if x]
+
+    failure_reason = "\n".join(str(x) for x in ci_failure.get("error_context", [])[:8])
+    validation_sequence = verification.get("validation_sequence") or []
+    failed_cmd = [
+        step.get("validation_cmd")
+        for step in validation_sequence
+        if isinstance(step, dict) and step.get("validation_cmd")
+    ]
+
+    query = {
+        "task_id": issue_id(issue),
+        "sha_fail": issue.get("sha_fail"),
+        "repo": repo_slug(issue),
+        "workflow_path": issue.get("workflow_path") or "",
+        "error_type": issue.get("error_type") or ci_failure.get("error_types") or "",
+        "failure_pattern": failure_reason[:500],
+        "failure_reason": failure_reason,
+        "error_context_summary": failure_reason,
+        "relevant_files": relevant_files,
+        "failed_cmd": failed_cmd,
+        "failed_tool": [],
+    }
+
+    try:
+        config = MemoryConfig(True, ablation, memory_root, top_k)
+        plugin = MemoryPlugin(config, str(result_dir), llm=None)
+        retrieval = plugin.retrieve(query)
+        write_json(result_dir / "memory_retrieval.json", retrieval)
+
+        formatted = plugin.format_for_prompt(retrieval)
+        details = json.dumps(
+            {
+                "level_scores": retrieval.get("level_scores"),
+                "weighted_similarity": retrieval.get("weighted_similarity"),
+                "candidate_files": retrieval.get("candidate_files"),
+                "high_level_hints": retrieval.get("high_level_hints"),
+                "l1_matches": retrieval.get("l1_matches", [])[:top_k],
+                "l2_matches": retrieval.get("l2_matches", [])[:top_k],
+                "l3_matches": retrieval.get("l3_matches", [])[:top_k],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        memory_md = f"Memory retrieval failed: {exc}"
+        write_text(result_dir / "memory_context.md", memory_md)
+        return memory_md
+
+    memory_md = f"{formatted}\n\n```json\n{details[:20000]}\n```"
+    write_text(result_dir / "memory_context.md", memory_md)
+    return memory_md
+
+
+def format_ci_failure_markdown(analysis: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# CI Failure Analysis",
+            "",
+            "## Failure Context",
+            bullet_lines(analysis.get("error_context")),
+            "",
+            "## Failure Signals",
+            bullet_lines(analysis.get("failure_signals")),
+            "",
+            "## Relevant Files",
+            bullet_lines(analysis.get("relevant_files")),
+            "",
+            "## Failed Jobs",
+            bullet_lines(analysis.get("failed_job") or analysis.get("failed_jobs")),
+            "",
+            "## Error Types",
+            bullet_lines(analysis.get("error_types")),
+            "",
+        ]
+    )
+
+
+def bullet_lines(value: Any) -> str:
+    if not value:
+        return "- Not available"
+    if not isinstance(value, list):
+        value = [value]
+    lines = []
+    for item in value:
+        if isinstance(item, (dict, list)):
+            item = json.dumps(item, ensure_ascii=False)
+        lines.append(f"- {str(item).strip()}")
+    return "\n".join(lines)
+
+
+def validation_markdown(verification: dict[str, Any]) -> str:
+    steps = verification.get("validation_sequence") or []
+    if not steps:
+        return "No workflow-aware verification sequence was available."
+
+    lines = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        lines.extend(
+            [
+                f"### Step {step.get('order', '?')}: {step.get('validates', '')}",
+                f"- Install: {step.get('installation_cmd') or 'n/a'}",
+                f"- Validate: {step.get('validation_cmd') or 'n/a'}",
+                f"- Source: {step.get('source') or 'n/a'}",
+                f"- Evidence: {step.get('evidence') or 'n/a'}",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
+def extract_problem_list(ci_failure: dict[str, Any]) -> list[dict[str, Any]]:
+    files = ci_failure.get("relevant_files") or []
+    problems = []
+    for idx, item in enumerate(files, start=1):
+        if isinstance(item, dict):
+            file_name = item.get("file") or item.get("path") or ""
+            reason = item.get("reason") or item.get("issue_type") or ""
+            failed_cmd = item.get("failed_cmd") or ""
+        else:
+            file_name = str(item)
+            reason = ""
+            failed_cmd = ""
+        if file_name or reason:
+            problems.append(
+                {
+                    "number": idx,
+                    "title": file_name or f"Problem {idx}",
+                    "file": file_name,
+                    "reason": reason,
+                    "failed_cmd": failed_cmd,
+                }
+            )
+
+    if not problems:
+        context = "\n".join(str(x) for x in ci_failure.get("error_context", [])[:10])
+        problems.append(
+            {
+                "number": 1,
+                "title": "Primary CI failure",
+                "file": "",
+                "reason": context or "Repair the CI failure described in the logs.",
+                "failed_cmd": "",
+            }
+        )
+
+    return problems
+
+
+def compose_issue_document(
+    issue: dict[str, Any],
+    ci_failure: dict[str, Any],
+    verification: dict[str, Any],
+    memory_context: str,
+    problem: dict[str, Any],
+    problem_count: int,
+) -> str:
+    memory_section = memory_context.strip() or "No memory context is enabled for this run."
+    problem_text = f"""Problem {problem["number"]} of {problem_count}: {problem["title"]}
+
+Repository: {repo_slug(issue)}
+Failing commit: {issue.get("sha_fail")}
+Workflow: {issue.get("workflow_path") or "unknown"}
+File: {problem.get("file") or "unknown"}
+Reason: {problem.get("reason") or "See CI failure analysis."}
+Failed command: {problem.get("failed_cmd") or "See CI verification."}
+
+Full CI context:
+{format_ci_failure_markdown(ci_failure)}""".strip()
+
+    return f"""# CI Repair Task
+
+You are fixing a CI failure in this repository. Fix only the current problem and leave the final patch in the working tree.
+
+## Problem To Fix
+{problem_text}
+
+## Previous Experience / Memory
+{memory_section}
+
+Use this section only as guidance. It may contain similar past failures, repair patterns, files commonly involved, or known repo-specific fixes.
+
+Do not copy a previous fix blindly. First verify whether it applies to the current repository state and current CI failure.
+
+If this section is empty, proceed using only the problem and CI verification.
+
+## CI Verification
+{validation_markdown(verification)}
+
+Use this section to understand:
+- which workflow failed
+- which command failed
+- which command should be run locally if feasible
+- which files or tools are involved in the CI check
+
+Prefer the narrowest relevant verification command first.
+
+## Required Workflow
+1. Inspect the repository before editing.
+2. Understand the failing problem from the `Problem To Fix` section.
+3. Use `Previous Experience / Memory` only to guide search and repair strategy.
+4. **IMPORTANT: If the CI failure is from automated tools (formatters, linters, type checkers), prefer running the tool with auto-fix flags over manual edits.**
+   - Examples: `black .`, `ruff --fix .`, `prettier --write .`, `mypy --install-types`, `pre-commit run --all-files`
+   - If the tool can fix the issue automatically, run it and let it fix all affected files at once.
+   - Only manually edit if the tool cannot auto-fix or if the fix requires logical changes.
+5. Identify the smallest set of files responsible for the failure.
+6. Make the minimal correct change.
+7. Do not modify unrelated files.
+8. Do not update dependencies, lock files, generated files, or broad formatting unless the CI failure requires it.
+9. Run the most relevant verification command from `CI Verification` to confirm the fix.
+10. If verification fails, inspect the new output and iterate.
+11. Leave the final fix in the working tree as a normal git diff.
+
+## Scope Rules
+- Fix this problem only.
+- Preserve earlier patches already present in the working tree.
+- If another issue is discovered, do not fix it unless it blocks verification of this problem.
+- Preserve existing behavior unless the CI failure proves the behavior is wrong.
+- Prefer source-code fixes over suppressing tests or weakening checks.
+- Do not remove tests to make CI pass.
+
+## Final Response
+When finished, report:
+- root cause
+- files changed
+- verification command run
+- verification result
+- remaining risk, if any
+"""
+
+
+def write_issue_document(result_dir: Path, problem: dict[str, Any], document: str) -> Path:
+    path = result_dir / f"issue_document_problem_{problem['number']}.md"
+    write_text(path, document)
+    return path
+
+
+def run_codex(
+    checkout: Path,
+    prompt_path: Path,
+    transcript_path: Path,
+    command: str,
+    timeout: int,
+    dry_run: bool,
+) -> dict[str, Any]:
+    cmd = shlex.split(command)
+    prompt = prompt_path.read_text(encoding="utf-8")
+    started = time.time()
+
+    if dry_run:
+        write_text(transcript_path, f"DRY RUN: would execute {cmd} in {checkout}\n")
+        return {"returncode": 0, "elapsed_seconds": 0.0, "dry_run": True}
+
+    proc = subprocess.run(
+        cmd,
+        cwd=checkout,
+        input=prompt,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+    elapsed = time.time() - started
+    write_text(transcript_path, proc.stdout)
+    return {"returncode": proc.returncode, "elapsed_seconds": elapsed, "dry_run": False}
+
+
+def git_diff(checkout: Path) -> str:
+    proc = subprocess.run(
+        ["git", "diff", "--binary"],
+        cwd=checkout,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return proc.stdout
+
+
+def changed_files(checkout: Path) -> list[str]:
+    proc = subprocess.run(
+        ["git", "diff", "--name-only"],
+        cwd=checkout,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return [x for x in proc.stdout.splitlines() if x.strip()]
+
+
+def candidate_validation_commands(verification: dict[str, Any]) -> list[str]:
+    commands = []
+    for step in verification.get("validation_sequence") or []:
+        if not isinstance(step, dict):
+            continue
+        cmd = str(step.get("validation_cmd") or "").strip()
+        if cmd and cmd.lower() != "n/a":
+            commands.append(cmd)
+    return commands
+
+
+def run_verification_command(
+    checkout: Path,
+    result_dir: Path,
+    command: str | None,
+    timeout: int,
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    if not command:
+        return None
+
+    started = time.time()
+    if dry_run:
+        log = f"DRY RUN: would execute verification command in {checkout}\n{command}\n"
+        write_text(result_dir / "verification.log", log)
+        return {
+            "command": command,
+            "returncode": 0,
+            "elapsed_seconds": 0.0,
+            "dry_run": True,
+        }
+
+    proc = subprocess.run(
+        command,
+        cwd=checkout,
+        shell=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+    elapsed = time.time() - started
+    write_text(result_dir / "verification.log", proc.stdout)
+    return {
+        "command": command,
+        "returncode": proc.returncode,
+        "elapsed_seconds": elapsed,
+        "dry_run": False,
+    }
+
+
+def save_patch_and_result(
+    result_dir: Path,
+    checkout: Path,
+    issue: dict[str, Any],
+    ablation: str,
+    model_name: str,
+    problem_results: list[dict[str, Any]],
+    verification: dict[str, Any],
+    verification_result: dict[str, Any] | None,
+) -> None:
+    diff = git_diff(checkout)
+    files = changed_files(checkout)
+    write_text(result_dir / "patch.diff", diff)
+    write_json(
+        result_dir / "result.json",
+        {
+            "id": issue_id(issue),
+            "repo": repo_slug(issue),
+            "sha_fail": issue.get("sha_fail"),
+            "ablation": ablation,
+            "model_name_or_path": model_name,
+            "patch_generated": bool(diff.strip()),
+            "patch_bytes": len(diff.encode("utf-8")),
+            "changed_files": files,
+            "candidate_validation_commands": candidate_validation_commands(verification),
+            "verification": verification_result,
+            "verification_passed": (
+                None
+                if verification_result is None
+                else verification_result.get("returncode") == 0
+            ),
+            "problem_results": problem_results,
+        },
+    )
+
+
+def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) -> None:
+    safe_ablation = ablation.replace("+", "_").lower()
+
+    # Include model name in output directory (e.g., baseline_minimax2.5)
+    if args.context_model:
+        model_suffix = f"_{args.context_model.replace('/', '_').replace('.', '_')}"
+        ablation_dir = f"{safe_ablation}{model_suffix}"
+    else:
+        ablation_dir = safe_ablation
+
+    result_dir = args.output_root / ablation_dir / issue_id(issue)
+    checkout = result_dir / "checkout"
+
+    prepare_repo_checkout(
+        issue,
+        checkout,
+        refresh=args.refresh_checkout,
+        dry_run=args.dry_run,
+    )
+    context_llm = make_context_llm(args.context_model) if args.generate_missing_analysis else None
+    ci_failure = load_or_generate_ci_failure(
+        issue,
+        result_dir,
+        args.log_cache,
+        context_llm,
+        args.context_model,
+        args.generate_missing_analysis,
+    )
+    verification = load_or_generate_verification(
+        issue,
+        result_dir,
+        args.workflow_cache,
+        checkout,
+        context_llm,
+        args.generate_missing_analysis,
+    )
+    memory_context = load_memory_context(
+        issue,
+        ci_failure,
+        verification,
+        result_dir,
+        args.memory_root,
+        ablation,
+        args.memory_top_k,
+    )
+
+    problems = extract_problem_list(ci_failure)
+    problem_results = []
+    for problem in problems:
+        document = compose_issue_document(
+            issue,
+            ci_failure,
+            verification,
+            memory_context,
+            problem,
+            len(problems),
+        )
+        prompt_path = write_issue_document(result_dir, problem, document)
+        transcript_path = result_dir / f"codex_transcript_problem_{problem['number']}.txt"
+        run_result = run_codex(
+            checkout,
+            prompt_path,
+            transcript_path,
+            args.codex_command,
+            args.timeout,
+            args.dry_run,
+        )
+        problem_results.append({"problem": problem, **run_result})
+        if run_result["returncode"] != 0:
+            break
+
+    verification_result = run_verification_command(
+        checkout,
+        result_dir,
+        args.verification_command,
+        args.verification_timeout,
+        args.dry_run,
+    )
+    save_patch_and_result(
+        result_dir,
+        checkout,
+        issue,
+        ablation,
+        prediction_model_name(args),
+        problem_results,
+        verification,
+        verification_result,
+    )
+
+
+def prediction_model_name(args: argparse.Namespace) -> str:
+    return str(args.model_name or args.context_model or "codex")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    parser.add_argument("--issue-ids", help="Comma-separated issue ids")
+    parser.add_argument(
+        "--issue-ids-file",
+        type=Path,
+        default=DEFAULT_ISSUE_IDS_FILE,
+        help="JSON list of issue ids to run when --issue-ids is omitted",
+    )
+    parser.add_argument(
+        "--hf-dataset",
+        default="ci-benchmark-user/ci-repair-bench",
+        help="Hugging Face dataset used only if --dataset does not exist",
+    )
+    parser.add_argument(
+        "--ablations",
+        default="baseline,L1,L1+L2,L1+L2+L3",
+        help="Comma-separated ablations to run",
+    )
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--memory-root", type=Path, default=DEFAULT_MEMORY_ROOT)
+    parser.add_argument("--log-cache", type=Path, default=DEFAULT_LOG_CACHE)
+    parser.add_argument("--workflow-cache", type=Path, default=DEFAULT_WORKFLOW_CACHE)
+    parser.add_argument("--memory-top-k", type=int, default=3)
+    parser.add_argument(
+        "--codex-command",
+        default=os.environ.get("CODEX_REPAIR_COMMAND", "codex exec --full-auto"),
+        help="Command used to run Codex non-interactively",
+    )
+    parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument(
+        "--verification-command",
+        default=None,
+        help="Optional shell command to run after Codex to record pass/fail",
+    )
+    parser.add_argument("--verification-timeout", type=int, default=1800)
+    parser.add_argument(
+        "--generate-missing-analysis",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Generate missing CI/log/workflow analysis with --context-model when "
+            "cache entries are missing. Enabled by default; use "
+            "--no-generate-missing-analysis to require cached data only."
+        ),
+    )
+    parser.add_argument(
+        "--context-model",
+        default=os.environ.get("CODEX_CONTEXT_MODEL"),
+        help="Model used by missing CI/log workflow analyzers",
+    )
+    parser.add_argument(
+        "--model-name",
+        default=os.environ.get("CODEX_MODEL_NAME"),
+        help=(
+            "Model name recorded in predictions.json. Defaults to --context-model "
+            "when set, otherwise 'codex'."
+        ),
+    )
+    parser.add_argument("--refresh-checkout", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args()
+
+
+def prediction_from_result(result_file: Path) -> dict[str, Any]:
+    issue_dir = result_file.parent
+
+    with open(result_file, encoding="utf-8") as f:
+        result = json.load(f)
+
+    patch_file = issue_dir / "patch.diff"
+    if patch_file.exists():
+        patch_content = patch_file.read_text(encoding="utf-8")
+    else:
+        patch_content = ""
+
+    return {
+        "id": result["id"],
+        "sha_fail": result["sha_fail"],
+        "repo": result["repo"],
+        "diff": patch_content,
+        "ablation": result.get("ablation", "unknown"),
+        "patch_generated": result["patch_generated"],
+        "patch_bytes": result["patch_bytes"],
+        "changed_files": result["changed_files"],
+        "verification_passed": result.get("verification_passed"),
+    }
+
+
+def consolidate_predictions(
+    output_root: Path, ablation: str, context_model: str | None = None
+) -> list[dict[str, Any]]:
+    """
+    Consolidate one ablation's patches into a predictions.json file.
+
+    This creates a predictions file compatible with evaluation tools,
+    similar to Mini-SWE-Agent's format.
+    """
+    safe_ablation = ablation.replace("+", "_").lower()
+
+    # Include model name in directory (e.g., baseline_minimax2.5)
+    if context_model:
+        model_suffix = f"_{context_model.replace('/', '_').replace('.', '_')}"
+        ablation_dir = f"{safe_ablation}{model_suffix}"
+    else:
+        ablation_dir = safe_ablation
+
+    results_dir = output_root / ablation_dir
+    predictions_file = results_dir / "predictions.json"
+
+    predictions = [
+        prediction_from_result(result_file)
+        for result_file in sorted(results_dir.glob("*/result.json"))
+    ]
+
+    # Write consolidated file
+    if predictions:
+        write_json(predictions_file, predictions)
+        print(f"\n[codex-ci-repair] Consolidated {len(predictions)} predictions -> {predictions_file}")
+
+    return predictions
+
+
+def consolidate_all_predictions(
+    output_root: Path, ablations: list[str], context_model: str | None = None
+) -> None:
+    """Write one predictions.json containing every selected ablation level."""
+    predictions: list[dict[str, Any]] = []
+    for ablation in ablations:
+        safe_ablation = ablation.replace("+", "_").lower()
+
+        # Include model name in directory (e.g., baseline_minimax2.5)
+        if context_model:
+            model_suffix = f"_{context_model.replace('/', '_').replace('.', '_')}"
+            ablation_dir = f"{safe_ablation}{model_suffix}"
+        else:
+            ablation_dir = safe_ablation
+
+        results_dir = output_root / ablation_dir
+        predictions.extend(
+            prediction_from_result(result_file)
+            for result_file in sorted(results_dir.glob("*/result.json"))
+        )
+
+    if predictions:
+        predictions_file = output_root / "predictions.json"
+        write_json(predictions_file, predictions)
+        print(
+            f"\n[codex-ci-repair] Consolidated {len(predictions)} total predictions "
+            f"-> {predictions_file}"
+        )
+
+
+def main() -> int:
+    args = parse_args()
+    if args.issue_ids:
+        issue_ids = [x.strip() for x in args.issue_ids.split(",") if x.strip()]
+    else:
+        issue_ids = load_issue_ids(args.issue_ids_file)
+
+    ablations = [x.strip() for x in args.ablations.split(",") if x.strip()]
+    issue_index = load_issue_index(args.dataset, args.hf_dataset)
+
+    for ablation in ablations:
+        print(f"\n[codex-ci-repair] Starting ablation: {ablation}")
+        print(f"[codex-ci-repair] Issues to process: {len(issue_ids)}")
+
+        failed_issues = []
+
+        for wanted_id in issue_ids:
+            issue = issue_index.get(str(wanted_id))
+            if issue is None:
+                print(f"[codex-ci-repair] WARNING: Issue {wanted_id} not found in dataset, skipping")
+                failed_issues.append((wanted_id, "not found in dataset"))
+                continue
+
+            print(f"[codex-ci-repair] issue={wanted_id} ablation={ablation}")
+
+            try:
+                run_issue(args, ablation, issue)
+            except Exception as exc:
+                print(f"[codex-ci-repair] ERROR processing issue {wanted_id}: {exc}")
+                failed_issues.append((wanted_id, str(exc)))
+                # Continue with next issue instead of crashing
+                continue
+
+        # Auto-consolidate predictions after processing all issues
+        consolidate_predictions(args.output_root, ablation, args.context_model)
+        print(f"[codex-ci-repair] Completed ablation: {ablation}")
+
+        if failed_issues:
+            print(f"\n[codex-ci-repair] WARNING: {len(failed_issues)} issues failed:")
+            for issue_id, error in failed_issues[:10]:  # Show first 10
+                print(f"  - {issue_id}: {error[:100]}")
+            if len(failed_issues) > 10:
+                print(f"  ... and {len(failed_issues) - 10} more")
+
+    # NOTE: For ablation studies, each ablation+model gets its own predictions.json
+    # Top-level consolidation disabled to avoid mixing different runs
+    # consolidate_all_predictions(args.output_root, ablations, args.context_model)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
