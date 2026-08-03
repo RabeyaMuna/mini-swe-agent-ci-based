@@ -36,7 +36,7 @@
                     },
                     {
                         "content_type": "text",
-                        "text": "\n\n**Testing**\n\n- ❌ `npm run lint` (failed to run `next lint`)"
+                        "text": "\n\n**Testing**\n\n- FAIL `npm run lint` (failed to run `next lint`)"
                     },
                     {
                         "content_type": "terminal_chunk_citation",
@@ -46,7 +46,7 @@
                     },
                     {
                         "content_type": "text",
-                        "text": "\n- ✅ `node scripts/fibonacci.js 10` produced “55”"
+                        "text": "\n- OK `node scripts/fibonacci.js 10` produced "55""
                     },
                     {
                         "content_type": "terminal_chunk_citation",

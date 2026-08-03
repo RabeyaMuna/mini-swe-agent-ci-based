@@ -5,12 +5,12 @@ expression: "render_human_report(&sample_report(), detailed_no_color_unicode_opt
 Codex Doctor v0.0.0
 
 Notes
-   ⚠ terminal     narrow terminal
-   ✗ auth         token expired - Run `codex login`.
+   WARNING terminal     narrow terminal
+   FAIL auth         token expired - Run `codex login`.
 ─────────────────────────────────────────────────────────────
 
 Environment
-  ✓ system       en-US
+  OK system       en-US
       os                       macOS 15.0
       OS language              en-US
       VISUAL                   code --wait
@@ -19,35 +19,35 @@ Environment
       GIT_PAGER                delta
       GH_PAGER                 less
       LESS                     -FRX
-  ✓ runtime      running local build on darwin-arm64
-  ✓ install      consistent
-      managed by               npm: no · bun: no · pnpm: no · package root —
-  ✓ search       search is OK (bundled)
-  ✓ git          git version 2.54.0
+  OK runtime      running local build on darwin-arm64
+  OK install      consistent
+      managed by               npm: no · bun: no · pnpm: no · package root -
+  OK search       search is OK (bundled)
+  OK git          git version 2.54.0
       selected git             /usr/bin/git
       version                  git version 2.54.0
       repo detected            true
-  ⚠ terminal     narrow terminal
-  ✓ title        default · project codex
+  WARNING terminal     narrow terminal
+  OK title        default · project codex
       title source             default
       title items              activity, project-name
       project value            codex
-  ✓ state        state paths inspectable
+  OK state        state paths inspectable
 
 Configuration
-  ✗ auth         token expired — Run `codex login`.
+  FAIL auth         token expired - Run `codex login`.
       OPENAI_API_KEY           present
 
 Updates
-  ✓ updates      update configuration is locally consistent
+  OK updates      update configuration is locally consistent
 
 Connectivity
-  ✓ network      network environment readable
-  ✓ websocket    Responses WebSocket handshake succeeded
-  ✓ reachability active provider endpoints are reachable over HTTP
+  OK network      network environment readable
+  OK websocket    Responses WebSocket handshake succeeded
+  OK reachability active provider endpoints are reachable over HTTP
 
 Background Server
-  ✓ app-server   background server is not running
+  OK app-server   background server is not running
 
 ─────────────────────────────────────────────────────────────
 12 ok · 2 notes · 1 warn · 1 fail failed

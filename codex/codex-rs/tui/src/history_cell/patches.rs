@@ -39,7 +39,7 @@ pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Failure title
-    lines.push(Line::from("✘ Failed to apply patch".magenta().bold()));
+    lines.push(Line::from(" Failed to apply patch".magenta().bold()));
 
     if !stderr.trim().is_empty() {
         let output = output_lines(
@@ -80,7 +80,7 @@ pub(crate) fn new_image_generation_call(
 ) -> PlainHistoryCell {
     let detail = revised_prompt.unwrap_or(call_id);
     let heading = if status == "failed" {
-        vec!["✗ ".red().bold(), "Image generation failed".bold()].into()
+        vec!["FAIL ".red().bold(), "Image generation failed".bold()].into()
     } else {
         vec!["• ".dim(), "Generated Image:".bold()].into()
     };

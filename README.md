@@ -5,7 +5,7 @@ This repository runs CI repair evaluations for two agents:
 - `mini-swe-agent`
 - `openhands`
 
-## 🤖 LLM Provider Support
+## LLM Provider Support
 
 **The system supports ANY LLM provider** through [LiteLLM](https://docs.litellm.ai/):
 
@@ -28,7 +28,7 @@ Each model is run at four ablation levels:
 - `L1+L2`: failure memory + repository memory
 - `L1+L2+L3`: full memory
 
-## 📁 Data Organization
+## Data Organization
 
 The evaluation dataset is now organized as follows:
 
@@ -263,16 +263,16 @@ The same model value is used throughout:
 
 ---
 
-## 🚀 Workflow: Split → Decompose → Build Memory → Evaluate
+## Workflow: Split -> Decompose -> Build Memory -> Evaluate
 
 ### **NEW Workflow (Temporal Leakage Prevention)**
 
 The correct workflow is now:
 
-1. **Split FIRST** (chronological) → creates `data/memory_set.jsonl` and `data/eval_set.jsonl`
-2. **Decompose ONLY memory** → creates `data/back_trs/decomposed_issues.json`
-3. **Build L1/L2/L3 memory** → creates memory files in `data/back_trs/`
-4. **Evaluate** → uses eval set + memory
+1. **Split FIRST** (chronological) -> creates `data/memory_set.jsonl` and `data/eval_set.jsonl`
+2. **Decompose ONLY memory** -> creates `data/back_trs/decomposed_issues.json`
+3. **Build L1/L2/L3 memory** -> creates memory files in `data/back_trs/`
+4. **Evaluate** -> uses eval set + memory
 
 This prevents temporal data leakage by ensuring only past issues are in memory.
 
@@ -291,13 +291,13 @@ source .venv/bin/activate
 
 ```bash
 # All repos
-python scripts/split_before_decomposition.py
+MODEL=glm5.2 scripts/workflows/run_memory_decompositions.sh
 
 # Specific repos (recommended)
-python scripts/split_before_decomposition.py --repos agno,flower,camel
+MODEL=glm5.2 scripts/workflows/run_memory_decompositions.sh agno,flower,camel,crewAI
 
 # Custom memory ratio (default 0.3 = 30%)
-python scripts/split_before_decomposition.py --repos agno --memory-ratio 0.2
+MEMORY_RATIO=0.2 MODEL=glm5.2 scripts/workflows/run_memory_decompositions.sh agno
 ```
 
 **Output:**
@@ -307,6 +307,8 @@ data/eval_set.jsonl          ← Latest 70% (for evaluation)
 data/memory_issue_ids.json
 data/eval_issue_ids.json
 data/split_metadata.json     ← Temporal safety confirmation
+data/back_trs/               ← Backward decomposition output
+data/fwr_trs/                ← Forward decomposition output
 ```
 
 ---
@@ -317,14 +319,14 @@ data/split_metadata.json     ← Temporal safety confirmation
 
 ```bash
 # MiniMax-M2.5
-MODEL=minimax2.5 python scripts/decompose_ci_failure.py \
+MODEL=minimax2.5 python backward_decomposition/decompose_ci_failure.py \
   --dataset data/memory_set.jsonl \
   --output-dir data/back_trs \
   --output-file decomposed_issues.json \
   --model minimax2.5
 
 # GLM-5.2
-MODEL=glm5.2 python scripts/decompose_ci_failure.py \
+MODEL=glm5.2 python backward_decomposition/decompose_ci_failure.py \
   --dataset data/memory_set.jsonl \
   --output-dir data/back_trs \
   --output-file decomposed_issues.json \
@@ -553,7 +555,7 @@ MODEL=glm5.2 openhands/.venv/bin/python openhands/ci_bench_runner.py \
 
 Codex is a third evaluation agent that uses the Codex CLI tool.
 
-> **📖 Multi-LLM Support**: Codex supports **any LLM provider** (Claude, GPT, Gemini, Ollama, Cohere, etc.) through LiteLLM. See [LLM Configuration Guide](docs/LLM_CONFIGURATION.md) for complete setup with different models.
+> ** Multi-LLM Support**: Codex supports **any LLM provider** (Claude, GPT, Gemini, Ollama, Cohere, etc.) through LiteLLM. See [LLM Configuration Guide](docs/LLM_CONFIGURATION.md) for complete setup with different models.
 
 #### 1. Install Codex CLI
 
@@ -819,23 +821,29 @@ python3 codex/scripts/run_codex_ci_repair.py \
 results/codex/
 ├── baseline_minimax2.5/
 │   ├── predictions.json
-│   └── baseline/<issue_id>/
+│   └── <issue_id>/
 │       ├── issue_document_problem_1.md
 │       ├── codex_transcript_problem_1.txt
 │       ├── patch.diff                   ← Unified issue fix after all problem prompts
 │       └── result.json
 ├── l1_minimax2.5_backward/
 │   ├── predictions.json
-│   └── l1/<issue_id>/
+│   └── <issue_id>/
 ├── l1_l2_minimax2.5_backward/
 │   ├── predictions.json
-│   └── l1_l2/<issue_id>/
+│   └── <issue_id>/
 ├── l1_l2_l3_minimax2.5_backward/
 │   ├── predictions.json
-│   └── l1_l2_l3/<issue_id>/
+│   └── <issue_id>/
 ├── l1_minimax2.5_forward/
+│   ├── predictions.json
+│   └── <issue_id>/
 ├── l1_l2_minimax2.5_forward/
+│   ├── predictions.json
+│   └── <issue_id>/
 └── l1_l2_l3_minimax2.5_forward/
+    ├── predictions.json
+    └── <issue_id>/
 ```
 
 #### Documentation
@@ -847,27 +855,15 @@ results/codex/
 
 ---
 
-## 🔬 Comparing Decomposition Approaches
+## Comparing Decomposition Approaches
 
 You can compare backward vs. forward decomposition:
 
 ```bash
-# 1. Split once (shared)
-python scripts/split_before_decomposition.py --repos agno,flower,camel
+# 1. Split once, then run BOTH decompositions
+MODEL=minimax2.5 scripts/workflows/run_memory_decompositions.sh agno,flower,camel
 
-# 2. Run BOTH decompositions
-MODEL=minimax2.5 python scripts/decompose_ci_failure.py \
-  --dataset data/memory_set.jsonl \
-  --output-dir data/back_trs \
-  --output-file decomposed_issues.json \
-  --model minimax2.5
-
-MODEL=minimax2.5 python commit_decomposition/run_commit_decomposition.py \
-  --dataset data/memory_set.jsonl \
-  --output data/fwr_trs/commit_decomposed_issue.json \
-  --model minimax2.5
-
-# 3. Build memory for BOTH
+# 2. Build memory for BOTH
 MODEL=minimax2.5 python memory_plugin/ci_memory_llm_analysis.py \
   --decomposed data/back_trs/decomposed_issues.json \
   --output-dir data/back_trs \
@@ -898,7 +894,7 @@ MODEL=minimax2.5 miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.c
 
 ---
 
-## 🔍 Verification
+## Verification
 
 Check your setup:
 
@@ -922,7 +918,7 @@ cat data/split_metadata.json | jq '{total: .total_issues, memory: .memory_size, 
 
 ---
 
-## 📊 Results
+## Results
 
 Results are saved to:
 
@@ -954,7 +950,7 @@ results/
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -972,7 +968,7 @@ results/
 
 ---
 
-## 📖 Additional Documentation
+## Additional Documentation
 
 - [DATA_ORGANIZATION.md](DATA_ORGANIZATION.md) - Complete data structure guide
 - [USAGE_GUIDE.md](USAGE_GUIDE.md) - Detailed usage guide
@@ -981,7 +977,7 @@ results/
 
 ---
 
-## ✅ Quick Checklist
+## OK Quick Checklist
 
 Before running evaluation, ensure:
 
@@ -991,6 +987,28 @@ Before running evaluation, ensure:
 - [ ] Memory built: `data/back_trs/*_memory.json` or `data/fwr_trs/*_memory.json` files exist
 - [ ] API keys configured in `.env`
 - [ ] Correct memory root specified in evaluation command
+
+---
+
+## Testing
+
+All test files are in the `test/` directory:
+
+```bash
+# Quick smoke test (no API keys needed)
+python test/test_memory_plugin_refactor.py
+
+# Run all tests
+./test/run_tests.sh
+
+# Run with LLM tests (requires API keys)
+RUN_LLM_TESTS=1 ./test/run_tests.sh
+
+# Test specific memory mode
+python test/test_memory_plugin.py --model gpt-4 --issue-id 125 --memory l1+l2+l3
+```
+
+See [test/README.md](test/README.md) for details.
 
 ---
 

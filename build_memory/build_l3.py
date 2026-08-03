@@ -204,12 +204,12 @@ def build_l3_memory(
 
         # DEBUG: Show L3 generation results
         if not universal_patterns:
-            print("  ⚠️  L3 generated 0 patterns (LLM returned empty list)")
+            print("  WARNING  L3 generated 0 patterns (LLM returned empty list)")
         else:
-            print(f"  ✓ L3 generated {len(universal_patterns)} patterns")
+            print(f"  OK L3 generated {len(universal_patterns)} patterns")
 
     except Exception as e:
-        print(f"  ❌ WARNING: L3 generation failed: {e}")
+        print(f"  FAIL WARNING: L3 generation failed: {e}")
         print("  Falling back to empty L3 structure")
         universal_patterns = []
 

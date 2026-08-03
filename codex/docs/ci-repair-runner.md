@@ -3,7 +3,7 @@
 This document explains how to run Codex as a CI-repair agent over eval issues,
 with and without the shared memory plugin.
 
-> **📖 LLM Configuration**: This system supports **any LLM provider** (Claude, GPT, Gemini, Ollama, Cohere, etc.). See [LLM Configuration Guide](../../docs/LLM_CONFIGURATION.md) for complete setup instructions with different models.
+> ** LLM Configuration**: This system supports **any LLM provider** (Claude, GPT, Gemini, Ollama, Cohere, etc.). See [LLM Configuration Guide](../../docs/LLM_CONFIGURATION.md) for complete setup instructions with different models.
 
 The runner is:
 

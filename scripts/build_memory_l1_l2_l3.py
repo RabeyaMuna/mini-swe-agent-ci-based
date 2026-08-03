@@ -185,7 +185,7 @@ def main():
             l1_file = l1_dir / f"{issue_id}_l1.json"
             with open(l1_file, "w") as f:
                 json.dump(l1_memory, f, indent=2)
-            print(f"✓ L1 saved: {l1_file}")
+            print(f"OK L1 saved: {l1_file}")
             l1_records.append(l1_memory)
 
             # Build L2
@@ -196,7 +196,7 @@ def main():
             l2_file = l2_dir / f"{issue_id}_l2.json"
             with open(l2_file, "w") as f:
                 json.dump(l2_memory, f, indent=2)
-            print(f"✓ L2 saved: {l2_file}")
+            print(f"OK L2 saved: {l2_file}")
             l2_records.append(l2_memory)
 
             # Build L3 (if not skipped)
@@ -210,13 +210,13 @@ def main():
                 l3_file = l3_dir / f"{issue_id}_l3.json"
                 with open(l3_file, "w") as f:
                     json.dump(l3_memory, f, indent=2)
-                print(f"✓ L3 saved: {l3_file}")
+                print(f"OK L3 saved: {l3_file}")
                 l3_records.append(l3_memory)
 
-            print(f"✓ Issue {issue_id} complete")
+            print(f"OK Issue {issue_id} complete")
 
         except Exception as e:
-            print(f"✗ ERROR processing issue {issue_id}: {e}")
+            print(f"FAIL ERROR processing issue {issue_id}: {e}")
             import traceback
 
             traceback.print_exc()
@@ -229,16 +229,16 @@ def main():
 
     with open(output_dir / "l1_all.json", "w") as f:
         json.dump(l1_records, f, indent=2)
-    print(f"✓ L1 aggregated: {output_dir / 'l1_all.json'}")
+    print(f"OK L1 aggregated: {output_dir / 'l1_all.json'}")
 
     with open(output_dir / "l2_all.json", "w") as f:
         json.dump(l2_records, f, indent=2)
-    print(f"✓ L2 aggregated: {output_dir / 'l2_all.json'}")
+    print(f"OK L2 aggregated: {output_dir / 'l2_all.json'}")
 
     if not args.skip_l3:
         with open(output_dir / "l3_all.json", "w") as f:
             json.dump(l3_records, f, indent=2)
-        print(f"✓ L3 aggregated: {output_dir / 'l3_all.json'}")
+        print(f"OK L3 aggregated: {output_dir / 'l3_all.json'}")
 
     # Summary
     print(f"\n{'=' * 80}")

@@ -60,7 +60,7 @@ Problem:
   When evaluating Issue A (2015), the system may retrieve 
   Issue C (2020) from memory as a "historical example"
   
-  → This is INVALID because C didn't exist when A occurred
+  -> This is INVALID because C didn't exist when A occurred
 ```
 
 ### Why This Matters
@@ -78,10 +78,10 @@ Problem:
 **YES - potentially severe leakage.**
 
 The current implementation:
-- ✅ Groups by repository (good - prevents cross-repo leakage)
-- ❌ **Does NOT consider timestamp** when selecting memory vs eval
-- ❌ Sorts purely by similarity score
-- ❌ Can select newer issues for memory and older issues for eval
+- OK Groups by repository (good - prevents cross-repo leakage)
+- FAIL **Does NOT consider timestamp** when selecting memory vs eval
+- FAIL Sorts purely by similarity score
+- FAIL Can select newer issues for memory and older issues for eval
 
 **Example of potential leakage:**
 ```python
@@ -92,10 +92,10 @@ timestamps =         [2020, 2015, 2018, 2016]
 sorted_by_sim =     [0.9,  0.85, 0.7,  0.65]
 corresponding_ts =  [2020, 2018, 2015, 2016]
 
-# Top 30% → memory
+# Top 30% -> memory
 memory = [2020, 2018]  # Issues from 2020 and 2018
 
-# Bottom 70% → eval  
+# Bottom 70% -> eval  
 eval = [2015, 2016]    # Issues from 2015 and 2016
 
 # LEAKAGE: Evaluating 2015 issue can retrieve 2020 memory!
@@ -122,12 +122,12 @@ columns = [
 ```
 
 **Timestamp availability:**
-- ❌ No direct timestamp field in dataset
-- ✅ Have `commit_link` and `sha_fail` for each issue
-- ✅ Can fetch commit timestamp from GitHub API:
+- FAIL No direct timestamp field in dataset
+- OK Have `commit_link` and `sha_fail` for each issue
+- OK Can fetch commit timestamp from GitHub API:
   ```
   GET https://api.github.com/repos/{owner}/{repo}/commits/{sha}
-  → returns commit.author.date (ISO timestamp)
+  -> returns commit.author.date (ISO timestamp)
   ```
 
 **Current state:**
@@ -211,13 +211,13 @@ def retrieve_memory(eval_issue):
 ```
 
 **Pros:**
-- ✅ Zero temporal leakage
-- ✅ Realistic deployment scenario
-- ✅ Scientifically sound
+- OK Zero temporal leakage
+- OK Realistic deployment scenario
+- OK Scientifically sound
 
 **Cons:**
-- ⚠️ Early eval issues may have very few memory examples
-- ⚠️ Latest memory issues may never be used
+- WARNING Early eval issues may have very few memory examples
+- WARNING Latest memory issues may never be used
 
 #### Strategy B: Hybrid Chronological + Similarity
 
@@ -243,12 +243,12 @@ def retrieve_memory(eval_issue):
 ```
 
 **Pros:**
-- ✅ Zero temporal leakage
-- ✅ Memory is still "representative" within the chronological constraint
-- ✅ May have better coverage
+- OK Zero temporal leakage
+- OK Memory is still "representative" within the chronological constraint
+- OK May have better coverage
 
 **Cons:**
-- ⚠️ Slightly more complex implementation
+- WARNING Slightly more complex implementation
 
 ### 3. Implement Incremental Memory (Advanced)
 
@@ -278,13 +278,13 @@ for eval_issue in sorted_by_timestamp(eval_set):
 ```
 
 **Pros:**
-- ✅ Most realistic simulation
-- ✅ Shows how performance improves with more historical data
-- ✅ Can analyze "cold start" (few examples) vs "mature" (many examples)
+- OK Most realistic simulation
+- OK Shows how performance improves with more historical data
+- OK Can analyze "cold start" (few examples) vs "mature" (many examples)
 
 **Cons:**
-- ⚠️ Slower evaluation
-- ⚠️ More complex analysis
+- WARNING Slower evaluation
+- WARNING More complex analysis
 
 ---
 
@@ -375,7 +375,7 @@ def retrieve_historical_issues(
         ]
         
         logger.info(
-            f"Filtered memory: {len(memory_bank)} → {len(valid_memory)} "
+            f"Filtered memory: {len(memory_bank)} -> {len(valid_memory)} "
             f"(only before {current_timestamp})"
         )
     
@@ -393,7 +393,7 @@ def retrieve_historical_issues(
 - [ ] Document performance difference
 - [ ] Analyze:
   - How much does performance drop? (expected if there was leakage)
-  - How does performance change over time? (cold start → mature)
+  - How does performance change over time? (cold start -> mature)
 
 ---
 
@@ -422,17 +422,17 @@ cat data/trs/temporal_analysis.json | jq '.leakage_analysis'
 Based on the leakage severity:
 
 **If leakage is high (>30%):**
-→ Immediate re-split using chronological approach
-→ Re-run evaluations
-→ Compare results
+-> Immediate re-split using chronological approach
+-> Re-run evaluations
+-> Compare results
 
 **If leakage is moderate (10-30%):**
-→ Consider hybrid approach
-→ Document limitations in paper/thesis
+-> Consider hybrid approach
+-> Document limitations in paper/thesis
 
 **If leakage is low (<10%):**
-→ May keep current split but add temporal filtering in retrieval
-→ Document as limitation
+-> May keep current split but add temporal filtering in retrieval
+-> Document as limitation
 
 ---
 
@@ -455,14 +455,14 @@ If temporal leakage exists, we expect:
 ### On Scientific Validity
 
 **Before fix:**
-- ❌ Results are not reproducible in production
-- ❌ Comparison with baselines is unfair
-- ❌ Claims about memory effectiveness are inflated
+- FAIL Results are not reproducible in production
+- FAIL Comparison with baselines is unfair
+- FAIL Claims about memory effectiveness are inflated
 
 **After fix:**
-- ✅ Results match real-world deployment
-- ✅ Fair comparison with other approaches
-- ✅ True understanding of memory's value
+- OK Results match real-world deployment
+- OK Fair comparison with other approaches
+- OK True understanding of memory's value
 
 ---
 
@@ -486,9 +486,9 @@ If temporal leakage exists, we expect:
 
 The current implementation has a **high risk of temporal data leakage** due to similarity-based splitting without timestamp consideration. This can be fixed by:
 
-1. ✅ Fetching commit timestamps (via GitHub API)
-2. ✅ Re-splitting chronologically (earliest → memory, latest → eval)
-3. ✅ Filtering memory by timestamp during retrieval
-4. ✅ Re-evaluating with the corrected setup
+1. OK Fetching commit timestamps (via GitHub API)
+2. OK Re-splitting chronologically (earliest -> memory, latest -> eval)
+3. OK Filtering memory by timestamp during retrieval
+4. OK Re-evaluating with the corrected setup
 
 **Recommendation:** Run the analysis tool immediately to quantify the leakage, then implement chronological splitting before finalizing any results or publications.

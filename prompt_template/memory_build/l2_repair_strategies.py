@@ -75,66 +75,66 @@ If files_metadata exists for a problem:
 FOR EACH L1 PROBLEM, FOLLOW THIS PROCESS:
 
 Step 1: EXTRACT CORE INFO
-→ failure_type = problem.failure_type
-→ validator = extract tool name from problem.verification_cmd
-→ error_detail = key phrase from problem.problem
-→ location = problem.files[0] if single file, else files_metadata.pattern if exists, else "N files"
+-> failure_type = problem.failure_type
+-> validator = extract tool name from problem.verification_cmd
+-> error_detail = key phrase from problem.problem
+-> location = problem.files[0] if single file, else files_metadata.pattern if exists, else "N files"
 
 Step 2: DETERMINE FIX APPROACH
-→ Check problem.failure_type:
-  - "type checking" / "type error" / "mypy" → MANUAL (semantic)
-  - "test failure" / "assertion" → MANUAL (logic)
-  - "formatting" / "style" / "lint" → CHECK AUTOMATION
-  - "import error" / "dependency" → MANUAL (code change)
-  - "configuration" → MANUAL (config file)
+-> Check problem.failure_type:
+  - "type checking" / "type error" / "mypy" -> MANUAL (semantic)
+  - "test failure" / "assertion" -> MANUAL (logic)
+  - "formatting" / "style" / "lint" -> CHECK AUTOMATION
+  - "import error" / "dependency" -> MANUAL (code change)
+  - "configuration" -> MANUAL (config file)
 
-→ If CHECK AUTOMATION:
+-> If CHECK AUTOMATION:
   a. Analyze the PROBLEM FIRST (not just file extension):
      - Look at L1 failure_type and issue_type
      - Look at the validator/tool that detected it (from verification_cmd)
      - Look at the actual error message in L1 problem field
 
   b. Match PROBLEM to auto-fixable tools:
-     - "format" or "lint" errors → Check if tool has auto-fix
-       * ruff detected error → ruff check --fix (auto-fixes)
-       * black detected error → black (auto-fixes)
-       * isort detected error → isort (auto-fixes)
-       * mdformat detected error → mdformat (auto-fixes)
-       * docstrfmt detected error → docstrfmt (auto-fixes)
+     - "format" or "lint" errors -> Check if tool has auto-fix
+       * ruff detected error -> ruff check --fix (auto-fixes)
+       * black detected error -> black (auto-fixes)
+       * isort detected error -> isort (auto-fixes)
+       * mdformat detected error -> mdformat (auto-fixes)
+       * docstrfmt detected error -> docstrfmt (auto-fixes)
 
-     - "type" errors (mypy, pyright) → MANUAL (no auto-fix)
-     - "test" failures (pytest) → MANUAL (semantic issues)
-     - "import" errors → MANUAL (need code understanding)
-     - "dependency" conflicts → CONFIG change (not automation)
+     - "type" errors (mypy, pyright) -> MANUAL (no auto-fix)
+     - "test" failures (pytest) -> MANUAL (semantic issues)
+     - "import" errors -> MANUAL (need code understanding)
+     - "dependency" conflicts -> CONFIG change (not automation)
 
   c. Count files: use files_metadata.total_count if exists, else len(files)
 
   d. Final decision:
-     - Tool CAN auto-fix + Files ≥ 10 + uniform error → USE AUTOMATION
-     - Tool CANNOT auto-fix (mypy, pytest, etc.) → MANUAL
-     - Files < 10 even if auto-fixable → Consider MANUAL (small enough)
+     - Tool CAN auto-fix + Files ≥ 10 + uniform error -> USE AUTOMATION
+     - Tool CANNOT auto-fix (mypy, pytest, etc.) -> MANUAL
+     - Files < 10 even if auto-fixable -> Consider MANUAL (small enough)
 
   EXAMPLES:
-  - L1 says "ruff: E501 line too long" in 50 files → USE ruff check --fix (automation)
-  - L1 says "mypy: error: Incompatible types" in 3 files → MANUAL (no auto-fix)
-  - L1 says "pytest: AssertionError" → MANUAL (semantic test failure)
-  - L1 says "black would reformat" in 20 files → USE black (automation)
+  - L1 says "ruff: E501 line too long" in 50 files -> USE ruff check --fix (automation)
+  - L1 says "mypy: error: Incompatible types" in 3 files -> MANUAL (no auto-fix)
+  - L1 says "pytest: AssertionError" -> MANUAL (semantic test failure)
+  - L1 says "black would reformat" in 20 files -> USE black (automation)
 
 Step 3: BUILD PROBLEM REFERENCE
-→ Pattern: "{{failure_type}} in {{location}} ({{error_detail}})"
-→ Example construction:
+-> Pattern: "{{failure_type}} in {{location}} ({{error_detail}})"
+-> Example construction:
   - failure_type = "type error"
   - location = "helpers.py" (from files[0])
   - error_detail = "Optional[Any] vs str" (extract from problem.problem)
   - Result: "Type error in helpers.py (Optional[Any] vs str)"
 
 Step 4: GROUP PROBLEMS
-→ Check problem.enabled field:
-  - If problem A has "enabled": [problem_B] → GROUP A+B in ONE strategy
+-> Check problem.enabled field:
+  - If problem A has "enabled": [problem_B] -> GROUP A+B in ONE strategy
   - Explain: "Fixing A reveals B because..."
-→ Check root_cause similarity:
-  - Same root cause → GROUP in ONE strategy
-  - Different root causes → SEPARATE strategies
+-> Check root_cause similarity:
+  - Same root cause -> GROUP in ONE strategy
+  - Different root causes -> SEPARATE strategies
 
 === AVAILABLE AUTOMATION TOOLS ===
 {json.dumps(automated_tools, indent=2)}
@@ -142,32 +142,32 @@ Step 4: GROUP PROBLEMS
 HOW TO CHOOSE THE RIGHT AUTOMATION TOOL:
 
 1. **Match file pattern AND error type**:
-   - *.rst files + RST formatting errors (heading style, syntax) → docstrfmt
-   - *.py files + docstring errors (PEP 257) → docformatter
-   - *.py files + import errors → isort
-   - *.py files + code formatting → black or ruff
-   - *.md files + markdown formatting → mdformat
-   - *.toml files + TOML formatting → taplo
+   - *.rst files + RST formatting errors (heading style, syntax) -> docstrfmt
+   - *.py files + docstring errors (PEP 257) -> docformatter
+   - *.py files + import errors -> isort
+   - *.py files + code formatting -> black or ruff
+   - *.md files + markdown formatting -> mdformat
+   - *.toml files + TOML formatting -> taplo
 
 2. **Check error type**:
-   - Formatting/style/linting errors → likely has automation tool
-   - Type checking/logic/semantic errors → NO automation, must be manual
+   - Formatting/style/linting errors -> likely has automation tool
+   - Type checking/logic/semantic errors -> NO automation, must be manual
 
 3. **Check validator name**:
-   - If validator = docstrfmt → use docstrfmt tool
-   - If validator = black → use black tool
-   - If validator = mypy/pylint/pytest → likely NO automation
+   - If validator = docstrfmt -> use docstrfmt tool
+   - If validator = black -> use black tool
+   - If validator = mypy/pylint/pytest -> likely NO automation
 
 4. **Consider file count and uniformity**:
-   - 1-5 files → prefer manual fix (even if tool exists)
-   - 10+ files with IDENTICAL error → automation strongly recommended
-   - Error differs between files → manual fix required
+   - 1-5 files -> prefer manual fix (even if tool exists)
+   - 10+ files with IDENTICAL error -> automation strongly recommended
+   - Error differs between files -> manual fix required
 
 CRITICAL DISTINCTIONS:
 - **docstrfmt** = for *.rst documentation files (RST syntax)
 - **docformatter** = for *.py docstrings (PEP 257 inside Python files)
-- Example: "heading adornment style" in *.rst files → docstrfmt
-- Example: "docstring not PEP 257" in *.py files → docformatter
+- Example: "heading adornment style" in *.rst files -> docstrfmt
+- Example: "docstring not PEP 257" in *.py files -> docformatter
 
 CONFIG SPECIFICATION RULES:
 When a fix requires config changes (dependencies, versions, settings), be SPECIFIC:
@@ -239,7 +239,7 @@ STRATEGY ORGANIZATION RULES:
    - <specific_error>: Extract key error detail from L1 problem.problem field (the unique identifier)
 
    HOW to construct:
-   1. Read L1 problem.failure_type → that's your failure_type
+   1. Read L1 problem.failure_type -> that's your failure_type
    2. Check L1 problem.files_metadata:
       - If exists and total_count > 10: Use files_metadata.pattern for location
       - Else: Use actual file path(s) from problem.files
@@ -257,9 +257,9 @@ STRATEGY ORGANIZATION RULES:
    - Config errors: "{{failure_type}} in {{config_file}} ({{config_issue}})"
 
 2. **Group by causal relationship**, not just validation:
-   - If problems share root cause (e.g., config change triggered multiple validators) → ONE strategy
-   - If problems are independent (different root causes) → SEPARATE strategies
-   - If fixing one problem enables others (from "enabled" field) → SAME strategy
+   - If problems share root cause (e.g., config change triggered multiple validators) -> ONE strategy
+   - If problems are independent (different root causes) -> SEPARATE strategies
+   - If fixing one problem enables others (from "enabled" field) -> SAME strategy
 
 3. **Automation vs Manual**:
    - For mechanical/formatting errors with automation tool:
@@ -272,7 +272,7 @@ STRATEGY ORGANIZATION RULES:
    - If problem A enables problem B (B is in A's "enabled" list):
      * Create ONE strategy covering both
      * Explain in causal_chain why B appears after fixing A
-   - Example: Config fix → validation now runs → reveals formatting errors
+   - Example: Config fix -> validation now runs -> reveals formatting errors
 
 4. **Signals are OBSERVABLE PATTERNS that detect this failure**:
 
@@ -284,41 +284,43 @@ STRATEGY ORGANIZATION RULES:
    - Exit codes and command failures
 
    WHAT SIGNALS ARE NOT:
-   ❌ "Error from L1: ..." (meta-reference)
-   ❌ "File pattern: ..." (generic label)
-   ❌ "Failed command: ..." (generic label)
+   FAIL "Error from L1: ..." (meta-reference)
+   FAIL "File pattern: ..." (generic label)
+   FAIL "Failed command: ..." (generic label)
 
    HOW TO EXTRACT SIGNALS:
 
    1. ERROR MESSAGE - Extract actual error as it appears:
-      ✅ "mypy error [arg-type]: Argument 1 to joinpath has incompatible type Optional[Any]"
-      ❌ "Error from L1: type mismatch"
+      OK "mypy error [arg-type]: Argument 1 to joinpath has incompatible type Optional[Any]"
+      FAIL "Error from L1: type mismatch"
 
    2. FILE INDICATOR - Actual file paths or patterns:
-      ✅ "libs/agno/agno/workspace/helpers.py at line 42"
-      ✅ "67 files matching docs/source/**/*.rst"
-      ❌ "File pattern: helpers.py"
+      OK "libs/agno/agno/workspace/helpers.py at line 42"
+      OK "67 files matching docs/source/**/*.rst"
+      FAIL "File pattern: helpers.py"
 
    3. COMMAND FAILURE - Exact command that fails:
-      ✅ "Command 'python -m mypy .' exits with code 1"
-      ✅ "pytest tests/ → 3 tests FAILED"
-      ❌ "Failed command: mypy ."
+      OK "Command 'python -m mypy .' exits with code 1"
+      OK "pytest tests/ -> 3 tests FAILED"
+      FAIL "Failed command: mypy ."
 
    4. TOOL/VERSION - If relevant to detection:
-      ✅ "mypy 1.8.0 reports incompatible types"
-      ✅ "ruff 0.1.9 F401 unused import"
-      ❌ "Validator: mypy"
+      OK "mypy 1.8.0 reports incompatible types"
+      OK "ruff 0.1.9 F401 unused import"
+      FAIL "Validator: mypy"
 
    EXAMPLES of good signals:
    - "mypy: error: Incompatible return value type (got RunResponse, expected str) [return-value] at chain.py:84"
    - "pytest: AssertionError: assert 200 == 401 in tests/test_auth.py::test_login"
    - "ruff check: F401 'numpy.typing.DTypeLike' imported but unused in 5 *.py files"
-   - "docstrfmt --check docs/source/ → 67 files with heading adornment errors"
+   - "docstrfmt --check docs/source/ -> 67 files with heading adornment errors"
 
 5. **Key actions must be EXECUTABLE and INCLUDE AUTOMATION COMMANDS**:
    - Start with prerequisite checks
    - **For automation tools**: Include EXACT install and run commands from available tools
+   - **For automation-capable fixes**: Include setup/install, the exact command to run, and the exact file or directory target
    - **For manual fixes**: Specify exact code changes
+   - **For any Python file edits**: Add a final Ruff cleanup step for the changed Python files or their parent directory
    - Include verification steps
 
    AUTOMATION TOOL GUIDANCE:
@@ -326,6 +328,18 @@ STRATEGY ORGANIZATION RULES:
      1. Install command: "pip install <tool>" (from automation tools list)
      2. Run command: "python -m <tool> <args> <target>" (use actual file paths/patterns)
      3. Verification: Re-run the validator to confirm fix
+   - If an automation tool can fix the problem, prefer a command step over manual edits.
+   - If the tool requires project setup first, include the setup command before the fix command.
+
+   PYTHON POST-EDIT RUFF RULE:
+   - If key_actions modify any *.py file, include these steps before final validation:
+     1. "Step N: Install Ruff if missing: pip install ruff"
+     2. "Step N+1: Run Ruff autofix: ruff check --fix <changed_python_file_or_dir>"
+     3. "Step N+2: Run Ruff formatter: ruff format <changed_python_file_or_dir>"
+   - Target the narrowest useful scope:
+     * One or a few files: use the exact changed file paths from L1
+     * Many Python files in one package: use the common parent directory
+   - This applies even when the main fix is semantic/manual, because Python edits can introduce import ordering, whitespace, or formatting issues.
 
    Examples:
    - AUTOMATION:
@@ -336,7 +350,10 @@ STRATEGY ORGANIZATION RULES:
    - MANUAL:
      * "Step 1: Open libs/agno/agno/agent.py"
      * "Step 2: Add null check: if self.knowledge is not None:"
-     * "Step 3: Verify: mypy libs/agno/agno/agent.py"
+     * "Step 3: Install Ruff if missing: pip install ruff"
+     * "Step 4: Run Ruff autofix: ruff check --fix libs/agno/agno/agent.py"
+     * "Step 5: Run Ruff formatter: ruff format libs/agno/agno/agent.py"
+     * "Step 6: Verify: mypy libs/agno/agno/agent.py"
 
 CRITICAL OUTPUT FORMAT:
 
@@ -400,21 +417,28 @@ IMPORTANT JSON FORMATTING:
         // 2. For AUTOMATED fixes: exact command + "no manual check unless this fails"
         // 3. For MANUAL fixes: exact file, line, change needed
         // 4. Include specific config values (versions, constraints, settings)
+        // 5. If any *.py file changes, add Ruff cleanup before final validation:
+        //    "Install Ruff if missing: pip install ruff"
+        //    "Run Ruff autofix: ruff check --fix <changed_python_file_or_dir>"
+        //    "Run Ruff formatter: ruff format <changed_python_file_or_dir>"
         //
         // PATTERN A: Config + Code fix (e.g., dependency issues)
         //   "Step 1: CONFIG - Open <config_file> and modify <section>: set <key>=<value>"
         //   "Step 2: CODE - Open <source_file> and change <specific_code_location>: <exact_change>"
-        //   "Step 3: Verify: <verification_cmd from L1> (should pass)"
+        //   "Step 3: Run Ruff cleanup if Python files changed: ruff check --fix <target> && ruff format <target>"
+        //   "Step 4: Verify: <verification_cmd from L1> (should pass)"
         //
         // PATTERN B: Automated fix (formatting/linting, many files)
         //   "Step 1: Install <tool>: <exact install_command from AUTOMATED_TOOLS>"
         //   "Step 2: Run automated fix: <exact fix_command with file paths> (fixes automatically, no manual check unless this fails)"
-        //   "Step 3: Verify: <verification_cmd> (should pass)"
+        //   "Step 3: Run Ruff cleanup if Python files changed: ruff check --fix <target> && ruff format <target>"
+        //   "Step 4: Verify: <verification_cmd> (should pass)"
         //
         // PATTERN C: Manual fix only (semantic changes, few files)
         //   "Step 1: Open <actual file from L1> at line <line_number if available>"
         //   "Step 2: Change <old_code> to <new_code> because <reason from L1 fix_strategy>"
-        //   "Step 3: Verify: <verification_cmd from L1> (should pass)"
+        //   "Step 3: Run Ruff cleanup if Python files changed: ruff check --fix <target> && ruff format <target>"
+        //   "Step 4: Verify: <verification_cmd from L1> (should pass)"
         //
         // EXAMPLES:
         // Config+Code: "Step 1: CONFIG - Open pyproject.toml [tool.poetry.dependencies] section: add click = '<8.2.0'"

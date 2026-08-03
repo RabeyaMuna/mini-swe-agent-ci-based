@@ -1,10 +1,10 @@
 #!/bin/bash
 # run_new_workflow.sh
-# CORRECT workflow: Split → Decompose Memory → Build Memory (L1/L2/L3)
+# CORRECT workflow: Split -> Decompose Memory -> Build Memory (L1/L2/L3)
 #
 # Usage:
-#   MODEL=minimax2.5 bash scripts/run_new_workflow.sh agno,flower,camel
-#   MODEL=glm5.2 bash scripts/run_new_workflow.sh
+#   MODEL=minimax2.5 bash scripts/workflows/run_new_workflow.sh agno,flower,camel
+#   MODEL=glm5.2 bash scripts/workflows/run_new_workflow.sh
 
 set -euo pipefail
 
@@ -22,7 +22,7 @@ fi
 echo "======================================================================"
 echo "NEW WORKFLOW (Correct Order)"
 echo "======================================================================"
-echo "Flow: Split → Decompose Memory → Build Memory (L1/L2/L3)"
+echo "Flow: Split -> Decompose Memory -> Build Memory (L1/L2/L3)"
 echo ""
 echo "Repos: $REPOS"
 echo "Output: $OUTPUT_DIR"
@@ -38,7 +38,7 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "STEP 1: Split Dataset (Chronological)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Strategy: Earliest 30% → Memory, Latest 70% → Eval"
+echo "Strategy: Earliest 30% -> Memory, Latest 70% -> Eval"
 echo "NO temporal leakage (guaranteed by chronological order)"
 echo ""
 
@@ -58,7 +58,7 @@ fi
 MEMORY_COUNT=$(wc -l < "$OUTPUT_DIR/memory_set.jsonl" | tr -d ' ')
 EVAL_COUNT=$(wc -l < "$OUTPUT_DIR/eval_set.jsonl" | tr -d ' ')
 
-echo "✓ Split complete:"
+echo "OK Split complete:"
 echo "  Memory: $MEMORY_COUNT issues (will be decomposed)"
 echo "  Eval:   $EVAL_COUNT issues (no decomposition needed)"
 echo ""
@@ -89,7 +89,7 @@ if [ ! -f "$OUTPUT_DIR/memory_decomposed.json" ]; then
     exit 1
 fi
 
-echo "✓ Decomposition complete!"
+echo "OK Decomposition complete!"
 echo ""
 
 # ======================================================================
@@ -122,22 +122,22 @@ else
 fi
 
 echo ""
-echo "✓ Memory building complete!"
+echo "OK Memory building complete!"
 echo ""
 
 # ======================================================================
 # WORKFLOW COMPLETE
 # ======================================================================
 echo "======================================================================"
-echo "✓ WORKFLOW COMPLETE!"
+echo "OK WORKFLOW COMPLETE!"
 echo "======================================================================"
 echo ""
-echo "📊 Summary:"
+echo " Summary:"
 echo "  Total issues:    $(($MEMORY_COUNT + $EVAL_COUNT))"
 echo "  Memory issues:   $MEMORY_COUNT (decomposed)"
 echo "  Eval issues:     $EVAL_COUNT (ready for evaluation)"
 echo ""
-echo "📁 Output files:"
+echo " Output files:"
 echo ""
 echo "  Split data:"
 echo "    • $OUTPUT_DIR/memory_set.jsonl"
@@ -154,7 +154,7 @@ echo "    • $OUTPUT_DIR/failure_memory.json    (L1 - file-level)"
 echo "    • $OUTPUT_DIR/repo_memory.json       (L2 - sequences)"
 echo "    • $OUTPUT_DIR/cross_memory.json      (L3 - patterns)"
 echo ""
-echo "🎯 Next step:"
+echo " Next step:"
 echo "   Evaluate on eval_set.jsonl using the L1/L2/L3 memory"
 echo ""
 echo "======================================================================"

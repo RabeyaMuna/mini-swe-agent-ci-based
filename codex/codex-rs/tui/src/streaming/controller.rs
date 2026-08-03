@@ -59,7 +59,7 @@ use super::table_holdback::TableHoldbackState;
 use super::table_holdback::table_holdback_state;
 
 // ---------------------------------------------------------------------------
-// StreamCore — shared bookkeeping for both stream controllers
+// StreamCore - shared bookkeeping for both stream controllers
 // ---------------------------------------------------------------------------
 
 /// Shared state and logic for the two-region streaming model.
@@ -197,7 +197,7 @@ impl StreamCore {
         step
     }
 
-    // Trivial StreamCore accessors inlined — called on every animation tick
+    // Trivial StreamCore accessors inlined - called on every animation tick
     // and render frame during active streaming.
 
     #[inline]
@@ -536,7 +536,7 @@ impl StreamController {
         (self.emit(step), self.core.is_idle())
     }
 
-    // Thin StreamController accessors inlined — one-liner delegates called
+    // Thin StreamController accessors inlined - one-liner delegates called
     // on every render frame and animation tick.
 
     #[inline]
@@ -590,7 +590,7 @@ impl StreamController {
     }
 }
 // ---------------------------------------------------------------------------
-// PlanStreamController — proposed plan streams
+// PlanStreamController - proposed plan streams
 // ---------------------------------------------------------------------------
 
 /// Controller that streams proposed plan markdown into a styled plan block.
@@ -1617,7 +1617,7 @@ mod tests {
 
     #[test]
     fn controller_live_view_matches_render_during_interleaved_table_streaming() {
-        let source = "Project updates are easier to scan when narrative and structured data alternate.\n\n| Focus Area | Owner | Priority | Status |\n|---|---|---|---|\n| Authentication cleanup | Maya | High | 80% |\n| CLI error messages | Jordan | Medium | 55% |\n| Docs refresh | Lee | Low | 30% |\n\nThe first checkpoint shows progress, but we still have open risks.\n\n| Task | Command / Artifact | Due | State |\n|---|---|---|---|\n| Run unit tests | `cargo test -p codex-core` | Today | ✅ |\n| Snapshot review | `cargo insta pending-snapshots -p codex-tui` | Today | ⏳ |\n| Changelog draft | Release template (https://replacechangelog.com/) | Tomorrow | 📝 |\n\nFinal sign-off criteria are summarized below.\n";
+        let source = "Project updates are easier to scan when narrative and structured data alternate.\n\n| Focus Area | Owner | Priority | Status |\n|---|---|---|---|\n| Authentication cleanup | Maya | High | 80% |\n| CLI error messages | Jordan | Medium | 55% |\n| Docs refresh | Lee | Low | 30% |\n\nThe first checkpoint shows progress, but we still have open risks.\n\n| Task | Command / Artifact | Due | State |\n|---|---|---|---|\n| Run unit tests | `cargo test -p codex-core` | Today | OK |\n| Snapshot review | `cargo insta pending-snapshots -p codex-tui` | Today | ⏳ |\n| Changelog draft | Release template (https://replacechangelog.com/) | Tomorrow |  |\n\nFinal sign-off criteria are summarized below.\n";
         let width = Some(72usize);
         let mut ctrl = stream_controller(width);
         let mut emitted_lines: Vec<Line<'static>> = Vec::new();

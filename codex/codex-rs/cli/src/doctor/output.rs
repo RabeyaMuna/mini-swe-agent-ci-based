@@ -201,7 +201,7 @@ fn write_detail_line(out: &mut String, detail: HumanDetail, options: HumanOutput
             );
         }
         HumanDetail::Remedy(value) => {
-            let marker = if options.ascii { "->" } else { "→" };
+            let marker = if options.ascii { "->" } else { "->" };
             let _ = writeln!(
                 out,
                 "    {} {}",
@@ -220,7 +220,7 @@ fn row_description(check: &DoctorCheck, options: HumanOutputOptions) -> String {
     if matches!(check.status, CheckStatus::Warning | CheckStatus::Fail)
         && let Some(remediation) = &check.remediation
     {
-        let dash = if options.ascii { " - " } else { " — " };
+        let dash = if options.ascii { " - " } else { " - " };
         let summary = &check.summary;
         return format!("{summary}{dash}{remediation}");
     }
@@ -290,10 +290,10 @@ fn status_marker(status: DisplayStatus, options: HumanOutputOptions) -> String {
         }
     } else {
         match status {
-            DisplayStatus::Ok => "✓",
+            DisplayStatus::Ok => "OK",
             DisplayStatus::Update => "↑",
-            DisplayStatus::Note | DisplayStatus::Warning => "⚠",
-            DisplayStatus::Fail => "✗",
+            DisplayStatus::Note | DisplayStatus::Warning => "WARNING",
+            DisplayStatus::Fail => "FAIL",
             DisplayStatus::Idle => "○",
         }
     };
@@ -1244,12 +1244,12 @@ mod tests {
 Codex Doctor v0.0.0
 
 Notes
-   ⚠ terminal     narrow terminal
-   ✗ auth         token expired - Run `codex login`.
+   WARNING terminal     narrow terminal
+   FAIL auth         token expired - Run `codex login`.
 ─────────────────────────────────────────────────────────────
 
 Environment
-  ✓ system       en-US
+  OK system       en-US
       os                       macOS 15.0
       OS language              en-US
       VISUAL                   code --wait
@@ -1258,35 +1258,35 @@ Environment
       GIT_PAGER                delta
       GH_PAGER                 less
       LESS                     -FRX
-  ✓ runtime      running local build on darwin-arm64
-  ✓ install      consistent
-      managed by               npm: no · bun: no · pnpm: no · package root —
-  ✓ search       search is OK (bundled)
-  ✓ git          git version 2.54.0
+  OK runtime      running local build on darwin-arm64
+  OK install      consistent
+      managed by               npm: no · bun: no · pnpm: no · package root -
+  OK search       search is OK (bundled)
+  OK git          git version 2.54.0
       selected git             /usr/bin/git
       version                  git version 2.54.0
       repo detected            true
-  ⚠ terminal     narrow terminal
-  ✓ title        default · project codex
+  WARNING terminal     narrow terminal
+  OK title        default · project codex
       title source             default
       title items              activity, project-name
       project value            codex
-  ✓ state        state paths inspectable
+  OK state        state paths inspectable
 
 Configuration
-  ✗ auth         token expired — Run `codex login`.
+  FAIL auth         token expired - Run `codex login`.
       OPENAI_API_KEY           present
 
 Updates
-  ✓ updates      update configuration is locally consistent
+  OK updates      update configuration is locally consistent
 
 Connectivity
-  ✓ network      network environment readable
-  ✓ websocket    Responses WebSocket handshake succeeded
-  ✓ reachability active provider endpoints are reachable over HTTP
+  OK network      network environment readable
+  OK websocket    Responses WebSocket handshake succeeded
+  OK reachability active provider endpoints are reachable over HTTP
 
 Background Server
-  ✓ app-server   background server is not running
+  OK app-server   background server is not running
 
 {}
 12 ok · 2 notes · 1 warn · 1 fail failed
@@ -1315,33 +1315,33 @@ Background Server
 Codex Doctor v0.0.0
 
 Notes
-   ⚠ terminal     narrow terminal
-   ✗ auth         token expired - Run `codex login`.
+   WARNING terminal     narrow terminal
+   FAIL auth         token expired - Run `codex login`.
 ─────────────────────────────────────────────────────────────
 
 Environment
-  ✓ system       en-US
-  ✓ runtime      running local build on darwin-arm64
-  ✓ install      consistent
-  ✓ search       search is OK (bundled)
-  ✓ git          git version 2.54.0
-  ⚠ terminal     narrow terminal
-  ✓ title        default · project codex
-  ✓ state        state paths inspectable
+  OK system       en-US
+  OK runtime      running local build on darwin-arm64
+  OK install      consistent
+  OK search       search is OK (bundled)
+  OK git          git version 2.54.0
+  WARNING terminal     narrow terminal
+  OK title        default · project codex
+  OK state        state paths inspectable
 
 Configuration
-  ✗ auth         token expired — Run `codex login`.
+  FAIL auth         token expired - Run `codex login`.
 
 Updates
-  ✓ updates      update configuration is locally consistent
+  OK updates      update configuration is locally consistent
 
 Connectivity
-  ✓ network      network environment readable
-  ✓ websocket    Responses WebSocket handshake succeeded
-  ✓ reachability active provider endpoints are reachable over HTTP
+  OK network      network environment readable
+  OK websocket    Responses WebSocket handshake succeeded
+  OK reachability active provider endpoints are reachable over HTTP
 
 Background Server
-  ✓ app-server   background server is not running
+  OK app-server   background server is not running
 
 {}
 12 ok · 2 notes · 1 warn · 1 fail failed
@@ -1403,7 +1403,7 @@ Run codex doctor without --summary for detailed diagnostics.
 
         let rendered = render_human_report(&report, detailed_no_color_unicode_options());
 
-        assert!(rendered.contains("✓ state        databases healthy"));
+        assert!(rendered.contains("OK state        databases healthy"));
         assert!(rendered.contains("memories DB              /tmp/memories.sqlite · integrity ok"));
     }
 
@@ -1508,11 +1508,11 @@ Run codex doctor without --summary for detailed diagnostics.
         let rendered = render_human_report(&report, detailed_no_color_unicode_options());
 
         assert!(
-            rendered.contains("⚠ terminal     width 79 cols - output may wrap (recommended >=80)")
+            rendered.contains("WARNING terminal     width 79 cols - output may wrap (recommended >=80)")
         );
         assert!(rendered.contains("▸ terminal size            79x26 (expected >= 80 columns)"));
-        assert!(rendered.contains("→ resize the window to at least 80 columns"));
-        assert!(!rendered.contains("⚠ terminal     Ghostty 1.3.1"));
+        assert!(rendered.contains("-> resize the window to at least 80 columns"));
+        assert!(!rendered.contains("WARNING terminal     Ghostty 1.3.1"));
     }
 
     #[test]
@@ -1583,11 +1583,11 @@ Run codex doctor without --summary for detailed diagnostics.
 
         assert!(rendered.contains("Notes\n   ↑ updates"));
         assert!(rendered.contains("0.130.0 available (current 0.0.0, dismissed 0.128.0)"));
-        assert!(rendered.contains("⚠ rollouts"));
-        assert!(rendered.contains("⚠ sandbox"));
-        assert!(rendered.contains("⚠ mcp"));
+        assert!(rendered.contains("WARNING rollouts"));
+        assert!(rendered.contains("WARNING sandbox"));
+        assert!(rendered.contains("WARNING mcp"));
         assert!(rendered.contains(
-            "⚠ auth         mixed auth signals: ChatGPT login plus API key env var; HTTP reachability uses API-key mode"
+            "WARNING auth         mixed auth signals: ChatGPT login plus API key env var; HTTP reachability uses API-key mode"
         ));
         assert!(rendered.contains("○ app-server   not running (ephemeral mode)"));
         assert!(rendered.contains("5 ok · 1 idle · 5 notes · 1 warn · 0 fail degraded"));

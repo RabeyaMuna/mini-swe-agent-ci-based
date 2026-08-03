@@ -39,7 +39,7 @@ REDO_EXISTING=""
 usage() {
     cat <<'EOF'
 Usage:
-  bash scripts/run_cibench_minimax_openrouter.sh [options]
+  bash scripts/workflows/run_cibench_minimax_openrouter.sh [options]
 
 Options:
   --ablation baseline|L1|L1+L2|L1+L2+L3

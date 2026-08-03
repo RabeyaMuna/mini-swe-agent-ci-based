@@ -418,7 +418,7 @@ impl ChatWidget {
         };
         let warning_text = warn_effort.as_ref().map(|effort| {
             let effort_label = Self::reasoning_effort_label(effort);
-            format!("⚠ {effort_label} reasoning effort can quickly consume Plus plan rate limits.")
+            format!("WARNING {effort_label} reasoning effort can quickly consume Plus plan rate limits.")
         });
         let warn_for_model = preset.model.starts_with("gpt-5.1-codex")
             || preset.model.starts_with("gpt-5.1-codex-max")
@@ -540,7 +540,7 @@ impl ChatWidget {
                 });
             })];
             items.push(SelectionItem {
-                name: "More reasoning…".to_string(),
+                name: "More reasoning...".to_string(),
                 description: Some(format!("{advanced_label} {verb} usage limits faster")),
                 is_current: is_current_model
                     && highlight_choice
@@ -620,7 +620,7 @@ impl ChatWidget {
 
         let mut header = ColumnRenderable::new();
         header.push(Line::from("Advanced Reasoning".bold()));
-        header.push(Line::from("⚠ Consumes usage limits faster".cyan()));
+        header.push(Line::from("WARNING Consumes usage limits faster".cyan()));
         self.bottom_pane.show_selection_view(SelectionViewParams {
             header: Box::new(header),
             footer_hint: Some(standard_popup_hint_line()),

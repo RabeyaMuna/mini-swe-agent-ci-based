@@ -20,6 +20,18 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Load environment variables from .env file at project root
+try:
+    from dotenv import load_dotenv
+    env_file = Path(__file__).resolve().parents[2] / ".env"
+    if env_file.exists():
+        load_dotenv(env_file)
+except ImportError:
+    pass  # dotenv not installed, rely on environment variables
+
+from memory_plugin import MemoryPlugin
+from utilities.ci_log_analyzer import _run_log_analysis
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATASET = PROJECT_ROOT / "data" / "eval_set.jsonl"
@@ -213,7 +225,7 @@ def make_context_llm(model: str | None) -> Any:
         return None
 
     try:
-        import litellm
+        from utilities.llm_model import LitellmModel
         from utilities.model_registry import configure_model_environment, resolve_model_alias
     except Exception as exc:
         raise RuntimeError(f"Could not import context LLM dependencies: {exc}") from exc
@@ -221,14 +233,8 @@ def make_context_llm(model: str | None) -> Any:
     model_name = str(resolve_model_alias(model))
     configure_model_environment(model_name)
 
-    def _call(prompt: str) -> str:
-        response = litellm.completion(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return str(response.choices[0].message.content or "").strip()
-
-    return _call
+    # Return proper LLM object with .invoke() method
+    return LitellmModel(model_name=model_name)
 
 
 def is_placeholder_analysis(data: dict[str, Any]) -> bool:
@@ -289,7 +295,6 @@ def load_or_generate_ci_failure(
             )
 
         try:
-            from utilities.ci_log_analyzer import _run_log_analysis
 
             analysis = _run_log_analysis(issue, context_llm, context_model or "")
             analysis["source"] = "ci_log_analyzer"
@@ -387,15 +392,6 @@ def load_or_generate_verification(
     return verification
 
 
-class MemoryConfig:
-    def __init__(self, enabled: bool, ablation: str, memory_root: Path, top_k: int) -> None:
-        self.memory_enabled = enabled
-        self.memory_ablation_levels = ablation
-        self.memory_top_k = top_k
-        self.project_result_dir = str(memory_root)
-        self.memory_backend = "json"
-
-
 def load_memory_context(
     issue: dict[str, Any],
     ci_failure: dict[str, Any],
@@ -404,73 +400,87 @@ def load_memory_context(
     memory_root: Path,
     ablation: str,
     top_k: int,
+    context_llm: Any = None,
 ) -> str:
+    """
+    Load memory context by passing raw CI failure data to memory plugin.
+
+    Memory plugin handles all query building and retrieval logic.
+    This function just passes data and formats the result for Codex.
+    """
     if ablation.lower() == "baseline":
         return ""
 
     try:
-        from memory_plugin.memory_plugin import MemoryPlugin
-    except Exception as exc:
-        return f"Memory plugin import failed: {exc}"
+        # Initialize memory plugin with LLM (required for dynamic stages)
+        plugin = MemoryPlugin(
+            memory_root=memory_root,
+            result_dir=str(result_dir),
+            ablation=ablation,
+            top_k=top_k,
+            llm=context_llm,  # Pass the LLM!
+            enabled=True
+        )
 
-    relevant_files = []
-    for item in ci_failure.get("relevant_files") or []:
-        if isinstance(item, dict):
-            relevant_files.append(item.get("file") or item.get("path") or "")
-        else:
-            relevant_files.append(str(item))
-    relevant_files = [x for x in relevant_files if x]
+        # Pass RAW ci_failure and verification to memory plugin
+        # Memory plugin will build query internally from this data
+        retrieval = plugin.retrieve(
+            ci_failure=ci_failure,
+            verification=verification,
+            issue_metadata={
+                "task_id": issue_id(issue),
+                "sha_fail": issue.get("sha_fail"),
+                "repo": repo_slug(issue),
+            }
+        )
 
-    failure_reason = "\n".join(str(x) for x in ci_failure.get("error_context", [])[:8])
-    validation_sequence = verification.get("validation_sequence") or []
-    failed_cmd = [
-        step.get("validation_cmd")
-        for step in validation_sequence
-        if isinstance(step, dict) and step.get("validation_cmd")
-    ]
-
-    query = {
-        "task_id": issue_id(issue),
-        "sha_fail": issue.get("sha_fail"),
-        "repo": repo_slug(issue),
-        "workflow_path": issue.get("workflow_path") or "",
-        "error_type": issue.get("error_type") or ci_failure.get("error_types") or "",
-        "failure_pattern": failure_reason[:500],
-        "failure_reason": failure_reason,
-        "error_context_summary": failure_reason,
-        "relevant_files": relevant_files,
-        "failed_cmd": failed_cmd,
-        "failed_tool": [],
-    }
-
-    try:
-        config = MemoryConfig(True, ablation, memory_root, top_k)
-        plugin = MemoryPlugin(config, str(result_dir), llm=None)
-        retrieval = plugin.retrieve(query)
+        # Save full retrieval for analysis
         write_json(result_dir / "memory_retrieval.json", retrieval)
 
+        # Format for Codex prompt (agent-specific formatting)
         formatted = plugin.format_for_prompt(retrieval)
+
+        # Add detailed JSON for debugging
         details = json.dumps(
             {
-                "level_scores": retrieval.get("level_scores"),
-                "weighted_similarity": retrieval.get("weighted_similarity"),
-                "candidate_files": retrieval.get("candidate_files"),
-                "high_level_hints": retrieval.get("high_level_hints"),
-                "l1_matches": retrieval.get("l1_matches", [])[:top_k],
-                "l2_matches": retrieval.get("l2_matches", [])[:top_k],
-                "l3_matches": retrieval.get("l3_matches", [])[:top_k],
+                "metadata": retrieval.get("metadata"),
+                "l1_matches": [
+                    {
+                        "score": m.get("similarity_score"),
+                        "file": m.get("file"),
+                        "error_type": m.get("error_type"),
+                    }
+                    for m in retrieval.get("l1_matches", [])[:top_k]
+                ],
+                "l2_matches": [
+                    {
+                        "score": m.get("similarity_score"),
+                        "issue_type": m.get("issue_type"),
+                    }
+                    for m in retrieval.get("l2_matches", [])[:top_k]
+                ],
+                "l3_matches": [
+                    {
+                        "score": m.get("similarity_score"),
+                        "category": m.get("category"),
+                    }
+                    for m in retrieval.get("l3_matches", [])[:top_k]
+                ],
             },
             indent=2,
             ensure_ascii=False,
         )
-    except Exception as exc:
-        memory_md = f"Memory retrieval failed: {exc}"
+
+        # Combine formatted text and details
+        memory_md = f"{formatted}\n\n### Debug Details\n\n```json\n{details[:20000]}\n```"
         write_text(result_dir / "memory_context.md", memory_md)
         return memory_md
 
-    memory_md = f"{formatted}\n\n```json\n{details[:20000]}\n```"
-    write_text(result_dir / "memory_context.md", memory_md)
-    return memory_md
+    except Exception as exc:
+        import traceback
+        error_msg = f"Memory retrieval failed: {exc}\n\n{traceback.format_exc()}"
+        write_text(result_dir / "memory_context.md", error_msg)
+        return error_msg
 
 
 def format_ci_failure_markdown(analysis: dict[str, Any]) -> str:
@@ -843,6 +853,7 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         args.memory_root,
         ablation,
         args.memory_top_k,
+        context_llm,  # Pass LLM for dynamic stages!
     )
 
     problems = extract_problem_list(ci_failure)
@@ -870,6 +881,8 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         if run_result["returncode"] != 0:
             break
 
+    # Verification is the agent's responsibility (see workflow step 9)
+    # The script only runs external verification if explicitly requested via --verification-command
     verification_result = run_verification_command(
         checkout,
         result_dir,
@@ -917,7 +930,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--memory-root", type=Path, default=DEFAULT_MEMORY_ROOT)
     parser.add_argument("--log-cache", type=Path, default=DEFAULT_LOG_CACHE)
     parser.add_argument("--workflow-cache", type=Path, default=DEFAULT_WORKFLOW_CACHE)
-    parser.add_argument("--memory-top-k", type=int, default=3)
+    parser.add_argument("--memory-top-k", type=int, default=5)
     parser.add_argument(
         "--codex-command",
         default=os.environ.get("CODEX_REPAIR_COMMAND", "codex exec --full-auto"),

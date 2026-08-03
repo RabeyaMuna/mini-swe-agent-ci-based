@@ -1,34 +1,48 @@
-# STAIR Memory Retrieval
+# Memory Plugin - Agent-Agnostic CI Repair Memory
 
-STAIR-inspired hierarchical memory retrieval for CI repair with LLM-driven decision making.
+## Overview
+
+The memory plugin provides **hierarchical memory retrieval** for CI repair agents. It retrieves similar past fixes from L1/L2/L3 memory and detects common repository/workflow patterns using **flattening + clustering + LLM validation**.
+
+## Key Features
+
+OK **Agent-agnostic**: Works with any CI repair agent (Codex, OpenDevin, etc.)  
+OK **Hierarchical memory**: L1 (repo+workflow), L2 (repo), L3 (universal)  
+OK **Common pattern detection**: Finds recurring problems across issues  
+OK **Frequency-based**: Counts distinct CI failures, not problem instances  
+OK **LLM-driven**: Dynamic decisions for filtering, validation, and synthesis  
+OK **Ablation support**: Control which levels to use (baseline, L1, L1+L2, L1+L2+L3)  
 
 ## Architecture
 
-- **Stage 1**: Cosine similarity retrieval (L1/L2/L3)
-- **Stage 2**: LLM detects common/frequent problems
-- **Stage 3**: LLM filters relevant problems + dependency analysis
-- **Stage 4**: LLM clusters similar problems
-- **Stage 5**: LLM generates final structured problem list
-- **Stage 6**: LLM generates repair plans (optional)
-
-## File Structure
-
 ```
-memory_plugin/
-├── stair_retrieval.py          - Main pipeline (uses utilities)
-├── __init__.py                 - Module exports
-├── README.md                   - This file
-└── example_usage.py            - Usage examples
-
-prompt_template/stair_retrieval/
-├── stair_prompts.py            - Stages 2-5 prompts
-├── repair_plan_prompt.py       - Stage 6 repair plan prompts
-└── __init__.py                 - Prompt exports
-
-utilities/
-├── llm_invoker.py              - Robust LLM calls with retry
-├── llm_chunking.py             - Smart chunking
-└── ...                         - Other shared utilities
+┌─────────────────────────────────────────────────────────────┐
+│                    Memory Plugin API                        │
+│  retrieve(ci_failure, verification, metadata)               │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                  STAIR Retrieval Pipeline                   │
+│                                                             │
+│  1. Cosine Search (L1/L2/L3 top-k)                         │
+│  2. LLM Relevance Filter                                   │
+│  3. Extract Consecutive Problems                           │
+│  4. Common Pattern Detection (NEW):                        │
+│     a. Flatten ALL L1/L2 problems                          │
+│     b. Cluster by similarity                               │
+│     c. Count distinct issue_ids (frequency)                │
+│     d. LLM validates each group                            │
+│  5. Final Clustering (deduplication)                       │
+│  6. LLM Synthesis (merge/prioritize)                       │
+│  7. Deterministic Ordering                                 │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                     Memory Storage                          │
+│  - L1: failure_memory.json (repo+workflow specific)        │
+│  - L2: repo_memory.json (repo-wide patterns)               │
+│  - L3: cross_memory.json (universal patterns)              │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Usage
@@ -36,134 +50,263 @@ utilities/
 ### Basic Usage
 
 ```python
-from memory_plugin import STAIRRetrieval
-import openai
+from memory_plugin import MemoryPlugin
 
-# Initialize with LLM client (full STAIR: L1+L2+L3)
-client = openai.OpenAI(api_key="...")
-retrieval = STAIRRetrieval(
-    memory_dir='data/fwr_trs',
-    llm_client=client,
-    memory_levels="l1+l2+l3"  # Default: all levels
+# Initialize plugin
+plugin = MemoryPlugin(
+    memory_root=Path("data/back_trs"),
+    result_dir="results/retrieval",
+    ablation="L1+L2+L3",  # or "baseline", "L1", "L1+L2"
+    top_k=5,
+    llm=llm_client,
+    enabled=True
 )
 
-# Query
-ci_failure = {
-    'repo': 'owner/repo',
-    'workflow': '.github/workflows/ci.yml',
-    'problem_statement': 'Type checking failed',
-    'error_signals': ['Cannot resolve type annotation DTypeLike'],
-    'config_signals': ['mypy removed from pyproject.toml'],
-    'failure_type': 'type_checking'
-}
-
-# Get problems only
-result = retrieval.retrieve(ci_failure, top_k=5)
-
-# Or get problems + repair plans
-result = retrieval.retrieve(ci_failure, top_k=5, generate_plans=True)
+# Retrieve similar past fixes
+retrieval = plugin.retrieve(
+    ci_failure={
+        "error_context": [...],
+        "failure_signals": [...],
+        "relevant_files": [...],
+        "error_types": [...],
+        "workflow_name": "CI",
+    },
+    verification={
+        "validation_sequence": [...]
+    },
+    issue_metadata={
+        "task_id": "123",
+        "sha_fail": "abc123",
+        "repo": "org/repo"
+    }
+)
 
 # Use results
-for problem in result['problems']:
+problems = retrieval['problems']
+metadata = retrieval['metadata']
+common_problems = retrieval['common_problems']
+```
+
+### Format for Agent Prompt
+
+```python
+# Generic markdown format
+prompt_text = plugin.format_for_prompt(retrieval)
+
+# Custom format
+for problem in retrieval['problems']:
     print(f"Problem: {problem['problem']}")
     print(f"Root Cause: {problem['root_cause']}")
-    print(f"Steps: {problem['repair_actions']['steps']}")
-
-# If repair plans generated
-if 'repair_plans' in result:
-    for plan in result['repair_plans']:
-        print(f"Repair Plan: {plan['repair_plan']['summary']}")
-        for step in plan['repair_plan']['steps']:
-            print(f"  {step['step_number']}. {step['description']}")
+    print(f"Fix Strategy: {problem.get('repair_strategy', {}).get('summary')}")
+    print(f"Confidence: {problem['confidence']}")
 ```
 
-### Baseline Mode (No Memory)
+## Common Pattern Detection Algorithm
 
-For comparison experiments:
+### The Flattening Approach
+
+Instead of pre-aggregating problems, we:
+
+1. **Flatten ALL problems** from L1/L2 memory (not just top-k)
+2. **Cluster by similarity** (deterministic)
+3. **Count distinct issue_ids** per cluster (frequency)
+4. **LLM validates** each group
+
+### Why Flattening Works
 
 ```python
-# Baseline: no memory retrieval
-baseline = STAIRRetrieval(
-    memory_dir='data/fwr_trs',
-    llm_client=client,
-    baseline_mode=True  # Skip all memory
-)
+# Example: 3 issues with similar import errors
+flattened = [
+    {"issue_id": "123", "problem": "import error in test.py"},
+    {"issue_id": "123", "problem": "import error in app.py"},   # same issue
+    {"issue_id": "456", "problem": "import error in utils.py"},
+    {"issue_id": "789", "problem": "import error in config.py"},
+]
 
-result = baseline.retrieve(ci_failure)
-# Returns: {'problems': [], 'metadata': {'mode': 'baseline', ...}}
+# After clustering
+cluster = {
+    "frequency": 3,  # ← 3 distinct issues (not 4 problems!)
+    "issue_ids": ["123", "456", "789"],
+    "representative_problem": "import error",
+    "examples": [...]
+}
+
+# LLM sees:
+# "This problem appeared in 3 distinct CI failures"
+# -> Decides if it's a real recurring pattern
 ```
 
-### Ablation Study (Control Memory Levels)
+### Key Insight: issue_id, not problem_id
 
-For measuring impact of each level:
+We **only track issue_id** because:
+
+- **Frequency = distinct CI failures**, not problem count
+- If one issue has same problem 3 times -> counts as 1 issue
+- Clustering is problem-level, not problem_id-level
+- Simpler data structure
+
+## Retrieval Result Structure
 
 ```python
-# Ablation: Only L1 (repo+workflow specific)
-l1_only = STAIRRetrieval(
-    memory_dir='data/fwr_trs',
-    llm_client=client,
-    memory_levels="l1"
-)
-
-# Ablation: L1 + L2 (repo patterns)
-l1_l2 = STAIRRetrieval(
-    memory_dir='data/fwr_trs',
-    llm_client=client,
-    memory_levels="l1+l2"
-)
-
-# Full STAIR: L1 + L2 + L3 (universal patterns)
-full = STAIRRetrieval(
-    memory_dir='data/fwr_trs',
-    llm_client=client,
-    memory_levels="l1+l2+l3"  # or just omit (default)
-)
-
-# Compare results
-baseline_result = baseline.retrieve(ci_failure)
-l1_result = l1_only.retrieve(ci_failure)
-l1_l2_result = l1_l2.retrieve(ci_failure)
-full_result = full.retrieve(ci_failure)
-
-print(f"Baseline: {len(baseline_result['problems'])} problems")
-print(f"L1 only: {len(l1_result['problems'])} problems")
-print(f"L1+L2: {len(l1_l2_result['problems'])} problems")
-print(f"L1+L2+L3: {len(full_result['problems'])} problems")
+{
+    "problems": [
+        {
+            "problem": "Clear problem description",
+            "root_cause": "Why it happened",
+            "failure_type": "type_checking|linting|test_failure|...",
+            "files": ["file.py"],
+            "failure_signals": ["signal"],
+            "repair_strategy": {
+                "summary": "High-level approach",
+                "actions": ["specific action"],
+                "pitfalls": ["avoid this"],
+                "validation_cmd": "pytest tests/"
+            },
+            "confidence": "HIGH|MEDIUM|LOW",
+            "priority": 1,
+            "source": {
+                "l1": ["issue_id"],
+                "l2": ["issue_id"],
+                "l3": ["pattern_id"],
+                "common_pattern": true,
+                "frequency": 5,
+                "coverage": 0.35
+            }
+        }
+    ],
+    "metadata": {
+        "mode": "memory",
+        "enabled_levels": ["L1", "L2", "L3"],
+        "retrieved": {"l1": 5, "l2": 5, "l3": 5},
+        "common_detected": 3,
+        "filtered": 8,
+        "consecutive": 2,
+        "clusters": 6,
+        "final": 4
+    },
+    "common_problems": [
+        {
+            "cluster_id": "import_error_pattern",
+            "frequency": 5,
+            "coverage": 0.35,
+            "relevance": "HIGH",
+            "representative_problem": "...",
+            "examples": [{"issue_id": "123", "problems": ["..."]}]
+        }
+    ]
+}
 ```
 
-## LLM Client Support
+## Configuration
 
-Works with any client that `utilities.llm_invoker` supports:
-- OpenAI (`openai.OpenAI()`)
-- Anthropic (`anthropic.Anthropic()`)
-- Custom clients with compatible interface
+### Ablation Modes
 
-All LLM calls use `invoke_llm_with_retry()` with:
-- Automatic retry on rate limits
-- Timeout handling
-- JSON parsing with multiple fallbacks
-- Robust error handling
+```python
+# Baseline (no memory)
+ablation="baseline"
 
-## Prompts
+# L1 only (same repo + workflow)
+ablation="L1"
 
-All prompts are in `prompt_template/stair_retrieval/`:
+# L1 + L2 (repo-wide patterns)
+ablation="L1+L2"
 
-- **Stage 2**: `build_common_detection_prompt()` - Cross-issue common problem detection
-- **Stage 3**: `build_filtering_prompt()` - Relevance filtering + dependency analysis
-- **Stage 4**: `build_clustering_prompt()` - Similar problem clustering
-- **Stage 5**: `build_final_generation_prompt()` - Final structured output
-- **Stage 6**: `build_repair_plan_prompt()` - Detailed repair plans
+# L1 + L2 + L3 (universal patterns)
+ablation="L1+L2+L3"
+```
 
-## Decision Making
+### Frequency Thresholds
 
-**LLM decides** (Stages 2-6):
-- Which problems are common/frequent
-- Which problems are relevant to current failure
-- Dependencies (consecutive, dependent problems)
-- How to cluster problems
-- Final problem structure
-- Repair plan steps
+```python
+# Small repo (< 5 issues)
+min_issues = 2
+min_coverage = 0.40  # 40%
 
-**Non-LLM** (Stage 1 only):
-- Cosine similarity retrieval
-- Top-k selection
+# Larger repo (>= 5 issues)
+min_issues = 3
+min_coverage = 0.30  # 30%
+```
+
+### Clustering Threshold
+
+```python
+# Similarity threshold for clustering
+threshold = 0.68  # 68% similar -> same cluster
+```
+
+## Files
+
+- **`memory_plugin.py`**: Main plugin interface
+- **`stair_retrieval.py`**: STAIR retrieval implementation
+- **`FLATTENING_ALGORITHM.md`**: Detailed algorithm documentation
+- **`README.md`**: This file
+
+## Example Integration
+
+```python
+# In your CI repair agent
+from memory_plugin import MemoryPlugin
+
+class MyRepairAgent:
+    def __init__(self, memory_plugin: MemoryPlugin):
+        self.memory = memory_plugin
+
+    def repair(self, ci_failure, verification):
+        # Retrieve similar past fixes
+        retrieval = self.memory.retrieve(
+            ci_failure=ci_failure,
+            verification=verification
+        )
+
+        # Build prompt with memory context
+        prompt = f"""
+        Current CI Failure:
+        {ci_failure}
+
+        {self.memory.format_for_prompt(retrieval)}
+
+        Task: Fix the CI failure.
+        """
+
+        # Run repair with memory context
+        fix = self.llm(prompt)
+        return fix
+```
+
+## Testing
+
+```bash
+# Test flattening logic
+python test_flattening_logic.py
+
+# Test memory plugin
+python -m pytest memory_plugin/tests/
+```
+
+## Benefits
+
+### 1. Evidence-Based Decisions
+- LLM sees actual examples with issue_ids
+- Not pre-aggregated summaries
+
+### 2. Frequency Visibility
+- LLM knows "5 distinct issues had this problem"
+- Clear signal for recurring patterns
+
+### 3. Contextual Merging
+- LLM merges based on seeing all variations
+- Better than pure text similarity
+
+### 4. Relevance Filtering
+- Common patterns marked HIGH/MEDIUM/LOW relevance
+- Current failure gets highest priority
+
+### 5. Preserves Granularity
+- Each problem keeps its issue_id
+- Full traceability back to source
+
+## See Also
+
+- **[FLATTENING_ALGORITHM.md](FLATTENING_ALGORITHM.md)**: Detailed algorithm explanation
+- **[../prompt_template/stair_retrieval.py](../prompt_template/stair_retrieval.py)**: LLM prompts
+- **[../utilities/llm_invoker.py](../utilities/llm_invoker.py)**: LLM call utilities

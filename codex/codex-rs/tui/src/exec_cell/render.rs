@@ -223,10 +223,10 @@ impl HistoryCell for ExecCell {
                 if let Some(duration) = call.duration {
                     let duration = format_duration(duration);
                     let mut result: Line = if output.exit_code == 0 {
-                        Line::from("✓".green().bold())
+                        Line::from("OK".green().bold())
                     } else {
                         Line::from(vec![
-                            "✗".red().bold(),
+                            "FAIL".red().bold(),
                             format!(" ({})", output.exit_code).into(),
                         ])
                     };
@@ -245,7 +245,7 @@ impl HistoryCell for ExecCell {
 
 impl ExecCell {
     fn output_ellipsis_text(omitted: usize) -> String {
-        format!("… +{omitted} lines ({TRANSCRIPT_HINT})")
+        format!("... +{omitted} lines ({TRANSCRIPT_HINT})")
     }
 
     fn output_ellipsis_line(omitted: usize) -> Line<'static> {
@@ -619,7 +619,7 @@ impl ExecCell {
     }
 
     fn ellipsis_line(omitted: usize) -> Line<'static> {
-        Line::from(vec![format!("… +{omitted} lines").dim()])
+        Line::from(vec![format!("... +{omitted} lines").dim()])
     }
 
     fn output_ellipsis_row_count(
@@ -635,7 +635,7 @@ impl ExecCell {
         .max(1)
     }
 
-    /// Builds an output ellipsis line (`… +N lines (ctrl + t to view transcript)`)
+    /// Builds an output ellipsis line (`... +N lines (ctrl + t to view transcript)`)
     /// with an optional leading prefix so the ellipsis aligns with the output gutter.
     fn output_ellipsis_line_with_prefix(
         omitted: usize,
@@ -788,7 +788,7 @@ mod tests {
 
         let contains_ellipsis = lines
             .iter()
-            .any(|line| line.spans.iter().any(|span| span.content.contains("… +")));
+            .any(|line| line.spans.iter().any(|span| span.content.contains("... +")));
 
         // Regression guard: previously this scenario could render hundreds of
         // wrapped rows because truncation happened before final viewport
@@ -837,7 +837,7 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line.contains("… +6 lines (ctrl + t to view transcript)")),
+                .any(|line| line.contains("... +6 lines (ctrl + t to view transcript)")),
             "expected omitted hint to count hidden lines (not wrapped rows), got: {rendered:?}"
         );
     }
@@ -868,7 +868,7 @@ mod tests {
             vec![
                 "1",
                 "2",
-                "… +3 lines (ctrl + t to view transcript)",
+                "... +3 lines (ctrl + t to view transcript)",
                 "6",
                 "7",
             ]
@@ -981,7 +981,7 @@ mod tests {
             vec![
                 "first".to_string(),
                 "second".to_string(),
-                "… +1 lines".to_string(),
+                "... +1 lines".to_string(),
             ]
         );
     }

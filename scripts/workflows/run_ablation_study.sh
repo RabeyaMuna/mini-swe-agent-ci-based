@@ -61,7 +61,8 @@ run_ablation "L1_L2" "memory" "L1+L2"
 run_ablation "L1_L2_L3" "memory" "L1+L2+L3"
 
 echo ""
-echo "================================================================================
+cat <<EOF
+================================================================================
 ABLATION STUDY COMPLETE
 ================================================================================
 Results structure:
@@ -69,12 +70,12 @@ $OUTPUT_ROOT/
 |-- baseline/      <- No memory
 |-- L1/            <- L1 only
 |-- L1_L2/         <- L1+L2
-`-- L1_L2_L3/      <- Full pipeline
+\`-- L1_L2_L3/      <- Full pipeline
 
 Each folder contains:
 |-- preds.json     <- All patches
-`-- issue_sha/     <- Per-issue folders
+\`-- issue_sha/     <- Per-issue folders
     |-- testbed/
-    `-- *.traj.json
+    \`-- *.traj.json
 ================================================================================
-"
+EOF

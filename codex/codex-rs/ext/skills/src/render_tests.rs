@@ -222,7 +222,7 @@ fn omission_notice_follows_render_policy_and_is_charged_to_catalog_budget() {
 
 #[test]
 fn character_fallback_counts_multibyte_metadata_by_characters() {
-    let description = "💡".repeat(MAX_CATALOG_SKILL_DESCRIPTION_CHARS);
+    let description = "界".repeat(MAX_CATALOG_SKILL_DESCRIPTION_CHARS);
     let catalog = SkillCatalog {
         entries: vec![
             entry(

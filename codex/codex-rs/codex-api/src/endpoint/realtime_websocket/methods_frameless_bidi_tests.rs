@@ -9,7 +9,7 @@ use serde_json::json;
 
 #[test]
 fn context_append_chunks_preserve_text_within_wire_limit() {
-    for text in ["a".repeat(1_201), "🙂".repeat(200)] {
+    for text in ["a".repeat(1_201), "界".repeat(200)] {
         let chunks = context_append_chunks(&text);
         assert_eq!(chunks.concat(), text);
         assert!(

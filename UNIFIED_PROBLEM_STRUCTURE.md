@@ -12,9 +12,9 @@ def extract_problem_list(ci_failure):
 ```
 
 **Missing:**
-- ❌ Related issues from memory
-- ❌ Common follow-up problems
-- ❌ Repair strategy from experience
+- FAIL Related issues from memory
+- FAIL Common follow-up problems
+- FAIL Repair strategy from experience
 
 ### Problem 2: One Problem at a Time
 ```python
@@ -24,9 +24,9 @@ for problem in problems:
 ```
 
 **Issues:**
-- ❌ Fragmented context
-- ❌ Doesn't see related issues
-- ❌ Inefficient (82 calls)
+- FAIL Fragmented context
+- FAIL Doesn't see related issues
+- FAIL Inefficient (82 calls)
 
 ---
 
@@ -182,9 +182,9 @@ pre-commit run --all-files
 ```
 
 **What this fixes:**
-- ✅ Black formatting (82 files) - PRIMARY ISSUE
-- ✅ Import sorting (if needed) - RELATED ISSUE
-- ✅ Other pre-commit hooks - POTENTIAL ISSUES
+- OK Black formatting (82 files) - PRIMARY ISSUE
+- OK Import sorting (if needed) - RELATED ISSUE
+- OK Other pre-commit hooks - POTENTIAL ISSUES
 
 **Why this works:**
 - Used in: 7/8 successful cases
@@ -203,11 +203,11 @@ Manual approach (used in 1/8 cases):
 ```
 
 **Benefits:**
-- ✅ Shows ALL problems (current + related)
-- ✅ Clear repair strategy from experience
-- ✅ One comprehensive view
-- ✅ Confidence levels shown
-- ✅ Handles related issues proactively
+- OK Shows ALL problems (current + related)
+- OK Clear repair strategy from experience
+- OK One comprehensive view
+- OK Confidence levels shown
+- OK Handles related issues proactively
 
 ---
 
@@ -392,9 +392,9 @@ Workflow: {issue['workflow_path']}
 ```
 
 **Key insights:**
-- ✅ Single problem statement
-- ✅ Includes hints
-- ✅ Test-driven
+- OK Single problem statement
+- OK Includes hints
+- OK Test-driven
 
 ### Our enhanced approach:
 ```python
@@ -407,10 +407,10 @@ Workflow: {issue['workflow_path']}
 ```
 
 **Advantages:**
-- ✅ More structured
-- ✅ Confidence levels
-- ✅ Evidence-based
-- ✅ Success rates from memory
+- OK More structured
+- OK Confidence levels
+- OK Evidence-based
+- OK Success rates from memory
 
 ---
 
@@ -424,8 +424,8 @@ After:  "Fix 82 files + watch for import sorting (85% likely)"
 
 ### 2. Proactive Problem Solving
 ```
-Before: Fix formatting → CI fails again (import sorting) → Fix again
-After:  Fix formatting + import sorting in one go → CI passes
+Before: Fix formatting -> CI fails again (import sorting) -> Fix again
+After:  Fix formatting + import sorting in one go -> CI passes
 ```
 
 ### 3. Evidence-Based Strategy
@@ -481,11 +481,11 @@ result = run_codex(prompt)  # ONE call handles everything!
 ```
 
 **Benefits:**
-- ✅ ONE prompt instead of 82
-- ✅ Includes related issues
-- ✅ Clear repair strategy
-- ✅ Confidence levels
-- ✅ Much more efficient
+- OK ONE prompt instead of 82
+- OK Includes related issues
+- OK Clear repair strategy
+- OK Confidence levels
+- OK Much more efficient
 
 ---
 

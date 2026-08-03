@@ -3,7 +3,7 @@
 decompose_commits.py - Commit-Based Forward Traces
 ===================================================
 
-Forward trace approach: Commit → Problem
+Forward trace approach: Commit -> Problem
 Uses commit_decomposition/ module to analyze commits and build L1/L2/L3 memory.
 
 Pipeline:
@@ -22,8 +22,8 @@ Usage:
     python scripts/decompose_commits.py --batch --use-huggingface --model minimax2.5 --limit 10
 """
 
-import sys
 import json
+import sys
 from pathlib import Path
 
 # Add project root to path
@@ -31,19 +31,68 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Import commit decomposition module
-from commit_decomposition.commit_based_decomposer import decompose_issue
-from commit_decomposition.commit_analyzer import CommitAnalyzer
-from commit_decomposition.github_fetcher import GitHubFetcher
+import argparse
+
+from datasets import load_dataset
 
 # Import memory building functions
 from build_memory.build_l1 import generate_l1_from_decomposed_problems
 from build_memory.build_l2 import build_l2_memory
 from build_memory.build_l3 import build_l3_memory
+from commit_decomposition.commit_analyzer import CommitAnalyzer
+from commit_decomposition.commit_based_decomposer import decompose_issue
+from commit_decomposition.github_fetcher import GitHubFetcher
 
 # Import utilities
 from utilities.ci_cache import load_validation_sequence
-from datasets import load_dataset
-import argparse
+
+
+def _issue_id(record: dict) -> str:
+    return str(
+        record.get("issue_id")
+        or record.get("id")
+        or record.get("instance_id")
+        or record.get("original_issue_id")
+        or ""
+    )
+
+
+def _load_json_list(path: Path) -> list:
+    if not path.exists():
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"Warning: Could not load {path}: {e}")
+        return []
+
+
+def _complete_memory_issue_ids(output_dir: Path) -> set[str]:
+    l1 = _load_json_list(output_dir / "failure_memory.json")
+    l2 = _load_json_list(output_dir / "repo_memory.json")
+    l3 = _load_json_list(output_dir / "cross_memory.json")
+
+    l1_ids = {str(item["issue_id"]) for item in l1 if item.get("issue_id")}
+    l2_ids = {str(item["issue_id"]) for item in l2 if item.get("issue_id")}
+    l3_ids = {
+        str(item["source_issue_id"]) for item in l3 if item.get("source_issue_id")
+    }
+    return l1_ids & l2_ids & l3_ids
+
+
+def _save_decomposed_results(results: list[dict], output_path: Path) -> None:
+    by_issue_id: dict[str, dict] = {}
+    for result in results:
+        clean_result = {k: v for k, v in result.items() if not k.startswith("_")}
+        issue_id = _issue_id(clean_result)
+        if issue_id:
+            by_issue_id[issue_id] = clean_result
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(list(by_issue_id.values()), f, indent=2)
 
 
 def build_l1_l2_l3_for_commit_decomposition(
@@ -82,18 +131,18 @@ def build_l1_l2_l3_for_commit_decomposition(
         ground_truth_files=decomposed_result.get("_changed_files", []),
         llm=llm,
     )
-    print(f"  ✓ L1 generated: {len(l1_memory.get('problems', []))} problems")
+    print(f"  OK L1 generated: {len(l1_memory.get('problems', []))} problems")
 
     # Build L2 memory
     print("  [2/3] Building L2 (repair strategies)...")
     l2_memory = build_l2_memory(l1_memory=l1_memory, llm=llm)
-    print(f"  ✓ L2 generated: {len(l2_memory.get('repair_strategies', []))} strategies")
+    print(f"  OK L2 generated: {len(l2_memory.get('repair_strategies', []))} strategies")
 
     # Build L3 memory
     print("  [3/3] Building L3 (universal patterns)...")
     l3_memory = build_l3_memory(l1_memory=l1_memory, l2_memory=l2_memory, llm=llm)
     num_patterns = len(l3_memory.get("universal_patterns", []))
-    print(f"  ✓ L3 generated: {num_patterns} patterns")
+    print(f"  OK L3 generated: {num_patterns} patterns")
 
     # Save L1/L2/L3 to their own files (NOT added to decomposed_result)
     _append_to_fwr_trs(
@@ -135,7 +184,7 @@ def _append_to_fwr_trs(
 
         with open(failure_memory_path, "w") as f:
             json.dump(existing, f, indent=2)
-        print(f"  ✓ Appended issue {issue_id} to failure_memory.json")
+        print(f"  OK Appended issue {issue_id} to failure_memory.json")
 
     # Append L2 (filter out duplicates by issue_id)
     if l2_memory:
@@ -151,7 +200,7 @@ def _append_to_fwr_trs(
 
         with open(repo_memory_path, "w") as f:
             json.dump(existing, f, indent=2)
-        print(f"  ✓ Appended 1 issue to repo_memory.json")
+        print("  OK Appended 1 issue to repo_memory.json")
 
     # Append L3 (filter out duplicates from same issue_id)
     if l3_memory and l3_memory.get("universal_patterns"):
@@ -174,13 +223,13 @@ def _append_to_fwr_trs(
         with open(cross_memory_path, "w") as f:
             json.dump(existing, f, indent=2)
         num_patterns = len(l3_memory["universal_patterns"])
-        print(f"  ✓ Appended {num_patterns} patterns to cross_memory.json")
+        print(f"  OK Appended {num_patterns} patterns to cross_memory.json")
 
 
 def main():
     """Main entry point for commit-based decomposition."""
     print("=" * 80)
-    print("COMMIT-BASED DECOMPOSITION (Forward Traces: Commit → Problem)")
+    print("COMMIT-BASED DECOMPOSITION (Forward Traces: Commit -> Problem)")
     print("=" * 80)
     print("Using: commit_decomposition/ module")
     print("Output: data/fwr_trs/")
@@ -194,6 +243,11 @@ def main():
     parser.add_argument("--issue-id", type=str, help="Process specific issue ID")
     parser.add_argument(
         "--use-huggingface", action="store_true", help="Use HuggingFace dataset"
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        help="Path to JSONL dataset file. Use this for data/memory_set.jsonl.",
     )
     parser.add_argument("--model", type=str, default="minimax2.5", help="LLM model")
     parser.add_argument("--limit", type=int, help="Limit number of issues")
@@ -209,13 +263,21 @@ def main():
     llm = get_llm(args.model)
 
     # Load issues
-    if args.use_huggingface:
+    if args.dataset:
+        print(f"Loading issues from {args.dataset}...")
+        issues = []
+        with open(args.dataset) as f:
+            for line in f:
+                if line.strip():
+                    issues.append(json.loads(line))
+        print(f"Loaded {len(issues)} issues")
+    elif args.use_huggingface:
         print("Loading issues from HuggingFace...")
         dataset = load_dataset("ci-benchmark-user/ci-repair-bench", split="train")
         issues = [dict(item) for item in dataset]
         print(f"Loaded {len(issues)} issues")
     else:
-        print("Error: --use-huggingface is required")
+        print("Error: --dataset or --use-huggingface is required")
         return
 
     if args.limit:
@@ -224,53 +286,52 @@ def main():
 
     # Filter by specific issue ID if provided
     if args.issue_id:
-        issues = [issue for issue in issues if str(issue.get("id")) == str(args.issue_id)]
+        issues = [
+            issue for issue in issues if str(issue.get("id")) == str(args.issue_id)
+        ]
         if not issues:
             print(f"Error: Issue {args.issue_id} not found in dataset")
             return
         print(f"Filtered to issue {args.issue_id}")
 
     # Load existing results to avoid reprocessing
-    # Check repo_memory.json (L2) to see which issues have L1/L2/L3 built
+    # Check complete L1/L2/L3 files to see which issues are already fully built.
     output_dir_path = Path(args.output_dir)
-    repo_memory_path = output_dir_path / "repo_memory.json"
     decomposed_file = output_dir_path / "decomposed_issues.json"
 
-    existing_results = []
-    processed_ids = set()
-
-    # Load from repo_memory.json (issues with L1/L2/L3)
-    if repo_memory_path.exists():
-        try:
-            with open(repo_memory_path) as f:
-                repo_memory = json.load(f)
-            processed_ids = {
-                r.get("issue_id") for r in repo_memory if r.get("issue_id")
-            }
-            print(f"Loaded {len(processed_ids)} existing L1/L2/L3 results (will skip)")
-        except Exception as e:
-            print(f"Warning: Could not load existing L2 results: {e}")
-
-    # Also load decomposed results for the final save
-    if decomposed_file.exists():
-        try:
-            with open(decomposed_file) as f:
-                existing_results = json.load(f)
-        except Exception as e:
-            print(f"Warning: Could not load decomposed results: {e}")
+    existing_results = _load_json_list(decomposed_file)
+    decomposed_cache = {
+        _issue_id(result): result for result in existing_results if _issue_id(result)
+    }
+    processed_ids = _complete_memory_issue_ids(output_dir_path)
+    partial_ids = (
+        {
+            str(item.get("issue_id"))
+            for path in ("failure_memory.json", "repo_memory.json")
+            for item in _load_json_list(output_dir_path / path)
+            if item.get("issue_id")
+        }
+        | {
+            str(item.get("source_issue_id"))
+            for item in _load_json_list(output_dir_path / "cross_memory.json")
+            if item.get("source_issue_id")
+        }
+    ) - processed_ids
+    print(f"Loaded {len(decomposed_cache)} decomposed issues (can reuse)")
+    print(f"Loaded {len(processed_ids)} complete L1/L2/L3 results (will skip)")
+    if partial_ids:
+        print(f"Found {len(partial_ids)} partial memory issues (will rebuild/replace)")
 
     # Initialize analyzers
     analyzer = CommitAnalyzer(llm)  # Pass LLM object (now uses utilities pattern)
     github_fetcher = GitHubFetcher()
 
-    # Process each issue
-    results = list(existing_results)  # Start with existing results
     for i, issue in enumerate(issues, 1):
-        issue_id = issue.get("id", f"issue_{i}")
+        issue_id = _issue_id(issue) or f"issue_{i}"
 
         # Skip if already processed
         if issue_id in processed_ids:
-            print(f"\n[{i}/{len(issues)}] {issue_id} - ✓ Already processed (skipping)")
+            print(f"\n[{i}/{len(issues)}] {issue_id} - OK Already processed (skipping)")
             continue
 
         print(f"\n{'=' * 80}")
@@ -278,21 +339,29 @@ def main():
         print(f"{'=' * 80}")
 
         try:
-            # Get validation cache
-            sha_fail = issue.get("sha_fail", "")
-            validation_cache = load_validation_sequence(issue_id, sha_fail) or {}
+            if issue_id in decomposed_cache:
+                print("  Found in decomposed_issues.json - Building L1/L2/L3 directly")
+                decomposed = decomposed_cache[issue_id]
+            else:
+                # Get validation cache
+                sha_fail = issue.get("sha_fail", "")
+                validation_cache = load_validation_sequence(issue_id, sha_fail) or {}
 
-            # Decompose issue using commit_decomposition module
-            decomposed = decompose_issue(
-                issue, validation_cache, analyzer, github_fetcher
-            )
+                # Decompose issue using commit_decomposition module
+                decomposed = decompose_issue(
+                    issue, validation_cache, analyzer, github_fetcher
+                )
+                decomposed_cache[issue_id] = decomposed
+                _save_decomposed_results(
+                    list(decomposed_cache.values()), decomposed_file
+                )
 
             # Build L1/L2/L3 memory
             if not args.batch or "error" not in decomposed:
                 result = build_l1_l2_l3_for_commit_decomposition(
                     decomposed, llm, args.output_dir
                 )
-                results.append(result)
+                decomposed_cache[issue_id] = result
 
         except Exception as e:
             print(f"Error processing {issue_id}: {e}")
@@ -300,27 +369,17 @@ def main():
 
             traceback.print_exc()
 
-    # Save decomposed issues (clean - no L1/L2/L3, no internal fields)
     fwr_trs_dir = Path(args.output_dir)
     fwr_trs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clean results: remove internal fields (starting with _)
-    clean_results = []
-    for result in results:
-        clean_result = {
-            k: v for k, v in result.items()
-            if not k.startswith("_")  # Remove internal fields
-        }
-        clean_results.append(clean_result)
-
-    decomposed_file = fwr_trs_dir / "decomposed_issues.json"
-    with open(decomposed_file, "w") as f:
-        json.dump(clean_results, f, indent=2)
+    _save_decomposed_results(
+        list(decomposed_cache.values()), fwr_trs_dir / "decomposed_issues.json"
+    )
 
     print(f"\n{'=' * 80}")
-    print("✓ Commit-based decomposition complete!")
+    print("OK Commit-based decomposition complete!")
     print(f"{'=' * 80}")
-    print(f"Processed: {len(results)} issues")
+    print(f"Decomposed cache: {len(decomposed_cache)} issues")
     print("\nOutput saved to:")
     print(f"  - {fwr_trs_dir}/decomposed_issues.json")
     print(f"  - {fwr_trs_dir}/failure_memory.json (L1)")

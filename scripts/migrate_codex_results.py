@@ -65,7 +65,7 @@ def main():
         if new_path.exists():
             issue_count = len(list(new_path.glob("*/result.json")))
             predictions_file = new_path / "predictions.json"
-            has_predictions = "✅" if predictions_file.exists() else "❌"
+            has_predictions = "OK" if predictions_file.exists() else "FAIL"
             print(f"  {new_path}/")
             print(f"    Issues: {issue_count}")
             print(f"    predictions.json: {has_predictions}")

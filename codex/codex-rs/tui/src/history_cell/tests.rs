@@ -997,12 +997,12 @@ fn prefixed_wrapped_history_cell_indents_wrapped_lines() {
         "echo something really long to ensure wrapping happens".dim(),
         " this time".bold(),
     ]);
-    let cell = PrefixedWrappedHistoryCell::new(summary, "✔ ".green(), "  ");
+    let cell = PrefixedWrappedHistoryCell::new(summary, "OK ".green(), "  ");
     let rendered = render_lines(&cell.display_lines(/*width*/ 24));
     assert_eq!(
         rendered,
         vec![
-            "✔ You approved codex to".to_string(),
+            "OK You approved codex to".to_string(),
             "  run echo something".to_string(),
             "  really long to ensure".to_string(),
             "  wrapping happens this".to_string(),
@@ -1014,7 +1014,7 @@ fn prefixed_wrapped_history_cell_indents_wrapped_lines() {
 #[test]
 fn prefixed_wrapped_history_cell_does_not_split_url_like_token() {
     let url_like = "example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890";
-    let cell = PrefixedWrappedHistoryCell::new(Line::from(url_like), "✔ ".green(), "  ");
+    let cell = PrefixedWrappedHistoryCell::new(Line::from(url_like), "OK ".green(), "  ");
     let rendered = render_lines(&cell.display_lines(/*width*/ 24));
 
     assert_eq!(
@@ -1048,7 +1048,7 @@ fn prefixed_wrapped_history_cell_height_matches_wrapped_rendering() {
     let url_like = "example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/artifacts/reports/performance/summary/detail/with/a/very/long/path";
     let cell: Box<dyn HistoryCell> = Box::new(PrefixedWrappedHistoryCell::new(
         Line::from(url_like),
-        "✔ ".green(),
+        "OK ".green(),
         "  ",
     ));
 
@@ -1075,7 +1075,7 @@ fn prefixed_wrapped_history_cell_height_matches_wrapped_rendering() {
         })
         .collect::<String>();
     assert!(
-        first_row.contains("✔"),
+        first_row.contains("OK"),
         "expected first rendered row to keep the prefix visible, got: {first_row:?}"
     );
 }
@@ -1260,7 +1260,7 @@ fn mcp_inventory_loading_without_animations_is_stable() {
     let second = render_lines(&cell.display_lines(/*width*/ 80));
 
     assert_eq!(first, second);
-    assert_eq!(first, vec!["• Loading MCP inventory…".to_string()]);
+    assert_eq!(first, vec!["• Loading MCP inventory...".to_string()]);
 }
 
 #[test]
@@ -1642,7 +1642,7 @@ fn session_header_directory_center_truncates() {
 
     let formatted = SessionHeaderHistoryCell::format_directory_inner(&dir, Some(24));
     let sep = std::path::MAIN_SEPARATOR;
-    let expected = format!("~{sep}hello{sep}the{sep}…{sep}very{sep}fast");
+    let expected = format!("~{sep}hello{sep}the{sep}...{sep}very{sep}fast");
     assert_eq!(formatted, expected);
 }
 
@@ -1653,7 +1653,7 @@ fn session_header_directory_front_truncates_long_segment() {
 
     let formatted = SessionHeaderHistoryCell::format_directory_inner(&dir, Some(18));
     let sep = std::path::MAIN_SEPARATOR;
-    let expected = format!("~{sep}…cexpialidocious");
+    let expected = format!("~{sep}...cexpialidocious");
     assert_eq!(formatted, expected);
 }
 
@@ -1690,7 +1690,7 @@ fn coalesces_sequential_reads_within_one_call() {
         },
         /*animations_enabled*/ true,
     );
-    // Mark call complete so markers are ✓
+    // Mark call complete so markers are OK
     cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
 
     let lines = cell.display_lines(/*width*/ 80);
@@ -2207,7 +2207,7 @@ fn plan_update_with_note_and_wrapping_snapshot() {
     // Long explanation forces wrapping; include long step text to verify step wrapping and alignment.
     let update = UpdatePlanArgs {
             explanation: Some(
-                "I’ll update Grafana call error handling by adding retries and clearer messages when the backend is unreachable."
+                "I'll update Grafana call error handling by adding retries and clearer messages when the backend is unreachable."
                     .to_string(),
             ),
             plan: vec![
@@ -2522,7 +2522,7 @@ fn deprecation_notice_renders_summary_with_details() {
     assert_eq!(
         rendered,
         vec![
-            "⚠ Feature flag `foo`".to_string(),
+            "WARNING Feature flag `foo`".to_string(),
             "Use flag `bar` instead.".to_string(),
         ]
     );

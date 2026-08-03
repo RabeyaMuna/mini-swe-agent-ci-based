@@ -6,10 +6,10 @@ from typing import Any
 
 try:
     from scripts.dependency_detector import build_dependency_graph
-    from scripts.deterministic_diff_parser import parse_diff_to_structured
 except ImportError:
     from dependency_detector import build_dependency_graph
-    from deterministic_diff_parser import parse_diff_to_structured
+
+from utilities.deterministic_diff_parser import parse_diff_to_structured
 
 
 def build_dependency_graph_for_diff(

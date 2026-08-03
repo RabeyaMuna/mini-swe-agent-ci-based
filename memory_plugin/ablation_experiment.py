@@ -197,7 +197,7 @@ def compare_problem_quality():
         print(f"  Signals: {len(full_problem.get('signals', {}).get('error_signals', []))} error signals")
         print(f"  Sources: {full_problem.get('source', {})}")
 
-    print("\n✅ Full STAIR should show:")
+    print("\nOK Full STAIR should show:")
     print("  - More complete root cause (synthesized from L1+L2+L3)")
     print("  - WHY/HOW/WHAT rationale breakdown")
     print("  - Signals from multiple levels")

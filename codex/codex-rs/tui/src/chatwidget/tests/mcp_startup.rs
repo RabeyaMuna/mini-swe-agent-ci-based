@@ -93,7 +93,7 @@ async fn mcp_startup_dedupes_same_round_duplicate_failure_warning() {
         .collect::<String>();
     assert_eq!(
         failure_text,
-        "⚠ MCP client for `alpha` failed to start: handshake failed\n"
+        "WARNING MCP client for `alpha` failed to start: handshake failed\n"
     );
 
     notify_mcp_status(&mut chat, "beta", McpServerStartupState::Ready);
@@ -102,7 +102,7 @@ async fn mcp_startup_dedupes_same_round_duplicate_failure_warning() {
         .iter()
         .map(|lines| lines_to_single_string(lines))
         .collect::<String>();
-    assert_eq!(summary_text, "⚠ MCP startup incomplete (failed: alpha)\n");
+    assert_eq!(summary_text, "WARNING MCP startup incomplete (failed: alpha)\n");
 }
 
 #[tokio::test]
@@ -224,7 +224,7 @@ async fn app_server_mcp_startup_failure_renders_warning_history() {
         .iter()
         .map(|lines| lines_to_single_string(lines))
         .collect::<String>();
-    assert_eq!(summary_text, "⚠ MCP startup incomplete (failed: alpha)\n");
+    assert_eq!(summary_text, "WARNING MCP startup incomplete (failed: alpha)\n");
     assert!(!chat.bottom_pane.is_task_running());
 
     let width: u16 = 120;
@@ -394,7 +394,7 @@ async fn app_server_mcp_startup_after_lag_can_settle_without_starting_updates() 
         .iter()
         .map(|lines| lines_to_single_string(lines))
         .collect::<String>();
-    assert_eq!(summary_text, "⚠ MCP startup incomplete (failed: alpha)\n");
+    assert_eq!(summary_text, "WARNING MCP startup incomplete (failed: alpha)\n");
     assert!(!chat.bottom_pane.is_task_running());
 }
 
@@ -516,7 +516,7 @@ async fn app_server_mcp_startup_next_round_keeps_terminal_statuses_after_startin
         .iter()
         .map(|lines| lines_to_single_string(lines))
         .collect::<String>();
-    assert_eq!(summary_text, "⚠ MCP startup incomplete (failed: alpha)\n");
+    assert_eq!(summary_text, "WARNING MCP startup incomplete (failed: alpha)\n");
     assert!(!chat.bottom_pane.is_task_running());
 }
 

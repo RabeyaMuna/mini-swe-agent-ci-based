@@ -151,16 +151,16 @@ def _check_api_health(llm: Any, verbose: bool = False) -> bool:
         # Any response means API is back
         if content:
             if verbose:
-                print("          -> ✅ API is responsive!")
+                print("          -> OK API is responsive!")
             return True
         else:
             if verbose:
-                print("          -> ❌ API returned empty response")
+                print("          -> FAIL API returned empty response")
             return False
 
     except Exception as e:
         if verbose:
-            print(f"          -> ❌ API still unreachable: {type(e).__name__}")
+            print(f"          -> FAIL API still unreachable: {type(e).__name__}")
         return False
 
 
