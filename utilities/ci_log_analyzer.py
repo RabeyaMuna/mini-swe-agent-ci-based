@@ -714,10 +714,25 @@ of the CI failure for this step using the following STRICT JSON schema
 - Do NOT wrap the JSON in triple backticks.
 - Do NOT include ```json or any other marker/fence.
 - Do NOT add any text before or after the JSON.
+
+### OUTPUT GUIDELINES
+- Keep log_content CONCISE - include only essential information
+- Include ALL important error causes in error_context (don't artificially limit)
+- Include ALL relevant files that are clearly tied to failures
+- Include ALL distinct error types found
+- Be thorough but concise - output only what's needed (not padding)
 """
 
             try:
-                response = self.llm.invoke([HumanMessage(content=prompt)]).content
+                # Use invoke_llm_with_retry with max_tokens as CEILING (not target)
+                # LLM outputs only what's needed, up to this limit
+                from utilities.llm_invoker import invoke_llm_with_retry
+                response = invoke_llm_with_retry(
+                    llm=self.llm,
+                    prompt=prompt,
+                    max_tokens=8000,  # Maximum limit (LLM outputs only what's needed)
+                    parse_json=False  # We parse JSON ourselves below
+                )
                 content = self.load_json_maybe_fenced(response)
 
                 if not content or not content.strip():

@@ -87,7 +87,7 @@ fn label_and_refreshed_line_appear_in_order() {
 
 #[test]
 fn unicode_and_span_boundaries_are_safe_on_narrow_rows() {
-    let previous = Line::from(vec!["模型 ".cyan(), "👩‍💻 main".underlined()]);
+    let previous = Line::from(vec!["模型 ".cyan(), " main".underlined()]);
     let current = Line::from(vec!["模型 ".cyan(), "ultra · main".underlined()]);
 
     for width in 0..=12 {

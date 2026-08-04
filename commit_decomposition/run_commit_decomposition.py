@@ -193,7 +193,7 @@ def main():
                     stats["failed"] += 1
             else:
                 stats["success"] += 1
-                print(f"  ✓ Success: {result.get('total_problems', 0)} problems found")
+                print(f"  OK Success: {result.get('total_problems', 0)} problems found")
 
             results.append(result)
 
@@ -221,7 +221,7 @@ def main():
     with open(args.output, "w") as f:
         json.dump(results, f, indent=2)
 
-    print(f"✓ Saved to {args.output}")
+    print(f"OK Saved to {args.output}")
 
     # Print statistics
     print("\n" + "=" * 70)

@@ -255,8 +255,8 @@ pub(crate) fn new_active_mcp_tool_call(
 /// Returns an additional history cell if an MCP tool result includes a decodable image.
 ///
 /// This intentionally returns at most one cell: the first image in `CallToolResult.content` that
-/// successfully base64-decodes and parses as an image. This is used as a lightweight “image output
-/// exists” affordance separate from the main MCP tool call cell.
+/// successfully base64-decodes and parses as an image. This is used as a lightweight "image output
+/// exists" affordance separate from the main MCP tool call cell.
 ///
 /// Manual testing tip:
 /// - Run the rmcp stdio test server (`codex-rs/rmcp-client/src/bin/test_stdio_server.rs`) and
@@ -319,7 +319,7 @@ pub(crate) fn empty_mcp_output() -> PlainHistoryCell {
     let lines: Vec<Line<'static>> = vec![
         "/mcp".magenta().into(),
         "".into(),
-        vec!["🔌  ".into(), "MCP Tools".bold()].into(),
+        vec!["  ".into(), "MCP Tools".bold()].into(),
         "".into(),
         "  • No MCP servers configured.".italic().into(),
         Line::from(vec![
@@ -349,7 +349,7 @@ pub(crate) fn new_mcp_tools_output(
     let mut lines: Vec<Line<'static>> = vec![
         "/mcp".magenta().into(),
         "".into(),
-        vec!["🔌  ".into(), "MCP Tools".bold()].into(),
+        vec!["  ".into(), "MCP Tools".bold()].into(),
         "".into(),
     ];
 
@@ -527,7 +527,7 @@ pub(crate) fn new_mcp_tools_output_from_statuses(
     let mut lines: Vec<Line<'static>> = vec![
         "/mcp".magenta().into(),
         "".into(),
-        vec!["🔌  ".into(), "MCP Tools".bold()].into(),
+        vec!["  ".into(), "MCP Tools".bold()].into(),
         "".into(),
     ];
 
@@ -647,7 +647,7 @@ impl HistoryCell for McpInventoryLoadingCell {
                 .unwrap_or_else(|| "•".dim()),
                 " ".into(),
                 "Loading MCP inventory".bold(),
-                "…".dim(),
+                "...".dim(),
             ]
             .into(),
         ]

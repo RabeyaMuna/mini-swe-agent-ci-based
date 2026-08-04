@@ -520,34 +520,34 @@ def print_summary(report: dict[str, Any]):
     print("CI-REPAIR BENCHMARK CHARACTERIZATION")
     print("=" * 80)
 
-    print(f"\n📊 Dataset Size: {report['dataset_size']['total_issues']} issues")
+    print(f"\n Dataset Size: {report['dataset_size']['total_issues']} issues")
 
-    print("\n🔧 Commits per PR:")
+    print("\n Commits per PR:")
     commits = report["commits_per_pr"]
     print(f"  Mean: {commits['mean']:.2f}")
     print(f"  Median: {commits['median']:.1f}")
     print(f"  Range: {commits['min']} - {commits['max']}")
 
-    print("\n📁 Files per PR:")
+    print("\n Files per PR:")
     files = report["files_per_pr"]
     print(f"  Mean: {files['mean']:.2f}")
     print(f"  Median: {files['median']:.1f}")
     print(f"  Range: {files['min']} - {files['max']}")
 
-    print("\n📝 Lines Changed per PR:")
+    print("\n Lines Changed per PR:")
     lines = report["lines_changed"]
     print(f"  Mean: {lines['mean']:.1f}")
     print(f"  Median: {lines['median']:.1f}")
     print(f"  Range: {lines['min']} - {lines['max']}")
 
-    print("\n🔴 CI Failure Categories:")
+    print("\n CI Failure Categories:")
     categories = report["ci_failure_categories"]
     print(f"  Total unique categories: {categories['total_categories']}")
     print("  Top 10 categories:")
     for cat, count in categories["most_common"][:10]:
         print(f"    {cat}: {count}")
 
-    print("\n🧩 Problems per PR:")
+    print("\n Problems per PR:")
     problems = report["problems_per_pr"]
     print(f"  Mean: {problems['mean']:.2f}")
     print(f"  Median: {problems['median']:.1f}")
@@ -558,7 +558,7 @@ def print_summary(report: dict[str, Any]):
         f"  Single-problem PRs: {problems['single_problem_prs']} ({100 * problems['single_problem_prs'] / max(report['dataset_size']['total_issues'], 1):.1f}%)"
     )
 
-    print("\n🏷️  Problem Types:")
+    print("\n  Problem Types:")
     types = report["problem_types"]
     print(f"  Total unique types: {types['total_types']}")
     print("  Top 10 types:")
@@ -602,7 +602,7 @@ def main():
     report_file = output_dir / "benchmark_report.json"
     with open(report_file, "w") as f:
         json.dump(report, f, indent=2)
-    print(f"\n✅ Full report saved to: {report_file}")
+    print(f"\nOK Full report saved to: {report_file}")
 
     # Generate comparison with SWE-bench
     comparator = SWEBenchComparator(
@@ -613,19 +613,19 @@ def main():
     # Save comparison table
     comparison_csv = output_dir / "benchmark_comparison.csv"
     comparison_df.to_csv(comparison_csv, index=False)
-    print(f"✅ Comparison table saved to: {comparison_csv}")
+    print(f"OK Comparison table saved to: {comparison_csv}")
 
     # Save LaTeX table
     latex_file = output_dir / "benchmark_comparison.tex"
     with open(latex_file, "w") as f:
         f.write(generate_latex_table(comparison_df))
-    print(f"✅ LaTeX table saved to: {latex_file}")
+    print(f"OK LaTeX table saved to: {latex_file}")
 
     # Save Markdown table
     markdown_file = output_dir / "benchmark_comparison.md"
     with open(markdown_file, "w") as f:
         f.write(generate_markdown_table(comparison_df))
-    print(f"✅ Markdown table saved to: {markdown_file}")
+    print(f"OK Markdown table saved to: {markdown_file}")
 
     # Print comparison table
     print("\n" + "=" * 80)

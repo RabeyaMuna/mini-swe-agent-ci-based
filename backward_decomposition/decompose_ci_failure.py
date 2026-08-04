@@ -25,7 +25,6 @@ import argparse
 import copy
 import json
 import logging
-import os
 import re
 import subprocess
 import sys
@@ -39,55 +38,50 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from utilities.diff_chunker import estimate_tokens
-from utilities.error_handler import EXECPTION_DIR
-from utilities.model_token_config import get_model_config, get_output_safe_tokens
+from datasets import load_dataset
+from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
-from deterministic_diff_parser import (
+# NEW: Import build_memory module for L1/L2/L3 generation
+from build_memory import (
+    build_l2_memory,  # L2: Generate repair strategies
+    build_l3_memory,  # L3: Generate universal patterns
+    generate_l1_from_decomposed_problems,  # L1: Pass decomposed problems + dependencies
+)
+
+# Import prompt templates
+from prompt_template.backward_decomposition import (
+    build_atomic_prompt,
+    build_classification_prompt_regular,
+    build_classification_prompt_with_dependencies,
+    build_cluster_merge_prompt,
+    build_full_dependency_prompt,
+    build_validation_group_dependency_prompt,
+)
+from utilities.ci_log_analyzer import (
+    _log_analysis_to_context,
+    _run_log_analysis,
+)
+from utilities.ci_workflow_aware_retrieval import (
+    analyze_workflow_from_benchmark,
+)
+from utilities.dependency_evidence import (
+    build_dependency_graph_from_structured_diff,
+)
+from utilities.deterministic_diff_parser import (
     chunk_structured_diff,
     format_structured_for_llm,
     parse_diff_to_structured,
 )
-
-import litellm  # noqa: E402
-from datasets import load_dataset  # noqa: E402
-from dotenv import load_dotenv  # noqa: E402
-from sentence_transformers import SentenceTransformer  # noqa: E402
-from sklearn.metrics.pairwise import cosine_similarity  # noqa: E402
-from utilities.ci_log_analyzer import (  # noqa: E402
-    _log_analysis_to_context,
-    _run_log_analysis,
-)
-
-from utilities.ci_workflow_aware_retrieval import (  # noqa: E402
-    analyze_workflow_from_benchmark,
-)
-from utilities.dependency_evidence import (  # noqa: E402
-    build_dependency_graph_from_structured_diff,
-)
-from utilities.llm_invoker import invoke_llm_with_retry  # noqa: E402
-from utilities.llm_model import LitellmModel  # noqa: E402
-from utilities.model_registry import (  # noqa: E402
+from utilities.diff_chunker import estimate_tokens
+from utilities.error_handler import EXECPTION_DIR
+from utilities.llm_invoker import invoke_llm_with_retry
+from utilities.llm_model import LitellmModel
+from utilities.model_registry import (
     configure_model_environment,
-    resolve_model_alias,
 )
-
-# Import prompt templates
-from prompt_template.backward_decomposition import (  # noqa: E402
-    build_classification_prompt_with_dependencies,
-    build_classification_prompt_regular,
-    build_cluster_merge_prompt,
-    build_atomic_prompt,
-    build_full_dependency_prompt,
-    build_validation_group_dependency_prompt,
-)
-
-# NEW: Import build_memory module for L1/L2/L3 generation
-from build_memory import (  # noqa: E402
-    generate_l1_from_decomposed_problems,  # L1: Pass decomposed problems + dependencies
-    build_l2_memory,  # L2: Generate repair strategies
-    build_l3_memory,  # L3: Generate universal patterns
-)
+from utilities.model_token_config import get_model_config
 
 
 # Load memory issue IDs from workflow_validation_cache.json
@@ -115,6 +109,72 @@ def _issue_id(issue: dict[str, Any]) -> str:
         or issue.get("original_issue_id")
         or ""
     )
+
+
+def _retrieve_memory_problems(
+    issue: dict, memory_retrieval, log_analysis: dict = None
+) -> dict:
+    """
+    Retrieve problems from memory plugin.
+
+    Args:
+        issue: Issue data from dataset
+        memory_retrieval: STAIRRetrieval instance (or None if disabled)
+        log_analysis: Log analysis result (optional, if available)
+
+    Returns:
+        Dict with 'problems', 'metadata', 'consecutive_sequences', 'dependencies'
+    """
+    if not memory_retrieval:
+        return {
+            "problems": [],
+            "metadata": {"mode": "disabled"},
+            "consecutive_sequences": [],
+            "dependencies": [],
+        }
+
+    # Build ci_failure dict
+    ci_failure = {
+        "repo": issue.get("repo", ""),
+        "workflow": issue.get("workflow", ""),
+        "problem_statement": issue.get("problem_statement", ""),
+        "error_signals": issue.get("error_signals", []),
+        "config_signals": issue.get("config_signals", []),
+        "failure_type": issue.get("failure_type", "unknown"),
+        "stage": issue.get("stage", "unknown"),
+    }
+
+    # If log_analysis provided, use it to enrich ci_failure
+    if log_analysis:
+        ci_failure["problem_statement"] = log_analysis.get(
+            "error_summary", ci_failure["problem_statement"]
+        )
+        ci_failure["error_signals"] = log_analysis.get(
+            "error_signals", ci_failure["error_signals"]
+        )
+        ci_failure["config_signals"] = log_analysis.get(
+            "config_signals", ci_failure["config_signals"]
+        )
+        ci_failure["failure_type"] = log_analysis.get(
+            "failure_type", ci_failure["failure_type"]
+        )
+
+    # Retrieve from memory
+    print(
+        f"   Retrieving from memory ({memory_retrieval.enabled_levels if hasattr(memory_retrieval, 'enabled_levels') else 'unknown'})..."
+    )
+    result = memory_retrieval.retrieve(ci_failure, top_k=5)
+
+    print(f"  OK Found {len(result['problems'])} problems from memory")
+    if result["metadata"].get("enabled_levels"):
+        print(f"     Levels: {result['metadata']['enabled_levels']}")
+        print(
+            f"     Retrieved: L1={result['metadata']['retrieved']['l1']}, "
+            f"L2={result['metadata']['retrieved']['l2']}, "
+            f"L3={result['metadata']['retrieved']['l3']}"
+        )
+
+    return result
 
 
 def _get_model_aware_limits(model_name: str | None = None) -> dict[str, int]:
@@ -492,7 +552,7 @@ def _build_caller_callee_contexts(
     file_changes_lookup: dict[str, list],
 ) -> list[dict[str, Any]]:
     """
-    Build caller → callee dependency contexts from graph edges.
+    Build caller -> callee dependency contexts from graph edges.
 
     CRITICAL: Only uses edges where BOTH caller AND callee are:
     1. In the changed files (file_changes_lookup)
@@ -503,15 +563,15 @@ def _build_caller_callee_contexts(
     Args:
         val_group: Validation group with all_files
         filtered_edges: Graph edges filtered to modified files only (caller & callee both modified)
-        file_changes_lookup: Map of file → changes
+        file_changes_lookup: Map of file -> changes
 
     Returns:
-        List of caller → callee contexts with changes
+        List of caller -> callee contexts with changes
     """
     group_files = set(val_group.get("all_files", []))
     contexts = []
 
-    # Group edges by (caller, type) to build caller → callees structure
+    # Group edges by (caller, type) to build caller -> callees structure
     caller_groups = {}
     for edge in filtered_edges:
         caller = edge.get("from")
@@ -533,7 +593,7 @@ def _build_caller_callee_contexts(
             if callee not in caller_groups[key]["callees"]:
                 caller_groups[key]["callees"].append(callee)
 
-    # Build structured contexts for each caller → callees relationship
+    # Build structured contexts for each caller -> callees relationship
     for (caller, dep_type), group in caller_groups.items():
         callees = group["callees"]
 
@@ -799,7 +859,7 @@ def merge_chunks_by_validation(
                             file_changes_lookup[file_path] = []
                         file_changes_lookup[file_path].extend(file_info["changes"])
 
-            # Extract dependency edges from chunks (for caller → callee structure)
+            # Extract dependency edges from chunks (for caller -> callee structure)
             if "dependency_graph" in chunk:
                 dep_graph = chunk["dependency_graph"]
                 if isinstance(dep_graph, dict) and "edges" in dep_graph:
@@ -837,9 +897,11 @@ def merge_chunks_by_validation(
                     val_group["all_changes"].append(change_with_file)
             group_dependency_contexts.extend(chunk_dependency_lookup.get(file_path, []))
 
-        print(f"[DEBUG] Validation {val_order}: {len(val_group['all_changes'])} changes added")
+        print(
+            f"[DEBUG] Validation {val_order}: {len(val_group['all_changes'])} changes added"
+        )
 
-        # Build caller → callee dependency contexts from graph edges
+        # Build caller -> callee dependency contexts from graph edges
         caller_callee_contexts = _build_caller_callee_contexts(
             val_group, filtered_edges, file_changes_lookup
         )
@@ -942,14 +1004,14 @@ def _chunk_by_dependencies(
     Chunk validation changes by dependency relationships.
 
     Strategy:
-    1. For each dependency context (caller → callees):
+    1. For each dependency context (caller -> callees):
        - Keep caller + callees together in one chunk
        - Include all their changes together
     2. If total changes exceed max, split callees across chunks but keep caller in each
 
     Args:
         val_group: Validation group
-        dependency_contexts: List of caller → callee contexts
+        dependency_contexts: List of caller -> callee contexts
         max_changes_per_chunk: Max changes per chunk
 
     Returns:
@@ -984,7 +1046,7 @@ def _chunk_by_dependencies(
                     "all_files": dep_files,
                     "all_changes": dep_changes,
                     "dependency_contexts": [dep_context],  # Attach dependency context
-                    "chunk_info": f"Dependency chunk: {caller_file} → {len(callee_files)} callees",
+                    "chunk_info": f"Dependency chunk: {caller_file} -> {len(callee_files)} callees",
                 },
             )
             chunks.append(chunk)
@@ -1004,7 +1066,7 @@ def _chunk_by_dependencies(
                         "all_files": dep_files,
                         "all_changes": chunk_changes,
                         "dependency_contexts": [dep_context],  # Keep dependency context
-                        "chunk_info": f"Dependency chunk {start_idx // max_changes_per_chunk + 1}: {caller_file} → callees (partial)",
+                        "chunk_info": f"Dependency chunk {start_idx // max_changes_per_chunk + 1}: {caller_file} -> callees (partial)",
                     },
                 )
                 chunks.append(chunk)
@@ -1269,7 +1331,9 @@ Problem {idx}:
         model_limits = _get_model_aware_limits(getattr(llm, "model_name", None))
         merge_max_tokens = model_limits["output_safe_tokens"]  # Use FULL capacity!
 
-        print(f"        [DEBUG] Merge max_tokens={merge_max_tokens} for {len(cluster)} problems")
+        print(
+            f"        [DEBUG] Merge max_tokens={merge_max_tokens} for {len(cluster)} problems"
+        )
 
         decision = _invoke_json(llm, prompt, max_tokens=merge_max_tokens)
 
@@ -1297,10 +1361,9 @@ Problem {idx}:
                 # Skip empty entries
                 continue
 
-            # Get actual problems from cluster (1-based → 0-based)
+            # Get actual problems from cluster (1-based -> 0-based)
             source_problems = [
-                cluster[idx - 1] for idx in merged_indices
-                if 0 < idx <= len(cluster)
+                cluster[idx - 1] for idx in merged_indices if 0 < idx <= len(cluster)
             ]
 
             if not source_problems:
@@ -1314,10 +1377,18 @@ Problem {idx}:
 
                 merged = {
                     "affected_files": list(dict.fromkeys(all_files)),  # Deduplicate
-                    "problem": out_prob.get("problem", source_problems[0].get("problem")),
-                    "root_cause": out_prob.get("root_cause", source_problems[0].get("root_cause")),
-                    "how_fixed": out_prob.get("how_fixed", source_problems[0].get("how_fixed")),
-                    "why_fix_works": out_prob.get("why_fix_works", source_problems[0].get("why_fix_works")),
+                    "problem": out_prob.get(
+                        "problem", source_problems[0].get("problem")
+                    ),
+                    "root_cause": out_prob.get(
+                        "root_cause", source_problems[0].get("root_cause")
+                    ),
+                    "how_fixed": out_prob.get(
+                        "how_fixed", source_problems[0].get("how_fixed")
+                    ),
+                    "why_fix_works": out_prob.get(
+                        "why_fix_works", source_problems[0].get("why_fix_works")
+                    ),
                     "failure_type": source_problems[0].get("failure_type"),
                     "issue_type": source_problems[0].get("issue_type"),
                     "validation_cmd": source_problems[0].get("validation_cmd"),
@@ -1325,9 +1396,14 @@ Problem {idx}:
                     "problem_type": source_problems[0].get("problem_type"),
                     "is_cascading": source_problems[0].get("is_cascading", False),
                     "dependency_type": source_problems[0].get("dependency_type", ""),
-                    "cascade_explanation": source_problems[0].get("cascade_explanation", ""),
+                    "cascade_explanation": source_problems[0].get(
+                        "cascade_explanation", ""
+                    ),
                     "is_merged": True,
-                    "merged_from": [p.get("problem_id", idx) for idx, p in enumerate(source_problems)],
+                    "merged_from": [
+                        p.get("problem_id", idx)
+                        for idx, p in enumerate(source_problems)
+                    ],
                     "merge_count": len(source_problems),
                 }
                 result.append(merged)
@@ -1352,7 +1428,7 @@ Problem {idx}:
         return {
             "action": "separate",
             "result": cluster,
-            "reasoning": f"Error: {str(e)}",
+            "reasoning": f"Error: {e!s}",
         }
 
 
@@ -1421,10 +1497,12 @@ def _cluster_and_merge_problems(
 
         if merged_count > 0:
             merge_stats["merged"] += total_input - total_output + merged_count
-            print(f"          ✓ MERGED: {total_input} problems -> {total_output} (saved {total_input - total_output})")
+            print(
+                f"          OK MERGED: {total_input} problems -> {total_output} (saved {total_input - total_output})"
+            )
         else:
             merge_stats["separate"] += total_input
-            print(f"          → KEPT SEPARATE: {total_input} problems remain distinct")
+            print(f"          -> KEPT SEPARATE: {total_input} problems remain distinct")
 
         optimized.extend(decision["result"])
         time.sleep(0.5)  # Rate limiting
@@ -1682,11 +1760,11 @@ def _dependency_context_for_prompt(chunk: dict[str, Any]) -> str:
     if not contexts:
         return ""
 
-    # Check if contexts use new caller → callee structure
+    # Check if contexts use new caller -> callee structure
     has_caller_callee = any("caller" in ctx and "callees" in ctx for ctx in contexts)
 
     if has_caller_callee:
-        # Use new caller → callee structure
+        # Use new caller -> callee structure
         return _caller_callee_context_for_prompt(contexts)
     else:
         # Fallback to old cluster-based structure
@@ -1720,41 +1798,47 @@ def _cascading_classification_context(chunk: dict[str, Any]) -> str:
     ]
 
     if is_cascading and dependency_type and cascade_explanation:
-        context_parts.extend([
-            f"  - Dependency type: {dependency_type}",
-            f"  - Cascade relationship: {cascade_explanation}",
-            "",
-            "CRITICAL FOR ROOT CAUSE ANALYSIS:",
-            "- The cascade_explanation tells you which OTHER validation triggered this",
-            "- Analyze BEFORE/AFTER changes to understand the trigger",
-            "- Root cause should explain the DEPENDENCY CHANGE that required adaptation",
-            "- Different files in THIS group may have DIFFERENT root causes if they",
-            "  were triggered by DIFFERENT dependencies!",
-            "",
-            "ANALYSIS PROCESS:",
-            "1. For EACH file in CHANGES, check dependency_context",
-            "2. Identify WHICH dependency (if any) triggered that specific file",
-            "3. Group files by ROOT CAUSE (which dependency triggered them)",
-            "4. Files triggered by DIFFERENT dependencies = SEPARATE problems",
-        ])
+        context_parts.extend(
+            [
+                f"  - Dependency type: {dependency_type}",
+                f"  - Cascade relationship: {cascade_explanation}",
+                "",
+                "CRITICAL FOR ROOT CAUSE ANALYSIS:",
+                "- The cascade_explanation tells you which OTHER validation triggered this",
+                "- Analyze BEFORE/AFTER changes to understand the trigger",
+                "- Root cause should explain the DEPENDENCY CHANGE that required adaptation",
+                "- Different files in THIS group may have DIFFERENT root causes if they",
+                "  were triggered by DIFFERENT dependencies!",
+                "",
+                "ANALYSIS PROCESS:",
+                "1. For EACH file in CHANGES, check dependency_context",
+                "2. Identify WHICH dependency (if any) triggered that specific file",
+                "3. Group files by ROOT CAUSE (which dependency triggered them)",
+                "4. Files triggered by DIFFERENT dependencies = SEPARATE problems",
+            ]
+        )
     else:
-        context_parts.extend([
-            "",
-            "INDEPENDENT validation group:",
-            "- No dependency triggers from other validations",
-            "- Root cause should focus on DIRECT validation failure",
-            "- Analyze BEFORE/AFTER to understand what violated the validation rule",
-            "",
-            "ANALYSIS PROCESS:",
-            "1. For EACH file, identify WHY it failed this validation",
-            "2. Group files by ROOT CAUSE",
-            "3. Files with DIFFERENT failure reasons = SEPARATE problems",
-        ])
+        context_parts.extend(
+            [
+                "",
+                "INDEPENDENT validation group:",
+                "- No dependency triggers from other validations",
+                "- Root cause should focus on DIRECT validation failure",
+                "- Analyze BEFORE/AFTER to understand what violated the validation rule",
+                "",
+                "ANALYSIS PROCESS:",
+                "1. For EACH file, identify WHY it failed this validation",
+                "2. Group files by ROOT CAUSE",
+                "3. Files with DIFFERENT failure reasons = SEPARATE problems",
+            ]
+        )
 
     return "\n".join(context_parts)
 
 
-def _build_cross_validation_context(chunk: dict[str, Any], all_validation_groups: list[dict[str, Any]] | None) -> str:
+def _build_cross_validation_context(
+    chunk: dict[str, Any], all_validation_groups: list[dict[str, Any]] | None
+) -> str:
     """
     Build context showing related validations with their ACTUAL CHANGES.
 
@@ -1786,7 +1870,7 @@ def _build_cross_validation_context(chunk: dict[str, Any], all_validation_groups
     context_parts = [
         "",
         "## RELATED VALIDATION GROUPS (that may have triggered files in THIS validation)",
-        ""
+        "",
     ]
 
     for group in related_validations[:3]:  # Top 3 most relevant
@@ -1794,11 +1878,13 @@ def _build_cross_validation_context(chunk: dict[str, Any], all_validation_groups
         issue_type = group.get("issue_type", "unknown")
         files = group.get("files", [])
 
-        context_parts.extend([
-            f"VALIDATION {val_order}:",
-            f"  Classification: {issue_type}",
-            f"  Files ({len(files)}): {', '.join(files[:3])}{'...' if len(files) > 3 else ''}",
-        ])
+        context_parts.extend(
+            [
+                f"VALIDATION {val_order}:",
+                f"  Classification: {issue_type}",
+                f"  Files ({len(files)}): {', '.join(files[:3])}{'...' if len(files) > 3 else ''}",
+            ]
+        )
 
         # Show sample changes from this validation group to understand what triggered
         all_changes = group.get("all_changes", [])
@@ -1808,22 +1894,24 @@ def _build_cross_validation_context(chunk: dict[str, Any], all_validation_groups
                 file = change.get("file", "")
                 before = _compact_text(change.get("before", ""), 60)
                 after = _compact_text(change.get("after", ""), 60)
-                context_parts.append(f'    {file}: "{before}" → "{after}"')
+                context_parts.append(f'    {file}: "{before}" -> "{after}"')
 
         context_parts.append("")
 
-    context_parts.extend([
-        "USE THIS TO UNDERSTAND ROOT CAUSES:",
-        "- Check dependency_context to see which files in THIS validation were triggered by which validation above",
-        "- Files triggered by DIFFERENT validations = DIFFERENT root causes = SEPARATE problems",
-        "- Example: If app.py triggered by validation 3, exit_code_test.py triggered by validation 16 → 2 problems",
-    ])
+    context_parts.extend(
+        [
+            "USE THIS TO UNDERSTAND ROOT CAUSES:",
+            "- Check dependency_context to see which files in THIS validation were triggered by which validation above",
+            "- Files triggered by DIFFERENT validations = DIFFERENT root causes = SEPARATE problems",
+            "- Example: If app.py triggered by validation 3, exit_code_test.py triggered by validation 16 -> 2 problems",
+        ]
+    )
 
     return "\n".join(context_parts)
 
 
 def _caller_callee_context_for_prompt(contexts: list[dict[str, Any]]) -> str:
-    """Format caller → callee dependency contexts for prompt."""
+    """Format caller -> callee dependency contexts for prompt."""
     compact_contexts = []
 
     for context in contexts[:8]:
@@ -1856,7 +1944,7 @@ def _caller_callee_context_for_prompt(contexts: list[dict[str, Any]]) -> str:
         return ""
 
     return f"""
-DEPENDENCY CONTEXT (Caller → Callee Structure):
+DEPENDENCY CONTEXT (Caller -> Callee Structure):
 
 {json.dumps(compact_contexts, indent=2)}
 
@@ -1873,7 +1961,7 @@ CRITICAL ANALYSIS INSTRUCTIONS:
 
 3. Decision:
    - CASCADING: Caller change directly triggered callee adaptations
-     Example: "dev/pyproject.toml upgraded docstrfmt → RST files reformatted"
+     Example: "dev/pyproject.toml upgraded docstrfmt -> RST files reformatted"
 
    - INDEPENDENT: Caller changed, but NOT in a way that affects this validation
      Example: "dev/pyproject.toml changed mdformat, current validation is Black (unrelated)"
@@ -1883,12 +1971,12 @@ CRITICAL ANALYSIS INSTRUCTIONS:
    - If INDEPENDENT: "{{standalone_issue}}, unrelated to {{caller_file}} changes"
 
 EXAMPLE (Cascading):
-  Caller: dev/pyproject.toml changed docstrfmt 1.5.0 → 1.7.0
+  Caller: dev/pyproject.toml changed docstrfmt 1.5.0 -> 1.7.0
   Callees: 85 RST files changed heading format
   root_cause: "dev/pyproject.toml upgraded docstrfmt to 1.7.0, which enforces overline+underline heading style, requiring all RST files to update their heading format"
 
 EXAMPLE (Independent):
-  Caller: dev/pyproject.toml changed mdformat-beautysh 0.2.2 → 1.0.0
+  Caller: dev/pyproject.toml changed mdformat-beautysh 0.2.2 -> 1.0.0
   Current file: exit_code_test.py (Black validation)
   root_cause: "Long if-condition exceeds Black line length limit (standalone issue, unrelated to mdformat-beautysh change in dev/pyproject.toml)"
 """
@@ -1960,7 +2048,9 @@ def _full_cascading_context(
 ) -> str:
     """Classification/cascading context plus related-validation context, combined."""
     cascading_context = _cascading_classification_context(chunk)
-    cross_validation_context = _build_cross_validation_context(chunk, all_validation_groups)
+    cross_validation_context = _build_cross_validation_context(
+        chunk, all_validation_groups
+    )
     if cross_validation_context:
         cascading_context = cascading_context + "\n" + cross_validation_context
     return cascading_context
@@ -2025,7 +2115,7 @@ def _split_count_for_atomic_chunk(
 
     estimated_splits = max(2, (prompt_size // target_prompt_size) + 1)
     max_splits = min(estimated_splits, change_count // 10, 8)
-    return 2 if max_splits <= 2 else max_splits
+    return max(2, max_splits)
 
 
 def _split_change_chunk_evenly(
@@ -2058,7 +2148,9 @@ def _fits_model_capacity(
     """
     prompt_size = len(prompt)
     input_tokens = prompt_size / 4  # Rough estimate
-    input_threshold = model_limits["atomic_analysis_threshold_chars"] / 4  # 50% of input capacity
+    input_threshold = (
+        model_limits["atomic_analysis_threshold_chars"] / 4
+    )  # 50% of input capacity
 
     # Derived from all_changes (not all_files): splitting only narrows
     # all_changes, so all_files would stay stuck at the parent group's full
@@ -2068,8 +2160,12 @@ def _fits_model_capacity(
     estimated_output_tokens = (num_files * 1000) + 500
     output_safe_limit = model_limits["output_safe_tokens"] * 0.80  # 80% safety margin
 
-    print(f"      Input: {prompt_size:,} chars (~{input_tokens:,.0f} tokens) vs {input_threshold:,.0f} threshold")
-    print(f"      Output: ~{estimated_output_tokens:,.0f} tokens ({num_files} files) vs {output_safe_limit:,.0f} limit")
+    print(
+        f"      Input: {prompt_size:,} chars (~{input_tokens:,.0f} tokens) vs {input_threshold:,.0f} threshold"
+    )
+    print(
+        f"      Output: ~{estimated_output_tokens:,.0f} tokens ({num_files} files) vs {output_safe_limit:,.0f} limit"
+    )
 
     input_ok = input_tokens <= input_threshold
     output_ok = estimated_output_tokens <= output_safe_limit
@@ -2086,7 +2182,10 @@ def _fits_model_capacity(
 
 
 def _split_chunk_for_capacity(
-    chunk: dict[str, Any], prompt_size: int, model_limits: dict[str, Any], model_name: str | None
+    chunk: dict[str, Any],
+    prompt_size: int,
+    model_limits: dict[str, Any],
+    model_name: str | None,
 ) -> list[dict[str, Any]]:
     """
     Single splitting strategy, tried in priority order:
@@ -2102,7 +2201,9 @@ def _split_chunk_for_capacity(
         return []
 
     change_type_groups = _group_changes_by_type(changes)
-    non_empty_types = [t for t in ("config", "dependency", "code") if change_type_groups[t]]
+    non_empty_types = [
+        t for t in ("config", "dependency", "code") if change_type_groups[t]
+    ]
 
     if len(non_empty_types) > 1:
         print(
@@ -2111,7 +2212,11 @@ def _split_chunk_for_capacity(
             f"{len(change_type_groups['code'])} code"
         )
         return [
-            {**chunk, "all_changes": change_type_groups[change_type], "change_type": change_type}
+            {
+                **chunk,
+                "all_changes": change_type_groups[change_type],
+                "change_type": change_type,
+            }
             for change_type in non_empty_types
         ]
 
@@ -2120,7 +2225,9 @@ def _split_chunk_for_capacity(
     dependency_contexts = chunk.get("dependency_contexts") or []
     if dependency_contexts:
         max_changes_per_chunk = max(1, len(changes) // num_splits)
-        sub_chunks = _chunk_by_dependencies(chunk, dependency_contexts, max_changes_per_chunk)
+        sub_chunks = _chunk_by_dependencies(
+            chunk, dependency_contexts, max_changes_per_chunk
+        )
         if len(sub_chunks) > 1:
             return sub_chunks
 
@@ -2160,9 +2267,13 @@ def _split_chunk_and_requeue(
     queue: list[tuple[dict[str, Any], int]],
 ) -> None:
     """Split a chunk and push each piece back onto the work queue at depth+1."""
-    for sub_chunk in _split_chunk_for_capacity(chunk, prompt_size, model_limits, model_name):
+    for sub_chunk in _split_chunk_for_capacity(
+        chunk, prompt_size, model_limits, model_name
+    ):
         sub_chunk["_all_validation_groups"] = chunk.get("_all_validation_groups")
-        sub_chunk.setdefault("dependency_contexts", chunk.get("dependency_contexts", []))
+        sub_chunk.setdefault(
+            "dependency_contexts", chunk.get("dependency_contexts", [])
+        )
         sub_chunk.setdefault("change_type", chunk.get("change_type", "unknown"))
         queue.append((sub_chunk, depth + 1))
 
@@ -2215,44 +2326,58 @@ def _build_atomic_problems(
         if not changes:
             continue
 
-        prompt = _build_atomic_prompt_for(current, val_info, ci_context, failed_validation_order)
+        prompt = _build_atomic_prompt_for(
+            current, val_info, ci_context, failed_validation_order
+        )
         fits, reason = _fits_model_capacity(prompt, current, model_limits)
         can_split = len(changes) > 1 and depth < MAX_SPLIT_DEPTH
 
         if not fits:
             if can_split:
-                print(f"      ✗ {reason} - splitting ({len(changes)} changes)")
-                _split_chunk_and_requeue(current, len(prompt), depth, model_limits, model_name, queue)
+                print(f"      FAIL {reason} - splitting ({len(changes)} changes)")
+                _split_chunk_and_requeue(
+                    current, len(prompt), depth, model_limits, model_name, queue
+                )
                 continue
-            print(f"      ✗ {reason} - cannot split further, using as-is ({len(changes)} change(s))")
+            print(
+                f"      FAIL {reason} - cannot split further, using as-is ({len(changes)} change(s))"
+            )
 
         processed += 1
         label = f"chunk_{processed}"
         print(f"      Calling LLM for {label} ({len(changes)} changes)...")
 
         try:
-            result = _invoke_json(llm, prompt, max_tokens=model_limits["output_safe_tokens"])
+            result = _invoke_json(
+                llm, prompt, max_tokens=model_limits["output_safe_tokens"]
+            )
 
-            problems = [] if result == "SPLIT_REQUIRED" else _extract_atomic_problems(result)
+            problems = (
+                [] if result == "SPLIT_REQUIRED" else _extract_atomic_problems(result)
+            )
         except Exception as exc:
-            print(f"      ✗ {label} ERROR: {type(exc).__name__}: {str(exc)[:200]}")
+            print(f"      FAIL {label} ERROR: {type(exc).__name__}: {str(exc)[:200]}")
             result, problems = "SPLIT_REQUIRED", []
 
         needs_retry = result == "SPLIT_REQUIRED" or (changes and not problems)
         if needs_retry and can_split:
             if result != "SPLIT_REQUIRED":
-                print(f"      {label}: 0 problems for {len(changes)} changes - saving debug prompt")
+                print(
+                    f"      {label}: 0 problems for {len(changes)} changes - saving debug prompt"
+                )
                 _save_debug_prompt(current, label, prompt)
             print(f"      {label}: retrying with split")
-            _split_chunk_and_requeue(current, len(prompt), depth, model_limits, model_name, queue)
+            _split_chunk_and_requeue(
+                current, len(prompt), depth, model_limits, model_name, queue
+            )
             continue
 
         if problems:
-            print(f"      ✓ {label}: {len(problems)} problem(s) extracted")
+            print(f"      OK {label}: {len(problems)} problem(s) extracted")
         all_problems.extend(problems)
 
         if queue:
-            time.sleep(min(2 ** depth, 8))  # Rate limiting between LLM calls
+            time.sleep(min(2**depth, 8))  # Rate limiting between LLM calls
 
     return all_problems
 
@@ -2324,7 +2449,9 @@ def _filter_dependency_contexts_for_group(
     filtered_group["dependency_contexts"] = filtered_contexts
 
     if filtered_contexts:
-        print(f"      Filtered dependency contexts: {len(all_dep_contexts)} → {len(filtered_contexts)} relevant")
+        print(
+            f"      Filtered dependency contexts: {len(all_dep_contexts)} -> {len(filtered_contexts)} relevant"
+        )
 
     return filtered_group
 
@@ -2361,7 +2488,7 @@ def _analyze_one_validation_group(
         model_limits=model_limits,
     )
 
-    print(f"      ✓ Total: {len(all_problems)} problem(s)")
+    print(f"      OK Total: {len(all_problems)} problem(s)")
     return all_problems
 
 
@@ -2390,18 +2517,24 @@ def analyze_validation_groups_with_reasoning(
     # Include classification info AND changes so atomic analysis can see
     # what triggered files in this validation from other validations
     all_validation_groups_summary = []
-    for val_order, val_group in sorted(groups_data.items(), key=_validation_group_sort_key):
-        all_validation_groups_summary.append({
-            "validation_order": val_group.get("validation_order", val_order),
-            "validation_cmd": val_group.get("validation_cmd", ""),
-            "failure_type": val_group.get("failure_type", ""),
-            "issue_type": val_group.get("issue_type", ""),
-            "files": val_group.get("all_files", []),
-            "all_changes": val_group.get("all_changes", []),  # Include actual changes!
-            "is_cascading": val_group.get("is_cascading", False),
-            "dependency_type": val_group.get("dependency_type", ""),
-            "cascade_explanation": val_group.get("cascade_explanation", ""),
-        })
+    for val_order, val_group in sorted(
+        groups_data.items(), key=_validation_group_sort_key
+    ):
+        all_validation_groups_summary.append(
+            {
+                "validation_order": val_group.get("validation_order", val_order),
+                "validation_cmd": val_group.get("validation_cmd", ""),
+                "failure_type": val_group.get("failure_type", ""),
+                "issue_type": val_group.get("issue_type", ""),
+                "files": val_group.get("all_files", []),
+                "all_changes": val_group.get(
+                    "all_changes", []
+                ),  # Include actual changes!
+                "is_cascading": val_group.get("is_cascading", False),
+                "dependency_type": val_group.get("dependency_type", ""),
+                "cascade_explanation": val_group.get("cascade_explanation", ""),
+            }
+        )
 
     all_problems = []
     next_id = 1
@@ -2695,7 +2828,7 @@ def _split_structured_chunk_by_size(
     result_chunks = [with_metadata(sc) for sc in sub_chunks if sc]
 
     # Log split details
-    print(f"      Smart split: {len(files_list)} files → {len(result_chunks)} chunks")
+    print(f"      Smart split: {len(files_list)} files -> {len(result_chunks)} chunks")
     for i, rc in enumerate(result_chunks, 1):
         print(
             f"        Chunk {i}: {rc.get('total_files', 0)} files, ~{rc.get('estimated_tokens', 0):,} tokens"
@@ -2710,6 +2843,7 @@ def _is_token_limit_error(error: Exception) -> bool:
         keyword in error_msg
         for keyword in ["token", "length", "limit", "too long", "maximum"]
     )
+
 
 def classify_chunk_with_fallback(
     chunk: dict,
@@ -2737,7 +2871,7 @@ def classify_chunk_with_fallback(
     if files_in_chunk == 0:
         return []
 
-    # Check for caller → callee dependency contexts
+    # Check for caller -> callee dependency contexts
     dependency_contexts = chunk.get("dependency_contexts", [])
     has_caller_callee = any(
         "caller" in ctx and "callees" in ctx for ctx in dependency_contexts
@@ -2781,7 +2915,7 @@ def _classify_chunk_with_dependencies(
     llm: Any,
 ) -> list[dict]:
     """
-    Specialized classification for chunks WITH caller → callee dependencies.
+    Specialized classification for chunks WITH caller -> callee dependencies.
 
     Analyzes dependency relationships FIRST, then classifies as cascading or independent.
     """
@@ -2850,7 +2984,7 @@ def _format_caller_callee_for_dependency_classification(
     dependency_contexts: list[dict],
 ) -> str:
     """
-    Format caller → callee contexts for semantic dependency analysis.
+    Format caller -> callee contexts for semantic dependency analysis.
 
     Provides BEFORE/AFTER context for both caller and callees to enable
     semantic understanding of cascading relationships.
@@ -2881,13 +3015,19 @@ def _format_caller_callee_for_dependency_classification(
             before = _compact_text(ch.get("before", ""), 100)
             after = _compact_text(ch.get("after", ""), 100)
             caller_change_details.append(
-                f'    Line {line_num}: "{before}" → "{after}"'
+                f'    Line {line_num}: "{before}" -> "{after}"'
             )
 
         if len(caller_changes) > 5:
-            caller_change_details.append(f"    ... and {len(caller_changes) - 5} more changes")
+            caller_change_details.append(
+                f"    ... and {len(caller_changes) - 5} more changes"
+            )
 
-        caller_changes_str = "\n".join(caller_change_details) if caller_change_details else "    No changes shown"
+        caller_changes_str = (
+            "\n".join(caller_change_details)
+            if caller_change_details
+            else "    No changes shown"
+        )
 
         # Analyze PATTERN across callees (first 5 detailed, then summary)
         callee_pattern_analysis = []
@@ -2904,12 +3044,14 @@ def _format_caller_callee_for_dependency_classification(
                     before = _compact_text(ch.get("before", ""), 80)
                     after = _compact_text(ch.get("after", ""), 80)
                     callee_pattern_analysis.append(
-                        f'    {callee_file} ({callee_role}) Line {ch.get("line", "?")}: "{before}" → "{after}"'
+                        f'    {callee_file} ({callee_role}) Line {ch.get("line", "?")}: "{before}" -> "{after}"'
                     )
 
         # Detect common patterns across ALL callees
         if len(callees) > 3:
-            callee_pattern_analysis.append(f"\n    PATTERN ACROSS {len(callees)} CALLEES:")
+            callee_pattern_analysis.append(
+                f"\n    PATTERN ACROSS {len(callees)} CALLEES:"
+            )
 
             # Analyze if there's a common before/after pattern
             common_befores = []
@@ -2931,7 +3073,11 @@ def _format_caller_callee_for_dependency_classification(
                     f"    ... similar pattern across remaining {len(callees) - 1} files"
                 )
 
-        callee_pattern_str = "\n".join(callee_pattern_analysis) if callee_pattern_analysis else "    No pattern detected"
+        callee_pattern_str = (
+            "\n".join(callee_pattern_analysis)
+            if callee_pattern_analysis
+            else "    No pattern detected"
+        )
 
         formatted.append(f"""
 DEPENDENCY {idx}: {dep_type}
@@ -3228,7 +3374,9 @@ def decompose_issue(issue: dict, llm) -> dict:
             print("  WARNING: No atomic problems identified")
             return {}
 
-        print(f"  OK Identified {len(atomic_problems)} atomic problems (before merging)")
+        print(
+            f"  OK Identified {len(atomic_problems)} atomic problems (before merging)"
+        )
 
         # NEW: Auto-cluster and merge similar problems
         print("  Step 4: Clustering and merging similar problems...")
@@ -3237,7 +3385,9 @@ def decompose_issue(issue: dict, llm) -> dict:
             validation_cmd = prob.get("validation_cmd", "unknown")
             validation_groups_for_merge[validation_cmd].append(prob)
 
-        print(f"    Grouped into {len(validation_groups_for_merge)} validation commands")
+        print(
+            f"    Grouped into {len(validation_groups_for_merge)} validation commands"
+        )
 
         optimized_problems = []
         for validation_cmd, val_problems in validation_groups_for_merge.items():
@@ -3260,7 +3410,9 @@ def decompose_issue(issue: dict, llm) -> dict:
         print("  Step 5: Reordering by repair trajectory...")
         final_problems = _reorder_by_repair_trajectory(optimized_problems)
 
-        print(f"  ✓ Final: {len(final_problems)} problems (merged {len(atomic_problems) - len(final_problems)} duplicates)")
+        print(
+            f"  OK Final: {len(final_problems)} problems (merged {len(atomic_problems) - len(final_problems)} duplicates)"
+        )
 
         # Build final result
         context = benchmark_context.get("context", {})
@@ -3348,10 +3500,75 @@ def generate_l1_l2_l3_pipeline(
         Dictionary with l1, l2, l3 sections
     """
 
-    if "error" in decomposed_result or not decomposed_result.get("problems"):
-        return decomposed_result
-
     issue_id = decomposed_result.get("original_issue_id", "?")
+    if "error" in decomposed_result or not decomposed_result.get("problems"):
+        issue_id = str(
+            decomposed_result.get("original_issue_id")
+            or decomposed_result.get("issue_id")
+            or "unknown"
+        )
+        repo = decomposed_result.get("repo", "unknown")
+        workflow_path = decomposed_result.get("benchmark_ci_context", {}).get(
+            "workflow_path",
+            decomposed_result.get("workflow_path", "unknown"),
+        )
+        workflow_name = workflow_path.split("/")[-1] if workflow_path else ""
+        note = (
+            decomposed_result.get("error") or "Backward decomposition found no problems"
+        )
+        result = {
+            "issue_id": issue_id,
+            "repo": repo,
+            "workflow_path": workflow_path,
+            "l1_memory": {
+                "issue_id": issue_id,
+                "repo": repo,
+                "repo_owner": repo.split("/")[0] if "/" in repo else "unknown",
+                "workflow": workflow_path,
+                "workflow_name": workflow_name,
+                "changed_files": decomposed_result.get("changed_files", []),
+                "problems": [],
+                "note": note,
+            },
+            "l2_memory": {
+                "issue_id": issue_id,
+                "repo": repo,
+                "workflow": workflow_path,
+                "total_problems": 0,
+                "failure_identify": [],
+                "repair_strategies": [],
+                "note": note,
+            },
+            "l3_memory": {
+                "issue_id": issue_id,
+                "repo": repo,
+                "workflow": workflow_path,
+                "universal_patterns": [
+                    {
+                        "pattern_id": f"no-backward-problems-{issue_id}",
+                        "failure_type": "no_backward_problems",
+                        "failure_pattern": "",
+                        "problem": "",
+                        "reasoning": note,
+                        "when_to_apply": "",
+                        "signals": [],
+                        "universal_fix": {"approach": "", "steps": []},
+                        "examples": [],
+                        "no_decomposed_problems": True,
+                    }
+                ],
+            },
+            "metadata": {
+                "original_problems_count": 0,
+                "deduplicated_count": 0,
+                "l1_problems": 0,
+                "l2_strategies": 0,
+                "l3_patterns": 1,
+            },
+        }
+        _append_to_memory_files(result, output_dir=output_dir)
+        return result
+
     print(f"\n{'=' * 80}")
     print(f"L1/L2/L3 Pipeline for Issue {issue_id}")
     print(f"{'=' * 80}")
@@ -3930,7 +4147,7 @@ def _append_to_memory_files(result: dict, output_dir: str = "data"):
             json.dump(existing, f, indent=2)
         num_problems = len(l1_memory.get("problems", []))
         print(
-            f"  ✓ Appended issue {issue_id} with {num_problems} problems to failure_memory.json"
+            f"  OK Appended issue {issue_id} with {num_problems} problems to failure_memory.json"
         )
 
     if l2_memory:
@@ -3942,7 +4159,7 @@ def _append_to_memory_files(result: dict, output_dir: str = "data"):
         existing.append(l2_memory)
         with open(repo_memory_path, "w") as f:
             json.dump(existing, f, indent=2)
-        print("  ✓ Appended 1 issue to repo_memory.json")
+        print("  OK Appended 1 issue to repo_memory.json")
 
     if l3_patterns:
         cross_memory_path = back_trs_dir / "cross_memory.json"
@@ -3953,7 +4170,7 @@ def _append_to_memory_files(result: dict, output_dir: str = "data"):
         existing.extend(l3_patterns)
         with open(cross_memory_path, "w") as f:
             json.dump(existing, f, indent=2)
-        print(f"  ✓ Appended {len(l3_patterns)} patterns to cross_memory.json")
+        print(f"  OK Appended {len(l3_patterns)} patterns to cross_memory.json")
 
 
 def _save_to_memory_files(results: list[dict], output_dir: str):
@@ -4061,6 +4278,11 @@ def _save_to_memory_files(results: list[dict], output_dir: str):
                 existing_l1 = json.load(f)
                 if not isinstance(existing_l1, list):
                     existing_l1 = []
+                existing_l1 = [
+                    item
+                    for item in existing_l1
+                    if str(item.get("issue_id", "")) not in new_issue_ids
+                ]
         except Exception as e:
             print(f"Warning: Could not load existing L1: {e}")
 
@@ -4089,6 +4311,11 @@ def _save_to_memory_files(results: list[dict], output_dir: str):
                 existing_l3 = json.load(f)
                 if not isinstance(existing_l3, list):
                     existing_l3 = []
+                existing_l3 = [
+                    item
+                    for item in existing_l3
+                    if str(item.get("source_issue_id", "")) not in new_issue_ids
+                ]
         except Exception as e:
             print(f"Warning: Could not load existing L3: {e}")
 
@@ -4274,9 +4501,10 @@ def _load_decomposed_cache(decomposed_issues_path: Path) -> dict[str, dict[str, 
 def _load_existing_l2_results(
     output_dir: Path,
 ) -> tuple[list[dict[str, Any]], set[str]]:
-    """Load existing L1/L2/L3 results from memory files to avoid reprocessing."""
-    # Check repo_memory.json (L2) to determine which issues are already processed
+    """Load existing complete L1/L2/L3 issue IDs to avoid reprocessing."""
+    failure_memory_path = output_dir / "failure_memory.json"
     repo_memory_path = output_dir / "repo_memory.json"
+    cross_memory_path = output_dir / "cross_memory.json"
 
     if not repo_memory_path.exists():
         return [], set()
@@ -4287,10 +4515,39 @@ def _load_existing_l2_results(
         if not isinstance(existing, list):
             return [], set()
 
-        processed_ids = {
+        l2_ids = {
             str(result["issue_id"]) for result in existing if "issue_id" in result
         }
-        print(f"Loaded {len(existing)} existing L1/L2/L3 results (will skip)")
+
+        l1_ids: set[str] = set()
+        if failure_memory_path.exists():
+            with open(failure_memory_path) as f:
+                l1_existing = json.load(f)
+            if isinstance(l1_existing, list):
+                l1_ids = {
+                    str(result["issue_id"])
+                    for result in l1_existing
+                    if "issue_id" in result
+                }
+
+        l3_ids: set[str] = set()
+        if cross_memory_path.exists():
+            with open(cross_memory_path) as f:
+                l3_existing = json.load(f)
+            if isinstance(l3_existing, list):
+                l3_ids = {
+                    str(result["source_issue_id"])
+                    for result in l3_existing
+                    if "source_issue_id" in result
+                }
+
+        processed_ids = l1_ids & l2_ids & l3_ids
+        partial_ids = (l1_ids | l2_ids | l3_ids) - processed_ids
+        print(f"Loaded {len(processed_ids)} complete L1/L2/L3 results (will skip)")
+        if partial_ids:
+            print(
+                f"Found {len(partial_ids)} partial memory issues (will rebuild missing/replace existing)"
+            )
         return existing, processed_ids
     except Exception as e:
         print(f"Warning: Could not load existing results: {e}")
@@ -4414,6 +4671,22 @@ def main():
         default=0.3,
         help="Memory set ratio for auto-split (default: 0.3 = 30%%)",
     )
+    parser.add_argument(
+        "--use-memory-retrieval",
+        action="store_true",
+        help="Use memory plugin for problem retrieval (STAIR-based)",
+    )
+    parser.add_argument(
+        "--memory-mode",
+        choices=["baseline", "l1", "l1+l2", "l1+l2+l3"],
+        default="l1+l2+l3",
+        help="Memory retrieval mode: baseline (no memory), l1 (repo+workflow), l1+l2 (+ patterns), l1+l2+l3 (full STAIR). Only used with --use-memory-retrieval.",
+    )
+    parser.add_argument(
+        "--memory-dir",
+        default="data/fwr_trs",
+        help="Memory directory for retrieval (default: data/fwr_trs)",
+    )
     args = parser.parse_args()
 
     issues = _load_issues_for_args(args)
@@ -4431,6 +4704,32 @@ def main():
     print(f"Initializing LLM: {args.model}")
     print(f"{'=' * 80}")
     llm = LitellmModel(model_name=args.model)
+
+    # Initialize Memory Plugin (if requested)
+    memory_retrieval = None
+    if args.use_memory_retrieval:
+        print(f"\n{'=' * 80}")
+        print(f"Initializing Memory Plugin: {args.memory_mode}")
+        print(f"Memory Directory: {args.memory_dir}")
+        print(f"{'=' * 80}")
+
+        from memory_plugin import STAIRRetrieval
+
+        if args.memory_mode == "baseline":
+            memory_retrieval = STAIRRetrieval(
+                memory_dir=args.memory_dir, llm_client=llm, baseline_mode=True
+            )
+            print("Mode: BASELINE (no memory)")
+        else:
+            memory_retrieval = STAIRRetrieval(
+                memory_dir=args.memory_dir,
+                llm_client=llm,
+                memory_levels=args.memory_mode,
+            )
+            print(f"Mode: {args.memory_mode.upper()} memory retrieval")
+    else:
+        print("\nMemory plugin: DISABLED (use --use-memory-retrieval to enable)")
+    _ = memory_retrieval
 
     # Prepare output path
     output_dir = Path(args.output_dir)
@@ -4471,17 +4770,17 @@ def main():
 
             # Check cache
             if issue_id in decomposed_cache:
-                print("  ✅ Found in cache - skipping decomposition")
+                print("  OK Found in cache - skipping decomposition")
                 continue
             else:
                 # Decompose
-                print("  🔄 Decomposing...")
+                print("   Decomposing...")
                 decomposed_result = decompose_issue(issue, llm)
 
                 if "error" not in decomposed_result:
                     decomposed_cache[issue_id] = decomposed_result
                     _save_decomposed_cache(decomposed_cache, decomposed_issues_path)
-                    print("  ✅ Saved to cache")
+                    print("  OK Saved to cache")
 
         # PHASE 2: Cosine similarity split
         print(f"\n{'=' * 80}")
@@ -4507,7 +4806,7 @@ def main():
         try:
             result = subprocess.run(split_cmd, check=True, capture_output=False)
         except subprocess.CalledProcessError as e:
-            print(f"  ❌ ERROR: Similarity split failed: {e}")
+            print(f"  FAIL ERROR: Similarity split failed: {e}")
             print("  You can run it manually:")
             print("    python scripts/prepare_memory_train_test_split.py \\")
             print(f"      --dataset {args.dataset} \\")
@@ -4520,7 +4819,7 @@ def main():
         eval_issues_path = output_dir / "eval_issues.jsonl"
 
         if not memory_issues_path.exists():
-            print(f"  ❌ ERROR: {memory_issues_path} not found")
+            print(f"  FAIL ERROR: {memory_issues_path} not found")
             print("  The similarity split may have failed.")
             return 1
 
@@ -4539,7 +4838,7 @@ def main():
                     if line.strip():
                         eval_count += 1
 
-        print("\n  ✅ Similarity split complete")
+        print("\n  OK Similarity split complete")
         print(f"  Total issues: {len(decomposed_cache)}")
         print(
             f"  Memory set: {len(memory_ids)} issues ({len(memory_ids) / len(decomposed_cache) * 100:.1f}%)"
@@ -4558,7 +4857,7 @@ def main():
 
             decomposed_result = decomposed_cache.get(issue_id)
             if not decomposed_result or "error" in decomposed_result:
-                print("  ⚠️  Skipping - decomposition error or missing")
+                print("  WARNING  Skipping - decomposition error or missing")
                 continue
 
             # Deep copy to prevent cache pollution
@@ -4572,9 +4871,9 @@ def main():
             # Incremental save
             try:
                 _save_to_memory_files(results, args.output_dir)
-                print(f"  ✅ Saved ({len(results)} memory issues total)")
+                print(f"  OK Saved ({len(results)} memory issues total)")
             except Exception as e:
-                print(f"  ⚠️  Could not save: {e}")
+                print(f"  WARNING  Could not save: {e}")
 
         # Final save
         _save_to_memory_files(results, args.output_dir)
@@ -4582,9 +4881,9 @@ def main():
         print(f"\n{'=' * 80}")
         print("AUTO-SPLIT COMPLETE")
         print(f"{'=' * 80}")
-        print(f"✅ Decomposed: {len(decomposed_cache)} issues")
-        print(f"✅ Memory set: {len(memory_ids)} issues with L1/L2/L3")
-        print(f"✅ Eval set: {eval_count} issues (decomposition only)")
+        print(f"OK Decomposed: {len(decomposed_cache)} issues")
+        print(f"OK Memory set: {len(memory_ids)} issues with L1/L2/L3")
+        print(f"OK Eval set: {eval_count} issues (decomposition only)")
         print("\nOutput files:")
         print(f"  - decomposed_issues.json ({len(decomposed_cache)} issues)")
         print(f"  - memory_issues.jsonl ({len(memory_ids)} issues)")
@@ -4653,8 +4952,6 @@ def main():
 
             # Run full L1/L2/L3 pipeline (unless --skip-memory)
             if not args.skip_memory:
-                import copy
-
                 decomposed_copy = copy.deepcopy(decomposed_result)
                 result = generate_l1_l2_l3_pipeline(
                     decomposed_copy, llm, output_dir=args.output_dir

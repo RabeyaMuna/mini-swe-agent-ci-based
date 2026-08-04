@@ -286,20 +286,20 @@ def main():
     stats_file = output_dir / "benchmark_stats.json"
     with open(stats_file, "w") as f:
         json.dump(stats, f, indent=2)
-    print(f"\n✓ Saved raw statistics to {stats_file}")
+    print(f"\nOK Saved raw statistics to {stats_file}")
 
     # Save summary
     summary_file = output_dir / "benchmark_summary.json"
     with open(summary_file, "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"✓ Saved summary to {summary_file}")
+    print(f"OK Saved summary to {summary_file}")
 
     # Generate comparison table
     comparison = format_comparison_table(summary)
     comparison_file = output_dir / "benchmark_comparison.md"
     with open(comparison_file, "w") as f:
         f.write(comparison)
-    print(f"✓ Saved comparison table to {comparison_file}")
+    print(f"OK Saved comparison table to {comparison_file}")
 
     print("\n" + "=" * 70)
     print("Summary:")

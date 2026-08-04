@@ -398,7 +398,7 @@ impl HooksBrowserView {
             self.entry
                 .warnings
                 .iter()
-                .map(|warning| format!("⚠ {warning}").into()),
+                .map(|warning| format!("WARNING {warning}").into()),
         );
         lines.extend(self.entry.errors.iter().map(|error| {
             format!("■ {}: {}", error.path.display(), error.message)
@@ -414,7 +414,7 @@ impl HooksBrowserView {
         lines.push(Line::default());
 
         if let Some(message) = review_needed_message(self.review_needed_total_count()) {
-            lines.push(format!("⚠ {message}").yellow().into());
+            lines.push(format!("WARNING {message}").yellow().into());
             lines.push(Line::default());
         }
 
@@ -850,7 +850,7 @@ fn detail_wrapped_lines(
             return lines;
         };
         let truncated = truncate_line_with_ellipsis_if_overflow(
-            Line::from(format!("{}…", last_span.content)),
+            Line::from(format!("{}...", last_span.content)),
             max_width,
         );
         let content = truncated

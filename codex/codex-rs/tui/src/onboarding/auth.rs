@@ -545,7 +545,7 @@ impl AuthModeWidget {
 
     fn render_chatgpt_success_message(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
-            "✓ Signed in with your ChatGPT account"
+            "OK Signed in with your ChatGPT account"
                 .fg(Color::Green)
                 .into(),
             "".into(),
@@ -592,7 +592,7 @@ impl AuthModeWidget {
 
     fn render_chatgpt_success(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
-            "✓ Signed in with your ChatGPT account"
+            "OK Signed in with your ChatGPT account"
                 .fg(Color::Green)
                 .into(),
         ];
@@ -604,7 +604,7 @@ impl AuthModeWidget {
 
     fn render_api_key_configured(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
-            "✓ API key configured".fg(Color::Green).into(),
+            "OK API key configured".fg(Color::Green).into(),
             "".into(),
             "  Codex will use usage-based billing with your API key.".into(),
         ];

@@ -3,7 +3,7 @@
 decompose_backward.py - CI-Based Backward Traces
 =================================================
 
-Backward trace approach: CI Failure → Problem
+Backward trace approach: CI Failure -> Problem
 Uses backward_decomposition/ module to analyze CI failures and build L1/L2/L3 memory.
 
 Pipeline:
@@ -44,7 +44,7 @@ def main():
     3. Saves to data/back_trs/ (backward traces)
     """
     print("=" * 80)
-    print("CI-BASED DECOMPOSITION (Backward Traces: CI Failure → Problem)")
+    print("CI-BASED DECOMPOSITION (Backward Traces: CI Failure -> Problem)")
     print("=" * 80)
     print("Using: backward_decomposition/ module")
     print("Output: data/back_trs/")
@@ -57,7 +57,7 @@ def main():
 
     print()
     print("=" * 80)
-    print("✓ CI-based decomposition complete!")
+    print("OK CI-based decomposition complete!")
     print("=" * 80)
     print("Output saved to:")
     print("  - data/back_trs/decomposed_issues.json")

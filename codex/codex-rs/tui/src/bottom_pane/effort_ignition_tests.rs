@@ -260,7 +260,7 @@ fn spark_only_fires_after_landing() {
     assert_eq!(
         [850, 950, 1050, 1150, 1250]
             .map(|millis| spark_frame(Duration::from_millis(millis), start)),
-        [None, Some("·"), Some("✦"), Some("✧"), None]
+        [None, Some("·"), Some(""), Some("*"), None]
     );
 }
 
@@ -285,7 +285,7 @@ fn effort_ignition_styles_preserve_draft_and_paint_expected_content() {
                 .any(|row| row.contains('#'))
                 || rendered[..HEIGHT as usize]
                     .iter()
-                    .any(|row| row.contains(['✦', '✧', '·']));
+                    .any(|row| row.contains(['', '*', '·']));
         }
         assert!(
             painted,

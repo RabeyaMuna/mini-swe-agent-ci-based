@@ -362,30 +362,30 @@ def create_all_visualizations(report_path: Path, output_dir: Path, analytics_dir
 
     # Create plots
     plot_commits_distribution(report, output_dir)
-    print("  ✓ Commits distribution")
+    print("  OK Commits distribution")
 
     plot_files_distribution(report, output_dir)
-    print("  ✓ Files distribution")
+    print("  OK Files distribution")
 
     plot_lines_distribution(report, output_dir)
-    print("  ✓ Lines changed distribution")
+    print("  OK Lines changed distribution")
 
     plot_problems_distribution(report, output_dir)
-    print("  ✓ Problems distribution")
+    print("  OK Problems distribution")
 
     plot_ci_categories(report, output_dir)
-    print("  ✓ CI categories pie chart")
+    print("  OK CI categories pie chart")
 
     plot_problem_types(report, output_dir)
-    print("  ✓ Problem types bar chart")
+    print("  OK Problem types bar chart")
 
     # Comparison plot
     comparison_csv = analytics_dir / "benchmark_comparison.csv"
     if comparison_csv.exists():
         plot_benchmark_comparison(comparison_csv, output_dir)
-        print("  ✓ Benchmark comparison chart")
+        print("  OK Benchmark comparison chart")
 
-    print(f"\n✅ All visualizations saved to: {output_dir}")
+    print(f"\nOK All visualizations saved to: {output_dir}")
 
 
 def main():

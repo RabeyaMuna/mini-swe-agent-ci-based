@@ -43,3 +43,4 @@ datasets>=2.0.0
 # bokeh>=3.4.0
 langchain-openai
 codex-cli
+litellm[proxy]

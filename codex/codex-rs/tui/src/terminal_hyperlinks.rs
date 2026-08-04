@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn wrapping_maps_multiple_links_across_indented_unicode_lines() {
-        let text = "alpha 😀here middle there end";
+        let text = "alpha here middle there end";
         let first_start = text.find("here").expect("first link");
         let second_start = text.find("there").expect("second link");
         let mut source = HyperlinkLine::new(Line::from(text));
@@ -675,7 +675,7 @@ mod tests {
         let wrapped = remap_wrapped_line(
             &source,
             vec![
-                Line::from("  alpha 😀here"),
+                Line::from("  alpha here"),
                 Line::from("    middle there end"),
             ],
         );
@@ -684,7 +684,7 @@ mod tests {
             wrapped,
             vec![
                 HyperlinkLine {
-                    line: Line::from("  alpha 😀here"),
+                    line: Line::from("  alpha here"),
                     hyperlinks: vec![TerminalHyperlink::web(
                         /*columns*/ 10..14,
                         "https://example.com/first".to_string(),

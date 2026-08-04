@@ -149,7 +149,7 @@ install CI step.
 ## ANALYSIS PROCESS (Dynamic - apply to each issue):
 
 STEP 2.1: For EACH file in CHANGES, answer these questions:
-  a) What changed? (BEFORE → AFTER)
+  a) What changed? (BEFORE -> AFTER)
   b) WHY did it need to change? (root cause)
   c) What triggered this need? (dependency context, cascade explanation)
 
@@ -159,22 +159,22 @@ STEP 2.2: Identify ROOT CAUSE patterns:
   - Root cause is about REASON, not about WHAT changed
 
 STEP 2.3: Group files by ROOT CAUSE:
-  - Files with IDENTICAL root cause → candidate for merging
-  - Files with DIFFERENT root causes → must be separate problems
+  - Files with IDENTICAL root cause -> candidate for merging
+  - Files with DIFFERENT root causes -> must be separate problems
 
 STEP 2.4: Apply MERGE/SPLIT decision:
 
   MERGE into ONE atomic problem when:
-  ✓ SAME root cause (WHY) across all files
-  ✓ Different changes (WHAT) are acceptable - these are variants
-  ✓ One root_cause explanation covers why ALL files changed
-  ✓ Example: 10 files, same root cause (package version upgrade),
-    different changes (header/trailer/spacing/imports) → 1 problem
+  OK SAME root cause (WHY) across all files
+  OK Different changes (WHAT) are acceptable - these are variants
+  OK One root_cause explanation covers why ALL files changed
+  OK Example: 10 files, same root cause (package version upgrade),
+    different changes (header/trailer/spacing/imports) -> 1 problem
 
   SPLIT into SEPARATE atomic problems when:
-  ✗ DIFFERENT root causes (even if same validation!)
-  ✗ Cannot explain all files with one root cause
-  ✗ Mixing unrelated changes
+  FAIL DIFFERENT root causes (even if same validation!)
+  FAIL Cannot explain all files with one root cause
+  FAIL Mixing unrelated changes
 
 ## KEY INSIGHT: Same ROOT CAUSE + Different CHANGES = MERGE with variants
 
@@ -184,8 +184,8 @@ Root cause is about WHY (reason), not WHAT (manifestation):
 
 Think semantically:
 - "Why did these files need to change?"
-- If answer is SAME → merge
-- If answer is DIFFERENT → split
+- If answer is SAME -> merge
+- If answer is DIFFERENT -> split
 
 3. Handle repeated failures across files dynamically.
 - Same validator plus same repair family across many files is one repeated problem pattern, even when files have variants.
@@ -257,8 +257,8 @@ PRINCIPLE 3: Validation boundary enforcement
 
 PRINCIPLE 4: Test your grouping
 - Ask: "Can I explain why ALL these files changed with ONE root_cause statement?"
-- If YES → merge into one problem
-- If NO → split into separate problems
+- If YES -> merge into one problem
+- If NO -> split into separate problems
 
 FIELD GUIDANCE (Dynamic - based on YOUR analysis):
 
@@ -327,7 +327,7 @@ OUTPUT REQUIREMENTS:
 - **CRITICAL: problem_type classification:**
   * "primary" = At least ONE affected file is in CI-VISIBLE FILES list above
   * "hidden" = NONE of the affected files are in CI-VISIBLE FILES list (discovered only through ground truth analysis)
-  * Algorithm: If any(file in affected_files is in CI-VISIBLE FILES) → "primary", else → "hidden"
+  * Algorithm: If any(file in affected_files is in CI-VISIBLE FILES) -> "primary", else -> "hidden"
   * This distinguishes problems that CI logs revealed vs problems only found in the diff
 - is_cascading must be a boolean matching the value from CLASSIFICATION CONTEXT.
 - dependency_type must be a string (empty string if not cascading).

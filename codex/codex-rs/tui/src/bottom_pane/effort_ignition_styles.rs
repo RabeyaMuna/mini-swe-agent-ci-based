@@ -17,7 +17,7 @@ const WAVE_HALF_WIDTH: f32 = 9.0;
 const PULSE_HALF_WIDTH: f32 = 4.5;
 const SPARK_START: Duration = Duration::from_millis(900);
 const SPARK_FRAME: Duration = Duration::from_millis(100);
-const SPARK_GLYPHS: &[&str] = &["·", "✦", "✧"];
+const SPARK_GLYPHS: &[&str] = &["·", "", "*"];
 
 /// Band entries are `(launch_or_speed, travel_or_phase, strength_or_hue)`.
 type Band = (f32, f32, f32);

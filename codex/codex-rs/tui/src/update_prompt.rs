@@ -191,7 +191,7 @@ impl WidgetRef for &UpdatePromptScreen {
 
         column.push("");
         column.push(Line::from(vec![
-            "  ✨\u{200A}".bold().cyan(),
+            "  New\u{200A}".bold().cyan(),
             "Update available!".bold(),
             " ".into(),
             format!(

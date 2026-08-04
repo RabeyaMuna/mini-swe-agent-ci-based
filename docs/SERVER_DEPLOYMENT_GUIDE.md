@@ -109,8 +109,8 @@ pip install datasets sentence-transformers scikit-learn
 ### **6. Verify Installation**
 
 ```bash
-python3 -c "import minisweagent; print('✓ Mini-SWE-Agent installed')"
-python3 -c "import sentence_transformers; print('✓ Sentence Transformers installed')"
+python3 -c "import minisweagent; print('OK Mini-SWE-Agent installed')"
+python3 -c "import sentence_transformers; print('OK Sentence Transformers installed')"
 ```
 
 ---
@@ -295,10 +295,10 @@ while true; do
     
     # Process status
     if ps aux | grep -q "[r]un_eval"; then
-        echo "✓ Evaluation is RUNNING"
+        echo "OK Evaluation is RUNNING"
         ps aux | grep "[r]un_eval" | awk '{print "  PID:", $2, "CPU:", $3"%", "MEM:", $4"%"}'
     else
-        echo "✗ Evaluation is NOT running"
+        echo "FAIL Evaluation is NOT running"
     fi
     
     echo ""
@@ -338,7 +338,7 @@ bash scripts/monitor_eval.sh
 nproc
 
 # Recommended workers = cores / 2
-# Example: 16 cores → 8 workers
+# Example: 16 cores -> 8 workers
 python3 scripts/run_eval.py \
     --issue-ids-file data/trs/eval_issue_ids.json \
     --ablation L1+L2+L3 \
@@ -518,7 +518,7 @@ for ablation in BASELINE L1 L1+L2 L1+L2+L3; do
         --ablation "$ablation" \
         --workers "$WORKERS"
     
-    echo "✓ $ablation complete"
+    echo "OK $ablation complete"
     echo ""
 done
 
@@ -620,16 +620,16 @@ while [ $RETRY -lt $MAX_RETRIES ]; do
         --workers 8
     
     if [ $? -eq 0 ]; then
-        echo "✓ Success!"
+        echo "OK Success!"
         exit 0
     else
-        echo "✗ Failed, retrying..."
+        echo "FAIL Failed, retrying..."
         RETRY=$((RETRY+1))
         sleep 60
     fi
 done
 
-echo "✗ Failed after $MAX_RETRIES attempts"
+echo "FAIL Failed after $MAX_RETRIES attempts"
 exit 1
 EOF
 
@@ -665,11 +665,11 @@ bash scripts/monitor_eval.sh
 ```
 
 ### **Key Points:**
-- ✅ Use JSON backend (not ChromaDB) on servers
-- ✅ Use tmux for long-running jobs
-- ✅ Monitor resources (htop, df -h)
-- ✅ Workers = CPU cores / 2
-- ✅ Backup results regularly
+- OK Use JSON backend (not ChromaDB) on servers
+- OK Use tmux for long-running jobs
+- OK Monitor resources (htop, df -h)
+- OK Workers = CPU cores / 2
+- OK Backup results regularly
 
 ---
 

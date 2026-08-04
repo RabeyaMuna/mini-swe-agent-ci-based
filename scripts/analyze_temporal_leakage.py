@@ -437,7 +437,7 @@ def main(
         console.print("  4. When retrieving memory for an eval issue, only consider")
         console.print("     memory from commits BEFORE the eval issue's timestamp")
     else:
-        console.print("[green]✓ No temporal leakage detected[/green]")
+        console.print("[green]OK No temporal leakage detected[/green]")
 
 
 if __name__ == "__main__":

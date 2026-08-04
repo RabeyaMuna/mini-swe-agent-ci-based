@@ -68,6 +68,8 @@ A universal pattern:
 3. **Shows concrete examples** from L1 (before/after code)
 4. **Identifies dependent changes** from L1's "enabled" relationships
 5. **Extracts signals** from L2 that indicate when to apply
+6. **Preserves automation guidance** from L2, including install/setup commands and exact run targets when a tool can fix the problem
+7. **Adds Python cleanup guidance**: if a pattern changes Python files, universal_fix.steps must include Ruff autofix and formatting before final validation
 
 EXAMPLES OF GOOD PATTERNS:
 
@@ -130,10 +132,12 @@ For EACH universal pattern found, generate:
       "2. Find code using those features (grep for imports/types)",
       "3. Replace with standard equivalents (library docs for alternatives)",
       "4. Remove imports of plugin-specific features",
-      "5. Verify with the validator (run type checker)",
+      "5. If Python files changed, run Ruff cleanup on affected files or their parent directory: pip install ruff; ruff check --fix <target>; ruff format <target>",
+      "6. Verify with the validator (run type checker)",
       "",
       "DO NOT include repo-specific commands like 'python -m mypy py/'",
-      "DO include generic patterns like 'Run type checker on affected modules'"
+      "DO include generic patterns like 'Run type checker on affected modules'",
+      "DO include automation commands when the repair is mechanical, such as installing the formatter/linter and running it against affected files or directories"
     ],
 
     "applies_to": [
@@ -202,6 +206,8 @@ For EACH universal pattern found, generate:
 16. Universal_fix steps must work WITHOUT knowing this repo's structure
 17. Signals must be observable in ANY repo with this pattern
 18. Examples are EVIDENCE (keep specific) but fix is UNIVERSAL (generalize)
+19. Automation-capable fixes must keep runnable commands in universal_fix.steps, including install/setup and the command target
+20. Any universal_fix that changes *.py files must include Ruff cleanup before validation: install Ruff if needed, run `ruff check --fix <target>`, then run `ruff format <target>`
 
 Return ONLY valid JSON:
 {{

@@ -28,7 +28,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MEMORY_SEED = PROJECT_ROOT / "data" / "trs" / "memory_seed_issues.json"
 LOG_DETAILS = PROJECT_ROOT / "data" / "log_details.json"  # Standardized location
-MEMORY_ROOT = PROJECT_ROOT / "data" / "trs"
+# MEMORY_ROOT is set based on direction parameter (backward or forward)
 RESULTS_ROOT = PROJECT_ROOT / "results"
 
 
@@ -169,6 +169,19 @@ Examples:
         help="Memory ablation level: BASELINE=no memory, L1=file-level, L1+L2=+sequences, L1+L2+L3=full (default: L1+L2+L3)",
     )
     parser.add_argument(
+        "--model",
+        type=str,
+        default="minimax",
+        help="Model to use (default: minimax). Examples: glm5.2, minimax, gpt-4",
+    )
+    parser.add_argument(
+        "--direction",
+        type=str,
+        default="backward",
+        choices=["backward", "forward"],
+        help="Decomposition direction: backward or forward (default: backward)",
+    )
+    parser.add_argument(
         "--workers", type=int, default=1, help="Number of parallel workers (default: 1)"
     )
     parser.add_argument(
@@ -251,11 +264,20 @@ Examples:
     write_json(temp_dataset, selected)
     print(f"\nTemporary dataset: {temp_dataset}")
 
-    # Build output directory
-    ablation_dir = args.ablation.replace("+", "_")
-    output_dir = RESULTS_ROOT / ablation_dir
+    # Build output directory: {ablation}_{model}_{direction}/
+    # Example: baseline_glm5_2_backward/
+    ablation_dir = args.ablation.replace("+", "_").lower()
+    model_slug = args.model.replace("/", "_").replace(".", "_").replace("-", "_")
+    direction = args.direction.lower()
+
+    # Format: {ablation}_{model}_{direction}
+    run_name = f"{ablation_dir}_{model_slug}_{direction}"
+
+    # Structure: results/minisweagent/{ablation}_{model}_{direction}/
+    output_dir = RESULTS_ROOT / "minisweagent" / run_name
 
     print(f"Output directory: {output_dir}/")
+    print(f"  Run name: {run_name}")
     print(f"  Example: {output_dir}/5f98672f68c7.../")
 
     # Build command
@@ -275,11 +297,17 @@ Examples:
 
     # Add memory flags ONLY if not baseline
     if args.ablation != "BASELINE":
+        # Set memory root based on direction
+        if args.direction == "backward":
+            memory_root = PROJECT_ROOT / "data" / "back_trs"
+        else:  # forward
+            memory_root = PROJECT_ROOT / "data" / "fwr_trs"
+
         cmd.extend(
             [
                 "--memory-enabled",
                 "--memory-root",
-                str(MEMORY_ROOT),
+                str(memory_root),
                 "--memory-ablation",
                 args.ablation,
                 "--memory-top-k",
@@ -295,6 +323,9 @@ Examples:
     print(f"  --dataset {temp_dataset.name}")
     print(f"  --output {output_dir}")
     print(f"  --memory-ablation {args.ablation}")
+    if args.ablation != "BASELINE":
+        memory_root = PROJECT_ROOT / "data" / "back_trs" if args.direction == "backward" else PROJECT_ROOT / "data" / "fwr_trs"
+        print(f"  --memory-root {memory_root}")
     print(f"  --workers {args.workers}")
     print()
 

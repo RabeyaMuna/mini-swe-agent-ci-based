@@ -1169,7 +1169,7 @@ async fn custom_prompt_enter_empty_does_not_send() {
     assert!(rx.try_recv().is_err(), "no app event should be sent");
 }
 
-// Snapshot test: interrupting a running exec finalizes the active cell with a red ✗
+// Snapshot test: interrupting a running exec finalizes the active cell with a red FAIL
 // marker (replacing the spinner) and flushes it into history.
 #[tokio::test]
 async fn interrupt_exec_marks_failed_snapshot() {
