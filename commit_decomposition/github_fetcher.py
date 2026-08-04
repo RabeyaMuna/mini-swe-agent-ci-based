@@ -207,9 +207,13 @@ class GitHubFetcher:
 
         while True:
             params["page"] = page
-            response = requests.get(
-                url, headers=self.headers, params=params, timeout=30
-            )
+            try:
+                response = requests.get(
+                    url, headers=self.headers, params=params, timeout=30
+                )
+            except requests.exceptions.RequestException as e:
+                print(f"    Warning: Could not fetch GitHub metadata: {e}")
+                return {"items": items, "status_code": 0}
             if response.status_code != 200:
                 return {"items": items, "status_code": response.status_code}
 

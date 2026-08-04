@@ -112,10 +112,10 @@ class MemoryPlugin:
                 'dependencies': []
             }
 
-        # Build query from raw CI data
+        # Build query from raw CI data (Stage 0 will decompose internally)
         query = self._build_query(ci_failure, verification, issue_metadata)
 
-        # Do retrieval
+        # Retrieve from memory (handles all 9 stages internally)
         retrieval_result = self.retrieval.retrieve(query, top_k=self.top_k)
 
         # Add raw query to result for debugging
@@ -259,7 +259,7 @@ class MemoryPlugin:
                 lines.append("")
 
             # Repair instructions
-            repair = problem.get('repair_strategy', {})
+            repair = problem.get('repair_strategy') or {}
             if repair.get('summary'):
                 lines.append("** Repair Approach:**")
                 lines.append(f"{repair['summary']}")

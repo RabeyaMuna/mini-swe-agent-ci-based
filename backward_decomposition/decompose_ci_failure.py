@@ -2213,7 +2213,7 @@ def _split_chunk_for_capacity(
         )
         return [
             {
-               **chunk,
+                **chunk,
                 "all_changes": change_type_groups[change_type],
                 "change_type": change_type,
             }
@@ -3014,7 +3014,9 @@ def _format_caller_callee_for_dependency_classification(
             line_num = ch.get("line", "?")
             before = _compact_text(ch.get("before", ""), 100)
             after = _compact_text(ch.get("after", ""), 100)
-            caller_change_details.append(f'    Line {line_num}: "{before}" -> "{after}"')
+            caller_change_details.append(
+                f'    Line {line_num}: "{before}" -> "{after}"'
+            )
 
         if len(caller_changes) > 5:
             caller_change_details.append(
@@ -3498,10 +3500,75 @@ def generate_l1_l2_l3_pipeline(
         Dictionary with l1, l2, l3 sections
     """
 
-    if "error" in decomposed_result or not decomposed_result.get("problems"):
-        return decomposed_result
-
     issue_id = decomposed_result.get("original_issue_id", "?")
+    if "error" in decomposed_result or not decomposed_result.get("problems"):
+        issue_id = str(
+            decomposed_result.get("original_issue_id")
+            or decomposed_result.get("issue_id")
+            or "unknown"
+        )
+        repo = decomposed_result.get("repo", "unknown")
+        workflow_path = decomposed_result.get("benchmark_ci_context", {}).get(
+            "workflow_path",
+            decomposed_result.get("workflow_path", "unknown"),
+        )
+        workflow_name = workflow_path.split("/")[-1] if workflow_path else ""
+        note = (
+            decomposed_result.get("error") or "Backward decomposition found no problems"
+        )
+        result = {
+            "issue_id": issue_id,
+            "repo": repo,
+            "workflow_path": workflow_path,
+            "l1_memory": {
+                "issue_id": issue_id,
+                "repo": repo,
+                "repo_owner": repo.split("/")[0] if "/" in repo else "unknown",
+                "workflow": workflow_path,
+                "workflow_name": workflow_name,
+                "changed_files": decomposed_result.get("changed_files", []),
+                "problems": [],
+                "note": note,
+            },
+            "l2_memory": {
+                "issue_id": issue_id,
+                "repo": repo,
+                "workflow": workflow_path,
+                "total_problems": 0,
+                "failure_identify": [],
+                "repair_strategies": [],
+                "note": note,
+            },
+            "l3_memory": {
+                "issue_id": issue_id,
+                "repo": repo,
+                "workflow": workflow_path,
+                "universal_patterns": [
+                    {
+                        "pattern_id": f"no-backward-problems-{issue_id}",
+                        "failure_type": "no_backward_problems",
+                        "failure_pattern": "",
+                        "problem": "",
+                        "reasoning": note,
+                        "when_to_apply": "",
+                        "signals": [],
+                        "universal_fix": {"approach": "", "steps": []},
+                        "examples": [],
+                        "no_decomposed_problems": True,
+                    }
+                ],
+            },
+            "metadata": {
+                "original_problems_count": 0,
+                "deduplicated_count": 0,
+                "l1_problems": 0,
+                "l2_strategies": 0,
+                "l3_patterns": 1,
+            },
+        }
+        _append_to_memory_files(result, output_dir=output_dir)
+        return result
+
     print(f"\n{'=' * 80}")
     print(f"L1/L2/L3 Pipeline for Issue {issue_id}")
     print(f"{'=' * 80}")

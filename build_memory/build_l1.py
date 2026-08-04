@@ -345,6 +345,60 @@ def _empty_l1_entry(
     }
 
 
+def _reorder_problems_by_ci_sequence(problems: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Reorder problems by CI verification sequence and dependencies.
+
+    Order:
+    1. validation_order (CI pipeline: dependencies → build → type check → test → docs)
+    2. Config files first (pyproject.toml, setup.py, etc.)
+    3. Dependencies first (has dependency_type)
+    4. Non-cascading before cascading
+    5. problem_id (original order as tiebreaker)
+
+    This ensures problems are presented in the order they would fail in CI.
+    """
+    def is_config_file(filepath: str) -> bool:
+        """Check if file is a configuration file."""
+        config_patterns = [
+            "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+            "package.json", "tsconfig.json", ".pre-commit-config",
+            "Dockerfile", ".github/workflows",
+        ]
+        return any(pattern in filepath for pattern in config_patterns)
+
+    def problem_sort_key(problem: dict) -> tuple:
+        """Generate sort key for CI verification order."""
+        validation_order = problem.get("validation_order", 999)
+
+        # Config file bonus (comes first)
+        files = problem.get("files", []) or problem.get("affected_files", [])
+        is_config = any(is_config_file(f) for f in files)
+        config_rank = 0 if is_config else 1
+
+        # Dependency rank
+        has_dependency = bool(problem.get("dependency_type", ""))
+        dependency_rank = 0 if has_dependency else 1
+
+        # Cascading rank (non-cascading first)
+        is_cascading = problem.get("is_cascading", False)
+        cascading_rank = 1 if is_cascading else 0
+
+        # Original problem_id
+        problem_id = problem.get("problem_id", 0)
+
+        return (validation_order, config_rank, dependency_rank, cascading_rank, problem_id)
+
+    # Sort problems
+    sorted_problems = sorted(problems, key=problem_sort_key)
+
+    # Reassign problem_ids to match new order
+    for idx, problem in enumerate(sorted_problems, 1):
+        problem["problem_id"] = idx
+
+    return sorted_problems
+
+
 def _build_l1_entry_with_dependencies(
     *,
     issue_id: str,
@@ -356,7 +410,12 @@ def _build_l1_entry_with_dependencies(
 ) -> Dict[str, Any]:
     """
     Build L1 entry structure with problem dependencies (enabled relationships).
+
+    Problems are automatically reordered by CI verification sequence before saving.
     """
+    # REORDER PROBLEMS BY CI VERIFICATION SEQUENCE
+    problems = _reorder_problems_by_ci_sequence(problems)
+
     # Extract workflow name from path
     workflow_name = workflow_path.split("/")[-1] if workflow_path else ""
 
@@ -370,7 +429,7 @@ def _build_l1_entry_with_dependencies(
         "problems": [],
     }
 
-    # Process each problem from repair sequence
+    # Process each problem from repair sequence (now in CI order!)
     for problem in problems:
         if not isinstance(problem, dict):
             continue

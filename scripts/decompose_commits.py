@@ -45,6 +45,10 @@ from commit_decomposition.github_fetcher import GitHubFetcher
 
 # Import utilities
 from utilities.ci_cache import load_validation_sequence
+from utilities.error_handler import (
+    clear_error_from_execption,
+    save_error_to_execption,
+)
 
 
 def _issue_id(record: dict) -> str:
@@ -64,7 +68,7 @@ def _load_json_list(path: Path) -> list:
         with open(path) as f:
             data = json.load(f)
         return data if isinstance(data, list) else []
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Warning: Could not load {path}: {e}")
         return []
 
@@ -114,7 +118,60 @@ def build_l1_l2_l3_for_commit_decomposition(
     # Check if decomposition has problems (using unified field name)
     problems = decomposed_result.get("problems", [])
     if not problems:
-        print(f"  No problems found for issue {issue_id}, skipping L1/L2/L3")
+        print(
+            f"  No problems found for issue {issue_id}, saving empty L1/L2/L3 records"
+        )
+        workflow_path = decomposed_result.get("workflow", "")
+        workflow_name = workflow_path.split("/")[-1] if workflow_path else ""
+        l1_memory = {
+            "issue_id": issue_id,
+            "repo": decomposed_result.get("repo", ""),
+            "repo_owner": decomposed_result.get("repo_owner", ""),
+            "workflow": workflow_path,
+            "workflow_name": workflow_name,
+            "changed_files": decomposed_result.get("_changed_files", []),
+            "problems": [],
+            "note": decomposed_result.get("error")
+            or "Forward decomposition found no problems",
+        }
+        l2_memory = {
+            "issue_id": issue_id,
+            "repo": decomposed_result.get("repo", ""),
+            "workflow": workflow_path,
+            "total_problems": 0,
+            "failure_identify": [],
+            "repair_strategies": [],
+            "note": decomposed_result.get("error")
+            or "Forward decomposition found no problems",
+        }
+        l3_memory = {
+            "issue_id": issue_id,
+            "repo": decomposed_result.get("repo", ""),
+            "workflow": workflow_path,
+            "universal_patterns": [
+                {
+                    "pattern_id": f"no-forward-problems-{issue_id}",
+                    "failure_type": "no_forward_problems",
+                    "failure_pattern": "",
+                    "problem": "",
+                    "reasoning": decomposed_result.get("error")
+                    or "Forward decomposition found no commit-level problems",
+                    "when_to_apply": "",
+                    "signals": [],
+                    "universal_fix": {"approach": "", "steps": []},
+                    "examples": [],
+                    "no_decomposed_problems": True,
+                    "no_forward_problems": True,
+                }
+            ],
+        }
+        _append_to_fwr_trs(
+            l1_memory=l1_memory,
+            l2_memory=l2_memory,
+            l3_memory=l3_memory,
+            issue_id=issue_id,
+            output_dir=output_dir,
+        )
         return decomposed_result
 
     print(f"\n[Memory Building] Issue {issue_id}")
@@ -136,7 +193,9 @@ def build_l1_l2_l3_for_commit_decomposition(
     # Build L2 memory
     print("  [2/3] Building L2 (repair strategies)...")
     l2_memory = build_l2_memory(l1_memory=l1_memory, llm=llm)
-    print(f"  OK L2 generated: {len(l2_memory.get('repair_strategies', []))} strategies")
+    print(
+        f"  OK L2 generated: {len(l2_memory.get('repair_strategies', []))} strategies"
+    )
 
     # Build L3 memory
     print("  [3/3] Building L3 (universal patterns)...")
@@ -300,10 +359,26 @@ def main():
     decomposed_file = output_dir_path / "decomposed_issues.json"
 
     existing_results = _load_json_list(decomposed_file)
+    # Error-only cache entries are stale/incomplete: they were created when a
+    # GitHub compare request returned no commits even though the dataset has a
+    # repair diff.  Drop them so the issue is reprocessed through the fallback.
     decomposed_cache = {
-        _issue_id(result): result for result in existing_results if _issue_id(result)
+        _issue_id(result): result
+        for result in existing_results
+        if _issue_id(result) and not result.get("error")
     }
+    stale_error_ids = {
+        _issue_id(result)
+        for result in existing_results
+        if _issue_id(result) and result.get("error")
+    }
+    if stale_error_ids:
+        print(
+            f"Discarding {len(stale_error_ids)} stale error-only decomposition "
+            "records; they will be rebuilt from the stored dataset diffs"
+        )
     processed_ids = _complete_memory_issue_ids(output_dir_path)
+    processed_ids -= stale_error_ids
     partial_ids = (
         {
             str(item.get("issue_id"))
@@ -351,23 +426,54 @@ def main():
                 decomposed = decompose_issue(
                     issue, validation_cache, analyzer, github_fetcher
                 )
+                if decomposed.get("error"):
+                    save_error_to_execption(
+                        issue_id,
+                        RuntimeError(decomposed["error"]),
+                        error_type="DECOMPOSITION_ERROR",
+                        additional_context={
+                            "repo": f"{issue.get('repo_owner', '')}/{issue.get('repo_name', '')}",
+                            "sha_fail": issue.get("sha_fail", ""),
+                            "sha_success": issue.get("sha_success", ""),
+                            "changed_files": issue.get("changed_files", []),
+                        },
+                    )
+                    print(
+                        "  Decomposition failed; saved details to "
+                        f"execption/{issue_id}.json"
+                    )
+                    continue
                 decomposed_cache[issue_id] = decomposed
                 _save_decomposed_results(
                     list(decomposed_cache.values()), decomposed_file
                 )
 
-            # Build L1/L2/L3 memory
-            if not args.batch or "error" not in decomposed:
-                result = build_l1_l2_l3_for_commit_decomposition(
-                    decomposed, llm, args.output_dir
-                )
-                decomposed_cache[issue_id] = result
+            # Build L1/L2/L3 memory. Even decompositions with no commit-level
+            # problems get empty records so memory coverage matches the
+            # decomposed issue set.
+            result = build_l1_l2_l3_for_commit_decomposition(
+                decomposed, llm, args.output_dir
+            )
+            decomposed_cache[issue_id] = result
+            clear_error_from_execption(issue_id)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"Error processing {issue_id}: {e}")
             import traceback
 
             traceback.print_exc()
+            save_error_to_execption(
+                issue_id,
+                e,
+                error_type="DECOMPOSITION_ERROR",
+                additional_context={
+                    "repo": f"{issue.get('repo_owner', '')}/{issue.get('repo_name', '')}",
+                    "sha_fail": issue.get("sha_fail", ""),
+                    "sha_success": issue.get("sha_success", ""),
+                    "changed_files": issue.get("changed_files", []),
+                },
+            )
+            decomposed_cache.pop(issue_id, None)
 
     fwr_trs_dir = Path(args.output_dir)
     fwr_trs_dir.mkdir(parents=True, exist_ok=True)
