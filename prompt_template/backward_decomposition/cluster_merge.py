@@ -26,15 +26,15 @@ PROBLEMS:
 YOUR TASK: Group similar problems together.
 
 MERGE CRITERIA (ALL must be true to merge):
-✓ Root causes express the SAME underlying issue
-✓ Fixes use the SAME pattern/approach
-✓ Files can be treated as "same problem in multiple places"
-✓ No interdependencies within cluster
+OK Root causes express the SAME underlying issue
+OK Fixes use the SAME pattern/approach
+OK Files can be treated as "same problem in multiple places"
+OK No interdependencies within cluster
 
 KEEP SEPARATE if ANY true:
-✗ Root causes are DIFFERENT
-✗ Fixes require DIFFERENT approaches
-✗ Problems have different complexity levels
+FAIL Root causes are DIFFERENT
+FAIL Fixes require DIFFERENT approaches
+FAIL Problems have different complexity levels
 
 IMPORTANT: Be CONSERVATIVE. When in doubt, keep problems SEPARATE.
 

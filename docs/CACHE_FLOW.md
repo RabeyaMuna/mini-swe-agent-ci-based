@@ -21,7 +21,7 @@
          ┃ exist in cache?         ┃
          ┗━━━━━━━┬━━━━━━━━┬━━━━━━━┛
                  │        │
-          YES ✓  │        │  NO ✗
+          YES OK  │        │  NO FAIL
                  ↓        ↓
     ┌──────────────────┐  ┌──────────────────────┐
     │ Load from cache  │  │ NOT in cache         │
@@ -52,7 +52,7 @@
          ┃ exist in cache?         ┃
          ┗━━━━━━━┬━━━━━━━━┬━━━━━━━┛
                  │        │
-          YES ✓  │        │  NO ✗
+          YES OK  │        │  NO FAIL
                  ↓        ↓
     ┌──────────────────┐  ┌──────────────────────┐
     │ Load from cache  │  │ NOT in cache         │
@@ -91,7 +91,7 @@ def _run_log_analysis(instance, llm, model):
     cached = _load_log_analysis_cache(sha_fail=sha_fail, task_id=task_id)
     
     if cached:
-        # ✓ FOUND IN CACHE - Use it!
+        # OK FOUND IN CACHE - Use it!
         logger.info("[Phase A] Loaded cached log analysis for %s", sha_fail[:12])
         return cached  # Skip LLM calls entirely!
     
@@ -133,7 +133,7 @@ def _extract_workflow_profile(instance, llm, model):
     cached = _load_workflow_validation_cache(sha_fail=sha_fail, issue_id=issue_id)
     
     if cached:
-        # ✓ FOUND IN CACHE - Use it!
+        # OK FOUND IN CACHE - Use it!
         logger.info("[Phase B] Loaded cached workflow validation for %s", sha_fail[:12])
         return cached  # Skip LLM call!
     
@@ -178,8 +178,8 @@ Issue 71:
   [Phase B] Cache miss - analyzing workflow
   [Phase B] LLM call 1/1...
   [Phase B] Saved workflow validation to cache
-  ⏱️  Time: 20 seconds
-  💰 Cost: $0.04
+  ⏱  Time: 20 seconds
+   Cost: $0.04
 
 Issue 72:
   [Phase A] Cache miss - running CILogAnalyzer
@@ -190,8 +190,8 @@ Issue 72:
   [Phase B] Cache miss - analyzing workflow
   [Phase B] LLM call 1/1...
   [Phase B] Saved workflow validation to cache
-  ⏱️  Time: 20 seconds
-  💰 Cost: $0.04
+  ⏱  Time: 20 seconds
+   Cost: $0.04
 
 Issue 73:
   [Phase A] Cache miss - running CILogAnalyzer
@@ -202,10 +202,10 @@ Issue 73:
   [Phase B] Cache miss - analyzing workflow
   [Phase B] LLM call 1/1...
   [Phase B] Saved workflow validation to cache
-  ⏱️  Time: 20 seconds
-  💰 Cost: $0.04
+  ⏱  Time: 20 seconds
+   Cost: $0.04
 
-Total: ⏱️  60 seconds, 💰 $0.12
+Total: ⏱  60 seconds,  $0.12
 ```
 
 **Cache files created:**
@@ -236,24 +236,24 @@ python3 scripts/run_eval.py --issue-ids 71,72,73 --ablation L1+L2+L3
 **Output:**
 ```
 Issue 71:
-  [Phase A] Loaded cached log analysis for bd46af65 ✓
-  [Phase B] Loaded cached workflow validation for bd46af65 ✓
-  ⏱️  Time: <1 second
-  💰 Cost: $0.00
+  [Phase A] Loaded cached log analysis for bd46af65 OK
+  [Phase B] Loaded cached workflow validation for bd46af65 OK
+  ⏱  Time: <1 second
+   Cost: $0.00
 
 Issue 72:
-  [Phase A] Loaded cached log analysis for c0f40b6a ✓
-  [Phase B] Loaded cached workflow validation for c0f40b6a ✓
-  ⏱️  Time: <1 second
-  💰 Cost: $0.00
+  [Phase A] Loaded cached log analysis for c0f40b6a OK
+  [Phase B] Loaded cached workflow validation for c0f40b6a OK
+  ⏱  Time: <1 second
+   Cost: $0.00
 
 Issue 73:
-  [Phase A] Loaded cached log analysis for c27ea533 ✓
-  [Phase B] Loaded cached workflow validation for c27ea533 ✓
-  ⏱️  Time: <1 second
-  💰 Cost: $0.00
+  [Phase A] Loaded cached log analysis for c27ea533 OK
+  [Phase B] Loaded cached workflow validation for c27ea533 OK
+  ⏱  Time: <1 second
+   Cost: $0.00
 
-Total: ⏱️  3 seconds, 💰 $0.00
+Total: ⏱  3 seconds,  $0.00
 ```
 
 **Savings:** 57 seconds + $0.12!
@@ -269,10 +269,10 @@ python3 scripts/run_eval.py --issue-ids 71,74,75 --ablation L1+L2+L3
 **Output:**
 ```
 Issue 71:
-  [Phase A] Loaded cached log analysis for bd46af65 ✓
-  [Phase B] Loaded cached workflow validation for bd46af65 ✓
-  ⏱️  Time: <1 second
-  💰 Cost: $0.00
+  [Phase A] Loaded cached log analysis for bd46af65 OK
+  [Phase B] Loaded cached workflow validation for bd46af65 OK
+  ⏱  Time: <1 second
+   Cost: $0.00
 
 Issue 74:
   [Phase A] Cache miss - running CILogAnalyzer
@@ -280,8 +280,8 @@ Issue 74:
   [Phase A] Saved log analysis to cache
   [Phase B] Cache miss - analyzing workflow
   [Phase B] Saved workflow validation to cache
-  ⏱️  Time: 20 seconds
-  💰 Cost: $0.04
+  ⏱  Time: 20 seconds
+   Cost: $0.04
 
 Issue 75:
   [Phase A] Cache miss - running CILogAnalyzer
@@ -289,27 +289,27 @@ Issue 75:
   [Phase A] Saved log analysis to cache
   [Phase B] Cache miss - analyzing workflow
   [Phase B] Saved workflow validation to cache
-  ⏱️  Time: 20 seconds
-  💰 Cost: $0.04
+  ⏱  Time: 20 seconds
+   Cost: $0.04
 
-Total: ⏱️  41 seconds, 💰 $0.08
+Total: ⏱  41 seconds,  $0.08
 ```
 
 ---
 
 ## **Key Points**
 
-✅ **Generate only if NOT present** - Exactly as you said!
+OK **Generate only if NOT present** - Exactly as you said!
 
-✅ **Automatic lookup** - No manual cache management needed
+OK **Automatic lookup** - No manual cache management needed
 
-✅ **SHA-based** - Each commit hash gets cached once
+OK **SHA-based** - Each commit hash gets cached once
 
-✅ **Persistent** - Cache survives across runs
+OK **Persistent** - Cache survives across runs
 
-✅ **Transparent** - Logs show "Loaded cached" or "Cache miss"
+OK **Transparent** - Logs show "Loaded cached" or "Cache miss"
 
-✅ **Safe** - Can delete cache files anytime to force regeneration
+OK **Safe** - Can delete cache files anytime to force regeneration
 
 ---
 
@@ -330,4 +330,4 @@ This is **already implemented** in the code at:
 - **Phase A:** `src/minisweagent/run/benchmarks/utils/ci_context.py` line 442-456
 - **Phase B:** `src/minisweagent/run/benchmarks/utils/ci_context.py` line 624-627
 
-No changes needed - it works exactly as you described! 🎉
+No changes needed - it works exactly as you described! 

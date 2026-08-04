@@ -35,7 +35,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
 
         let content = text![
             line![
-                "✨\u{200A}".bold().cyan(),
+                "New\u{200A}".bold().cyan(),
                 "Update available!".bold().cyan(),
                 " ",
                 format!("{CODEX_CLI_VERSION} -> {}", self.latest_version).bold(),
@@ -82,7 +82,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
 }
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn new_warning_event(message: String) -> PrefixedWrappedHistoryCell {
-    PrefixedWrappedHistoryCell::new(message.yellow(), "⚠ ".yellow(), "  ")
+    PrefixedWrappedHistoryCell::new(message.yellow(), "WARNING ".yellow(), "  ")
 }
 
 #[derive(Debug)]
@@ -103,7 +103,7 @@ pub(crate) fn new_safety_access_block_event() -> SafetyAccessBlockCell {
 
 pub(crate) fn new_cyber_policy_error_event() -> SafetyAccessBlockCell {
     SafetyAccessBlockCell {
-        body: "We take extra caution with cybersecurity requests. If you’re a security professional, you may be able to apply for Trusted Access.",
+        body: "We take extra caution with cybersecurity requests. If you're a security professional, you may be able to apply for Trusted Access.",
         trusted_access_url: "https://openai.com/form/enterprise-trusted-access-for-cyber/",
     }
 }
@@ -179,7 +179,7 @@ pub(crate) fn new_deprecation_notice(
 impl HistoryCell for DeprecationNoticeCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(vec!["⚠ ".red().bold(), self.summary.clone().red()].into());
+        lines.push(vec!["WARNING ".red().bold(), self.summary.clone().red()].into());
 
         let wrap_width = width.saturating_sub(4).max(1) as usize;
 

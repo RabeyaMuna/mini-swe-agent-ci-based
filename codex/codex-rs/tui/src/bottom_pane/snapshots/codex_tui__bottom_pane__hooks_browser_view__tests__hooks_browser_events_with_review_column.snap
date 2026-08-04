@@ -6,7 +6,7 @@ expression: "render_lines(&view, 112)"
   Hooks                                                                                                         
   Lifecycle hooks from config and enabled plugins.                                                              
                                                                                                                 
-  ⚠ 1 hook needs review before it can run.                                                                      
+  WARNING 1 hook needs review before it can run.                                                                      
                                                                                                                 
   Event                 Installed   Active      Review      Description                                         
   PreToolUse            1           0           1           Before a tool executes                              

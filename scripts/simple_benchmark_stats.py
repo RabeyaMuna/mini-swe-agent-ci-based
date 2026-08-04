@@ -195,27 +195,27 @@ def print_summary(stats: dict, total_issues: int):
     print("BENCHMARK STATISTICS")
     print("=" * 70)
 
-    print(f"\n📊 Total Issues: {total_issues}")
+    print(f"\n Total Issues: {total_issues}")
 
-    print("\n🔧 COMMITS PER PULL REQUEST")
+    print("\n COMMITS PER PULL REQUEST")
     print(f"  Mean:   {stats['commits']['mean']:.2f}")
     print(f"  Median: {stats['commits']['median']:.1f}")
     print(f"  Std:    {stats['commits']['std']:.2f}")
     print(f"  Range:  {stats['commits']['min']} - {stats['commits']['max']}")
 
-    print("\n📁 FILES PER PULL REQUEST")
+    print("\n FILES PER PULL REQUEST")
     print(f"  Mean:   {stats['files']['mean']:.2f}")
     print(f"  Median: {stats['files']['median']:.1f}")
     print(f"  Std:    {stats['files']['std']:.2f}")
     print(f"  Range:  {stats['files']['min']} - {stats['files']['max']}")
 
-    print("\n📝 LINES CHANGED PER PULL REQUEST")
+    print("\n LINES CHANGED PER PULL REQUEST")
     print(f"  Mean:   {stats['lines']['mean']:.1f}")
     print(f"  Median: {stats['lines']['median']:.1f}")
     print(f"  Std:    {stats['lines']['std']:.1f}")
     print(f"  Range:  {stats['lines']['min']} - {stats['lines']['max']}")
 
-    print("\n🧩 PROBLEMS PER PULL REQUEST")
+    print("\n PROBLEMS PER PULL REQUEST")
     print(f"  Mean:   {stats['problems']['mean']:.2f}")
     print(f"  Median: {stats['problems']['median']:.1f}")
     print(f"  Std:    {stats['problems']['std']:.2f}")
@@ -331,24 +331,24 @@ def main():
     report_file = output_dir / "benchmark_stats.json"
     with open(report_file, "w") as f:
         json.dump(report, f, indent=2)
-    print(f"\n✅ Full report: {report_file}")
+    print(f"\nOK Full report: {report_file}")
 
     # Save markdown table
     md_file = output_dir / "benchmark_stats.md"
     with open(md_file, "w") as f:
         f.write("# Benchmark Statistics\n\n")
         f.write(generate_markdown_table(stats, len(issues)))
-    print(f"✅ Markdown table: {md_file}")
+    print(f"OK Markdown table: {md_file}")
 
     # Save LaTeX table
     tex_file = output_dir / "benchmark_stats.tex"
     with open(tex_file, "w") as f:
         f.write(generate_latex_table(stats, len(issues)))
-    print(f"✅ LaTeX table: {tex_file}")
+    print(f"OK LaTeX table: {tex_file}")
 
     # Save distributions
     save_distributions(stats, output_dir)
-    print(f"✅ Distributions: {output_dir / 'distributions.json'}")
+    print(f"OK Distributions: {output_dir / 'distributions.json'}")
 
     print("\n" + "=" * 70)
     print("DONE!")

@@ -1,0 +1,32 @@
+model_list:
+  # GLM models
+  - model_name: glm5.2
+    litellm_params:
+      model: zai/glm-5.2
+      api_base: os.environ/GLM_BASE_URL
+      api_key: os.environ/GLM_API_KEY
+
+  - model_name: glm4
+    litellm_params:
+      model: zai/glm-4
+      api_base: os.environ/GLM_BASE_URL
+      api_key: os.environ/GLM_API_KEY
+
+  # Minimax via OpenRouter
+  - model_name: minimax
+    litellm_params:
+      model: openrouter/minimax/minimax-m2.5
+      api_base: os.environ/OPENROUTER_BASE_URL
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # DeepSeek (optional)
+  - model_name: deepseek-chat
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  # OpenAI (optional)
+  - model_name: gpt-4
+    litellm_params:
+      model: gpt-4
+      api_key: os.environ/OPENAI_API_KEY

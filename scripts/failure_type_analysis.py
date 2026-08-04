@@ -299,14 +299,14 @@ def main():
     json_file = output_dir / "failure_type_analysis.json"
     with open(json_file, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\n✓ Saved analysis to {json_file}")
+    print(f"\nOK Saved analysis to {json_file}")
 
     # Generate report
     report = format_analysis_report(results)
     report_file = output_dir / "failure_type_analysis.md"
     with open(report_file, "w") as f:
         f.write(report)
-    print(f"✓ Saved report to {report_file}")
+    print(f"OK Saved report to {report_file}")
 
     # Print summary
     print("\n" + "=" * 70)

@@ -2111,7 +2111,7 @@ fn picker_footer_progress_label(state: &PickerState, list_height: u16, width: u1
         state.selected.saturating_add(1)
     };
     let total = if state.pagination.loading.is_pending() {
-        format!("{}…", state.filtered_rows.len())
+        format!("{}...", state.filtered_rows.len())
     } else {
         state.filtered_rows.len().to_string()
     };
@@ -2237,7 +2237,7 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
             priority: 7,
         },
         PickerFooterHint {
-            key: "←/→",
+            key: "←/->",
             wide_label: String::from("change option"),
             compact_label: String::from("option"),
             priority: 8,
@@ -2310,7 +2310,7 @@ fn render_transcript_loading_overlay(frame: &mut crate::custom_terminal::Frame, 
         return;
     }
 
-    let message = "Loading transcript…";
+    let message = "Loading transcript...";
     let message_width = UnicodeWidthStr::width(message) as u16;
     let overlay_width = if area.width >= message_width.saturating_add(10) {
         message_width + 10
@@ -2507,7 +2507,7 @@ fn render_list(frame: &mut crate::custom_terminal::Frame, area: Rect, state: &Pi
     if state.pagination.loading.is_pending()
         && y < content_area.y.saturating_add(content_area.height)
     {
-        let loading_line: Line = vec!["  ".into(), "Loading older sessions…".italic().dim()].into();
+        let loading_line: Line = vec!["  ".into(), "Loading older sessions...".italic().dim()].into();
         let rect = Rect::new(area.x, y, area.width, 1);
         frame.render_widget_ref(loading_line, rect);
     }
@@ -2746,7 +2746,7 @@ fn dense_column_text(text: &str, width: usize) -> String {
 fn selection_marker(is_selected: bool, is_expanded: bool) -> Span<'static> {
     match (is_selected, is_expanded) {
         (true, true) => "⌄ ".set_style(selected_session_style().bold()),
-        (true, false) => "❯ ".set_style(selected_session_style().bold()),
+        (true, false) => "> ".set_style(selected_session_style().bold()),
         (false, _) => "  ".into(),
     }
 }
@@ -3203,7 +3203,7 @@ fn render_empty_state_line(state: &PickerState) -> Line<'static> {
         if state.search_state.is_active()
             || (state.pagination.loading.is_pending() && state.pagination.next_cursor.is_some())
         {
-            return vec!["Searching…".italic().dim()].into();
+            return vec!["Searching...".italic().dim()].into();
         }
         if state.pagination.reached_scan_cap {
             let msg = format!(
@@ -3217,9 +3217,9 @@ fn render_empty_state_line(state: &PickerState) -> Line<'static> {
 
     if state.pagination.loading.is_pending() {
         if state.all_rows.is_empty() && state.pagination.num_scanned_files == 0 {
-            return vec!["Loading sessions…".italic().dim()].into();
+            return vec!["Loading sessions...".italic().dim()].into();
         }
-        return vec!["Loading older sessions…".italic().dim()].into();
+        return vec!["Loading older sessions...".italic().dim()].into();
     }
 
     vec!["No sessions yet".italic().dim()].into()
@@ -3854,7 +3854,7 @@ mod tests {
 
         assert!(rendered.contains("esc new"));
         assert!(rendered.contains("tab focus"));
-        assert!(rendered.contains("←/→ option"));
+        assert!(rendered.contains("←/-> option"));
         assert!(rendered.contains("ctrl+o dense"));
         assert!(rendered.contains("ctrl+t preview"));
         assert!(rendered.contains("ctrl+e exp"));
@@ -4065,7 +4065,7 @@ mod tests {
 
         let label = picker_footer_progress_label(&state, /*list_height*/ 6, /*width*/ 80);
 
-        assert_eq!(label, " 10 / 10… · 37% ");
+        assert_eq!(label, " 10 / 10... · 37% ");
     }
 
     #[test]
@@ -4847,7 +4847,7 @@ session_picker_view = "dense"
 
         assert_eq!(line.width(), 80);
         assert_eq!(line.style.fg, selected_session_style().fg);
-        assert_eq!(line.spans[0].content, "❯ ");
+        assert_eq!(line.spans[0].content, "> ");
     }
 
     #[test]
@@ -5665,7 +5665,7 @@ session_picker_view = "dense"
         assert_eq!(recorded_requests.lock().unwrap().len(), 1);
         assert_eq!(
             picker_footer_progress_label(&state, /*list_height*/ 5, /*width*/ 80),
-            " 10 / 10… · 100% "
+            " 10 / 10... · 100% "
         );
     }
 

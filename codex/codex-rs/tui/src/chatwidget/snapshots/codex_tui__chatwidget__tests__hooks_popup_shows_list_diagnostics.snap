@@ -6,7 +6,7 @@ expression: popup
   Lifecycle hooks from config and enabled plugins.
 
   Issues
-  ⚠ skipped invalid matcher for PreToolUse
+  WARNING skipped invalid matcher for PreToolUse
   ■ /tmp/hooks.json: failed to parse hooks config
 
   Event                 Installed   Active      Description

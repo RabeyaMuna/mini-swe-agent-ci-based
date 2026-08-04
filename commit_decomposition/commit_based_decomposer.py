@@ -492,6 +492,27 @@ def decompose_issue(
     )
     print(f"    Total commits: {len(commits)}")
 
+    # The benchmark stores the exact repair patch.  GitHub compare can return
+    # no commits when either SHA is only available on a temporary benchmark
+    # branch, a mirrored repository, or when the API is unavailable.  In that
+    # case the stored diff is still authoritative and can be analyzed as one
+    # repair commit.
+    if not commits and issue.get("diff"):
+        fallback_sha = sha_fail or sha_success or f"dataset-issue-{issue_id}"
+        commits = [
+            {
+                "sha": fallback_sha,
+                "message": f"Benchmark repair diff for issue {issue_id}",
+                "author": "",
+                "date": issue.get("commit_date", ""),
+                "html_url": issue.get("commit_link", ""),
+                "_diff": issue["diff"],
+                "_changed_files": issue.get("changed_files", []),
+                "_from_dataset": True,
+            }
+        ]
+        print("    GitHub compare returned no commits; using stored benchmark diff")
+
     if not commits:
         return {
             "issue_id": issue_id,
@@ -503,7 +524,9 @@ def decompose_issue(
     all_problems = []
     commit_analyses = []
     validation_sequence = validation_cache.get("validation_sequence", [])
-    workflow_path = validation_cache.get("workflow_path", "")
+    workflow_path = validation_cache.get("workflow_path") or issue.get(
+        "workflow_path", ""
+    )
     structured_failure = load_structured_ci_failure(sha_fail, issue_id)
     if structured_failure:
         print("    Using structured CI failure info from data/log_details.json")
@@ -517,8 +540,14 @@ def decompose_issue(
         print(f"    Analyzing commit {i}/{len(commits)}: {commit_sha[:8]}")
 
         # First fetch commit diff and changed-file information.
-        full_diff = get_commit_diff(repo_owner, repo_name, commit_sha, github_fetcher)
+        full_diff = commit.get("_diff") or get_commit_diff(
+            repo_owner, repo_name, commit_sha, github_fetcher
+        )
         changed_files = get_changed_files(full_diff, include_ignored=True)
+        if commit.get("_changed_files"):
+            changed_files = merge_file_lists(
+                commit.get("_changed_files", []), changed_files
+            )
         hard_filtered_diff = filter_diff(full_diff)
         validated_changed_files = get_changed_files(
             hard_filtered_diff, include_ignored=True
@@ -793,18 +822,22 @@ def decompose_issue(
         # Core identification (matches backward decomposition EXACTLY)
         "issue_id": issue_id,
         "repo": f"{repo_owner}/{repo_name}",
-        "workflow": validation_cache.get("workflow_path", ""),
+        "workflow": workflow_path,
+        "workflow_path": workflow_path,
         "problems": problem_sequence,  # ← Changed to "problems" to match backward decomposition
-
         # Metadata (not saved to decomposed_issues.json, only for L1/L2/L3 building)
         "sha_fail": sha_fail,
         "sha_success": sha_success,
         "repo_owner": repo_owner,
+        "changed_files": list(all_changed_files),
+        "diff": issue.get("diff", "") if issue.get("diff") else "",
+        "commit_link": issue.get("commit_link", ""),
         "decomposition_type": "commit_based",
         "total_commits": len(commits),
         "total_problems": len(problem_sequence),
-
         # Internal data for L1 building (not in final output)
-        "_changed_files": list(all_changed_files),  # Prefixed with _ to mark as internal
+        "_changed_files": list(
+            all_changed_files
+        ),  # Prefixed with _ to mark as internal
         "_dependencies": {},  # Internal data for dependency analysis
     }

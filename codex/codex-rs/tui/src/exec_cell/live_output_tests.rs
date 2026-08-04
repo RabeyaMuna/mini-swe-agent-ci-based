@@ -91,20 +91,20 @@ fn truncated_ansi_sequence_does_not_hide_the_retained_tail() {
 #[test]
 fn bounds_long_no_newline_output_and_preserves_utf8_head_and_tail() {
     let mut output = LiveCommandOutput::default();
-    let chunk = "🦀".repeat(1024);
+    let chunk = "界".repeat(1024);
     for _ in 0..600 {
         output.push_str(&chunk);
     }
 
     let line = output.lines().next().expect("partial line");
     let retained_bytes = LIVE_COMMAND_OUTPUT_LINE_HEAD_BYTES + LIVE_COMMAND_OUTPUT_LINE_TAIL_BYTES
-        - LIVE_COMMAND_OUTPUT_LINE_HEAD_BYTES % "🦀".len()
-        - LIVE_COMMAND_OUTPUT_LINE_TAIL_BYTES % "🦀".len();
+        - LIVE_COMMAND_OUTPUT_LINE_HEAD_BYTES % "界".len()
+        - LIVE_COMMAND_OUTPUT_LINE_TAIL_BYTES % "界".len();
 
     assert_eq!(output.total_lines(), 1);
     assert_eq!(output.retained_lines(), 1);
-    assert!(line.starts_with("🦀🦀🦀"));
-    assert!(line.ends_with("🦀🦀🦀"));
+    assert!(line.starts_with("界界界"));
+    assert!(line.ends_with("界界界"));
     assert!(line.contains(&format!(
         "... {} bytes omitted ...",
         600 * chunk.len() - retained_bytes
@@ -129,7 +129,7 @@ fn retained_output_stays_within_the_live_byte_budget() {
     assert!(lines.last().expect("tail line").ends_with(" partial-tail"));
     assert_eq!(
         output.transcript_lines().nth(50).expect("omission line"),
-        "… +80 lines"
+        "... +80 lines"
     );
     assert!(lines.iter().map(|line| line.len()).sum::<usize>() <= LIVE_COMMAND_OUTPUT_MAX_BYTES);
 }

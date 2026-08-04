@@ -37,11 +37,11 @@ The system automatically caches expensive LLM analysis to avoid reprocessing the
 cached = _load_log_analysis_cache(sha_fail=sha_fail, task_id=task_id)
 
 if cached:
-    # ✓ Cache HIT - use cached data (NO LLM calls!)
+    # OK Cache HIT - use cached data (NO LLM calls!)
     logger.info("[Phase A] Loaded cached log analysis for %s", sha_fail[:12])
     return cached
 
-# ✗ Cache MISS - run CILogAnalyzer (3 LLM calls)
+# FAIL Cache MISS - run CILogAnalyzer (3 LLM calls)
 analyzer = CILogAnalyzer(logs=logs, sha_fail=sha_fail, ...)
 result = analyzer.run()
 
@@ -57,11 +57,11 @@ return result
 cached = _load_workflow_validation_cache(sha_fail=sha_fail, issue_id=issue_id)
 
 if cached:
-    # ✓ Cache HIT - use cached data (NO LLM calls!)
+    # OK Cache HIT - use cached data (NO LLM calls!)
     logger.info("[Phase B] Loaded cached workflow validation for %s", sha_fail[:12])
     return cached
 
-# ✗ Cache MISS - run workflow analyzer (1 LLM call)
+# FAIL Cache MISS - run workflow analyzer (1 LLM call)
 context = analyze_workflow_from_benchmark(workflow_content=workflow, ...)
 
 # Save to cache for next time
@@ -98,20 +98,20 @@ def _load_log_analysis_cache(sha_fail: str, task_id: str):
 
 ## **When Caches Are Used**
 
-### **✓ Cache Hit (Logged as):**
+### **OK Cache Hit (Logged as):**
 
 ```
-[Phase A] Loaded cached log analysis for bd46af65 — error_types=1 files=2 jobs=1
+[Phase A] Loaded cached log analysis for bd46af65 - error_types=1 files=2 jobs=1
 [Phase B] Loaded cached workflow validation sequence for bd46af65
 ```
 
 **Result:**
-- ✅ No LLM calls
-- ✅ Instant processing
-- ✅ Cost: $0.00
-- ✅ Time: <1 second
+- OK No LLM calls
+- OK Instant processing
+- OK Cost: $0.00
+- OK Time: <1 second
 
-### **✗ Cache Miss (Logged as):**
+### **FAIL Cache Miss (Logged as):**
 
 ```
 [Phase A] Running CILogAnalyzer...
@@ -119,10 +119,10 @@ def _load_log_analysis_cache(sha_fail: str, task_id: str):
 ```
 
 **Result:**
-- ❌ 3-4 LLM calls needed
-- ❌ Processing takes time
-- ❌ Cost: ~$0.01-0.05 per issue
-- ❌ Time: 10-30 seconds
+- FAIL 3-4 LLM calls needed
+- FAIL Processing takes time
+- FAIL Cost: ~$0.01-0.05 per issue
+- FAIL Time: 10-30 seconds
 
 ---
 
@@ -404,16 +404,16 @@ cat data/trs/workflow_validation_cache.json | jq -r '
 
 ## **Summary**
 
-✅ **Automatic:** Caching happens automatically, no configuration needed
+OK **Automatic:** Caching happens automatically, no configuration needed
 
-✅ **Fast:** Cache hits are instant (<1 second)
+OK **Fast:** Cache hits are instant (<1 second)
 
-✅ **Cost-effective:** Saves ~$0.04 per cached issue
+OK **Cost-effective:** Saves ~$0.04 per cached issue
 
-✅ **Persistent:** Caches survive across runs
+OK **Persistent:** Caches survive across runs
 
-✅ **Transparent:** Logs show "Loaded cached" for cache hits
+OK **Transparent:** Logs show "Loaded cached" for cache hits
 
-✅ **Safe:** Caches can be cleared anytime without breaking anything
+OK **Safe:** Caches can be cleared anytime without breaking anything
 
 **Bottom line:** The caching system saves time and money by avoiding redundant LLM calls for issues you've already processed!

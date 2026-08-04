@@ -1,340 +1,312 @@
-# Memory Plugin - Shared CI-Bench Memory System
+# Memory Plugin - Agent-Agnostic CI Repair Memory
 
 ## Overview
 
-This is the **complete memory plugin system** for CI-Bench, shared by BOTH mini-swe-agent and OpenHands.
+The memory plugin provides **hierarchical memory retrieval** for CI repair agents. It retrieves similar past fixes from L1/L2/L3 memory and detects common repository/workflow patterns using **flattening + clustering + LLM validation**.
 
-**Moved from:** `miniswe-agent/src/minisweagent/run/benchmarks/utils/`
-**To:** `memory_plugin/` (root directory)
+## Key Features
 
-**Why:** So both agents can import and use the same memory logic without duplication.
+OK **Agent-agnostic**: Works with any CI repair agent (Codex, OpenDevin, etc.)  
+OK **Hierarchical memory**: L1 (repo+workflow), L2 (repo), L3 (universal)  
+OK **Common pattern detection**: Finds recurring problems across issues  
+OK **Frequency-based**: Counts distinct CI failures, not problem instances  
+OK **LLM-driven**: Dynamic decisions for filtering, validation, and synthesis  
+OK **Ablation support**: Control which levels to use (baseline, L1, L1+L2, L1+L2+L3)  
 
----
+## Architecture
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| `memory_plugin.py` | Core MemoryPlugin class - L1/L2/L3 retrieval, semantic similarity, top-K ranking |
-| `ci_memory_system.py` | Integration system - wires memory into CI context pipeline |
-| `ci_memory_llm_analysis.py` | LLM-based analysis for L1 problem identification |
-| `ci_memory_l2_analysis.py` | L2 consecutive pattern analysis |
-| `ci_memory_staged_analysis.py` | Staged L3 cross-repo analysis |
-| `ci_memory_llm_analysis_multistage.py` | Multi-stage LLM analysis |
-
----
-
-## Features
-
-###  Three-Layer Memory
-
-- **L1 (failure_memory.json)**: Similar CI failures from same repo
-- **L2 (repo_memory.json)**: Repository-specific patterns
-- **L3 (cross_memory.json)**: Cross-repo general principles
-
-###  Top-K Retrieval
-
-- Configurable top-K (default: 3, supports up to 10)
-- Semantic similarity using sentence-transformers
-- Cosine similarity ranking
-
-###  Analysis & Selection
-
-- Fetches top-10 candidates from each layer
-- Analyzes for relevance, commonality, consecutiveness
-- Selects most relevant CI failure patterns
-- Organizes by source (L1/L2/L3)
-- Generates repair plan
-
-###  Ablation Support
-
-- **Baseline**: No memory (layers=None)
-- **L1**: Failure memory only
-- **L1+L2**: Failure + Repository patterns
-- **L1+L2+L3**: Full memory (all three layers)
-
-###  Performance Optimizations
-
-- Embedding caching (no re-embedding)
-- Pre-loaded stored embeddings
-- ChromaDB backend option
-
----
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Memory Plugin API                        │
+│  retrieve(ci_failure, verification, metadata)               │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                  STAIR Retrieval Pipeline                   │
+│                                                             │
+│  1. Cosine Search (L1/L2/L3 top-k)                         │
+│  2. LLM Relevance Filter                                   │
+│  3. Extract Consecutive Problems                           │
+│  4. Common Pattern Detection (NEW):                        │
+│     a. Flatten ALL L1/L2 problems                          │
+│     b. Cluster by similarity                               │
+│     c. Count distinct issue_ids (frequency)                │
+│     d. LLM validates each group                            │
+│  5. Final Clustering (deduplication)                       │
+│  6. LLM Synthesis (merge/prioritize)                       │
+│  7. Deterministic Ordering                                 │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                     Memory Storage                          │
+│  - L1: failure_memory.json (repo+workflow specific)        │
+│  - L2: repo_memory.json (repo-wide patterns)               │
+│  - L3: cross_memory.json (universal patterns)              │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Usage
 
-### For Mini-SWE-Agent
+### Basic Usage
 
 ```python
 from memory_plugin import MemoryPlugin
 
-# Configure
-class Config:
-    memory_enabled = True
-    memory_top_k = 3
-    memory_ablation_levels = "L1+L2+L3"  # or "L1" or "L1+L2" or "baseline"
-    project_result_dir = "data/trs"
-
-# Initialize
-plugin = MemoryPlugin(config, result_dir="data/trs", llm=None)
-
-# Retrieve
-retrieved = plugin.retrieve(
-    repo="pytest-dev/pytest",
-    workflow=".github/workflows/test.yml",
-    files=["tests/test_collection.py"],
-    problem="CI test failing - Expected 1 test, found 0"
+# Initialize plugin
+plugin = MemoryPlugin(
+    memory_root=Path("data/back_trs"),
+    result_dir="results/retrieval",
+    ablation="L1+L2+L3",  # or "baseline", "L1", "L1+L2"
+    top_k=5,
+    llm=llm_client,
+    enabled=True
 )
 
-# retrieved is a list of ranked memory items from L1/L2/L3
+# Retrieve similar past fixes
+retrieval = plugin.retrieve(
+    ci_failure={
+        "error_context": [...],
+        "failure_signals": [...],
+        "relevant_files": [...],
+        "error_types": [...],
+        "workflow_name": "CI",
+    },
+    verification={
+        "validation_sequence": [...]
+    },
+    issue_metadata={
+        "task_id": "123",
+        "sha_fail": "abc123",
+        "repo": "org/repo"
+    }
+)
+
+# Use results
+problems = retrieval['problems']
+metadata = retrieval['metadata']
+common_problems = retrieval['common_problems']
 ```
 
-### For OpenHands
+### Format for Agent Prompt
 
 ```python
-from memory_plugin import MemoryPlugin
+# Generic markdown format
+prompt_text = plugin.format_for_prompt(retrieval)
 
-# Same configuration
-class Config:
-    memory_enabled = True
-    memory_top_k = 3
-    memory_ablation_levels = "L1+L2+L3"
-    project_result_dir = "../data/trs"
-
-# Same initialization
-plugin = MemoryPlugin(config, result_dir="../data/trs", llm=None)
-
-# Same retrieval
-retrieved = plugin.retrieve(
-    repo=issue_data['repo'],
-    workflow=issue_data.get('workflow', '.github/workflows'),
-    files=issue_data.get('files', []),
-    problem=issue_data['problem_statement']
-)
-
-# Format for OpenHands prompt
-repair_plan = format_repair_plan(retrieved)
+# Custom format
+for problem in retrieval['problems']:
+    print(f"Problem: {problem['problem']}")
+    print(f"Root Cause: {problem['root_cause']}")
+    print(f"Fix Strategy: {problem.get('repair_strategy', {}).get('summary')}")
+    print(f"Confidence: {problem['confidence']}")
 ```
 
----
+## Common Pattern Detection Algorithm
 
-## Memory Retrieval Flow
+### The Flattening Approach
 
+Instead of pre-aggregating problems, we:
+
+1. **Flatten ALL problems** from L1/L2 memory (not just top-k)
+2. **Cluster by similarity** (deterministic)
+3. **Count distinct issue_ids** per cluster (frequency)
+4. **LLM validates** each group
+
+### Why Flattening Works
+
+```python
+# Example: 3 issues with similar import errors
+flattened = [
+    {"issue_id": "123", "problem": "import error in test.py"},
+    {"issue_id": "123", "problem": "import error in app.py"},   # same issue
+    {"issue_id": "456", "problem": "import error in utils.py"},
+    {"issue_id": "789", "problem": "import error in config.py"},
+]
+
+# After clustering
+cluster = {
+    "frequency": 3,  # ← 3 distinct issues (not 4 problems!)
+    "issue_ids": ["123", "456", "789"],
+    "representative_problem": "import error",
+    "examples": [...]
+}
+
+# LLM sees:
+# "This problem appeared in 3 distinct CI failures"
+# -> Decides if it's a real recurring pattern
 ```
-1. Load Memory Files
-   ├─ L1: failure_memory.json
-   ├─ L2: repo_memory.json
-   └─ L3: cross_memory.json
 
-2. Build Query
-   └─ repo + workflow + files + problem
+### Key Insight: issue_id, not problem_id
 
-3. Semantic Search
-   ├─ Embed query
-   ├─ Compute cosine similarity
-   └─ Rank by similarity
+We **only track issue_id** because:
 
-4. Top-K Selection
-   ├─ L1: Top 10 similar failures (same repo)
-   ├─ L2: Top 10 patterns (same repo)
-   └─ L3: Top 10 principles (cross-repo)
+- **Frequency = distinct CI failures**, not problem count
+- If one issue has same problem 3 times -> counts as 1 issue
+- Clustering is problem-level, not problem_id-level
+- Simpler data structure
 
-5. Analysis
-   ├─ Select relevant items
-   ├─ Identify common patterns
-   ├─ Find consecutive issues
-   └─ Organize by source
+## Retrieval Result Structure
 
-6. Generate Repair Plan
-   ├─ From L1: Similar fixes
-   ├─ From L2: Repository patterns
-   └─ From L3: General strategies
+```python
+{
+    "problems": [
+        {
+            "problem": "Clear problem description",
+            "root_cause": "Why it happened",
+            "failure_type": "type_checking|linting|test_failure|...",
+            "files": ["file.py"],
+            "failure_signals": ["signal"],
+            "repair_strategy": {
+                "summary": "High-level approach",
+                "actions": ["specific action"],
+                "pitfalls": ["avoid this"],
+                "validation_cmd": "pytest tests/"
+            },
+            "confidence": "HIGH|MEDIUM|LOW",
+            "priority": 1,
+            "source": {
+                "l1": ["issue_id"],
+                "l2": ["issue_id"],
+                "l3": ["pattern_id"],
+                "common_pattern": true,
+                "frequency": 5,
+                "coverage": 0.35
+            }
+        }
+    ],
+    "metadata": {
+        "mode": "memory",
+        "enabled_levels": ["L1", "L2", "L3"],
+        "retrieved": {"l1": 5, "l2": 5, "l3": 5},
+        "common_detected": 3,
+        "filtered": 8,
+        "consecutive": 2,
+        "clusters": 6,
+        "final": 4
+    },
+    "common_problems": [
+        {
+            "cluster_id": "import_error_pattern",
+            "frequency": 5,
+            "coverage": 0.35,
+            "relevance": "HIGH",
+            "representative_problem": "...",
+            "examples": [{"issue_id": "123", "problems": ["..."]}]
+        }
+    ]
+}
 ```
-
----
 
 ## Configuration
 
-### Ablation Levels
+### Ablation Modes
 
 ```python
-# Baseline - No memory
-config.memory_ablation_levels = "baseline"
-config.memory_enabled = False
+# Baseline (no memory)
+ablation="baseline"
 
-# L1 only - Similar failures
-config.memory_ablation_levels = "L1"
+# L1 only (same repo + workflow)
+ablation="L1"
 
-# L1+L2 - Failures + Patterns
-config.memory_ablation_levels = "L1+L2"
+# L1 + L2 (repo-wide patterns)
+ablation="L1+L2"
 
-# L1+L2+L3 - Full memory
-config.memory_ablation_levels = "L1+L2+L3"
+# L1 + L2 + L3 (universal patterns)
+ablation="L1+L2+L3"
 ```
 
-### Top-K
+### Frequency Thresholds
 
 ```python
-# Top 3 (default)
-config.memory_top_k = 3
+# Small repo (< 5 issues)
+min_issues = 2
+min_coverage = 0.40  # 40%
 
-# Top 10 (maximum detail)
-config.memory_top_k = 10
+# Larger repo (>= 5 issues)
+min_issues = 3
+min_coverage = 0.30  # 30%
 ```
 
-### Memory Location
+### Clustering Threshold
 
 ```python
-# Default: data/trs/
-config.project_result_dir = "data/trs"
-
-# Custom location
-config.project_result_dir = "/path/to/memory"
+# Similarity threshold for clustering
+threshold = 0.68  # 68% similar -> same cluster
 ```
 
----
+## Files
 
-## Integration
+- **`memory_plugin.py`**: Main plugin interface
+- **`stair_retrieval.py`**: STAIR retrieval implementation
+- **`FLATTENING_ALGORITHM.md`**: Detailed algorithm documentation
+- **`README.md`**: This file
 
-### Mini-SWE-Agent Integration
-
-**File:** `miniswe-agent/src/minisweagent/run/benchmarks/cibench.py`
+## Example Integration
 
 ```python
-# Import from root
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent))
-
+# In your CI repair agent
 from memory_plugin import MemoryPlugin
 
-# Use it
-memory = MemoryPlugin(config, result_dir, llm)
-retrieved = memory.retrieve(...)
+class MyRepairAgent:
+    def __init__(self, memory_plugin: MemoryPlugin):
+        self.memory = memory_plugin
+
+    def repair(self, ci_failure, verification):
+        # Retrieve similar past fixes
+        retrieval = self.memory.retrieve(
+            ci_failure=ci_failure,
+            verification=verification
+        )
+
+        # Build prompt with memory context
+        prompt = f"""
+        Current CI Failure:
+        {ci_failure}
+
+        {self.memory.format_for_prompt(retrieval)}
+
+        Task: Fix the CI failure.
+        """
+
+        # Run repair with memory context
+        fix = self.llm(prompt)
+        return fix
 ```
-
-### OpenHands Integration
-
-**File:** `openhands/ci_bench_runner.py`
-
-```python
-# Import from root
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from memory_plugin import MemoryPlugin
-
-# Use it
-memory = MemoryPlugin(config, result_dir, llm)
-retrieved = memory.retrieve(...)
-```
-
----
-
-## Output Format
-
-### Retrieved Memory Structure
-
-```python
-[
-    {
-        "memory_level": "L1",  # or "L2" or "L3"
-        "similarity_score": 0.87,
-        "repo": "pytest-dev/pytest",
-        "problem": "test collection fails - missing __init__.py",
-        "fixes": "Added __init__.py file to test directory",
-        "why_fix": "pytest requires package structure for test discovery",
-        "files": ["tests/test_collection.py"],
-        # ... other fields
-    },
-    {
-        "memory_level": "L2",
-        "similarity_score": 0.75,
-        "pattern": "makepyfile() requires __init__='' for package creation",
-        # ... other fields
-    },
-    # ... more items
-]
-```
-
-### Formatted Repair Plan
-
-```
-Based on previous experiences, consider these approaches:
-
-**From Similar Past Failures (L1):**
-1. Added __init__.py file to test directory
-   (Similar issue: test collection fails - missing __init__.py)
-2. makepyfile needs __init__='' parameter
-   (Similar issue: test_parametrize.py fails with 0 tests)
-
-**Repository-Specific Patterns (L2):**
-3. pytest uses testdir fixture for testing
-4. makepyfile() requires __init__='' for packages
-
-**General Debugging Strategies (L3):**
-5. Test discovery failures often indicate missing __init__.py
-6. Verify package structure before running tests
-```
-
----
-
-## Benefits
-
-###  Shared Between Both Agents
-
-- Same code, same logic, same results
-- No duplication
-- Single source of truth
-
-###  No Breakage
-
-- Mini-swe-agent continues to work
-- Just updates import path
-- All features preserved
-
-###  Easy to Maintain
-
-- Fix bug once → fixes for both agents
-- Update once → updates for both
-- Add feature once → available to both
-
-###  Fair Comparison
-
-- Both agents use identical memory system
-- Only agent scaffold differs
-- Research findings are valid
-
----
 
 ## Testing
 
 ```bash
-# Test memory plugin directly
-cd memory_plugin
-python3 -c "
-from memory_plugin import MemoryPlugin
-print('Memory plugin imported successfully!')
-"
+# Test flattening logic
+python test_flattening_logic.py
+
+# Test memory plugin
+python -m pytest memory_plugin/tests/
 ```
 
----
+## Benefits
 
-## Migration from Original Location
+### 1. Evidence-Based Decisions
+- LLM sees actual examples with issue_ids
+- Not pre-aggregated summaries
 
-**Original:**
-```python
-from memory_plugin import MemoryPlugin
-```
+### 2. Frequency Visibility
+- LLM knows "5 distinct issues had this problem"
+- Clear signal for recurring patterns
 
-**New:**
-```python
-from memory_plugin import MemoryPlugin
-```
+### 3. Contextual Merging
+- LLM merges based on seeing all variations
+- Better than pure text similarity
 
----
+### 4. Relevance Filtering
+- Common patterns marked HIGH/MEDIUM/LOW relevance
+- Current failure gets highest priority
 
-**Last Updated**: July 16, 2026
-**Version**: 1.0.0
-**Status**:  Ready for use by both agents
+### 5. Preserves Granularity
+- Each problem keeps its issue_id
+- Full traceability back to source
+
+## See Also
+
+- **[FLATTENING_ALGORITHM.md](FLATTENING_ALGORITHM.md)**: Detailed algorithm explanation
+- **[../prompt_template/stair_retrieval.py](../prompt_template/stair_retrieval.py)**: LLM prompts
+- **[../utilities/llm_invoker.py](../utilities/llm_invoker.py)**: LLM call utilities

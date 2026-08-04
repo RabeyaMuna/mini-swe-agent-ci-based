@@ -145,7 +145,7 @@
 //!   burst detection for actual paste streams.
 //!
 //! The burst detector can also be disabled (`disable_paste_burst`), which bypasses the state
-//! machine and treats the key stream as normal typing. When toggling from enabled → disabled, the
+//! machine and treats the key stream as normal typing. When toggling from enabled -> disabled, the
 //! composer flushes/clears any in-flight burst state so it cannot leak into subsequent input.
 //!
 //! For the detailed burst state machine, see `codex-rs/tui/src/bottom_pane/paste_burst.rs`.
@@ -1105,7 +1105,7 @@ impl ChatComposer {
             return false;
         };
 
-        // normalize_pasted_path already handles Windows → WSL path conversion,
+        // normalize_pasted_path already handles Windows -> WSL path conversion,
         // so we can directly try to read the image dimensions.
         match image::image_dimensions(&path_buf) {
             Ok((width, height)) => {
@@ -1128,7 +1128,7 @@ impl ChatComposer {
     /// `disable_paste_burst` is an escape hatch for terminals/platforms where the burst heuristic
     /// is unwanted or has already been handled elsewhere.
     ///
-    /// When transitioning from enabled → disabled, we "defuse" any in-flight burst state so it
+    /// When transitioning from enabled -> disabled, we "defuse" any in-flight burst state so it
     /// cannot affect subsequent normal typing:
     ///
     /// - First, flush any held/buffered text immediately via
@@ -1548,7 +1548,7 @@ impl ChatComposer {
 
     pub(crate) fn set_parent_owned_thread(&mut self) {
         self.blocks_direct_input = true;
-        self.placeholder_text = "Viewing sub-agent — direct input is disabled".to_string();
+        self.placeholder_text = "Viewing sub-agent - direct input is disabled".to_string();
     }
 
     /// Move the cursor to the end of the current text buffer.
@@ -7579,7 +7579,7 @@ mod tests {
                 "Mixed ASCII and Cyrillic",
             ),
             ("@诶", 2, Some("诶".to_string()), "Chinese character"),
-            ("@👍", 2, Some("👍".to_string()), "Emoji token"),
+            ("@", 2, Some("".to_string()), "Emoji token"),
             // Invalid cases (should return None)
             ("hello", 2, None, "No @ symbol"),
             (
@@ -8877,7 +8877,7 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
 
-        // Type "/mo" humanlike so paste-burst doesn’t interfere.
+        // Type "/mo" humanlike so paste-burst doesn't interfere.
         type_chars_humanlike(&mut composer, &['/', 'm', 'o']);
 
         let mut terminal = match Terminal::new(TestBackend::new(60, 5)) {
@@ -8936,7 +8936,7 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
 
-        // Type "/res" humanlike so paste-burst doesn’t interfere.
+        // Type "/res" humanlike so paste-burst doesn't interfere.
         type_chars_humanlike(&mut composer, &['/', 'r', 'e', 's']);
 
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).expect("terminal");

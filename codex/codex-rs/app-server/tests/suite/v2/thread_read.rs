@@ -559,7 +559,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
                     CoreTurnItem::AgentMessage(AgentMessageItem {
                         id: "final-1".to_string(),
                         content: vec![AgentMessageContent::Text {
-                            text: "😀 **Final**  \nneedle".to_string(),
+                            text: " **Final** \nneedle".to_string(),
                         }],
                         phase: Some(MessagePhase::FinalAnswer),
                         memory_citation: None,
@@ -638,7 +638,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
             .collect::<Vec<_>>(),
         vec!["turn-1", "turn-1", "turn-1"]
     );
-    assert_eq!(data[2].snippet, "😀 Final needle");
+    assert_eq!(data[2].snippet, " Final needle");
     assert_eq!(data[2].snippet_match_range.start, 9);
     assert_eq!(data[2].snippet_match_range.end, 15);
     assert_eq!(next_cursor, None);

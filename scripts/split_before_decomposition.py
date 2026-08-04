@@ -4,7 +4,7 @@ split_before_decomposition.py
 Create chronological split BEFORE decomposition.
 
 This ensures:
-1. No temporal data leakage (earliest → memory, latest → eval)
+1. No temporal data leakage (earliest -> memory, latest -> eval)
 2. Only memory data gets decomposed (saves time and cost)
 
 Usage:
@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import typer
+
 from utilities.chronological_splitter import create_split_from_huggingface
 
 app = typer.Typer()
@@ -54,14 +55,14 @@ def main(
 
     Workflow:
     1. Load dataset from HuggingFace (already sorted by commit_date)
-    2. Split chronologically per repository (earliest 30% → memory)
+    2. Split chronologically per repository (earliest 30% -> memory)
     3. Save memory_set.jsonl and eval_set.jsonl
     4. Decompose ONLY memory_set.jsonl (not all data!)
     """
     # Parse repos
     repo_filter = None
     if repos:
-        repo_filter = [r.strip() for r in repos.split(",")]
+        repo_filter = [r.strip() for r in repos.split(",") if r.strip()]
 
     # Create split
     result = create_split_from_huggingface(
@@ -74,7 +75,7 @@ def main(
 
     # Print next steps
     print("\n" + "=" * 60)
-    print("✓ Split Complete!")
+    print("OK Split Complete!")
     print("=" * 60)
     print(f"\nMemory: {len(result['memory'])} issues")
     print(f"Eval:   {len(result['eval'])} issues")

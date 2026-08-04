@@ -172,12 +172,12 @@ def main():
         f.write(cleaned_json)
 
     print(f"\n{'=' * 60}")
-    print("✅ DONE - Cache cleaned successfully")
+    print("OK DONE - Cache cleaned successfully")
     print(f"{'=' * 60}")
     print("\nCleaned fields:")
-    print("  ✓ Removed is_merged, merged_from, repair_sequence_index")
-    print("  ✓ Removed l1, l2, l3 sections")
-    print("  ✓ Kept only decomposition data")
+    print("  OK Removed is_merged, merged_from, repair_sequence_index")
+    print("  OK Removed l1, l2, l3 sections")
+    print("  OK Kept only decomposition data")
     print("\nThe cache is now clean and ready to use!")
 
     return 0

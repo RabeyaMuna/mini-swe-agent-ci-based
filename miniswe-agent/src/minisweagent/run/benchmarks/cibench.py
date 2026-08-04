@@ -79,12 +79,11 @@ from minisweagent.models import get_model
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.benchmarks.utils.common import ProgressTrackingAgent
 
-# TODO: Refactor to call ci_log_analyzer and ci_workflow_aware_retrieval directly
-# ci_context.py was removed as it was redundant orchestration layer
-# from minisweagent.run.benchmarks.utils.ci_context import (
-#     build_ci_context,
-#     save_memory_after_patch,
-# )
+# Import CI context builder with memory integration
+from utilities.ci_cache import (
+    load_structured_ci_failure,
+    load_validation_sequence,
+)
 from minisweagent.run.benchmarks.utils.patch_merger import (
     merge_duplicate_patches,
     detect_duplicate_patches,
@@ -2036,30 +2035,106 @@ def process_instance(
     ci_memory: Dict[str, Any] = {}  # full memory retrieval result - saved to trajectory
     extra_info: Dict[str, Any] = {}
 
-    # ── Phase 1: build enriched CI problem statement ──────────────────────────
+    # ── Phase 1: build enriched CI problem statement using shared cache ──────
     try:
         context_llm = _make_context_llm(config, context_model=context_model)
-        ci_result = build_ci_context(
-            instance,
-            memory_root=memory_root,
-            memory_enabled=memory_enabled,
-            memory_top_k=memory_top_k,
-            memory_ablation_levels=memory_ablation_levels,
-            memory_plugin_path=memory_plugin_path,
-            model=context_model,
-            llm=context_llm,
-        )
-        ci_ctx = ci_result["context"]
-        task = ci_result["problem_statement"]
-        ci_memory = ci_result["memory"]
 
-        # Validate ci_memory is a dict (not a list)
-        if not isinstance(ci_memory, dict):
-            logger.warning(
-                "[CIBench] ci_memory is not a dict (got %s), using empty dict",
-                type(ci_memory).__name__,
-            )
-            ci_memory = {}
+        # Load CI failure analysis from shared cache
+        sha_fail = str(instance.get("sha_fail", ""))
+        issue_id = str(instance.get("instance_id") or instance.get("id", ""))
+
+        ci_failure = load_structured_ci_failure(
+            sha_fail=sha_fail,
+            issue_id=issue_id,
+            logs=instance.get("logs") or instance.get("log"),
+            workflow=instance.get("workflow"),
+            workflow_path=instance.get("workflow_path", ""),
+            llm=context_llm,
+            model_name=context_model,
+        )
+
+        # Load validation sequence from shared cache
+        verification = load_validation_sequence(
+            issue_id=issue_id,
+            sha_fail=sha_fail,
+            workflow_content=instance.get("workflow", ""),
+            workflow_path=instance.get("workflow_path", ""),
+            repo_path="",
+            llm=context_llm,
+            save=True,
+        )
+
+        # Build context structure
+        ci_ctx = {
+            "ci_failure": ci_failure or {},
+            "verification": verification or {},
+            "repo": instance.get("repo_name", ""),
+            "sha_fail": sha_fail,
+            "workflow_path": instance.get("workflow_path", ""),
+        }
+
+        # Memory retrieval (if enabled)
+        ci_memory = {}
+        if memory_enabled and memory_root:
+            try:
+                from memory_plugin import MemoryPlugin
+                from utilities.ci_log_analyzer import _make_langchain_llm
+
+                # Convert context_llm (callable) to LangChain LLM for memory plugin
+                llm_for_memory = _make_langchain_llm(context_llm)
+
+                memory_plugin = MemoryPlugin(
+                    memory_root=Path(memory_root),
+                    result_dir=str(output_dir),
+                    ablation=memory_ablation_levels,
+                    top_k=memory_top_k,
+                    llm=llm_for_memory,
+                    enabled=True,
+                )
+
+                issue_metadata = {
+                    "task_id": issue_id,
+                    "sha_fail": sha_fail,
+                    "repo": instance.get("repo_name", ""),
+                }
+
+                ci_memory = memory_plugin.retrieve(
+                    ci_failure=ci_failure or {},
+                    verification=verification or {},
+                    issue_metadata=issue_metadata,
+                )
+
+                # Transform memory plugin output to expected structure
+                # Memory plugin returns: {"problems": [...], "metadata": {...}}
+                # Expected: {"llm_selection": {"separate_problems": [...]}}
+                if ci_memory and "problems" in ci_memory:
+                    problems_from_memory = ci_memory.get("problems", [])
+                    # Convert each problem to the expected format with source="previous experience"
+                    separate_problems = []
+                    for prob in problems_from_memory:
+                        separate_problems.append({
+                            "source": "previous experience",
+                            "problem": prob.get("problem", ""),
+                            "root_cause": prob.get("root_cause", ""),
+                            "files": prob.get("files", []),
+                            "failure_type": prob.get("failure_type", ""),
+                            "repair_strategy": prob.get("repair_strategy", {}),
+                            "validation_cmd": prob.get("verification_cmd") or prob.get("validation_cmd", ""),
+                        })
+
+                    # Add to ci_memory in the expected structure
+                    if "llm_selection" not in ci_memory:
+                        ci_memory["llm_selection"] = {}
+                    ci_memory["llm_selection"]["separate_problems"] = separate_problems
+
+                    logger.info(f"[CIBench] Transformed {len(separate_problems)} problems from memory plugin")
+            except Exception as e:
+                logger.warning(f"[CIBench] Memory retrieval failed: {e}")
+                logger.debug(f"[CIBench] Memory retrieval traceback:\n{traceback.format_exc()}")
+                ci_memory = {}
+
+        # Build task/problem statement
+        task = f"# CI Failure\n\nFix the CI failure for {instance.get('repo_name', '')} at commit {sha_fail[:8]}"
 
         extra_info["memory_summary"] = {
             "enabled": memory_enabled,
@@ -2191,20 +2266,8 @@ def process_instance(
 
         # ── Phase 4: save memory record ───────────────────────────────────────
         if save_memory and diff and ci_ctx and memory_root:
-            try:
-                save_memory_after_patch(
-                    instance,
-                    ci_ctx,
-                    diff,
-                    memory_root=memory_root,
-                    memory_plugin_path=memory_plugin_path,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[CIBench] save_memory_after_patch failed for %s: %s",
-                    instance_id,
-                    exc,
-                )
+            # Memory saving removed - using shared cache only
+            pass
 
     except Exception as exc:
         logger.error(
@@ -2645,7 +2708,9 @@ def main(
     # Create subdirectory based on memory ablation level
     if memory_enabled:
         ablation_folder = memory_ablation_levels.replace("+", "_")
-        if output_path.name != ablation_folder and output_path.parent.name != ablation_folder:
+        # Case-insensitive comparison to avoid duplicate directory levels
+        if (output_path.name.lower() != ablation_folder.lower() and
+            output_path.parent.name.lower() != ablation_folder.lower()):
             output_path = output_path / ablation_folder
 
     output_path.mkdir(parents=True, exist_ok=True)

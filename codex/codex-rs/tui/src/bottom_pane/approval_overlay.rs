@@ -2193,7 +2193,7 @@ mod tests {
             })
             .collect();
         let expected = vec![
-            "✔ You approved codex to run".to_string(),
+            "OK You approved codex to run".to_string(),
             "  git add tui/src/render/".to_string(),
             "  mod.rs tui/src/render/".to_string(),
             "  renderable.rs this time".to_string(),
@@ -2210,7 +2210,7 @@ mod tests {
         );
         assert_eq!(
             render_history_cell_lines(approved.as_ref(), /*width*/ 80),
-            vec!["✔ You approved this request this time".to_string()]
+            vec!["OK You approved this request this time".to_string()]
         );
 
         let approved_for_session = history_cell::new_approval_decision_cell(
@@ -2220,7 +2220,7 @@ mod tests {
         );
         assert_eq!(
             render_history_cell_lines(approved_for_session.as_ref(), /*width*/ 80),
-            vec!["✔ You approved this request every time this session".to_string()]
+            vec!["OK You approved this request every time this session".to_string()]
         );
     }
 
@@ -2263,7 +2263,7 @@ mod tests {
         assert_eq!(
             render_history_cell_lines(decision.as_ref(), /*width*/ 80),
             vec![
-                "✔ You approved codex network access to https://example.com:8443 this time"
+                "OK You approved codex network access to https://example.com:8443 this time"
                     .to_string(),
             ]
         );

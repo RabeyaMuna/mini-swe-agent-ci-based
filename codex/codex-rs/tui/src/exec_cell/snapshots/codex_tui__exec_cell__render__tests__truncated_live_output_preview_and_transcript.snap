@@ -38,7 +38,7 @@ expression: "(preview, transcript)"
             Span::from("tail output that also wraps").green().bg(Color::Reset).underline_color(Color::Reset).dim().not_bold().not_italic().not_underlined().not_slow_blink().not_rapid_blink().not_reversed().not_hidden().not_crossed_out(),
         ]),
         Line::from_iter([
-            Span::from("✗").red().bold(),
+            Span::from("FAIL").red().bold(),
             Span::from(" (1)"),
             Span::from(" • 0ms").dim(),
         ]),

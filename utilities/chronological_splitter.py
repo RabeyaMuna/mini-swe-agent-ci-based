@@ -24,7 +24,7 @@ def split_chronologically(
     group_by_repo: bool = True,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Split dataset chronologically (earliest → memory, latest → eval).
+    Split dataset chronologically (earliest -> memory, latest -> eval).
 
     Args:
         dataset: List of issues with commit_date field
@@ -185,9 +185,9 @@ def create_split_from_huggingface(
         json.dump(metadata, f, indent=2)
 
     if verbose:
-        console.print(f"\n[green]✓ Saved {len(memory_set)} memory issues[/green]")
-        console.print(f"[green]✓ Saved {len(eval_set)} eval issues[/green]")
-        console.print(f"[green]✓ Saved to {output_path}[/green]")
+        console.print(f"\n[green]OK Saved {len(memory_set)} memory issues[/green]")
+        console.print(f"[green]OK Saved {len(eval_set)} eval issues[/green]")
+        console.print(f"[green]OK Saved to {output_path}[/green]")
 
     return {
         "memory": memory_set,

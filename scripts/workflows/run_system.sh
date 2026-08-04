@@ -2,8 +2,8 @@
 # run_system.sh - Intelligent workflow that handles existing data
 #
 # Usage:
-#   bash scripts/run_system.sh [repo1,repo2,...]  # Specific repos
-#   bash scripts/run_system.sh                    # All repos
+#   bash scripts/workflows/run_system.sh [repo1,repo2,...]  # Specific repos
+#   bash scripts/workflows/run_system.sh                    # All repos
 
 set -e
 
@@ -132,7 +132,7 @@ if [ "$NEEDS_STEP_1" = false ] && [ "$NEEDS_STEP_2" = false ] && [ "$NEEDS_STEP_
     echo ""
     echo "To rebuild from scratch, delete the files and re-run:"
     echo "  rm -rf $OUTPUT_DIR/*"
-    echo "  bash scripts/run_system.sh"
+    echo "  bash scripts/workflows/run_system.sh"
     echo ""
     exit 0
 fi

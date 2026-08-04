@@ -20,6 +20,18 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Load environment variables from .env file at project root
+try:
+    from dotenv import load_dotenv
+    env_file = Path(__file__).resolve().parents[2] / ".env"
+    if env_file.exists():
+        load_dotenv(env_file)
+except ImportError:
+    pass  # dotenv not installed, rely on environment variables
+
+from memory_plugin import MemoryPlugin
+from utilities.ci_log_analyzer import _run_log_analysis
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATASET = PROJECT_ROOT / "data" / "eval_set.jsonl"
@@ -213,7 +225,7 @@ def make_context_llm(model: str | None) -> Any:
         return None
 
     try:
-        import litellm
+        from utilities.llm_model import LitellmModel
         from utilities.model_registry import configure_model_environment, resolve_model_alias
     except Exception as exc:
         raise RuntimeError(f"Could not import context LLM dependencies: {exc}") from exc
@@ -221,14 +233,8 @@ def make_context_llm(model: str | None) -> Any:
     model_name = str(resolve_model_alias(model))
     configure_model_environment(model_name)
 
-    def _call(prompt: str) -> str:
-        response = litellm.completion(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return str(response.choices[0].message.content or "").strip()
-
-    return _call
+    # Return proper LLM object with .invoke() method
+    return LitellmModel(model_name=model_name)
 
 
 def is_placeholder_analysis(data: dict[str, Any]) -> bool:
@@ -289,7 +295,6 @@ def load_or_generate_ci_failure(
             )
 
         try:
-            from utilities.ci_log_analyzer import _run_log_analysis
 
             analysis = _run_log_analysis(issue, context_llm, context_model or "")
             analysis["source"] = "ci_log_analyzer"
@@ -387,15 +392,6 @@ def load_or_generate_verification(
     return verification
 
 
-class MemoryConfig:
-    def __init__(self, enabled: bool, ablation: str, memory_root: Path, top_k: int) -> None:
-        self.memory_enabled = enabled
-        self.memory_ablation_levels = ablation
-        self.memory_top_k = top_k
-        self.project_result_dir = str(memory_root)
-        self.memory_backend = "json"
-
-
 def load_memory_context(
     issue: dict[str, Any],
     ci_failure: dict[str, Any],
@@ -404,73 +400,71 @@ def load_memory_context(
     memory_root: Path,
     ablation: str,
     top_k: int,
-) -> str:
+    context_llm: Any = None,
+) -> tuple[str, dict]:
+    """
+    Load memory context by passing raw CI failure data to memory plugin.
+
+    Memory plugin handles all query building and retrieval logic.
+    This function just passes data and formats the result for Codex.
+
+    Returns:
+        (formatted_context, retrieval_dict): Formatted markdown and raw retrieval with problems list
+    """
     if ablation.lower() == "baseline":
-        return ""
+        return "", {"problems": []}
 
     try:
-        from memory_plugin.memory_plugin import MemoryPlugin
-    except Exception as exc:
-        return f"Memory plugin import failed: {exc}"
+        # Initialize memory plugin with LLM (required for dynamic stages)
+        plugin = MemoryPlugin(
+            memory_root=memory_root,
+            result_dir=str(result_dir),
+            ablation=ablation,
+            top_k=top_k,
+            llm=context_llm,  # Pass the LLM!
+            enabled=True
+        )
 
-    relevant_files = []
-    for item in ci_failure.get("relevant_files") or []:
-        if isinstance(item, dict):
-            relevant_files.append(item.get("file") or item.get("path") or "")
-        else:
-            relevant_files.append(str(item))
-    relevant_files = [x for x in relevant_files if x]
+        # Pass RAW ci_failure and verification to memory plugin
+        # Memory plugin will build query internally from this data
+        retrieval = plugin.retrieve(
+            ci_failure=ci_failure,
+            verification=verification,
+            issue_metadata={
+                "task_id": issue_id(issue),
+                "sha_fail": issue.get("sha_fail"),
+                "repo": repo_slug(issue),
+            }
+        )
 
-    failure_reason = "\n".join(str(x) for x in ci_failure.get("error_context", [])[:8])
-    validation_sequence = verification.get("validation_sequence") or []
-    failed_cmd = [
-        step.get("validation_cmd")
-        for step in validation_sequence
-        if isinstance(step, dict) and step.get("validation_cmd")
-    ]
-
-    query = {
-        "task_id": issue_id(issue),
-        "sha_fail": issue.get("sha_fail"),
-        "repo": repo_slug(issue),
-        "workflow_path": issue.get("workflow_path") or "",
-        "error_type": issue.get("error_type") or ci_failure.get("error_types") or "",
-        "failure_pattern": failure_reason[:500],
-        "failure_reason": failure_reason,
-        "error_context_summary": failure_reason,
-        "relevant_files": relevant_files,
-        "failed_cmd": failed_cmd,
-        "failed_tool": [],
-    }
-
-    try:
-        config = MemoryConfig(True, ablation, memory_root, top_k)
-        plugin = MemoryPlugin(config, str(result_dir), llm=None)
-        retrieval = plugin.retrieve(query)
+        # Save full retrieval for analysis
         write_json(result_dir / "memory_retrieval.json", retrieval)
 
+        # Format for Codex prompt (agent-specific formatting)
         formatted = plugin.format_for_prompt(retrieval)
+
+        # Add detailed JSON for debugging (simplified structure)
+        problems = retrieval.get("problems", [])
         details = json.dumps(
             {
-                "level_scores": retrieval.get("level_scores"),
-                "weighted_similarity": retrieval.get("weighted_similarity"),
-                "candidate_files": retrieval.get("candidate_files"),
-                "high_level_hints": retrieval.get("high_level_hints"),
-                "l1_matches": retrieval.get("l1_matches", [])[:top_k],
-                "l2_matches": retrieval.get("l2_matches", [])[:top_k],
-                "l3_matches": retrieval.get("l3_matches", [])[:top_k],
+                "total_problems": len(problems),
+                "problem_types": [p.get("problem_type", "unknown") for p in problems],
+                "failure_types": [p.get("failure_type", "unknown") for p in problems],
             },
             indent=2,
             ensure_ascii=False,
         )
-    except Exception as exc:
-        memory_md = f"Memory retrieval failed: {exc}"
-        write_text(result_dir / "memory_context.md", memory_md)
-        return memory_md
 
-    memory_md = f"{formatted}\n\n```json\n{details[:20000]}\n```"
-    write_text(result_dir / "memory_context.md", memory_md)
-    return memory_md
+        # Combine formatted text and details
+        memory_md = f"{formatted}\n\n### Debug Details\n\n```json\n{details[:20000]}\n```"
+        write_text(result_dir / "memory_context.md", memory_md)
+        return memory_md, retrieval
+
+    except Exception as exc:
+        import traceback
+        error_msg = f"Memory retrieval failed: {exc}\n\n{traceback.format_exc()}"
+        write_text(result_dir / "memory_context.md", error_msg)
+        return error_msg, {"problems": []}
 
 
 def format_ci_failure_markdown(analysis: dict[str, Any]) -> str:
@@ -532,6 +526,153 @@ def validation_markdown(verification: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def build_unified_problem_list(
+    ci_failure: dict[str, Any],
+    ci_problems: list[dict[str, Any]],
+    memory_problems: list[dict[str, Any]],
+    ablation: str,
+) -> list[dict[str, Any]]:
+    """
+    Build unified problem list.
+
+    Baseline mode:
+      - Use CI decomposition only
+      - No repair strategies (agent must figure it out)
+
+    Memory modes (l1_l2_l3):
+      - Memory plugin already processed CI failure
+      - Memory plugin returns organized list:
+        1. CI failure problems (WITH repair strategies if found in memory)
+        2. Consecutive problems (appear after this type of fix)
+        3. Common problems (general patterns)
+      - Just use memory plugin's output directly!
+    """
+
+    # Baseline: Use CI decomposition only (no memory)
+    if ablation.lower() == "baseline":
+        print(f"[DEBUG] Baseline mode: Building {len(ci_problems)} CI problems (no memory)")
+        unified = []
+        for ci_prob in ci_problems:
+            ci_signals = extract_error_signals_from_ci(ci_failure, ci_prob)
+            unified.append({
+                "problem": ci_prob.get("reason") or f"Fix {ci_prob.get('file', 'CI failure')}",
+                "root_cause": "Analyze from CI failure context below",
+                "files": [ci_prob.get("file")] if ci_prob.get("file") else [],
+                "failure_signals": ci_signals,
+                "repair_strategy": None,  # No memory guidance
+                "failure_type": infer_failure_type(ci_prob),
+                "verification_cmd": ci_prob.get("failed_cmd", ""),
+                "source": "ci_failure",
+            })
+
+        # Add sequential numbers
+        for idx, prob in enumerate(unified, 1):
+            prob["number"] = idx
+
+        print(f"[DEBUG] Total problems: {len(unified)}")
+        return unified
+
+    # Memory modes: Memory plugin already did ALL the work!
+    # It processed CI failure, found repair strategies, consecutive problems, common patterns
+    # Just use its organized output directly
+    else:
+        print(f"[DEBUG] Memory mode ({ablation}): Using {len(memory_problems)} problems from memory plugin")
+
+        # Add sequential numbers
+        for idx, prob in enumerate(memory_problems, 1):
+            prob["number"] = idx
+
+        # Debug: show problem types
+        for prob in memory_problems:
+            ptype = prob.get("problem_type", "unknown")
+            has_repair = "✓" if prob.get("repair_strategy") else "✗"
+            print(f"[DEBUG]   Problem {prob['number']}: [{ptype}] [repair:{has_repair}] {prob.get('problem', '')[:80]}")
+
+        return memory_problems
+
+
+
+def calculate_match_score(ci_file: str, ci_signals: list[str], mem_prob: dict[str, Any]) -> float:
+    """
+    Calculate match score between CI problem and memory problem.
+
+    Returns score 0.0-1.0 based on:
+    - File name similarity (0.5 weight)
+    - Error signal overlap (0.5 weight)
+    """
+    score = 0.0
+
+    # File similarity
+    mem_files = mem_prob.get("files", [])
+    if ci_file and mem_files:
+        for mem_file in mem_files:
+            if ci_file in mem_file or mem_file in ci_file:
+                score += 0.5
+                break
+            # Partial match on filename
+            ci_basename = ci_file.split("/")[-1]
+            mem_basename = mem_file.split("/")[-1]
+            if ci_basename == mem_basename:
+                score += 0.3
+                break
+
+    # Error signal similarity
+    mem_signals = mem_prob.get("failure_signals", [])
+    if ci_signals and mem_signals:
+        # Count overlapping keywords
+        ci_keywords = set()
+        for sig in ci_signals:
+            ci_keywords.update(sig.lower().split())
+
+        mem_keywords = set()
+        for sig in mem_signals:
+            mem_keywords.update(sig.lower().split())
+
+        if ci_keywords and mem_keywords:
+            overlap = len(ci_keywords & mem_keywords)
+            total = len(ci_keywords | mem_keywords)
+            if total > 0:
+                score += 0.5 * (overlap / total)
+
+    return min(score, 1.0)  # Cap at 1.0
+
+
+def extract_error_signals_from_ci(ci_failure: dict[str, Any], ci_problem: dict[str, Any]) -> list[str]:
+    """Extract error signals relevant to a specific CI problem."""
+    signals = []
+    # Get error signals from CI failure analysis
+    for signal in ci_failure.get("failure_signals", [])[:5]:
+        if isinstance(signal, str):
+            signals.append(signal)
+    return signals
+
+
+def extract_all_error_signals_from_ci(ci_failure: dict[str, Any]) -> list[str]:
+    """Extract all error signals from CI failure."""
+    signals = []
+    for signal in ci_failure.get("failure_signals", [])[:10]:
+        if isinstance(signal, str):
+            signals.append(signal)
+    return signals
+
+
+def infer_failure_type(ci_problem: dict[str, Any]) -> str:
+    """Infer failure type from CI problem."""
+    cmd = ci_problem.get("failed_cmd", "")
+    reason = ci_problem.get("reason", "").lower()
+
+    if "mypy" in cmd or "type" in reason:
+        return "type_checking"
+    elif "pylint" in cmd or "lint" in reason:
+        return "linting"
+    elif "test" in cmd or "pytest" in cmd:
+        return "test_failure"
+    elif "black" in cmd or "format" in reason:
+        return "formatting"
+    else:
+        return "unknown"
+
+
 def extract_problem_list(ci_failure: dict[str, Any]) -> list[dict[str, Any]]:
     files = ci_failure.get("relevant_files") or []
     problems = []
@@ -570,86 +711,227 @@ def extract_problem_list(ci_failure: dict[str, Any]) -> list[dict[str, Any]]:
     return problems
 
 
+def compose_baseline_prompt(
+    issue: dict[str, Any],
+    ci_failure: dict[str, Any],
+    verification: dict[str, Any],
+    problem: dict[str, Any],
+    problem_count: int,
+) -> str:
+    """
+    Baseline mode prompt: No memory plugin.
+
+    Agent gets full CI failure analysis and must figure out the fix from scratch.
+    """
+    problem_desc = problem.get("problem", "See CI failure analysis")
+    root_cause = problem.get("root_cause", "")
+    files = problem.get("files", [])
+    signals = problem.get("failure_signals", [])
+
+    return f"""# CI Repair Task
+
+You are fixing a CI failure in this repository.
+
+## Problem To Fix
+
+**[Problem {problem.get('number', '')} of {problem_count}]**
+
+**Problem Description:**
+{problem_desc}
+
+**Root Cause:**
+{root_cause if root_cause else "Analyze from CI failure context below"}
+
+**Affected Files:**
+{chr(10).join(f'  - {f}' for f in files) if files else "  (Identify from CI context)"}
+
+**Error Signals:**
+{chr(10).join(f'  - {s}' for s in signals[:5]) if signals else "  (See CI failure output below)"}
+
+**Repository Context:**
+- Repository: {repo_slug(issue)}
+- Failing commit: {issue.get("sha_fail")}
+- Workflow: {issue.get("workflow_path") or "unknown"}
+
+{format_ci_failure_markdown(ci_failure)}
+
+## CI Verification Details
+{validation_markdown(verification)}
+
+## Instructions
+
+**Your Task:**
+- Analyze the CI failure context above
+- Identify the root cause from error signals and relevant files
+- Determine the minimal fix needed
+- Implement and validate the fix
+
+**For automated tool failures (formatters, linters, type checkers):**
+- Prefer running the tool with auto-fix flags: `black .`, `ruff --fix .`, `mypy --install-types`, etc.
+- Let the tool fix all affected files at once
+- Only manually edit if the tool cannot auto-fix
+
+**General workflow:**
+1. Inspect the repository and understand the problem from CI context
+2. Make the minimal correct change to fix the issue
+3. Do not modify unrelated files
+4. Run the validation command to confirm the fix
+5. If verification fails, inspect output and iterate
+6. Leave the final fix in the working tree as a git diff
+
+**Scope:**
+- Fix this problem only
+- Preserve existing behavior unless proven wrong by CI
+- Do not remove tests or weaken checks
+- Do not update dependencies unless required by the fix
+
+**Final report:**
+- Root cause identified
+- Files changed
+- Validation command run
+- Verification result
+- Any remaining risks
+"""
+
+
+def compose_memory_prompt(
+    issue: dict[str, Any],
+    verification: dict[str, Any],
+    problem: dict[str, Any],
+    problem_count: int,
+) -> str:
+    """
+    Memory mode prompt: Memory plugin active.
+
+    Agent gets a self-contained problem with repair strategy from similar past fixes.
+    NO full CI failure analysis (would confuse with errors from other problems).
+    """
+    problem_desc = problem.get("problem", "")
+    root_cause = problem.get("root_cause", "")
+    files = problem.get("files", [])
+    signals = problem.get("failure_signals", [])
+    repair_strategy = problem.get("repair_strategy") or {}
+
+    # Build repair plan section if available
+    repair_plan = ""
+    if repair_strategy and isinstance(repair_strategy, dict):
+        summary = repair_strategy.get("summary", "")
+        actions = repair_strategy.get("actions", [])
+        validation_cmd = repair_strategy.get("validation_cmd", "")
+        pitfalls = repair_strategy.get("pitfalls", [])
+
+        if summary or actions:
+            repair_plan = f"""
+
+**Repair Plan (from similar past fixes):**
+
+Approach: {summary if summary else "Follow the actions below"}
+
+Action Steps:
+{chr(10).join(f'{i}. {action}' for i, action in enumerate(actions, 1)) if actions else "1. Analyze problem and determine fix"}
+
+Validation Command:
+  {validation_cmd if validation_cmd else "./ci-validation-command (see CI Verification section)"}
+
+Pitfalls to Avoid:
+{chr(10).join(f'  - {p}' for p in pitfalls) if pitfalls else "  (Use best practices)"}
+
+**IMPORTANT:** The repair plan above is based on similar past fixes that worked. Follow the action steps as your primary strategy."""
+
+    return f"""# CI Repair Task
+
+You are fixing a CI failure in this repository using guidance from similar past fixes.
+
+## Problem To Fix
+
+**[Problem {problem.get('number', '')} of {problem_count}]**
+
+**Problem Description:**
+{problem_desc}
+
+**Root Cause:**
+{root_cause}
+
+**Affected Files:**
+{chr(10).join(f'  - {f}' for f in files) if files else "  (See repair plan)"}
+
+**Error Signals:**
+{chr(10).join(f'  - {s}' for s in signals[:5]) if signals else "  (See repair plan)"}
+{repair_plan}
+
+**Repository Context:**
+- Repository: {repo_slug(issue)}
+- Failing commit: {issue.get("sha_fail")}
+- Workflow: {issue.get("workflow_path") or "unknown"}
+
+## CI Verification Details
+{validation_markdown(verification)}
+
+## Instructions
+
+**If repair plan is provided above:**
+- Follow the action steps as your primary repair strategy
+- The steps are based on similar past fixes that worked
+- Pay attention to the pitfalls listed
+- Run the validation command specified
+
+**If repair plan is missing or incomplete:**
+- Use the problem description, root cause, and error signals above
+- Identify the fix from the affected files
+- Make the minimal correct change
+
+**For automated tool failures (formatters, linters, type checkers):**
+- Prefer running the tool with auto-fix flags: `black .`, `ruff --fix .`, `mypy --install-types`, etc.
+- Let the tool fix all affected files at once
+- Only manually edit if the tool cannot auto-fix
+
+**General workflow:**
+1. Inspect the repository and understand the problem
+2. Make the minimal correct change to fix the issue
+3. Do not modify unrelated files
+4. Run the validation command to confirm the fix
+5. If verification fails, inspect output and iterate
+6. Leave the final fix in the working tree as a git diff
+
+**Scope:**
+- Fix this problem only (do not fix unrelated issues)
+- Preserve existing behavior unless proven wrong by CI
+- Do not remove tests or weaken checks
+- Do not update dependencies unless required by the fix
+
+**Final report:**
+- Root cause identified
+- Files changed
+- Validation command run
+- Verification result
+- Any remaining risks
+"""
+
+
 def compose_issue_document(
     issue: dict[str, Any],
     ci_failure: dict[str, Any],
     verification: dict[str, Any],
-    memory_context: str,
     problem: dict[str, Any],
     problem_count: int,
+    ablation: str,
 ) -> str:
-    memory_section = memory_context.strip() or "No memory context is enabled for this run."
-    problem_text = f"""Problem {problem["number"]} of {problem_count}: {problem["title"]}
+    """
+    Route to appropriate prompt template based on mode.
 
-Repository: {repo_slug(issue)}
-Failing commit: {issue.get("sha_fail")}
-Workflow: {issue.get("workflow_path") or "unknown"}
-File: {problem.get("file") or "unknown"}
-Reason: {problem.get("reason") or "See CI failure analysis."}
-Failed command: {problem.get("failed_cmd") or "See CI verification."}
+    Baseline mode: Full CI failure analysis, agent analyzes from scratch
+    Memory mode: Self-contained problem with repair strategy
+    """
+    is_baseline = ablation.lower() == "baseline"
 
-Full CI context:
-{format_ci_failure_markdown(ci_failure)}""".strip()
-
-    return f"""# CI Repair Task
-
-You are fixing a CI failure in this repository. Fix only the current problem and leave the final patch in the working tree.
-
-## Problem To Fix
-{problem_text}
-
-## Previous Experience / Memory
-{memory_section}
-
-Use this section only as guidance. It may contain similar past failures, repair patterns, files commonly involved, or known repo-specific fixes.
-
-Do not copy a previous fix blindly. First verify whether it applies to the current repository state and current CI failure.
-
-If this section is empty, proceed using only the problem and CI verification.
-
-## CI Verification
-{validation_markdown(verification)}
-
-Use this section to understand:
-- which workflow failed
-- which command failed
-- which command should be run locally if feasible
-- which files or tools are involved in the CI check
-
-Prefer the narrowest relevant verification command first.
-
-## Required Workflow
-1. Inspect the repository before editing.
-2. Understand the failing problem from the `Problem To Fix` section.
-3. Use `Previous Experience / Memory` only to guide search and repair strategy.
-4. **IMPORTANT: If the CI failure is from automated tools (formatters, linters, type checkers), prefer running the tool with auto-fix flags over manual edits.**
-   - Examples: `black .`, `ruff --fix .`, `prettier --write .`, `mypy --install-types`, `pre-commit run --all-files`
-   - If the tool can fix the issue automatically, run it and let it fix all affected files at once.
-   - Only manually edit if the tool cannot auto-fix or if the fix requires logical changes.
-5. Identify the smallest set of files responsible for the failure.
-6. Make the minimal correct change.
-7. Do not modify unrelated files.
-8. Do not update dependencies, lock files, generated files, or broad formatting unless the CI failure requires it.
-9. Run the most relevant verification command from `CI Verification` to confirm the fix.
-10. If verification fails, inspect the new output and iterate.
-11. Leave the final fix in the working tree as a normal git diff.
-
-## Scope Rules
-- Fix this problem only.
-- Preserve earlier patches already present in the working tree.
-- If another issue is discovered, do not fix it unless it blocks verification of this problem.
-- Preserve existing behavior unless the CI failure proves the behavior is wrong.
-- Prefer source-code fixes over suppressing tests or weakening checks.
-- Do not remove tests to make CI pass.
-
-## Final Response
-When finished, report:
-- root cause
-- files changed
-- verification command run
-- verification result
-- remaining risk, if any
-"""
+    if is_baseline:
+        return compose_baseline_prompt(
+            issue, ci_failure, verification, problem, problem_count
+        )
+    else:
+        return compose_memory_prompt(
+            issue, verification, problem, problem_count
+        )
 
 
 def write_issue_document(result_dir: Path, problem: dict[str, Any], document: str) -> Path:
@@ -666,6 +948,11 @@ def run_codex(
     timeout: int,
     dry_run: bool,
 ) -> dict[str, Any]:
+    """
+    Run codex agent and stream output in real-time to both terminal and file.
+
+    This allows you to see what the agent is doing while it runs.
+    """
     cmd = shlex.split(command)
     prompt = prompt_path.read_text(encoding="utf-8")
     started = time.time()
@@ -674,17 +961,51 @@ def run_codex(
         write_text(transcript_path, f"DRY RUN: would execute {cmd} in {checkout}\n")
         return {"returncode": 0, "elapsed_seconds": 0.0, "dry_run": True}
 
-    proc = subprocess.run(
-        cmd,
-        cwd=checkout,
-        input=prompt,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-    )
+    print(f"\n{'='*80}")
+    print(f"[AGENT] Starting: {' '.join(cmd)}")
+    print(f"[AGENT] Working directory: {checkout}")
+    print(f"[AGENT] Output will be saved to: {transcript_path}")
+    print(f"{'='*80}\n")
+
+    # Stream output to both terminal and file in real-time
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Pass environment variables to subprocess (needed for Codex proxy)
+    env = os.environ.copy()
+
+    with open(transcript_path, 'w', encoding='utf-8') as f:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=checkout,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,  # Pass environment to subprocess
+        )
+
+        # Send prompt to stdin
+        if proc.stdin:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+
+        # Stream output line by line
+        if proc.stdout:
+            for line in proc.stdout:
+                # Print to terminal (real-time visibility)
+                print(line, end='', flush=True)
+                # Save to file
+                f.write(line)
+                f.flush()
+
+        proc.wait(timeout=timeout)
+
     elapsed = time.time() - started
-    write_text(transcript_path, proc.stdout)
+
+    print(f"\n{'='*80}")
+    print(f"[AGENT] Completed in {elapsed:.1f}s with exit code {proc.returncode}")
+    print(f"{'='*80}\n")
+
     return {"returncode": proc.returncode, "elapsed_seconds": elapsed, "dry_run": False}
 
 
@@ -723,44 +1044,7 @@ def candidate_validation_commands(verification: dict[str, Any]) -> list[str]:
     return commands
 
 
-def run_verification_command(
-    checkout: Path,
-    result_dir: Path,
-    command: str | None,
-    timeout: int,
-    dry_run: bool,
-) -> dict[str, Any] | None:
-    if not command:
-        return None
-
-    started = time.time()
-    if dry_run:
-        log = f"DRY RUN: would execute verification command in {checkout}\n{command}\n"
-        write_text(result_dir / "verification.log", log)
-        return {
-            "command": command,
-            "returncode": 0,
-            "elapsed_seconds": 0.0,
-            "dry_run": True,
-        }
-
-    proc = subprocess.run(
-        command,
-        cwd=checkout,
-        shell=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-    )
-    elapsed = time.time() - started
-    write_text(result_dir / "verification.log", proc.stdout)
-    return {
-        "command": command,
-        "returncode": proc.returncode,
-        "elapsed_seconds": elapsed,
-        "dry_run": False,
-    }
+# External verification removed - agent handles verification internally for each problem
 
 
 def save_patch_and_result(
@@ -835,7 +1119,8 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         context_llm,
         args.generate_missing_analysis,
     )
-    memory_context = load_memory_context(
+    # Load memory retrieval (problems from past fixes)
+    _, memory_retrieval = load_memory_context(
         issue,
         ci_failure,
         verification,
@@ -843,18 +1128,48 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         args.memory_root,
         ablation,
         args.memory_top_k,
+        context_llm,  # Pass LLM for dynamic stages!
     )
 
-    problems = extract_problem_list(ci_failure)
+    # Build unified problem list from CI failure + memory problems
+    memory_problems = memory_retrieval.get("problems", [])
+    ci_problems = extract_problem_list(ci_failure)
+
+    print(f"\n[DEBUG] Building unified problem list:")
+    print(f"[DEBUG]   CI failure problems: {len(ci_problems)}")
+    print(f"[DEBUG]   Memory problems: {len(memory_problems)}")
+
+    # Build unified problem list by matching CI with Memory
+    problems = build_unified_problem_list(
+        ci_failure=ci_failure,
+        ci_problems=ci_problems,
+        memory_problems=memory_problems,
+        ablation=ablation
+    )
+
+    # Count by source
+    ci_count = sum(1 for p in problems if p.get('source') == 'ci_failure')
+    mem_count = sum(1 for p in problems if p.get('source') == 'memory')
+
+    print(f"\n[DEBUG] Unified problem list:")
+    print(f"[DEBUG]   Total problems: {len(problems)}")
+    print(f"[DEBUG]   From CI: {ci_count} (no repair strategies)")
+    print(f"[DEBUG]   From Memory: {mem_count} (HAS repair strategies)")
+    print(f"\n[DEBUG] Problems to fix (one by one):")
+    for idx, p in enumerate(problems, 1):
+        source = p.get('source', 'unknown')
+        has_repair = '✓' if p.get('repair_strategy') else '✗'
+        print(f"[DEBUG]   {idx}. [{source}] [repair:{has_repair}] {p.get('problem', 'N/A')[:70]}...")
+    print()
     problem_results = []
     for problem in problems:
         document = compose_issue_document(
             issue,
             ci_failure,
             verification,
-            memory_context,
             problem,
             len(problems),
+            ablation,
         )
         prompt_path = write_issue_document(result_dir, problem, document)
         transcript_path = result_dir / f"codex_transcript_problem_{problem['number']}.txt"
@@ -870,13 +1185,8 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         if run_result["returncode"] != 0:
             break
 
-    verification_result = run_verification_command(
-        checkout,
-        result_dir,
-        args.verification_command,
-        args.verification_timeout,
-        args.dry_run,
-    )
+    # Agent handles verification internally for each problem
+    # No external verification needed
     save_patch_and_result(
         result_dir,
         checkout,
@@ -885,7 +1195,7 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         prediction_model_name(args),
         problem_results,
         verification,
-        verification_result,
+        None,  # No external verification
     )
 
 
@@ -917,19 +1227,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--memory-root", type=Path, default=DEFAULT_MEMORY_ROOT)
     parser.add_argument("--log-cache", type=Path, default=DEFAULT_LOG_CACHE)
     parser.add_argument("--workflow-cache", type=Path, default=DEFAULT_WORKFLOW_CACHE)
-    parser.add_argument("--memory-top-k", type=int, default=3)
+    parser.add_argument("--memory-top-k", type=int, default=5)
     parser.add_argument(
         "--codex-command",
         default=os.environ.get("CODEX_REPAIR_COMMAND", "codex exec --full-auto"),
         help="Command used to run Codex non-interactively",
     )
     parser.add_argument("--timeout", type=int, default=3600)
-    parser.add_argument(
-        "--verification-command",
-        default=None,
-        help="Optional shell command to run after Codex to record pass/fail",
-    )
-    parser.add_argument("--verification-timeout", type=int, default=1800)
+    # Note: Verification is handled by agent internally, no external verification needed
     parser.add_argument(
         "--generate-missing-analysis",
         action=argparse.BooleanOptionalAction,

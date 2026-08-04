@@ -249,14 +249,14 @@ python scripts/analyze_temporal_leakage.py \
 
 ## Script Features
 
-✅ **Auto-caching** - Saves progress every 10 fetches  
-✅ **Resume support** - Continue from interruption  
-✅ **Rate limit handling** - Auto-waits when limit hit  
-✅ **Retry logic** - 3 retries with exponential backoff  
-✅ **Error handling** - Graceful failure for missing commits  
-✅ **Progress tracking** - Real-time progress bar  
-✅ **Rich metadata** - Stores author, message, etc.  
-✅ **Repo filtering** - Fetch only what you need  
+OK **Auto-caching** - Saves progress every 10 fetches  
+OK **Resume support** - Continue from interruption  
+OK **Rate limit handling** - Auto-waits when limit hit  
+OK **Retry logic** - 3 retries with exponential backoff  
+OK **Error handling** - Graceful failure for missing commits  
+OK **Progress tracking** - Real-time progress bar  
+OK **Rich metadata** - Stores author, message, etc.  
+OK **Repo filtering** - Fetch only what you need  
 
 ---
 
@@ -264,12 +264,12 @@ python scripts/analyze_temporal_leakage.py \
 
 For each issue, the script fetches and stores:
 
-- ✅ **Commit timestamp** (ISO 8601 format)
-- ✅ **Repository** (owner/name)
-- ✅ **Commit SHA**
-- ✅ **Author name**
-- ✅ **Author email**
-- ✅ **Commit message** (first line, truncated to 100 chars)
+- OK **Commit timestamp** (ISO 8601 format)
+- OK **Repository** (owner/name)
+- OK **Commit SHA**
+- OK **Author name**
+- OK **Author email**
+- OK **Commit message** (first line, truncated to 100 chars)
 
 This extra metadata can be useful for:
 - Analyzing commit patterns

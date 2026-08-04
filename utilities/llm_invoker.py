@@ -112,7 +112,9 @@ def _load_json_flexible(content: str) -> Any:
     # Try demjson3 for lenient parsing
     try:
         if demjson3 is not None:
-            return demjson3.decode(content)
+            result = demjson3.decode(content)
+            if result is not None:
+                return result
     except Exception as exc:
         last_demjson3_err = exc
 
@@ -151,16 +153,16 @@ def _check_api_health(llm: Any, verbose: bool = False) -> bool:
         # Any response means API is back
         if content:
             if verbose:
-                print("          -> ✅ API is responsive!")
+                print("          -> OK API is responsive!")
             return True
         else:
             if verbose:
-                print("          -> ❌ API returned empty response")
+                print("          -> FAIL API returned empty response")
             return False
 
     except Exception as e:
         if verbose:
-            print(f"          -> ❌ API still unreachable: {type(e).__name__}")
+            print(f"          -> FAIL API still unreachable: {type(e).__name__}")
         return False
 
 
@@ -511,7 +513,7 @@ def invoke_llm_with_retry(
     parsed = _load_json_flexible(content)
 
     # Successfully parsed
-    if parsed not in (None, [], {}):
+    if parsed is not None and parsed not in ([], {}):
         return parsed
 
     # ============================================================
@@ -551,7 +553,8 @@ If the output is truncated, close the current JSON structure conservatively and 
     LOGGER.warning(
         f"All JSON parsing attempts failed. Returning empty. Original content length: {len(content)}"
     )
-    return parsed  # Returns [] since parsing failed
+    # Ensure we always return a valid type (never None)
+    return parsed if parsed is not None else []
 
 
 # Convenience alias for backward compatibility
