@@ -63,8 +63,9 @@ agent:
        Project configuration files such as `pyproject.toml`, `setup.cfg`,
        `setup.py`, lock files, and source files are valid repair targets when
        the CI evidence points to them. Do NOT modify tests or unrelated files.
-       Do NOT modify files under `.github/` unless the workflow/action file
-       itself is proven to be the root cause.
+       **CRITICAL: NEVER modify files under `.github/` directory - this is an
+       absolute restriction with NO exceptions. Fix the source code to pass CI,
+       not the CI configuration itself.**
 
     5. **Reproduce or sanity-check when feasible** — if installation commands
        were provided and completed successfully, run the validation commands from
@@ -79,8 +80,11 @@ agent:
     ## Important Constraints
     - ONLY modify files under `{{testbed_path}}`
     - Do NOT modify tests unless the task explicitly requires a test-only fix
-    - Do NOT modify files under `.github/` unless the workflow/action file is
-      proven to be the root cause
+    - **CRITICAL: NEVER modify ANY files under `.github/` directory**
+      - This includes workflows, actions, CI configuration
+      - NO EXCEPTIONS - even if the workflow seems to be the problem
+      - Fix the SOURCE CODE to pass existing CI checks, not the CI configuration
+      - CI workflows are managed by DevOps and must not be changed
     - Project config and dependency files such as `pyproject.toml`, `setup.cfg`,
       `setup.py`, lock files, and requirements files may be modified when they
       are the root cause
@@ -104,6 +108,11 @@ agent:
     ## Submission
     When your fix is complete:
 
+    **Step 0** — Verify you did NOT modify .github/ (REQUIRED):
+    ```bash
+    cd {{testbed_path}} && git diff --name-only | grep -E '^\.github/' && echo "ERROR: Modified .github/ files - this is forbidden!" || echo "OK: No .github/ modifications"
+    ```
+
     **Step 1** — Create the patch file (list ONLY modified project files):
     ```bash
     git -C {{testbed_path}} diff -- path/to/file1.py path/to/file2.py > {{testbed_path}}/patch.txt
@@ -124,6 +133,8 @@ agent:
     - You CANNOT continue working after submitting.
     - If the patch command returns exit code 0 but patch.txt is empty,
       that means no changes were detected — re-check your edits.
+    - If Step 0 shows "ERROR: Modified .github/ files", you MUST revert those
+      changes before submitting. The patch will be rejected if it modifies .github/.
     </CRITICAL>
     </instructions>
 

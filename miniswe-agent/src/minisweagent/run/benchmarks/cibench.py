@@ -1930,6 +1930,16 @@ def _run_sequential_repair(
     # The working tree is the source of truth. Concatenating per-problem
     # submissions can create duplicate diffs for the same file.
     unified_diff = _collect_final_workspace_diff(testbed_path)
+
+    # CRITICAL: Validate patch doesn't modify .github/ directory
+    if unified_diff and ".github/" in unified_diff:
+        logger.error("[CIBench] REJECTED: Patch modifies .github/ directory, which is forbidden")
+        logger.error("[CIBench] Clearing patch - agent must fix source code, not CI configuration")
+        # Extract modified .github/ files for logging
+        github_files = [line for line in unified_diff.split("\n") if line.startswith("diff --git") and ".github/" in line]
+        logger.error(f"[CIBench] Attempted to modify: {github_files}")
+        unified_diff = ""  # Reject the patch entirely
+
     if unified_diff:
         logger.info(
             "[CIBench] Collected final workspace diff after sequential repair (%d chars)",

@@ -2832,8 +2832,23 @@ Return JSON with COMPLETE repair strategy for each pattern:
         left_actions = left.get("repair_actions", []) or (left_repair.get("actions", []) if isinstance(left_repair, dict) else [])
         right_actions = right.get("repair_actions", []) or (right_repair.get("actions", []) if isinstance(right_repair, dict) else [])
 
-        left_fix_text = left_fix_summary + " " + " ".join(left_actions[:3])  # First 3 actions
-        right_fix_text = right_fix_summary + " " + " ".join(right_actions[:3])
+        # Convert actions to strings if they're dicts
+        left_actions_str = []
+        for action in (left_actions[:3] if left_actions else []):
+            if isinstance(action, dict):
+                left_actions_str.append(action.get("description", "") or action.get("action", "") or str(action))
+            else:
+                left_actions_str.append(str(action))
+
+        right_actions_str = []
+        for action in (right_actions[:3] if right_actions else []):
+            if isinstance(action, dict):
+                right_actions_str.append(action.get("description", "") or action.get("action", "") or str(action))
+            else:
+                right_actions_str.append(str(action))
+
+        left_fix_text = left_fix_summary + " " + " ".join(left_actions_str)  # First 3 actions
+        right_fix_text = right_fix_summary + " " + " ".join(right_actions_str)
 
         fix_sim = self._text_similarity(left_fix_text, right_fix_text)
 
