@@ -155,11 +155,14 @@ def prepare_repo_checkout(
     checkout: Path,
     refresh: bool,
     dry_run: bool,
-) -> None:
+) -> str:
     """
     Prepare a repository checkout at the failing commit.
 
     Simple approach: Clone directly from GitHub to the checkout directory.
+
+    Returns:
+        The SHA of the checkout commit (for later diff comparison)
     """
     sha = str(issue.get("sha_fail") or "").strip()
     slug = repo_slug(issue)
@@ -174,7 +177,7 @@ def prepare_repo_checkout(
 
     if dry_run and not (checkout / ".git").exists():
         checkout.mkdir(parents=True, exist_ok=True)
-        return
+        return sha  # Return the SHA even in dry run
 
     # Clone directly from GitHub
     if not (checkout / ".git").exists():
@@ -218,6 +221,9 @@ def prepare_repo_checkout(
         )
 
     subprocess.run(["git", "clean", "-fdx"], cwd=checkout, check=True)
+
+    # Return the SHA we checked out (for later diff comparison)
+    return sha
 
 
 def make_context_llm(model: str | None) -> Any:
@@ -463,7 +469,18 @@ def load_memory_context(
     except Exception as exc:
         import traceback
         error_msg = f"Memory retrieval failed: {exc}\n\n{traceback.format_exc()}"
+        print(f"[WARNING] Memory retrieval failed: {exc}")
+        print(f"[WARNING] Falling back to baseline mode (no memory)")
+
+        # Check if it's a missing dependency error
+        if "No module named 'sentence_transformers'" in str(exc):
+            error_msg += "\n\n⚠️  MISSING DEPENDENCY: sentence-transformers\n"
+            error_msg += "Install with: pip install sentence-transformers>=2.7.0\n"
+            error_msg += "Falling back to baseline mode (no memory).\n"
+
         write_text(result_dir / "memory_context.md", error_msg)
+
+        # Return empty problems - will trigger baseline fallback in build_unified_problem_list
         return error_msg, {"problems": []}
 
 
@@ -576,6 +593,34 @@ def build_unified_problem_list(
     # It processed CI failure, found repair strategies, consecutive problems, common patterns
     # Just use its organized output directly
     else:
+        # Fallback: If memory plugin failed or returned empty, use CI problems
+        if not memory_problems:
+            print(f"[DEBUG] Memory mode ({ablation}): Memory plugin returned 0 problems")
+            print(f"[DEBUG] Falling back to CI decomposition: {len(ci_problems)} problems")
+
+            # Use same structure as baseline mode
+            unified = []
+            for ci_prob in ci_problems:
+                ci_signals = extract_error_signals_from_ci(ci_failure, ci_prob)
+                unified.append({
+                    "problem": ci_prob.get("reason") or f"Fix {ci_prob.get('file', 'CI failure')}",
+                    "root_cause": "Analyze from CI failure context below",
+                    "files": [ci_prob.get("file")] if ci_prob.get("file") else [],
+                    "failure_signals": ci_signals,
+                    "repair_strategy": None,  # No memory guidance
+                    "failure_type": infer_failure_type(ci_prob),
+                    "verification_cmd": ci_prob.get("failed_cmd", ""),
+                    "source": "ci_failure",  # Mark as CI-derived
+                })
+
+            # Add sequential numbers
+            for idx, prob in enumerate(unified, 1):
+                prob["number"] = idx
+
+            print(f"[DEBUG] Fallback: Using {len(unified)} CI problems")
+            return unified
+
+        # Normal memory mode: use memory plugin's output
         print(f"[DEBUG] Memory mode ({ablation}): Using {len(memory_problems)} problems from memory plugin")
 
         # Add sequential numbers
@@ -638,13 +683,30 @@ def calculate_match_score(ci_file: str, ci_signals: list[str], mem_prob: dict[st
 
 
 def extract_error_signals_from_ci(ci_failure: dict[str, Any], ci_problem: dict[str, Any]) -> list[str]:
-    """Extract error signals relevant to a specific CI problem."""
+    """Extract error signals relevant to a specific CI problem (filtered by file)."""
     signals = []
+    problem_file = ci_problem.get("file", "")
+
     # Get error signals from CI failure analysis
-    for signal in ci_failure.get("failure_signals", [])[:5]:
+    # Filter to only signals mentioning this specific file
+    for signal in ci_failure.get("failure_signals", []):
         if isinstance(signal, str):
-            signals.append(signal)
-    return signals
+            # If we have a specific file, only include signals mentioning it
+            if problem_file and problem_file in signal:
+                signals.append(signal)
+            # If no specific file, include all signals (fallback)
+            elif not problem_file:
+                signals.append(signal)
+                if len(signals) >= 5:
+                    break
+
+    # If no file-specific signals found, include first few general signals as context
+    if not signals and problem_file:
+        for signal in ci_failure.get("failure_signals", [])[:2]:
+            if isinstance(signal, str):
+                signals.append(signal)
+
+    return signals[:5]  # Limit to 5 signals max
 
 
 def extract_all_error_signals_from_ci(ci_failure: dict[str, Any]) -> list[str]:
@@ -775,21 +837,28 @@ You are fixing a CI failure in this repository.
 1. Inspect the repository and understand the problem from CI context
 2. Make the minimal correct change to fix the issue
 3. Do not modify unrelated files
-4. Run the validation command to confirm the fix
-5. If verification fails, inspect output and iterate
-6. Leave the final fix in the working tree as a git diff
+4. Commit your changes with a descriptive message
+5. OPTIONAL: Run the validation command ONLY on files you changed (not the whole repo)
+6. The fix should be committed in git (not as uncommitted changes)
 
 **Scope:**
 - Fix this problem only
 - Preserve existing behavior unless proven wrong by CI
 - Do not remove tests or weaken checks
 - Do not update dependencies unless required by the fix
+- Do NOT run validation on the entire repository (may have unrelated failures)
+- If you verify, run validation ONLY on the specific files you changed
+
+**Important:**
+- COMMIT your changes (don't leave as uncommitted diff)
+- Use descriptive commit messages
+- Don't worry if repo-wide validation fails due to other issues
+- Your fix should address the specific problem described above
 
 **Final report:**
 - Root cause identified
 - Files changed
-- Validation command run
-- Verification result
+- Whether validation passed on YOUR changes (not whole repo)
 - Any remaining risks
 """
 
@@ -889,21 +958,28 @@ You are fixing a CI failure in this repository using guidance from similar past 
 1. Inspect the repository and understand the problem
 2. Make the minimal correct change to fix the issue
 3. Do not modify unrelated files
-4. Run the validation command to confirm the fix
-5. If verification fails, inspect output and iterate
-6. Leave the final fix in the working tree as a git diff
+4. Commit your changes with a descriptive message
+5. OPTIONAL: Run validation ONLY on files you changed (not the whole repo)
+6. The fix should be committed in git (not as uncommitted changes)
 
 **Scope:**
 - Fix this problem only (do not fix unrelated issues)
 - Preserve existing behavior unless proven wrong by CI
 - Do not remove tests or weaken checks
 - Do not update dependencies unless required by the fix
+- Do NOT run validation on the entire repository (may have unrelated failures)
+- If you verify, run validation ONLY on the specific files you changed
+
+**Important:**
+- COMMIT your changes (don't leave as uncommitted diff)
+- Use descriptive commit messages
+- Don't worry if repo-wide validation fails due to other issues
+- Your fix should address the specific problem described above
 
 **Final report:**
 - Root cause identified
 - Files changed
-- Validation command run
-- Verification result
+- Whether validation passed on YOUR changes (not whole repo)
 - Any remaining risks
 """
 
@@ -970,8 +1046,20 @@ def run_codex(
     # Stream output to both terminal and file in real-time
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Pass environment variables to subprocess (needed for Codex proxy)
+    # Pass environment variables to subprocess
+    # CRITICAL: Filter out OpenRouter key to prevent API key conflicts
     env = os.environ.copy()
+
+    # Remove OpenRouter variables if using OpenAI/Anthropic directly
+    if 'OPENAI_API_KEY' in env and env.get('OPENAI_API_KEY', '').startswith('sk-proj-'):
+        # Using OpenAI directly - remove OpenRouter
+        env.pop('OPENROUTER_API_KEY', None)
+        env.pop('OPENAI_BASE_URL', None)
+    elif 'ANTHROPIC_API_KEY' in env:
+        # Using Anthropic directly - remove OpenAI/OpenRouter
+        env.pop('OPENROUTER_API_KEY', None)
+        env.pop('OPENAI_API_KEY', None)
+        env.pop('OPENAI_BASE_URL', None)
 
     with open(transcript_path, 'w', encoding='utf-8') as f:
         proc = subprocess.Popen(
@@ -1009,28 +1097,103 @@ def run_codex(
     return {"returncode": proc.returncode, "elapsed_seconds": elapsed, "dry_run": False}
 
 
-def git_diff(checkout: Path) -> str:
+def git_diff(checkout: Path, original_commit: str = None) -> str:
+    """
+    Get diff of all changes made by agent (committed + uncommitted).
+
+    Codex agent commits its changes, so we need to diff against the original commit
+    before the agent ran, not just uncommitted working directory changes.
+    """
+    # Try to get uncommitted changes first
     proc = subprocess.run(
-        ["git", "diff", "--binary"],
+        ["git", "diff", "--binary", "HEAD"],
         cwd=checkout,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
-    return proc.stdout
+    uncommitted = proc.stdout.strip()
 
+    # If original_commit provided, diff from it to HEAD
+    if original_commit:
+        proc = subprocess.run(
+            ["git", "diff", "--binary", original_commit, "HEAD"],
+            cwd=checkout,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        committed_diff = proc.stdout.strip()
+        # Return committed changes if any, otherwise uncommitted
+        return committed_diff if committed_diff else uncommitted
 
-def changed_files(checkout: Path) -> list[str]:
+    # Fallback: try to get diff from last 5 commits (in case agent made commits)
+    # This covers the case where agent committed changes
     proc = subprocess.run(
-        ["git", "diff", "--name-only"],
+        ["git", "diff", "--binary", "HEAD~5..HEAD"],
         cwd=checkout,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
-    return [x for x in proc.stdout.splitlines() if x.strip()]
+    recent_commits = proc.stdout.strip() if proc.returncode == 0 else ""
+
+    # Return whichever has content
+    return recent_commits if recent_commits else uncommitted
+
+
+def changed_files(checkout: Path, original_commit: str = None) -> list[str]:
+    """
+    Get list of files changed by agent (committed + uncommitted).
+
+    Args:
+        checkout: Path to git repository
+        original_commit: Original commit SHA to diff from (if agent made commits)
+
+    Returns:
+        List of changed file paths
+    """
+    # Try uncommitted changes first
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD"],
+        cwd=checkout,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    uncommitted_files = [x.strip() for x in proc.stdout.splitlines() if x.strip()]
+
+    # If original_commit provided, get files from commits
+    if original_commit:
+        proc = subprocess.run(
+            ["git", "diff", "--name-only", original_commit, "HEAD"],
+            cwd=checkout,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        committed_files = [x.strip() for x in proc.stdout.splitlines() if x.strip()]
+        # Return committed files if any, otherwise uncommitted
+        return committed_files if committed_files else uncommitted_files
+
+    # Fallback: try recent commits
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD~5..HEAD"],
+        cwd=checkout,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    recent_files = [x.strip() for x in proc.stdout.splitlines() if x.strip()] if proc.returncode == 0 else []
+
+    # Return whichever has content
+    return recent_files if recent_files else uncommitted_files
 
 
 def candidate_validation_commands(verification: dict[str, Any]) -> list[str]:
@@ -1056,9 +1219,17 @@ def save_patch_and_result(
     problem_results: list[dict[str, Any]],
     verification: dict[str, Any],
     verification_result: dict[str, Any] | None,
+    original_sha: str = None,
 ) -> None:
-    diff = git_diff(checkout)
-    files = changed_files(checkout)
+    print(f"[save_patch_and_result] Getting git diff from {checkout}")
+    print(f"[save_patch_and_result] Original SHA: {original_sha}")
+    diff = git_diff(checkout, original_sha)
+    files = changed_files(checkout, original_sha)
+
+    print(f"[save_patch_and_result] Diff size: {len(diff)} bytes")
+    print(f"[save_patch_and_result] Changed files: {len(files)} files")
+    print(f"[save_patch_and_result] Writing to {result_dir / 'patch.diff'}")
+
     write_text(result_dir / "patch.diff", diff)
     write_json(
         result_dir / "result.json",
@@ -1096,7 +1267,7 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
     result_dir = args.output_root / ablation_dir / issue_id(issue)
     checkout = result_dir / "checkout"
 
-    prepare_repo_checkout(
+    original_sha = prepare_repo_checkout(
         issue,
         checkout,
         refresh=args.refresh_checkout,
@@ -1119,21 +1290,30 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         context_llm,
         args.generate_missing_analysis,
     )
-    # Load memory retrieval (problems from past fixes)
-    _, memory_retrieval = load_memory_context(
-        issue,
-        ci_failure,
-        verification,
-        result_dir,
-        args.memory_root,
-        ablation,
-        args.memory_top_k,
-        context_llm,  # Pass LLM for dynamic stages!
-    )
+    # For baseline: extract problems from CI failure (simple extraction)
+    # For memory modes: let memory plugin decompose (uses LLM, smarter)
+    if ablation.lower() == "baseline":
+        # Baseline: Simple CI extraction, no memory
+        ci_problems = extract_problem_list(ci_failure)
+        memory_problems = []
+    else:
+        # Memory modes: Let memory plugin decompose CI and search
+        _, memory_retrieval = load_memory_context(
+            issue,
+            ci_failure,
+            verification,
+            result_dir,
+            args.memory_root,
+            ablation,
+            args.memory_top_k,
+            context_llm,  # Pass LLM for dynamic stages!
+        )
 
-    # Build unified problem list from CI failure + memory problems
-    memory_problems = memory_retrieval.get("problems", [])
-    ci_problems = extract_problem_list(ci_failure)
+        memory_problems = memory_retrieval.get("problems", [])
+
+        # Only extract CI problems as fallback if memory returned empty
+        # (Memory plugin's Stage 0 decomposition is better, but if it crashed, use this)
+        ci_problems = extract_problem_list(ci_failure) if not memory_problems else []
 
     print(f"\n[DEBUG] Building unified problem list:")
     print(f"[DEBUG]   CI failure problems: {len(ci_problems)}")
@@ -1155,6 +1335,27 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
     print(f"[DEBUG]   Total problems: {len(problems)}")
     print(f"[DEBUG]   From CI: {ci_count} (no repair strategies)")
     print(f"[DEBUG]   From Memory: {mem_count} (HAS repair strategies)")
+
+    # If no problems, save empty result and return early
+    if not problems:
+        print(f"\n[ERROR] No problems to fix! This should never happen.")
+        print(f"[ERROR]   CI problems: {len(ci_problems)}")
+        print(f"[ERROR]   Memory problems: {len(memory_problems)}")
+        print(f"[ERROR] Saving empty result and returning...")
+
+        save_patch_and_result(
+            result_dir,
+            checkout,
+            issue,
+            ablation,
+            prediction_model_name(args),
+            [],  # No problem results
+            verification,
+            None,
+            original_sha,
+        )
+        return
+
     print(f"\n[DEBUG] Problems to fix (one by one):")
     for idx, p in enumerate(problems, 1):
         source = p.get('source', 'unknown')
@@ -1187,6 +1388,11 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
 
     # Agent handles verification internally for each problem
     # No external verification needed
+    print(f"\n[DEBUG] Saving patch and result for issue {issue_id(issue)}...")
+    print(f"[DEBUG]   Result dir: {result_dir}")
+    print(f"[DEBUG]   Checkout: {checkout}")
+    print(f"[DEBUG]   Problem results: {len(problem_results)} problems processed")
+
     save_patch_and_result(
         result_dir,
         checkout,
@@ -1196,7 +1402,10 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         problem_results,
         verification,
         None,  # No external verification
+        original_sha,
     )
+
+    print(f"[DEBUG] ✓ Saved patch.diff and result.json")
 
 
 def prediction_model_name(args: argparse.Namespace) -> str:

@@ -25,8 +25,34 @@ model_list:
       model: deepseek/deepseek-chat
       api_key: os.environ/DEEPSEEK_API_KEY
 
-  # OpenAI (optional)
+  # OpenAI models
+  - model_name: gpt-5-mini
+    litellm_params:
+      model: gpt-5-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: gpt-4o
+    litellm_params:
+      model: gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
   - model_name: gpt-4
     litellm_params:
       model: gpt-4
       api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: o1
+    litellm_params:
+      model: o1
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Anthropic models
+  - model_name: claude-opus-4
+    litellm_params:
+      model: anthropic/claude-opus-4
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-sonnet-4
+    litellm_params:
+      model: anthropic/claude-sonnet-4
+      api_key: os.environ/ANTHROPIC_API_KEY

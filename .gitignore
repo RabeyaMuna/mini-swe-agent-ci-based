@@ -216,3 +216,10 @@ data/
 data/
 repo/
 execption/
+.venv-codex/
+.venv-harbor/
+
+# Codex project-specific config (contains API keys)
+
+# Codex config (contains API keys)
+codex/.codex-config/

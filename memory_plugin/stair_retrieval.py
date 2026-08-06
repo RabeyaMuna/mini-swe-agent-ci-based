@@ -166,12 +166,31 @@ class STAIRRetrieval:
         per_problem_matches = self._stage_1_per_problem_retrieval(ci_problems, query, top_k)
         print(f"[Memory] STAGE 1: Retrieved matches for {len(per_problem_matches)} problems")
 
+        # Check if no matches found - return CI problems as-is
+        total_matches = sum(
+            len(pm.get('l1_matches', [])) + len(pm.get('l2_matches', [])) + len(pm.get('l3_matches', []))
+            for pm in per_problem_matches
+        )
+        if total_matches == 0:
+            print("[Memory] STAGE 1: No matches found in memory - returning decomposed CI problems")
+            # Return CI problems without repair strategies
+            return {"problems": ci_problems}
+
         # ============================================================
         # STAGE 2: Per-problem filtering
         # ============================================================
         print("[Memory] STAGE 2: Filtering relevant matches per problem...")
         filtered_matches = self._stage_2_per_problem_filtering(per_problem_matches, query)
         print(f"[Memory] STAGE 2: Filtered {len(filtered_matches)} problem match sets")
+
+        # Check if all matches filtered out - return CI problems as-is
+        total_filtered = sum(
+            len(fm.get('l1_matches', [])) + len(fm.get('l2_matches', [])) + len(fm.get('l3_matches', []))
+            for fm in filtered_matches
+        )
+        if total_filtered == 0:
+            print("[Memory] STAGE 2: All matches filtered out - returning decomposed CI problems")
+            return {"problems": ci_problems}
 
         # ============================================================
         # STAGE 3: Enrich CI problems with repair strategies

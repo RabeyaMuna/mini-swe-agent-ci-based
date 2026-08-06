@@ -1,1015 +1,537 @@
-# CI-Repair-Bench Evaluation Setup
+# CI Failure Repair with Memory Plugin
 
-This repository runs CI repair evaluations for two agents:
+Automated CI failure repair using Codex CLI with STaIR memory system.
 
-- `mini-swe-agent`
-- `openhands`
+## Quick Start
 
-## LLM Provider Support
-
-**The system supports ANY LLM provider** through [LiteLLM](https://docs.litellm.ai/):
-
-- **Anthropic**: Claude Opus, Sonnet, Haiku
-- **OpenAI**: GPT-4o, GPT-4 Turbo, GPT-3.5
-- **Google**: Gemini Pro, Gemini Flash
-- **Cohere**: Command R+, Command R
-- **Local**: Ollama (Llama, Mistral, CodeLlama, etc.)
-- **100+ providers**: See [LLM Configuration Guide](docs/LLM_CONFIGURATION.md)
-
-Default evaluation models:
-
-- `openrouter/minimax/minimax-m2.5`
-- `openrouter/z-ai/glm-5.2`
-
-Each model is run at four ablation levels:
-
-- `baseline`: no memory
-- `L1`: failure memory
-- `L1+L2`: failure memory + repository memory
-- `L1+L2+L3`: full memory
-
-## Data Organization
-
-The evaluation dataset is now organized as follows:
-
-```
-data/
-├── eval_set.jsonl              ← Eval issues (shared across workflows)
-├── memory_set.jsonl            ← Memory issues (shared across workflows)
-├── eval_issue_ids.json
-├── memory_issue_ids.json
-├── split_metadata.json
-├── workflow_validation_cache.json
-│
-├── back_trs/                   ← Backward decomposition outputs
-│   ├── decomposed_issues.json
-│   ├── log_details.json
-│   ├── failure_memory.json     (L1)
-│   ├── repo_memory.json        (L2)
-│   └── cross_memory.json       (L3)
-│
-└── fwr_trs/                    ← Forward (commit-based) outputs
-    ├── commit_decomposed_issue.json
-    ├── failure_memory.json     (L1)
-    ├── repo_memory.json        (L2)
-    └── cross_memory.json       (L3)
-```
-
-**Key points:**
-- `data/eval_set.jsonl` contains the full eval issue records (NOT just IDs)
-- `data/memory_set.jsonl` contains the memory issue records
-- `data/back_trs/` contains backward decomposition outputs (default)
-- `data/fwr_trs/` contains forward (commit-based) decomposition outputs
-- Split files are shared across ALL decomposition approaches
-
-**See [DATA_ORGANIZATION.md](DATA_ORGANIZATION.md) for complete details.**
-
----
-
-## Setup
-
-Run everything from the project root:
+### One-Time Setup
 
 ```bash
-cd /Users/rabeyakhatunmuna/Documents/mini-swe-agent-ci-based
+# 1. Create virtual environment
+python3 -m venv .venv-codex
+
+# 2. Activate environment
+source .venv-codex/bin/activate
+
+# 3. Install ALL Python dependencies
+pip install -r requirements-codex.txt
+
+# 4. Install Codex CLI
+npm install -g @openai/codex
+
+# 5. Add your API key to .env
+echo "OPENAI_API_KEY=sk-proj-YOUR_KEY_HERE" > .env
+
+# 6. Setup Codex authentication
+./update_codex_auth.sh
 ```
 
-### 1. Shared Root Environment
-
-The root environment is used for shared scripts, memory utilities, and result evaluation.
+### Run Commands
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+# Activate environment
+source .venv-codex/bin/activate
 
-python -m pip install --upgrade pip
-python -m pip install -r requirements-shared.txt
-python -m pip install demjson3 datasets litellm typer rich
+# Run single issue
+./run_codex_direct.sh 129 baseline backward gpt-5-mini
 
-deactivate
+# Run ALL 60 evaluation issues
+./run_codex_direct.sh "" baseline backward gpt-5-mini
 ```
 
-Verify:
+> **📋 See [COMPLETE_SETUP_SUMMARY.md](COMPLETE_SETUP_SUMMARY.md) for detailed installation and troubleshooting**
+
+## Common Commands Cheat Sheet
+
+| Task | Command |
+|------|---------|
+| **Single issue** | `./run_codex_direct.sh 129 baseline backward gpt-5-mini` |
+| **ALL issues (baseline)** | `./run_codex_direct.sh "" baseline backward gpt-5-mini` |
+| **ALL issues (with memory)** | `./run_codex_direct.sh "" L1+L2+L3 backward gpt-5-mini` |
+| **ALL issues (forward)** | `./run_codex_direct.sh "" baseline forward gpt-5-mini` |
+| **ALL ablations (single issue)** | `for a in baseline L1 L1+L2 L1+L2+L3; do ./run_codex_direct.sh 129 $a backward gpt-5-mini; done` |
+| **ALL ablations (ALL issues)** | `for a in baseline L1 L1+L2 L1+L2+L3; do ./run_codex_direct.sh "" $a backward gpt-5-mini; done` |
+| **Complete benchmark** | `for a in baseline L1 L1+L2 L1+L2+L3; do for d in backward forward; do ./run_codex_direct.sh "" $a $d gpt-5-mini; done; done` |
+
+> 💡 **Empty string `""` = run ALL 60 evaluation issues**
+
+## Supported Models
+
+### OpenAI Models ✅
+
+| Model | Command | Best For |
+|-------|---------|----------|
+| **GPT-5 Mini** | `gpt-5-mini` | Latest, fastest, most efficient |
+| **GPT-4o** | `gpt-4o` | Fast GPT-4 |
+| **GPT-4** | `gpt-4` | Most capable GPT-4 |
+| **GPT-4 Turbo** | `gpt-4-turbo` | Fast, capable |
+| **O1** | `o1` | Complex reasoning |
+| **O1 Mini** | `o1-mini` | Fast reasoning |
+| **O3 Mini** | `o3-mini` | Latest reasoning |
+
+### Anthropic Models ✅
+
+| Model | Command | Best For |
+|-------|---------|----------|
+| **Claude Opus 4** | `anthropic/claude-opus-4` | Most capable |
+| **Claude Sonnet 4** | `anthropic/claude-sonnet-4` | Balanced |
+| **Claude Sonnet 3.5** | `anthropic/claude-sonnet-3.5` | Fast, capable |
+
+## Complete Command Reference
+
+### Basic Usage
 
 ```bash
-source .venv/bin/activate
-python -c "import numpy, pandas, sentence_transformers, demjson3; print('root env ok')"
-deactivate
+./run_codex_direct.sh <issue-ids> [ablation] [direction] [model]
 ```
 
-### 2. Mini-SWE-Agent Environment
+**Parameters:**
+- `issue-ids` - Issue ID(s) from dataset
+  - Single: `129`
+  - Multiple: `129,150,151`
+  - **ALL issues**: `""` (empty string) - runs all 60 evaluation issues
+- `ablation` - Memory mode (default: `baseline`)
+  - `baseline` - No memory
+  - `L1` - Failure-level memory only
+  - `L1+L2` - Failure + repo-level memory
+  - `L1+L2+L3` - All memory levels (cross-repo)
+- `direction` - Decomposition direction (default: `backward`)
+  - `backward` - Backward decomposition (failure to root cause)
+  - `forward` - Forward decomposition (symptoms to fix)
+- `model` - Model to use (default: `gpt-4o`)
+  - OpenAI: `gpt-5-mini`, `gpt-4o`, `gpt-4`, `o1`, `o3-mini`
+  - Anthropic: `anthropic/claude-opus-4`, `anthropic/claude-sonnet-4`
 
-Mini-SWE-Agent has its own isolated environment under `miniswe-agent/.venv`.
+### Examples
+
+#### OpenAI Models
 
 ```bash
-cd miniswe-agent
+# GPT-5 Mini (recommended - latest, fastest, most efficient)
+./run_codex_direct.sh 129 baseline backward gpt-5-mini
 
-python3 -m venv .venv
-source .venv/bin/activate
+# GPT-4o (fast GPT-4)
+./run_codex_direct.sh 129 baseline backward gpt-4o
 
-python -m pip install --upgrade pip
-python -m pip install -e .
-python -m pip install demjson3 sentence-transformers fastembed chromadb datasets
+# GPT-4 (most capable)
+./run_codex_direct.sh 129 baseline backward gpt-4
 
-deactivate
-cd ..
+# O1 (complex reasoning)
+./run_codex_direct.sh 129 baseline backward o1
+
+# O3 Mini (latest reasoning model)
+./run_codex_direct.sh 129 baseline backward o3-mini
 ```
 
-Verify:
+#### Anthropic Models
 
 ```bash
-cd /Users/rabeyakhatunmuna/Documents/mini-swe-agent-ci-based
-export PYTHONPATH="$PWD/miniswe-agent/src:$PWD"
-miniswe-agent/.venv/bin/python -c "import minisweagent, demjson3; print('mini-swe-agent env ok')"
-miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.cibench --help
+# Claude Opus 4 (most capable)
+./run_codex_direct.sh 129 baseline backward anthropic/claude-opus-4
+
+# Claude Sonnet 4 (balanced)
+./run_codex_direct.sh 129 baseline backward anthropic/claude-sonnet-4
+
+# Claude Sonnet 3.5 (fast)
+./run_codex_direct.sh 129 baseline backward anthropic/claude-sonnet-3.5
 ```
 
-### 3. OpenHands Environment
-
-OpenHands has its own isolated environment under `openhands/.venv`.
-
-Use Python 3.12 or newer if available. If your machine only has `python3`, use that.
+#### With Memory Plugin
 
 ```bash
-cd openhands
+# L1 memory (failure-level only)
+./run_codex_direct.sh 129 L1 backward gpt-5-mini
 
-python3.12 -m venv .venv
-source .venv/bin/activate
+# L1+L2 memory (failure + repo-level)
+./run_codex_direct.sh 129 L1+L2 backward gpt-5-mini
 
-python -m pip install --upgrade pip
-python -m pip install poetry
-poetry install
-python -m pip install demjson3 datasets litellm
-
-deactivate
-cd ..
+# L1+L2+L3 memory (all levels)
+./run_codex_direct.sh 129 L1+L2+L3 backward gpt-5-mini
 ```
 
-If `python3.12` is not installed:
+#### Forward vs Backward Decomposition
 
 ```bash
-cd openhands
+# Backward decomposition (default - from failure to root cause)
+./run_codex_direct.sh 129 baseline backward gpt-5-mini
 
-python3 -m venv .venv
-source .venv/bin/activate
-
-python -m pip install --upgrade pip
-python -m pip install poetry
-poetry install
-python -m pip install demjson3 datasets litellm
-
-deactivate
-cd ..
+# Forward decomposition (from symptoms to fix)
+./run_codex_direct.sh 129 baseline forward gpt-5-mini
 ```
 
-Verify:
+#### Multiple Issues & ALL Evaluation Issues
 
 ```bash
-cd /Users/rabeyakhatunmuna/Documents/mini-swe-agent-ci-based
-openhands/.venv/bin/python openhands/ci_bench_runner.py --help
+# Run on multiple specific issues
+./run_codex_direct.sh 129,150,151 baseline backward gpt-5-mini
+
+# Run ALL 60 evaluation issues (empty string = all issues)
+./run_codex_direct.sh "" baseline backward gpt-5-mini
+
+# Run ALL issues with memory
+./run_codex_direct.sh "" L1+L2+L3 backward gpt-5-mini
+
+# Run ALL issues with forward decomposition
+./run_codex_direct.sh "" baseline forward gpt-5-mini
 ```
 
-### 4. API Keys
+## Complete Setup Guide
 
-Configure API keys in the root `.env` file:
+### Prerequisites
+
+- **Python 3.13+**: https://www.python.org/downloads/
+- **Node.js & npm**: https://nodejs.org/
+- **Git**: https://git-scm.com/
+
+### Installation Steps
 
 ```bash
-cat > .env <<'EOF'
-# MiniMax M2.5 through OpenRouter
-OPENROUTER_API_KEY=your_openrouter_key
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+# 1. Create Python virtual environment
+python3 -m venv .venv-codex
 
-# GLM through native Z.ai-compatible LiteLLM provider
-GLM_API_KEY=your_glm_provider_key
+# 2. Activate environment
+source .venv-codex/bin/activate
 
-# Optional HuggingFace token, only needed for private/gated dataset access.
-# HUGGINGFACE_TOKEN=your_huggingface_token
-EOF
+# 3. Install ALL Python dependencies
+pip install -r requirements-codex.txt
 ```
 
-MiniMax and GLM can use different providers or credentials. The scripts select credentials by model:
-
-- `MODEL=minimax2.5` uses `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`.
-- `MODEL=glm5.2` uses `GLM_API_KEY` with LiteLLM's native `zai` provider.
-- Optional overrides are still supported: set `GLM_MODEL_NAME` if your GLM provider requires a different LiteLLM model string, and set `GLM_BASE_URL` only if your provider does not use the default Z.ai API base.
-- Do not set `MEMCI_LLM_MODEL` in `.env` for this workflow. Pass the model explicitly with `MODEL=minimax2.5` or `MODEL=glm5.2`.
-- Do not set duplicate MiniMax keys. With the config above, `MINIMAX_API_KEY` and `MINIMAX_BASE_URL` are not needed.
-
----
-
-## Cache Behavior
-
-The runner loads precomputed CI analysis from:
+**Installed packages:**
+- Core: numpy, pandas, jsonlines, datasets
+- LLM: langchain-openai, litellm, openai
+- Memory: sentence-transformers, torch, scikit-learn, scipy
+- Utilities: tqdm, pyyaml, python-dotenv, requests, demjson3
 
 ```bash
-data/back_trs/log_details.json         # Backward decomposition cache
-data/workflow_validation_cache.json     # Workflow validation cache
-```
-
-If these cache files exist, the runner uses them instead of regenerating CI log analysis and workflow validation. To force regeneration for missing cache entries only:
-
-```bash
-export CIBENCH_REGENERATE_MISSING_CACHE=1
-```
-
----
-
-## Common Environment Variables
-
-Set these once in your shell before running direct commands:
-
-```bash
-cd /Users/rabeyakhatunmuna/Documents/mini-swe-agent-ci-based
-export PYTHONPATH="$PWD/miniswe-agent/src:$PWD"
-export MINI_PY="$PWD/miniswe-agent/.venv/bin/python"
-export OH_PY="$PWD/openhands/.venv/bin/python"
-
-test -x "$MINI_PY" && echo "MINI_PY ok: $MINI_PY"
-test -x "$OH_PY" && echo "OH_PY ok: $OH_PY"
-```
-
-For a quick smoke test, append `--slice 0:5` to Mini-SWE-Agent commands and OpenHands commands.
-
----
-
-## Model Names
-
-The system supports two models with automatic configuration:
-
-| Model | Full Name | API Provider | Auto-Config |
-|---|---|---|---|
-| `minimax2.5` | `openrouter/minimax/minimax-m2.5` | `OPENROUTER_API_KEY` / `OPENROUTER_BASE_URL` | 4x increase |
-| `glm5.2` | `zai/glm-5.2`, override with `GLM_MODEL_NAME` only if needed | `GLM_API_KEY` | 10x increase |
-
-**Supported aliases:**
-- MiniMax: `minimax2.5`, `minimax-m2.5`, `minimax/minimax-m2.5`, `MiniMax-M2.5`
-- GLM: `glm5.2`, `glm-5.2`, `z-ai/glm-5.2`, `GLM-5.2`
-
-**Model-Aware Processing:**
-
-When you specify a model, the entire system automatically uses:
-- Correct API provider and credentials
-- Correct token limits (100k vs 200k input chunks)
-- Correct chunk sizes (15 vs 20 L1s per chunk)
-- Correct candidate limits (120/160 vs 300/400 L2 candidates)
-
-The same model value is used throughout:
-- Memory building (decomposition, L1/L2/L3 generation)
-- Cached CI log/workflow analysis
-- Memory retrieval and selection
-- Agent repair runs (Mini-SWE-Agent and OpenHands)
-
-**See [USAGE_GUIDE.md](USAGE_GUIDE.md) for detailed model specifications.**
-
----
-
-## Workflow: Split -> Decompose -> Build Memory -> Evaluate
-
-### **NEW Workflow (Temporal Leakage Prevention)**
-
-The correct workflow is now:
-
-1. **Split FIRST** (chronological) -> creates `data/memory_set.jsonl` and `data/eval_set.jsonl`
-2. **Decompose ONLY memory** -> creates `data/back_trs/decomposed_issues.json`
-3. **Build L1/L2/L3 memory** -> creates memory files in `data/back_trs/`
-4. **Evaluate** -> uses eval set + memory
-
-This prevents temporal data leakage by ensuring only past issues are in memory.
-
----
-
-## Step 1: Split Dataset (Chronological)
-
-Use the root environment.
-
-```bash
-cd /Users/rabeyakhatunmuna/Documents/mini-swe-agent-ci-based
-source .venv/bin/activate
-```
-
-### One Command (Recommended)
-
-```bash
-# All repos
-MODEL=glm5.2 scripts/workflows/run_memory_decompositions.sh
-
-# Specific repos (recommended)
-MODEL=glm5.2 scripts/workflows/run_memory_decompositions.sh agno,flower,camel,crewAI
-
-# Custom memory ratio (default 0.3 = 30%)
-MEMORY_RATIO=0.2 MODEL=glm5.2 scripts/workflows/run_memory_decompositions.sh agno
-```
-
-**Output:**
-```
-data/memory_set.jsonl        ← Earliest 30% (for decomposition)
-data/eval_set.jsonl          ← Latest 70% (for evaluation)
-data/memory_issue_ids.json
-data/eval_issue_ids.json
-data/split_metadata.json     ← Temporal safety confirmation
-data/back_trs/               ← Backward decomposition output
-data/fwr_trs/                ← Forward decomposition output
-```
-
----
-
-## Step 2: Decompose Memory (Backward or Forward)
-
-### Option A: Backward Decomposition (Default, Recommended)
-
-```bash
-# MiniMax-M2.5
-MODEL=minimax2.5 python backward_decomposition/decompose_ci_failure.py \
-  --dataset data/memory_set.jsonl \
-  --output-dir data/back_trs \
-  --output-file decomposed_issues.json \
-  --model minimax2.5
-
-# GLM-5.2
-MODEL=glm5.2 python backward_decomposition/decompose_ci_failure.py \
-  --dataset data/memory_set.jsonl \
-  --output-dir data/back_trs \
-  --output-file decomposed_issues.json \
-  --model glm5.2
-```
-
-**Output:**
-```
-data/back_trs/decomposed_issues.json
-data/back_trs/log_details.json
-```
-
-### Option B: Forward (Commit-Based) Decomposition
-
-```bash
-# MiniMax-M2.5
-MODEL=minimax2.5 python commit_decomposition/run_commit_decomposition.py \
-  --dataset data/memory_set.jsonl \
-  --output data/fwr_trs/commit_decomposed_issue.json \
-  --model minimax2.5
-
-# GLM-5.2
-MODEL=glm5.2 python commit_decomposition/run_commit_decomposition.py \
-  --dataset data/memory_set.jsonl \
-  --output data/fwr_trs/commit_decomposed_issue.json \
-  --model glm5.2
-```
-
-**Output:**
-```
-data/fwr_trs/commit_decomposed_issue.json
-```
-
----
-
-## Step 3: Build L1/L2/L3 Memory
-
-### For Backward Decomposition
-
-```bash
-# MiniMax-M2.5
-MODEL=minimax2.5 python memory_plugin/ci_memory_llm_analysis.py \
-  --decomposed data/back_trs/decomposed_issues.json \
-  --output-dir data/back_trs \
-  --model minimax2.5
-
-# GLM-5.2
-MODEL=glm5.2 python memory_plugin/ci_memory_llm_analysis.py \
-  --decomposed data/back_trs/decomposed_issues.json \
-  --output-dir data/back_trs \
-  --model glm5.2
-```
-
-**Output:**
-```
-data/back_trs/failure_memory.json  (L1)
-data/back_trs/repo_memory.json     (L2)
-data/back_trs/cross_memory.json    (L3)
-```
-
-### For Forward Decomposition
-
-```bash
-# MiniMax-M2.5
-MODEL=minimax2.5 python memory_plugin/ci_memory_llm_analysis.py \
-  --decomposed data/fwr_trs/commit_decomposed_issue.json \
-  --output-dir data/fwr_trs \
-  --model minimax2.5
-
-# GLM-5.2
-MODEL=glm5.2 python memory_plugin/ci_memory_llm_analysis.py \
-  --decomposed data/fwr_trs/commit_decomposed_issue.json \
-  --output-dir data/fwr_trs \
-  --model glm5.2
-```
-
-**Output:**
-```
-data/fwr_trs/failure_memory.json   (L1)
-data/fwr_trs/repo_memory.json      (L2)
-data/fwr_trs/cross_memory.json     (L3)
-```
-
----
-
-## Step 4: Evaluate
-
-### Mini-SWE-Agent
-
-#### Baseline (No Memory)
-
-```bash
-export PYTHONPATH="$PWD/miniswe-agent/src:$PWD"
-
-# MiniMax-M2.5
-MODEL=minimax2.5 miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.cibench \
-  --dataset data/eval_set.jsonl \
-  --model minimax2.5
-
-# GLM-5.2
-MODEL=glm5.2 miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.cibench \
-  --dataset data/eval_set.jsonl \
-  --model glm5.2
-```
-
-#### With Memory (L1+L2+L3) - Backward Decomposition
-
-```bash
-# MiniMax-M2.5
-MODEL=minimax2.5 miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.cibench \
-  --dataset data/eval_set.jsonl \
-  --model minimax2.5 \
-  --memory-enabled \
-  --memory-root data/back_trs \
-  --memory-ablation L1+L2+L3
-
-# GLM-5.2
-MODEL=glm5.2 miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.cibench \
-  --dataset data/eval_set.jsonl \
-  --model glm5.2 \
-  --memory-enabled \
-  --memory-root data/back_trs \
-  --memory-ablation L1+L2+L3
-```
-
-#### With Memory (L1+L2+L3) - Forward Decomposition
-
-```bash
-# MiniMax-M2.5
-MODEL=minimax2.5 miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.cibench \
-  --dataset data/eval_set.jsonl \
-  --model minimax2.5 \
-  --memory-enabled \
-  --memory-root data/fwr_trs \
-  --memory-ablation L1+L2+L3
-
-# GLM-5.2
-MODEL=glm5.2 miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.cibench \
-  --dataset data/eval_set.jsonl \
-  --model glm5.2 \
-  --memory-enabled \
-  --memory-root data/fwr_trs \
-  --memory-ablation L1+L2+L3
-```
-
-#### Ablation Studies
-
-```bash
-# L1 only
---memory-ablation L1
-
-# L1+L2
---memory-ablation L1+L2
-
-# L1+L2+L3
---memory-ablation L1+L2+L3
-```
-
----
-
-### OpenHands
-
-#### Baseline (No Memory)
-
-```bash
-# MiniMax-M2.5
-MODEL=minimax2.5 openhands/.venv/bin/python openhands/ci_bench_runner.py \
-  --eval-issues data/eval_set.jsonl \
-  --model minimax2.5 \
-  --mode baseline
-
-# GLM-5.2
-MODEL=glm5.2 openhands/.venv/bin/python openhands/ci_bench_runner.py \
-  --eval-issues data/eval_set.jsonl \
-  --model glm5.2 \
-  --mode baseline
-```
-
-#### With Memory (L1+L2+L3) - Backward Decomposition
-
-```bash
-# MiniMax-M2.5
-MODEL=minimax2.5 openhands/.venv/bin/python openhands/ci_bench_runner.py \
-  --eval-issues data/eval_set.jsonl \
-  --decomposed-issues data/back_trs/decomposed_issues.json \
-  --model minimax2.5 \
-  --mode memory \
-  --memory-root data/back_trs \
-  --memory-ablation L1+L2+L3
-
-# GLM-5.2
-MODEL=glm5.2 openhands/.venv/bin/python openhands/ci_bench_runner.py \
-  --eval-issues data/eval_set.jsonl \
-  --decomposed-issues data/back_trs/decomposed_issues.json \
-  --model glm5.2 \
-  --mode memory \
-  --memory-root data/back_trs \
-  --memory-ablation L1+L2+L3
-```
-
-#### With Memory (L1+L2+L3) - Forward Decomposition
-
-```bash
-# MiniMax-M2.5
-MODEL=minimax2.5 openhands/.venv/bin/python openhands/ci_bench_runner.py \
-  --eval-issues data/eval_set.jsonl \
-  --decomposed-issues data/fwr_trs/commit_decomposed_issue.json \
-  --model minimax2.5 \
-  --mode memory \
-  --memory-root data/fwr_trs \
-  --memory-ablation L1+L2+L3
-
-# GLM-5.2
-MODEL=glm5.2 openhands/.venv/bin/python openhands/ci_bench_runner.py \
-  --eval-issues data/eval_set.jsonl \
-  --decomposed-issues data/fwr_trs/commit_decomposed_issue.json \
-  --model glm5.2 \
-  --mode memory \
-  --memory-root data/fwr_trs \
-  --memory-ablation L1+L2+L3
-```
-
----
-
-### Codex CLI
-
-Codex is a third evaluation agent that uses the Codex CLI tool.
-
-> ** Multi-LLM Support**: Codex supports **any LLM provider** (Claude, GPT, Gemini, Ollama, Cohere, etc.) through LiteLLM. See [LLM Configuration Guide](docs/LLM_CONFIGURATION.md) for complete setup with different models.
-
-#### 1. Install Codex CLI
-
-```bash
-# Install Codex CLI globally
-pip install codex-cli
+# 4. Install Codex CLI
+npm install -g @openai/codex
 
 # Verify installation
-codex --version
+codex --version  # Should show: codex-cli 0.146.1
 ```
 
-For more installation options, see: https://github.com/anthropics/codex
+### API Keys Setup
 
-#### 2. Baseline (No Memory)
-
-Run all validation issues with unlimited problems per issue:
+Create `.env` file in project root:
 
 ```bash
-# MiniMax 2.5 (via OpenRouter)
-export OPENROUTER_API_KEY="your-key-here"
+# OpenAI API key (REQUIRED)
+OPENAI_API_KEY=sk-proj-YOUR_KEY_HERE
 
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations baseline \
-  --context-model minimax2.5
-
-# GLM 5.2 (via Z-AI)
-export GLM_API_KEY="your-key-here"
-
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations baseline \
-  --context-model glm5.2
+# Anthropic API key (optional - for Claude models)
+ANTHROPIC_API_KEY=sk-ant-YOUR_KEY_HERE
 ```
 
-**Using other LLM providers:**
+Then sync to Codex configuration:
 
 ```bash
-# Claude Sonnet 4.5
-export ANTHROPIC_API_KEY="your-key-here"
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations baseline \
-  --context-model claude-sonnet-4-5 \
-  
-# GPT-4o
-export OPENAI_API_KEY="your-key-here"
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations baseline \
-  --context-model gpt-4o \
-  
-# Ollama (Local, Free)
-ollama pull llama3.1
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations baseline \
-  --context-model ollama/llama3.1 \
-  ```
+./update_codex_auth.sh
+```
 
-#### 3. With Memory (L1+L2+L3) - Backward Decomposition
+## Dataset
+
+### Evaluation Set
+
+- **Total issues:** 60 CI failures from CI-bench
+- **Source:** `data/eval_set.jsonl`
+- **Issue IDs file:** `data/eval_issue_ids.json`
+
+### Check Available Issues
 
 ```bash
-# MiniMax 2.5
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations L1+L2+L3 \
-  --context-model minimax2.5 \
-  --memory-root data/back_trs
+# Count total issues
+cat data/eval_issue_ids.json | python3 -c "import sys, json; print(f'Total: {len(json.load(sys.stdin))}')"
 
-# GLM 5.2
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations L1+L2+L3 \
-  --context-model glm5.2 \
-  --memory-root data/back_trs
+# List all issue IDs
+cat data/eval_issue_ids.json | python3 -c "import sys, json; print('Issues:', json.load(sys.stdin))"
 ```
 
-#### 4. With Memory (L1+L2+L3) - Forward Decomposition
+**Sample issue IDs:** 190, 185, 129, 81, 206, 87, 178, 188, 164, 172, ...
+
+### Running Specific vs ALL Issues
 
 ```bash
-# MiniMax 2.5
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations L1+L2+L3 \
-  --context-model minimax2.5 \
-  --memory-root data/fwr_trs
+# Single issue
+./run_codex_direct.sh 129 baseline backward gpt-5-mini
 
-# GLM 5.2
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations L1+L2+L3 \
-  --context-model glm5.2 \
-  --memory-root data/fwr_trs
+# Multiple specific issues
+./run_codex_direct.sh 129,185,190 baseline backward gpt-5-mini
+
+# ALL 60 issues (empty string)
+./run_codex_direct.sh "" baseline backward gpt-5-mini
 ```
-
-#### 5. Separate Codex Evaluation Runs
-
-Run baseline, backward-memory, and forward-memory experiments separately. Store
-each run directly under `results/codex/` with this naming convention:
-
-```text
-results/codex/<ablation>_<model>
-results/codex/<ablation>_<model>_<decomposition>
-```
-
-Use the decomposition suffix only when memory is enabled.
-
-Set the model once:
-
-```bash
-MODEL=minimax2.5
-MODEL_NAME=minimax2.5
-```
-
-For GLM, Claude, GPT, Gemini, or another configured LiteLLM model, change only
-the `MODEL`, `MODEL_NAME`, and API key. Use `MODEL_NAME` as a filesystem-safe
-label, for example `openrouter_minimax_m2_5` instead of
-`openrouter/minimax/minimax-m2.5`.
-
-##### Baseline: No Memory
-
-Do not pass `--memory-root` for baseline. Results are saved under the model's
-baseline directory:
-
-```bash
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations baseline \
-  --context-model "${MODEL}" \
-  --model-name "${MODEL_NAME}" \
-  --output-root "results/codex/baseline_${MODEL_NAME}"
-```
-
-Combined predictions:
-
-```text
-results/codex/baseline_<model>/predictions.json
-```
-
-##### Backward Decomposition Memory
-
-Use `data/back_trs` for backward-decomposed memory. Run the memory ablations one
-at a time so each result root includes the ablation name:
-
-```bash
-for LEVEL in L1 L1+L2 L1+L2+L3; do
-  SAFE_LEVEL=$(printf "%s" "${LEVEL}" | tr "[:upper:]+" "[:lower:]_")
-
-  python3 codex/scripts/run_codex_ci_repair.py \
-    --issue-ids-file data/eval_issue_ids.json \
-    --ablations "${LEVEL}" \
-    --context-model "${MODEL}" \
-    --model-name "${MODEL_NAME}" \
-    --memory-root data/back_trs \
-    --output-root "results/codex/${SAFE_LEVEL}_${MODEL_NAME}_backward"
-done
-```
-
-Example prediction files:
-
-```text
-results/codex/l1_<model>_backward/predictions.json
-results/codex/l1_l2_<model>_backward/predictions.json
-results/codex/l1_l2_l3_<model>_backward/predictions.json
-```
-
-##### Forward Decomposition Memory
-
-Use `data/fwr_trs` for forward-decomposed memory:
-
-```bash
-for LEVEL in L1 L1+L2 L1+L2+L3; do
-  SAFE_LEVEL=$(printf "%s" "${LEVEL}" | tr "[:upper:]+" "[:lower:]_")
-
-  python3 codex/scripts/run_codex_ci_repair.py \
-    --issue-ids-file data/eval_issue_ids.json \
-    --ablations "${LEVEL}" \
-    --context-model "${MODEL}" \
-    --model-name "${MODEL_NAME}" \
-    --memory-root data/fwr_trs \
-    --output-root "results/codex/${SAFE_LEVEL}_${MODEL_NAME}_forward"
-done
-```
-
-Example prediction files:
-
-```text
-results/codex/l1_<model>_forward/predictions.json
-results/codex/l1_l2_<model>_forward/predictions.json
-results/codex/l1_l2_l3_<model>_forward/predictions.json
-```
-
-##### Optional: One Memory Level Only
-
-To run only one memory level, set `--ablations` and the matching output root:
-
-```bash
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --ablations L1+L2+L3 \
-  --context-model "${MODEL}" \
-  --model-name "${MODEL_NAME}" \
-  --memory-root data/back_trs \
-  --output-root "results/codex/l1_l2_l3_${MODEL_NAME}_backward"
-```
-
-This writes:
-
-```text
-results/codex/l1_l2_l3_<model>_backward/predictions.json
-results/codex/l1_l2_l3_<model>_backward/l1_l2_l3/<issue_id>/patch.diff
-```
-
-Even when an issue is decomposed into multiple problem prompts, Codex keeps the
-earlier edits in the same checkout and saves one unified issue patch after all
-problem prompts finish. Each `predictions.json` stores those unified patches for
-later evaluation.
-
-To rebuild a combined file from existing result directories:
-
-```bash
-python3 scripts/consolidate_codex_patches.py \
-  --output-root results/codex/l1_l2_l3_minimax2.5_backward \
-  --all
-```
-
-#### 6. Single Issue Testing
-
-Test a single issue before running the full evaluation:
-
-```bash
-# Test with issue 43
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids 43 \
-  --ablations baseline \
-  --context-model minimax2.5 \
-  --dry-run
-
-# Run it (remove --dry-run)
-python3 codex/scripts/run_codex_ci_repair.py \
-  --issue-ids 43 \
-  --ablations baseline \
-  --context-model minimax2.5 \
-  ```
-
-#### Key Parameters
-
-- **`--issue-ids-file`**: Path to JSON file containing issue IDs (default: `data/eval_issue_ids.json`)
-- **`--issue-ids`**: Comma-separated issue IDs for testing specific issues
-- **`--ablations`**: Comma-separated list: `baseline`, `L1`, `L1+L2`, `L1+L2+L3`
-- **`--context-model`**: LLM model to use (supports 100+ providers via LiteLLM)
-- **`--model-name`**: Model label saved in `predictions.json` (defaults to `--context-model`)
-- **`--memory-root`**: Path to memory data (`data/back_trs` or `data/fwr_trs`)
-- **`--output-root`**: Results directory; include model/decomposition names to keep runs separate
-- **`--generate-missing-analysis`**: Auto-generate CI failure analysis for uncached issues; enabled by default
-- **`--no-generate-missing-analysis`**: Disable generation and require cached analysis only
-- **`--dry-run`**: Generate prompts without executing Codex
-
-#### Output Structure
-
-```
-results/codex/
-├── baseline_minimax2.5/
-│   ├── predictions.json
-│   └── <issue_id>/
-│       ├── issue_document_problem_1.md
-│       ├── codex_transcript_problem_1.txt
-│       ├── patch.diff                   ← Unified issue fix after all problem prompts
-│       └── result.json
-├── l1_minimax2.5_backward/
-│   ├── predictions.json
-│   └── <issue_id>/
-├── l1_l2_minimax2.5_backward/
-│   ├── predictions.json
-│   └── <issue_id>/
-├── l1_l2_l3_minimax2.5_backward/
-│   ├── predictions.json
-│   └── <issue_id>/
-├── l1_minimax2.5_forward/
-│   ├── predictions.json
-│   └── <issue_id>/
-├── l1_l2_minimax2.5_forward/
-│   ├── predictions.json
-│   └── <issue_id>/
-└── l1_l2_l3_minimax2.5_forward/
-    ├── predictions.json
-    └── <issue_id>/
-```
-
-#### Documentation
-
-- **[Complete LLM Configuration Guide](docs/LLM_CONFIGURATION.md)** - All providers, API keys, advanced config
-- **[Quick Start Guide](docs/QUICK_START_LLM.md)** - Common examples and troubleshooting
-- **[CI Repair Runner](codex/docs/ci-repair-runner.md)** - Full runner documentation
-- **[Example Scripts](examples/run_with_different_llms.sh)** - Executable examples
-
----
-
-## Comparing Decomposition Approaches
-
-You can compare backward vs. forward decomposition:
-
-```bash
-# 1. Split once, then run BOTH decompositions
-MODEL=minimax2.5 scripts/workflows/run_memory_decompositions.sh agno,flower,camel
-
-# 2. Build memory for BOTH
-MODEL=minimax2.5 python memory_plugin/ci_memory_llm_analysis.py \
-  --decomposed data/back_trs/decomposed_issues.json \
-  --output-dir data/back_trs \
-  --model minimax2.5
-
-MODEL=minimax2.5 python memory_plugin/ci_memory_llm_analysis.py \
-  --decomposed data/fwr_trs/commit_decomposed_issue.json \
-  --output-dir data/fwr_trs \
-  --model minimax2.5
-
-# 4. Evaluate BOTH
-MODEL=minimax2.5 miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.cibench \
-  --dataset data/eval_set.jsonl \
-  --model minimax2.5 \
-  --memory-enabled \
-  --memory-root data/back_trs \
-  --memory-ablation L1+L2+L3 \
-  --output results/backward
-
-MODEL=minimax2.5 miniswe-agent/.venv/bin/python -m minisweagent.run.benchmarks.cibench \
-  --dataset data/eval_set.jsonl \
-  --model minimax2.5 \
-  --memory-enabled \
-  --memory-root data/fwr_trs \
-  --memory-ablation L1+L2+L3 \
-  --output results/forward
-```
-
----
-
-## Verification
-
-Check your setup:
-
-```bash
-# Verify split files
-ls -lh data/*.jsonl data/*.json
-
-# Verify backward decomposition outputs
-ls -lh data/back_trs/
-
-# Verify forward decomposition outputs (if created)
-ls -lh data/fwr_trs/
-
-# Check temporal safety
-cat data/split_metadata.json | jq '.temporal_leakage_prevented'
-# Should output: true
-
-# Check split statistics
-cat data/split_metadata.json | jq '{total: .total_issues, memory: .memory_size, eval: .eval_size}'
-```
-
----
 
 ## Results
 
 Results are saved to:
-
 ```
-results/
-├── miniswe-agent/
-│   ├── minimax2.5/
-│   │   ├── baseline/
-│   │   ├── L1/
-│   │   ├── L1+L2/
-│   │   └── L1+L2+L3/
-│   └── glm5.2/
-│       ├── baseline/
-│       ├── L1/
-│       ├── L1+L2/
-│       └── L1+L2+L3/
-└── openhands/
-    ├── minimax2.5/
-    │   ├── baseline/
-    │   ├── L1/
-    │   ├── L1+L2/
-    │   └── L1+L2+L3/
-    └── glm5.2/
-        ├── baseline/
-        ├── L1/
-        ├── L1+L2/
-        └── L1+L2+L3/
+results/codex/<ablation>/
+  <issue-id>/
+    checkout/                          # Cloned repository
+    issue_document_problem_1.md        # Problem description
+    codex_transcript_problem_1.txt     # Agent execution log
+    patch.diff                         # Generated fix
+    result.json                        # Metadata
+  predictions.json                     # All predictions
 ```
 
----
+View results:
+```bash
+# Find all patches
+find results/codex/ -name "patch.diff"
+
+# View specific patch
+cat results/codex/baseline/129/patch.diff
+
+# Check results summary
+cat results/codex/baseline/predictions.json
+```
+
+## Complete Workflow Examples
+
+### 1. Single Issue (Quick Test)
+
+```bash
+source .venv-codex/bin/activate
+./run_codex_direct.sh 129 baseline backward gpt-5-mini
+```
+
+**Expected output:** Patch generated in `results/codex/baseline_gpt-5-mini/129/patch.diff`
+
+### 2. ALL Evaluation Issues - Baseline Mode
+
+```bash
+# Run all 60 issues with baseline (no memory)
+./run_codex_direct.sh "" baseline backward gpt-5-mini
+```
+
+**Expected output:** 60 directories in `results/codex/baseline_gpt-5-mini/*/`
+
+### 3. ALL Evaluation Issues - With Memory
+
+```bash
+# Run all 60 issues with full memory (L1+L2+L3)
+./run_codex_direct.sh "" L1+L2+L3 backward gpt-5-mini
+```
+
+**Expected output:** 60 directories in `results/codex/l1_l2_l3_gpt-5-mini/*/`
+
+### 4. Ablation Study - Single Issue
+
+```bash
+# Compare all memory levels on one issue
+for ablation in baseline L1 L1+L2 L1+L2+L3; do
+  ./run_codex_direct.sh 129 $ablation backward gpt-5-mini
+done
+```
+
+**Results locations:**
+- `results/codex/baseline_gpt-5-mini/129/`
+- `results/codex/l1_gpt-5-mini/129/`
+- `results/codex/l1_l2_gpt-5-mini/129/`
+- `results/codex/l1_l2_l3_gpt-5-mini/129/`
+
+### 5. Ablation Study - ALL Issues
+
+```bash
+# Run ALL 60 issues with ALL ablations (baseline, L1, L1+L2, L1+L2+L3)
+for ablation in baseline L1 L1+L2 L1+L2+L3; do
+  ./run_codex_direct.sh "" $ablation backward gpt-5-mini
+done
+```
+
+**Total runs:** 60 issues × 4 ablations = 240 runs
+
+### 6. Forward vs Backward - ALL Issues
+
+```bash
+# Compare decomposition directions on ALL issues
+for direction in backward forward; do
+  ./run_codex_direct.sh "" baseline $direction gpt-5-mini
+done
+```
+
+**Results:**
+- Backward: `results/codex/baseline_gpt-5-mini/*/`
+- Forward: Uses `data/fwr_trs/` memory instead of `data/back_trs/`
+
+### 7. Complete Benchmark (ALL Issues × ALL Ablations × Both Directions)
+
+```bash
+# Full experiment: 60 issues × 4 ablations × 2 directions = 480 runs
+for ablation in baseline L1 L1+L2 L1+L2+L3; do
+  for direction in backward forward; do
+    echo "Running: $ablation / $direction"
+    ./run_codex_direct.sh "" $ablation $direction gpt-5-mini
+  done
+done
+```
+
+### 8. Model Comparison - ALL Issues
+
+```bash
+# Compare different models on all 60 issues
+for model in gpt-5-mini gpt-4o gpt-4; do
+  echo "Running with model: $model"
+  ./run_codex_direct.sh "" baseline backward $model
+done
+```
+
+**Results:**
+- GPT-5 Mini: `results/codex/baseline_gpt-5-mini/*/`
+- GPT-4o: `results/codex/baseline_gpt-4o/*/`
+- GPT-4: `results/codex/baseline_gpt-4/*/`
 
 ## Troubleshooting
 
-### Common Issues
+### Missing Dependency: sentence-transformers
 
-1. **Wrong eval file format**: Use `data/eval_set.jsonl` (full records), NOT `data/eval_issue_ids.json` (IDs only)
-
-2. **Old workflow**: Don't use `scripts/run_memory_split_workflow.sh` - it has temporal leakage. Use the new split-first workflow above.
-
-3. **Missing memory files**: Make sure you ran Step 3 (Build L1/L2/L3) before evaluation
-
-4. **Wrong memory root**:
-   - For backward decomposition: `--memory-root data/back_trs`
-   - For forward decomposition: `--memory-root data/fwr_trs`
-
-5. **Temporal leakage**: Verify `data/split_metadata.json` shows `"temporal_leakage_prevented": true`
-
----
-
-## Additional Documentation
-
-- [DATA_ORGANIZATION.md](DATA_ORGANIZATION.md) - Complete data structure guide
-- [USAGE_GUIDE.md](USAGE_GUIDE.md) - Detailed usage guide
-- [QUICK_START.md](QUICK_START.md) - Quick start guide
-- [commit_decomposition/README_V2.md](commit_decomposition/README_V2.md) - Commit decomposition details
-
----
-
-## OK Quick Checklist
-
-Before running evaluation, ensure:
-
-- [ ] Split created: `data/memory_set.jsonl` and `data/eval_set.jsonl` exist
-- [ ] Temporal safety: `data/split_metadata.json` shows `temporal_leakage_prevented: true`
-- [ ] Decomposition complete: Either `data/back_trs/decomposed_issues.json` or `data/fwr_trs/commit_decomposed_issue.json` exists
-- [ ] Memory built: `data/back_trs/*_memory.json` or `data/fwr_trs/*_memory.json` files exist
-- [ ] API keys configured in `.env`
-- [ ] Correct memory root specified in evaluation command
-
----
-
-## Testing
-
-All test files are in the `test/` directory:
-
-```bash
-# Quick smoke test (no API keys needed)
-python test/test_memory_plugin_refactor.py
-
-# Run all tests
-./test/run_tests.sh
-
-# Run with LLM tests (requires API keys)
-RUN_LLM_TESTS=1 ./test/run_tests.sh
-
-# Test specific memory mode
-python test/test_memory_plugin.py --model gpt-4 --issue-id 125 --memory l1+l2+l3
+```
+ModuleNotFoundError: No module named 'sentence_transformers'
 ```
 
-See [test/README.md](test/README.md) for details.
+**Fix:** Install all dependencies:
+```bash
+source .venv-codex/bin/activate
+pip install -r requirements-codex.txt
+```
 
----
+Or install just this package:
+```bash
+pip install sentence-transformers>=2.7.0
+```
 
-**For questions or issues, see the documentation files or check the issue tracker.**
+**Note:** Required for memory modes (L1, L1+L2, L1+L2+L3). Baseline mode works without it.
+
+### API Key Not Set
+
+```
+✗ OPENAI_API_KEY not set in .env
+```
+
+**Fix:**
+```bash
+echo "OPENAI_API_KEY=sk-proj-YOUR_KEY_HERE" > .env
+./update_codex_auth.sh
+```
+
+### Codex CLI Not Found
+
+```
+command not found: codex
+```
+
+**Fix:**
+```bash
+npm install -g @openai/codex
+```
+
+### Issue Not Found
+
+```
+Issue 125 not found in dataset
+```
+
+**Fix:** Use an issue from `data/eval_issue_ids.json`:
+```bash
+cat data/eval_issue_ids.json
+```
+
+### Empty Results (0 Problems)
+
+If memory mode returns 0 problems, the system now automatically falls back to baseline mode and uses decomposed CI problems.
+
+**Check logs for:**
+```
+[WARNING] Memory retrieval failed: ...
+[WARNING] Falling back to baseline mode (no memory)
+```
+
+**To verify dependencies are installed:**
+```bash
+python3 -c "import sentence_transformers; print('✓ Dependencies OK')"
+```
+
+## Advanced Usage
+
+### Custom Codex Command
+
+Edit `codex/scripts/run_codex_ci_repair.py` line 1234:
+
+```python
+CODEX_REPAIR_COMMAND=codex exec --custom-flag
+
+--codex-command "$CODEX_REPAIR_COMMAND"
+```
+
+### Add New Models
+
+OpenAI-compatible models can be added by setting environment variables:
+
+```bash
+# Example: Using a custom API
+export OPENAI_BASE_URL=https://your-api.com/v1
+export OPENAI_API_KEY=your-key
+
+./run_codex_direct.sh 129 baseline backward custom-model
+```
+
+## Monitoring Progress
+
+### Watch Running Jobs
+
+```bash
+# Count completed issues in real-time
+watch -n 5 'find results/codex/baseline_gpt-5-mini/ -name "patch.diff" | wc -l'
+
+# List completed issues
+find results/codex/baseline_gpt-5-mini/ -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort -n
+
+# Check how many have patches
+find results/codex/baseline_gpt-5-mini/ -name "result.json" -exec grep -l "patch_generated.*true" {} \; | wc -l
+```
+
+### View Results
+
+```bash
+# View specific patch
+cat results/codex/baseline_gpt-5-mini/129/patch.diff
+
+# View agent transcript
+cat results/codex/baseline_gpt-5-mini/129/codex_transcript_problem_1.txt
+
+# Check all predictions
+cat results/codex/baseline_gpt-5-mini/predictions.json
+```
+
+## Performance Tips
+
+1. **Use GPT-5 Mini** - Latest, fastest, and most cost-effective
+2. **Start with baseline** - Test without memory first
+3. **Test single issue first** - Verify setup before running ALL issues
+4. **Monitor results** - Check `patch.diff` after each run
+5. **Run in background** - For ALL issues, consider running in tmux/screen session
+
+## Citation
+
+If you use this code, please cite:
+
+```bibtex
+@article{stair2024,
+  title={STaIR: Structured Memory for AI Repair},
+  year={2024}
+}
+```
+
+## Files
+
+- `run_codex_direct.sh` - Main runner script
+- `codex/scripts/run_codex_ci_repair.py` - Core repair logic
+- `memory_plugin/` - STaIR memory system
+- `data/eval_set.jsonl` - CI failure dataset
+- `data/back_trs/` - Backward decomposition memory
+- `data/fwr_trs/` - Forward decomposition memory
+
+## License
+
+[Your License]
