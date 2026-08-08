@@ -1930,6 +1930,7 @@ def _run_sequential_repair(
     # The working tree is the source of truth. Concatenating per-problem
     # submissions can create duplicate diffs for the same file.
     unified_diff = _collect_final_workspace_diff(testbed_path)
+
     if unified_diff:
         logger.info(
             "[CIBench] Collected final workspace diff after sequential repair (%d chars)",

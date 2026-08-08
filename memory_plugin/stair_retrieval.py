@@ -166,12 +166,31 @@ class STAIRRetrieval:
         per_problem_matches = self._stage_1_per_problem_retrieval(ci_problems, query, top_k)
         print(f"[Memory] STAGE 1: Retrieved matches for {len(per_problem_matches)} problems")
 
+        # Check if no matches found - return CI problems as-is
+        total_matches = sum(
+            len(pm.get('l1_matches', [])) + len(pm.get('l2_matches', [])) + len(pm.get('l3_matches', []))
+            for pm in per_problem_matches
+        )
+        if total_matches == 0:
+            print("[Memory] STAGE 1: No matches found in memory - returning decomposed CI problems")
+            # Return CI problems without repair strategies
+            return {"problems": ci_problems}
+
         # ============================================================
         # STAGE 2: Per-problem filtering
         # ============================================================
         print("[Memory] STAGE 2: Filtering relevant matches per problem...")
         filtered_matches = self._stage_2_per_problem_filtering(per_problem_matches, query)
         print(f"[Memory] STAGE 2: Filtered {len(filtered_matches)} problem match sets")
+
+        # Check if all matches filtered out - return CI problems as-is
+        total_filtered = sum(
+            len(fm.get('l1_matches', [])) + len(fm.get('l2_matches', [])) + len(fm.get('l3_matches', []))
+            for fm in filtered_matches
+        )
+        if total_filtered == 0:
+            print("[Memory] STAGE 2: All matches filtered out - returning decomposed CI problems")
+            return {"problems": ci_problems}
 
         # ============================================================
         # STAGE 3: Enrich CI problems with repair strategies
@@ -2832,8 +2851,23 @@ Return JSON with COMPLETE repair strategy for each pattern:
         left_actions = left.get("repair_actions", []) or (left_repair.get("actions", []) if isinstance(left_repair, dict) else [])
         right_actions = right.get("repair_actions", []) or (right_repair.get("actions", []) if isinstance(right_repair, dict) else [])
 
-        left_fix_text = left_fix_summary + " " + " ".join(left_actions[:3])  # First 3 actions
-        right_fix_text = right_fix_summary + " " + " ".join(right_actions[:3])
+        # Convert actions to strings if they're dicts
+        left_actions_str = []
+        for action in (left_actions[:3] if left_actions else []):
+            if isinstance(action, dict):
+                left_actions_str.append(action.get("description", "") or action.get("action", "") or str(action))
+            else:
+                left_actions_str.append(str(action))
+
+        right_actions_str = []
+        for action in (right_actions[:3] if right_actions else []):
+            if isinstance(action, dict):
+                right_actions_str.append(action.get("description", "") or action.get("action", "") or str(action))
+            else:
+                right_actions_str.append(str(action))
+
+        left_fix_text = left_fix_summary + " " + " ".join(left_actions_str)  # First 3 actions
+        right_fix_text = right_fix_summary + " " + " ".join(right_actions_str)
 
         fix_sim = self._text_similarity(left_fix_text, right_fix_text)
 

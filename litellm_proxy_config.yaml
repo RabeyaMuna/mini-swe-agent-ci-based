@@ -1,0 +1,16 @@
+model_list:
+  - model_name: minimax-m2.5
+    litellm_params:
+      model: openrouter/minimax/minimax-m2.5
+      api_key: os.environ/OPENROUTER_API_KEY
+      api_base: https://openrouter.ai/api/v1
+
+  - model_name: minimax-m3
+    litellm_params:
+      model: openrouter/minimax/minimax-m3
+      api_key: os.environ/OPENROUTER_API_KEY
+      api_base: https://openrouter.ai/api/v1
+
+general_settings:
+  master_key: codex-proxy-key-2024
+  drop_params: true  # Drop unsupported params

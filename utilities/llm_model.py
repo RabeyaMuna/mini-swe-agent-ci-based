@@ -121,10 +121,14 @@ class LitellmModel:
                 max_tokens = min(int(max_tokens), 120000)
 
             # Build completion kwargs
+            # GPT-5 models require temperature=1, others can use temperature=0
+            model_lower = str(self.model_name).lower()
+            temperature = 1 if "gpt-5" in model_lower else 0
+
             completion_kwargs = {
                 "model": self.model_name,
                 "messages": messages,
-                "temperature": 0,
+                "temperature": temperature,
                 "max_tokens": max_tokens,
                 "timeout": int(os.getenv("LITELLM_TIMEOUT", "600")),
             }

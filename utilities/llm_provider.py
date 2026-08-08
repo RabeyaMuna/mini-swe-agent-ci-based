@@ -90,6 +90,7 @@ MODEL_ALIASES: Dict[str, str] = {
     "MiniMax-M2.5": "minimax/minimax-m2.5",
     "MiniMax M2.5": "minimax/minimax-m2.5",
     "glm": "glm-5.2",
+    "glm5.2": "glm-5.2",
     "gml": "glm-5.2",
     "gml5.2": "glm-5.2",
     "gml-5.2": "glm-5.2",

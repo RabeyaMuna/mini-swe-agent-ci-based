@@ -1,5 +1,11 @@
 # Requirements for Codex CI Repair with Memory Plugin
 # Python 3.13+
+#
+# Install with:
+#   pip install -r requirements-codex.txt
+#
+# Note: Codex CLI is installed separately via npm:
+#   npm install -g @openai/codex
 
 # Core Dependencies
 numpy>=1.26.0
@@ -12,11 +18,13 @@ datasets>=2.0.0
 # LLM Integration
 langchain-openai>=0.1.0
 litellm>=1.0.0
-litellm[proxy]>=1.0.0
+openai>=1.0.0
 
-# Memory & Embeddings
+# Memory & Embeddings (REQUIRED for L1+L2+L3 memory modes)
 sentence-transformers>=2.7.0
-fastembed>=0.8.0
+torch>=2.0.0
+scikit-learn>=1.5.0
+scipy>=1.13.0
 
 # Utilities
 tqdm>=4.66.0
@@ -25,9 +33,5 @@ python-dotenv>=1.0.0
 requests>=2.31.0
 demjson3>=3.0.0
 
-# Codex CLI
-codex-cli
-
-# Analysis (Optional)
-scikit-learn>=1.5.0
-scipy>=1.13.0
+# Optional (faster embeddings, not required)
+# fastembed>=0.8.0

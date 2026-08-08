@@ -224,9 +224,18 @@ QUALITY RULES:
   * Root cause = the underlying reason WHY all these files needed to change
   * Example: "RST format upgrade" is one root cause for 10 files
   * Example: File A (API change) + File B (doc format) = TWO problems (different root causes)
-- Be specific about packages, symbols, config keys, validators, commands, before/after states, directories, and affected file kinds.
+- **BE EXTREMELY SPECIFIC** - include exact names, versions, values, commands:
+  * Package changes: "package_name: version_before → version_after" with FULL version constraints
+  * Config changes: "key_name: old_value → new_value" with exact values
+  * Symbol changes: exact function/class/variable names before and after
+  * Command changes: full command strings, not summaries
+  * Type changes: exact type annotations before and after
+  * Import changes: full import paths and what changed
 - Do not mention line numbers.
-- Do not use vague phrasing like "fixed issues" or "updated files".
+- **NEVER use vague phrasing** like "fixed issues", "updated files", "addressed problems", "made changes"
+  * BAD: "Updated dependencies", GOOD: "Updated numpy from >=1.24.0 to >=2.0.0,<2.5.0"
+  * BAD: "Fixed type errors", GOOD: "Added cast(str, value) for type narrowing in 3 files"
+  * BAD: "Improved formatting", GOOD: "Applied black formatting: added trailing commas, normalized quotes"
 - **CRITICAL - affected_files scope (VALIDATION GROUP BOUNDARIES):**
   * affected_files must ONLY include files from the CHANGES section (THIS validation group)
   * DO NOT include files from OTHER validation groups, even if they are cascading-related
@@ -238,6 +247,17 @@ QUALITY RULES:
   * Config files, dependency files, and code files in CHANGES ALL must be included
   * Example: If 26 pyproject.toml files all in CHANGES, list ALL 26 - but don't add files from other validations
 - If no valid CI problem can be extracted, return {{"atomic_problems": []}}.
+
+## DEPENDENCY VERSION SPECIFICITY (CRITICAL):
+- **NEVER generalize dependency version changes** - preserve EXACT versions from before/after
+- **BAD**: "Updated datacommons packages"
+- **GOOD**: "Updated datacommons>=1.4.3,<2 and datacommons_pandas>=0.0.3,<0.0.4 to datacommons-client[pandas]>=2,<3"
+- **BAD**: "Downgraded fish-audio-sdk for compatibility"
+- **GOOD**: "Downgraded fish-audio-sdk from >=2024.12.5,<2025 to >=1.0.0,<2"
+- In root_cause/how_fixed: Include EXACT package names and version constraints
+- Format: "package_name: old_version → new_version"
+- For multiple dependencies: List ALL with exact versions
+- This applies to ALL dependency files: pyproject.toml, requirements.txt, package.json, Cargo.toml, etc.
 
 ## DECISION PRINCIPLES (Dynamic - apply to YOUR specific changes):
 
@@ -263,10 +283,14 @@ PRINCIPLE 4: Test your grouping
 FIELD GUIDANCE (Dynamic - based on YOUR analysis):
 
 - **root_cause**: The underlying WHY that applies to ALL affected files
-  * Must be specific to THIS issue's context
+  * Must be specific to THIS issue's context with EXACT details
+  * Include EXACT package names, versions, config values, symbols, commands
+  * For dependency changes: List EXACT version constraints (before → after)
+  * For config changes: Include EXACT key names and values (old → new)
+  * For code changes: Include EXACT symbols, types, imports changed
   * Explain what changed/broke that required these files to adapt
   * For variants: describe the common root cause, not individual changes
-  * For cascading: explain the dependency change that triggered adaptation
+  * For cascading: explain the dependency change that triggered adaptation with exact details
 
 - **problem**: What failed and scope
   * Describe the failure based on root_cause
@@ -274,10 +298,14 @@ FIELD GUIDANCE (Dynamic - based on YOUR analysis):
   * For variants: "X files with variant changes" (don't list all variants)
   * For cascading: explain the triggering relationship
 
-- **how_fixed**: What changed to address root_cause
-  * Describe the fix that applies across affected files
+- **how_fixed**: What changed to address root_cause (WITH EXACT DETAILS)
+  * Describe the fix that applies across affected files with EXACT specifics
+  * For dependency changes: "Updated package_name from old_version to new_version"
+  * For config changes: "Changed key_name from old_value to new_value"
+  * For code changes: "Added/removed/changed exact_symbol_name"
   * For variants: "Fixed via X approach with variants (header/trailer/spacing changes)"
-  * For cascading: explain adaptation to new format/behavior
+  * For cascading: explain adaptation to new format/behavior with exact changes
+  * NEVER use generic terms like "updated dependencies" - list exact package names and versions
 
 - **issue_type**: Specific semantic issue type (NOT just validation name!)
   * Based on root_cause analysis, not validation command
