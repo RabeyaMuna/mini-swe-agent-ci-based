@@ -50,34 +50,44 @@ GLM_API_KEY=...
 
 ## 1) Prepare Data (Split → Decompose → Build Memory)
 
-- Split dataset into memory/eval
+**Step 1: Split dataset into memory/eval**
 ```bash
 python3 scripts/split_before_decomposition.py
 ```
-Creates data/memory_set.jsonl and data/eval_set.jsonl (plus id lists).
+Creates `data/memory_set.jsonl` and `data/eval_set.jsonl` (plus ID lists).
 
-- Backward decomposition (for backward memory builds)
+**Step 2: Backward decomposition + memory build (automatic)**
 ```bash
 python3 scripts/decompose_backward.py \
+  --batch \
+  --use-huggingface \
   --dataset data/memory_set.jsonl \
-  --output  data/backward_decomposed.json
+  --model minimax2.5
 ```
+This automatically:
+- Decomposes CI failures into problems
+- Builds L1/L2/L3 memory files
+- Saves to **`data/back_trs/`**:
+  - `decomposed_issues.json` (decomposed problems)
+  - `failure_memory.json` (L1 - concrete failures)
+  - `repo_memory.json` (L2 - repair strategies)
+  - `cross_memory.json` (L3 - universal patterns)
 
-- Forward decomposition (optional, for forward memory)
+**Step 3: Forward decomposition + memory build (optional)**
 ```bash
-python3 commit_decomposition/run_commit_decomposition.py \
+python3 scripts/decompose_commits.py \
+  --batch \
+  --use-huggingface \
   --dataset data/memory_set.jsonl \
-  --output  data/commit_decomposed.json
+  --model minimax2.5
 ```
+Similarly, this automatically builds forward memory and saves to **`data/fwr_trs/`**.
 
-- Build memory artifacts
-```bash
-# Backward memory (used when direction=backward)
-python3 scripts/build_memory_l1_l2_l3.py --direction backward
-
-# Forward memory (used when direction=forward)
-python3 scripts/build_memory_l1_l2_l3.py --direction forward
-```
+**Note:** 
+- You do NOT need to run `build_memory_l1_l2_l3.py` separately
+- Decomposition scripts handle everything in one command
+- `data/back_trs/` = backward traces (CI failure → problem)
+- `data/fwr_trs/` = forward traces (commit → problem)
 
 ## 2) Run Mini‑SWE‑Agent (evaluation runner)
 
@@ -154,22 +164,22 @@ Key points
 
 Syntax
 ```bash
-./run_codex_direct.sh "<ids or empty>" <ablation> <direction> <model> [repo_slug] [dataset] [workers]
+bash ./run_codex_direct.sh "<ids or empty>" <ablation> <direction> <model> [repo_slug] [dataset] [workers]
 ```
 
 Examples
 ```bash
 # All issues, ALL ablations, BOTH directions, GPT‑5‑mini, 4 workers
-./run_codex_direct.sh "" all both gpt-5-mini    data/eval_set.jsonl  4
+bash ./run_codex_direct.sh "" all both gpt-5-mini    data/eval_set.jsonl  4
 
 # MiniMax M2.5 via OpenRouter, full memory, backward
-./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5  data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5  data/eval_set.jsonl 4
 
 # Snapshot model, baseline, backward, 6 workers
-./run_codex_direct.sh "" baseline backward gpt-5.4-mini-2026-03-17  data/eval_set.jsonl 6
+bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini-2026-03-17  data/eval_set.jsonl 6
 
 # Filter issues by repo slug (use dataset to expand IDs)
-./run_codex_direct.sh "" L1 backward minimax/minimax-m2.5 agno-agi/agno data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1 backward minimax/minimax-m2.5 agno-agi/agno data/eval_set.jsonl 4
 ```
 
 Outputs
@@ -194,42 +204,42 @@ See codex/docs/reademe.md for how MiniMax M2.5 is wired via OpenRouter (OpenAI�
 Run ALL eval_issues for each model, ablation, and direction (workers=4, dataset=data/eval_set.jsonl).
 
 # GPT‑5‑mini
-./run_miniswe_direct.sh "" BASELINE backward gpt-5-mini "" data/eval_set.jsonl 4
-./run_miniswe_direct.sh "" BASELINE forward  gpt-5-mini "" data/eval_set.jsonl 4
-./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5-mini "" data/eval_set.jsonl 4
-./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5-mini "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" BASELINE backward gpt-5-mini "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" BASELINE forward  gpt-5-mini "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5-mini "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5-mini "" data/eval_set.jsonl 4
 
 # GPT‑5.4‑mini‑2026‑03‑17
-./run_miniswe_direct.sh "" BASELINE backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-./run_miniswe_direct.sh "" BASELINE forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" BASELINE backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" BASELINE forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
 
 # MiniMax M2.5
-./run_miniswe_direct.sh "" BASELINE backward minimax2.5 "" data/eval_set.jsonl 4
-./run_miniswe_direct.sh "" BASELINE forward  minimax2.5 "" data/eval_set.jsonl 4
-./run_miniswe_direct.sh "" L1+L2+L3 backward minimax2.5 "" data/eval_set.jsonl 4
-./run_miniswe_direct.sh "" L1+L2+L3 forward  minimax2.5 "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" BASELINE backward minimax2.5 "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" BASELINE forward  minimax2.5 "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 backward minimax2.5 "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  minimax2.5 "" data/eval_set.jsonl 4
 
 ### Codex – 12 One‑Liners
 
 Run ALL eval_issues for each model, ablation, and direction (workers=4, dataset=data/eval_set.jsonl). The script auto‑configures provider and prints an auth banner.
 
 # GPT ‑5 ‑mini
-./run_codex_direct.sh "" baseline backward gpt-5-mini "" data/eval_set.jsonl 4
-./run_codex_direct.sh "" baseline forward  gpt-5-mini "" data/eval_set.jsonl 4
-./run_codex_direct.sh "" L1+L2+L3 backward gpt-5-mini "" data/eval_set.jsonl 4
-./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5-mini "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline backward gpt-5-mini "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline forward  gpt-5-mini "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5-mini "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5-mini "" data/eval_set.jsonl 4
 
 # GPT ‑5.4 ‑mini ‑2026 ‑03 ‑17
-./run_codex_direct.sh "" baseline backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-./run_codex_direct.sh "" baseline forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
 
 # MiniMax M2.5 (via OpenRouter)
-./run_codex_direct.sh "" baseline backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
-./run_codex_direct.sh "" baseline forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
-./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
-./run_codex_direct.sh "" L1+L2+L3 forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 
