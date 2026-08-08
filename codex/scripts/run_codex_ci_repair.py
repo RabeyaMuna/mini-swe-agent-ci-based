@@ -19,8 +19,10 @@ import shutil
 import subprocess
 import sys
 import time
+import requests
 from pathlib import Path
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables from .env file at project root
 try:
@@ -44,6 +46,103 @@ DEFAULT_LOG_CACHE = PROJECT_ROOT / "data" / "log_details.json"
 DEFAULT_WORKFLOW_CACHE = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
 
 sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _print_auth_banner(provider: str, endpoint: str, code_home: Path) -> None:
+    print("\n==========================================")
+    print("Auth mode: API key")
+    print(f"Provider: {provider}")
+    print(f"Endpoint: {endpoint}")
+    print(f"CODEX_HOME: {code_home}")
+
+
+def _headers(token: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+    h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    if extra:
+        h.update(extra)
+    return h
+
+
+# Canonical model aliases so users can pass simple names
+ALIASES: dict[str, str] = {
+    # MiniMax aliases
+    "minimax": "minimax/minimax-m2.5",
+    "minimax2.5": "minimax/minimax-m2.5",
+    "minimax-m2.5": "minimax/minimax-m2.5",
+}
+
+
+def canonical_model(name: str | None) -> str | None:
+    if not name:
+        return None
+    n = str(name).strip()
+    return ALIASES.get(n, n)
+
+
+def preflight_model(model: str) -> None:
+    """Verify model with minimal API call and print banner.
+
+    Handles GPT-5.* (max_completion_tokens / max_output_tokens) and OpenRouter
+    (max_tokens).
+    """
+    if not model:
+        return
+
+    model = canonical_model(model) or model
+    provider = "openai" if model.startswith("gpt-") else "openrouter"
+    if provider == "openai":
+        endpoint = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        key_env = "OPENAI_API_KEY"
+        token = os.environ.get("OPENAI_API_KEY", "").strip()
+    else:
+        endpoint = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        key_env = "OPENROUTER_API_KEY"
+        token = os.environ.get("OPENROUTER_API_KEY", "").strip()
+
+    # Ensure Codex sees OpenAI-compatible env regardless of provider
+    if provider == "openai":
+        os.environ.setdefault("OPENAI_BASE_URL", endpoint)
+    else:
+        os.environ["OPENAI_BASE_URL"] = endpoint
+        if token:
+            os.environ["OPENAI_API_KEY"] = token
+
+    code_home = PROJECT_ROOT / "codex" / ".codex-config"
+    code_home.mkdir(parents=True, exist_ok=True)
+    _print_auth_banner(provider, endpoint, code_home)
+
+    if not token:
+        raise SystemExit(f"Missing {key_env} for provider {provider}")
+
+    # Try chat/completions
+    url = endpoint.rstrip("/") + "/chat/completions"
+    payload: dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": "ok"}]}
+    if provider == "openai":
+        payload["max_completion_tokens"] = 16
+    else:
+        payload["max_tokens"] = 16
+
+    r = requests.post(url, headers=_headers(token), json=payload, timeout=20)
+    if r.status_code == 200:
+        print("\n✓ Model verified: chat/completions")
+        return
+
+    if provider == "openai":
+        url2 = endpoint.rstrip("/") + "/responses"
+        payload2 = {"model": model, "input": "ok", "max_output_tokens": 16}
+        r2 = requests.post(url2, headers=_headers(token), json=payload2, timeout=20)
+        if r2.status_code == 200:
+            print("\n✓ Model verified: responses")
+            return
+        print("\n✗ FATAL: Model test failed!")
+        print("  Model: ", model)
+        print("  Error: ", f"chat={r.status_code} {str(r.text)[:200]} | responses={r2.status_code} {str(r2.text)[:200]}")
+        raise SystemExit(1)
+
+    print("\n✗ FATAL: Model test failed!")
+    print("  Model: ", model)
+    print("  Error: ", f"chat={r.status_code} {str(r.text)[:200]}")
+    raise SystemExit(1)
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -1418,11 +1517,18 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         )
         prompt_path = write_issue_document(result_dir, problem, document)
         transcript_path = result_dir / f"codex_transcript_problem_{problem['number']}.txt"
+        # Ensure Codex command has a model flag; if missing, inject canonical model
+        codex_cmd = args.codex_command
+        if " --model " not in f" {codex_cmd} ":
+            cm = canonical_model(args.context_model)
+            if cm:
+                codex_cmd = f"{codex_cmd} --model {cm}"
+
         run_result = run_codex(
             checkout,
             prompt_path,
             transcript_path,
-            args.codex_command,
+            codex_cmd,
             args.timeout,
             args.dry_run,
         )
@@ -1560,6 +1666,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--direction",
+        choices=["backward", "forward"],
+        default="backward",
+        help="Select backward (default) or forward memory root when memory is enabled",
+    )
+    parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers (default: 1)")
     return parser.parse_args()
 
 
@@ -1689,6 +1802,13 @@ def consolidate_all_predictions(
 
 def main() -> int:
     args = parse_args()
+    # Adjust memory root from direction if memory is enabled and default is in use
+    if args.direction == "forward" and str(args.memory_root).endswith("back_trs"):
+        args.memory_root = PROJECT_ROOT / "data" / "fwr_trs"
+
+    # Pre-flight model verification and banner when a context model is provided
+    if args.context_model:
+        preflight_model(args.context_model)
     if args.issue_ids:
         issue_ids = [x.strip() for x in args.issue_ids.split(",") if x.strip()]
     else:
@@ -1701,39 +1821,48 @@ def main() -> int:
         print(f"\n[codex-ci-repair] Starting ablation: {ablation}")
         print(f"[codex-ci-repair] Issues to process: {len(issue_ids)}")
 
-        failed_issues: list[tuple[str, str]] = []
+        failed_issues = []
+        if args.workers and args.workers > 1:
+            print(f"[codex-ci-repair] Running with workers={args.workers}")
+            tasks = {}
+            with ThreadPoolExecutor(max_workers=args.workers) as ex:
+                for wanted_id in issue_ids:
+                    issue = issue_index.get(str(wanted_id))
+                    if issue is None:
+                        print(f"[codex-ci-repair] WARNING: Issue {wanted_id} not found in dataset, skipping")
+                        failed_issues.append((wanted_id, "not found in dataset"))
+                        continue
+                    print(f"[codex-ci-repair] issue={wanted_id} ablation={ablation}")
+                    tasks[ex.submit(run_issue, args, ablation, issue)] = str(wanted_id)
 
-        def _process_one(wanted_id: str) -> tuple[str, str | None]:
-            issue = issue_index.get(str(wanted_id))
-            if issue is None:
-                return wanted_id, "not found in dataset"
-            print(f"[codex-ci-repair] issue={wanted_id} ablation={ablation}")
-            try:
-                run_issue(args, ablation, issue)
-                if args.incremental_predictions:
+                for fut in as_completed(tasks):
+                    wid = tasks[fut]
                     try:
-                        append_prediction_for_issue(
-                            args.output_root, ablation, issue_id(issue), args.context_model
-                        )
+                        fut.result()
                     except Exception as exc:
-                        print(
-                            f"[codex-ci-repair] WARNING: Could not append predictions for issue {issue_id(issue)}: {exc}"
-                        )
-                return wanted_id, None
-            except Exception as exc:
-                return wanted_id, str(exc)
+                        print(f"[codex-ci-repair] ERROR processing issue {wid}: {exc}")
+                        failed_issues.append((wid, str(exc)))
+                    # Incremental predictions write after each completion
+                    consolidate_predictions(args.output_root, ablation, args.context_model)
+        else:
+            for wanted_id in issue_ids:
+                issue = issue_index.get(str(wanted_id))
+                if issue is None:
+                    print(f"[codex-ci-repair] WARNING: Issue {wanted_id} not found in dataset, skipping")
+                    failed_issues.append((wanted_id, "not found in dataset"))
+                    continue
 
-        with ThreadPoolExecutor(max_workers=max(1, int(args.workers))) as pool:
-            futures = {pool.submit(_process_one, wid): wid for wid in issue_ids}
-            for fut in as_completed(futures):
-                wid = futures[fut]
+                print(f"[codex-ci-repair] issue={wanted_id} ablation={ablation}")
+
                 try:
-                    wid_done, err = fut.result()
+                    run_issue(args, ablation, issue)
                 except Exception as exc:
-                    err = str(exc)
-                if err:
-                    print(f"[codex-ci-repair] ERROR processing issue {wid}: {err}")
-                    failed_issues.append((wid, err))
+                    print(f"[codex-ci-repair] ERROR processing issue {wanted_id}: {exc}")
+                    failed_issues.append((wanted_id, str(exc)))
+                    # Continue with next issue instead of crashing
+                    continue
+                # Incremental predictions write after each issue (serial mode)
+                consolidate_predictions(args.output_root, ablation, args.context_model)
 
         # Auto-consolidate predictions after processing all issues
         consolidate_predictions(args.output_root, ablation, args.context_model)

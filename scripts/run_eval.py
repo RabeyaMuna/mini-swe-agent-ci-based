@@ -22,6 +22,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+import os
 from typing import Any
 
 
@@ -171,8 +172,11 @@ Examples:
     parser.add_argument(
         "--model",
         type=str,
-        default="minimax",
-        help="Model to use (default: minimax). Examples: glm5.2, minimax, gpt-4",
+        default="minimax2.5",
+        help=(
+            "Model to use (default: minimax2.5). Allowed: minimax2.5, gpt-5-mini, "
+            "gpt-5.4-mini-2026-03-17"
+        ),
     )
     parser.add_argument(
         "--direction",
@@ -341,7 +345,17 @@ Examples:
     print()
 
     try:
-        subprocess.run(cmd, check=True)
+        # Pass model to Mini‑SWE via environment for consistency across agents
+        model_alias = args.model.strip()
+        alias_map = {
+            "minimax": "minimax2.5",
+            "minimax-m2.5": "minimax2.5",
+            "minimax/minimax-m2.5": "minimax2.5",
+        }
+        model_env = alias_map.get(model_alias, model_alias)
+        env = os.environ.copy()
+        env["MODEL"] = model_env
+        subprocess.run(cmd, check=True, env=env)
     except subprocess.CalledProcessError as e:
         print(f"\nERROR: Command failed with code {e.returncode}")
         sys.exit(e.returncode)

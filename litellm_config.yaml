@@ -1,14 +1,8 @@
 model_list:
-  # GLM models
+  # GLM 5.2 (for decomposition/memory building only)
   - model_name: glm5.2
     litellm_params:
       model: zai/glm-5.2
-      api_base: os.environ/GLM_BASE_URL
-      api_key: os.environ/GLM_API_KEY
-
-  - model_name: glm4
-    litellm_params:
-      model: zai/glm-4
       api_base: os.environ/GLM_BASE_URL
       api_key: os.environ/GLM_API_KEY
 
@@ -19,40 +13,23 @@ model_list:
       api_base: os.environ/OPENROUTER_BASE_URL
       api_key: os.environ/OPENROUTER_API_KEY
 
-  # DeepSeek (optional)
-  - model_name: deepseek-chat
+  # Minimax alias (minimax2.5) for consistency across agents
+  - model_name: minimax2.5
     litellm_params:
-      model: deepseek/deepseek-chat
-      api_key: os.environ/DEEPSEEK_API_KEY
+      model: openrouter/minimax/minimax-m2.5
+      api_base: os.environ/OPENROUTER_BASE_URL
+      api_key: os.environ/OPENROUTER_API_KEY
 
-  # OpenAI models
+  # OpenAI GPT‑5 Mini
   - model_name: gpt-5-mini
     litellm_params:
       model: gpt-5-mini
+      api_base: os.environ/OPENAI_BASE_URL
       api_key: os.environ/OPENAI_API_KEY
 
-  - model_name: gpt-4o
+  # OpenAI GPT‑5.4 Mini snapshot
+  - model_name: gpt-5.4-mini-2026-03-17
     litellm_params:
-      model: gpt-4o
+      model: gpt-5.4-mini-2026-03-17
+      api_base: os.environ/OPENAI_BASE_URL
       api_key: os.environ/OPENAI_API_KEY
-
-  - model_name: gpt-4
-    litellm_params:
-      model: gpt-4
-      api_key: os.environ/OPENAI_API_KEY
-
-  - model_name: o1
-    litellm_params:
-      model: o1
-      api_key: os.environ/OPENAI_API_KEY
-
-  # Anthropic models
-  - model_name: claude-opus-4
-    litellm_params:
-      model: anthropic/claude-opus-4
-      api_key: os.environ/ANTHROPIC_API_KEY
-
-  - model_name: claude-sonnet-4
-    litellm_params:
-      model: anthropic/claude-sonnet-4
-      api_key: os.environ/ANTHROPIC_API_KEY
