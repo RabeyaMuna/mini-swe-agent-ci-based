@@ -338,7 +338,8 @@ For EACH problem, extract:
       "failure_type": "type_checking",
       "failure_signals": ["error message 1", "error message 2"],
       "verification_cmd": "./dev/test.sh"
-    }}
+    }},
+    // ... more problems if applicable
   ]
 }}
 ```
@@ -352,7 +353,7 @@ For EACH problem, extract:
 
         # Debug output
         for i, p in enumerate(problems, 1):
-            print(f"[Memory]   Problem {i}: {p.get('problem', 'N/A')[:60]}")
+            print(f"[Memory]   Problem {i}: {p.get('problem', 'N/A')}")
             print(f"[Memory]     Files: {', '.join(p.get('files', [])[:3])}")
             print(f"[Memory]     Type: {p.get('failure_type', 'unknown')}")
 

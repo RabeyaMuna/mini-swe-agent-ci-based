@@ -1751,7 +1751,6 @@ def parse_args() -> argparse.Namespace:
         default="backward",
         help="Select backward (default) or forward memory root when memory is enabled",
     )
-    parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers (default: 1)")
     return parser.parse_args()
 
 

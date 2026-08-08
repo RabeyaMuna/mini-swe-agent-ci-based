@@ -276,7 +276,7 @@ class MemoryPlugin:
 
             # Files to modify
             if problem.get('files'):
-                files = problem['files'][:10]
+                files = problem['files']
                 lines.append("** Files to Modify:**")
                 for f in files:
                     lines.append(f"  - `{f}`")
@@ -284,7 +284,7 @@ class MemoryPlugin:
 
             # Failure signals
             if problem.get('failure_signals'):
-                signals = problem['failure_signals'][:5]
+                signals = problem['failure_signals']
                 lines.append("** Error Signals:**")
                 for sig in signals:
                     lines.append(f"  - {sig}")
