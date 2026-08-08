@@ -37,7 +37,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Import all the functions we need from the original script
 from run_codex_ci_repair import (
     parse_args,
-    load_issue_dataset,
+    load_issue_index,
+    load_issue_ids,
     load_ci_failure_analysis,
     load_workflow_validation,
     retrieve_memory_for_issue,
@@ -275,11 +276,16 @@ def main():
         print("Example: --model glm5.2")
         sys.exit(1)
 
-    # Load issues
-    issues = load_issue_dataset(args)
-    ablations = [a.strip() for a in args.ablations.split(",")]
+    # Load issues using new pattern
+    if args.issue_ids:
+        issue_ids = [x.strip() for x in args.issue_ids.split(",") if x.strip()]
+    else:
+        issue_ids = load_issue_ids(args.issue_ids_file)
 
-    print(f"[codex-ci-repair] Issues to process: {len(issues)}")
+    ablations = [a.strip() for a in args.ablations.split(",") if a.strip()]
+    issue_index = load_issue_index(args.dataset, args.hf_dataset)
+
+    print(f"[codex-ci-repair] Issues to process: {len(issue_ids)}")
     print(f"[codex-ci-repair] Ablations: {', '.join(ablations)}")
     print(f"[codex-ci-repair] Model: {args.model}")
 
@@ -287,14 +293,21 @@ def main():
     for ablation in ablations:
         print(f"\n[codex-ci-repair] Starting ablation: {ablation}")
 
-        for issue in issues:
+        for wanted_id in issue_ids:
+            issue = issue_index.get(str(wanted_id))
+            if issue is None:
+                print(f"[codex-ci-repair] WARNING: Issue {wanted_id} not found in dataset, skipping")
+                continue
+
+            print(f"[codex-ci-repair] issue={wanted_id} ablation={ablation}")
+
             try:
                 run_issue(args, ablation, issue)
             except KeyboardInterrupt:
                 print("\nInterrupted by user")
                 sys.exit(1)
             except Exception as e:
-                print(f"ERROR processing issue {issue.get('id')}: {e}")
+                print(f"ERROR processing issue {wanted_id}: {e}")
                 import traceback
                 traceback.print_exc()
 

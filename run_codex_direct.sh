@@ -1,26 +1,42 @@
 #!/bin/bash
 # Run Codex with any OpenAI or Anthropic model
 #
-# Usage: ./run_codex_direct.sh <issue-ids> [ablation] [direction] [model]
-#   <issue-ids>: Issue ID(s) to run, or empty string "" for ALL issues
+# Usage: ./run_codex_direct.sh <issue-ids> [ablation] [direction] [model] [repo_slug] [dataset] [workers]
+#   <issue-ids>: Comma-separated IDs, or empty string "" to use eval_issue_ids.json, or omit to RUN ALL
+#   [ablation]:  baseline|L1|L2|L3|L1+L2|L1+L2+L3|all   (default: all)
+#   [direction]: backward|forward|both                   (default: both)
+#   [model]:     gpt-5-mini | gpt-5.4-mini-2026-03-17 | minimax/minimax-m2.5 (default: gpt-5-mini)
+#   [repo_slug]: Optional owner/repo to filter IDs from dataset (overrides <issue-ids>)
+#   [dataset]:   Path to eval_set.jsonl (default: data/eval_set.jsonl)
+#   [workers]:   Parallel issues per ablation (default: 1)
+#
 #   Examples:
-#     ./run_codex_direct.sh 129 baseline backward gpt-4o      # Single issue
-#     ./run_codex_direct.sh "" baseline backward gpt-4o       # ALL issues
+#     # Run ALL ablations and BOTH directions for all issues in eval_issue_ids.json using GPT‑5‑mini
+#     ./run_codex_direct.sh "" all both gpt-5-mini
+#     # Run MiniMax on a single issue with backward memory L1+L2+L3
+#     ./run_codex_direct.sh 129 L1+L2+L3 backward minimax/minimax-m2.5
+#     # Run OpenAI snapshot across all issues for a specific repo (pulled from dataset)
+#     ./run_codex_direct.sh "" all both gpt-5.4-mini-2026-03-17 octo-org/demo-repo data/eval_set.jsonl
 
 set -e
 
 # Handle empty string for "all issues"
 if [ $# -eq 0 ]; then
-    ISSUE_IDS="129"  # No args: default to 129
-elif [ -z "$1" ]; then
-    ISSUE_IDS=""     # Empty string: run ALL issues
+    ISSUE_IDS=""          # No args: run ALL issues from eval_issue_ids.json
 else
-    ISSUE_IDS="$1"   # Specific issue(s)
+    if [ -z "$1" ]; then
+        ISSUE_IDS=""      # Empty string: run ALL issues
+    else
+        ISSUE_IDS="$1"    # Specific issue(s)
+    fi
 fi
 
-ABLATION=${2:-baseline}
-DIRECTION=${3:-backward}
-MODEL=${4:-gpt-4o}  # Default: gpt-4o (has full metadata, no warnings)
+ABLATION=${2:-all}
+DIRECTION=${3:-both}
+MODEL=${4:-gpt-5-mini}
+REPO_SLUG=${5:-}
+DATASET=${6:-data/eval_set.jsonl}
+WORKERS=${7:-1}
 
 echo "=========================================="
 echo "CODEX CLI - Multi-Model Support"
@@ -33,6 +49,9 @@ fi
 echo "Ablation:  $ABLATION"
 echo "Direction: $DIRECTION"
 echo "Model:     $MODEL"
+if [ -n "$REPO_SLUG" ]; then
+    echo "Repo:      $REPO_SLUG (filter from $DATASET)"
+fi
 echo ""
 
 # Load .env BUT save specific keys first
@@ -49,9 +68,14 @@ unset OPENROUTER_API_KEY
 unset MINIMAX_API_KEY
 unset OPENAI_BASE_URL
 
-# Configure API based on model
+##############################################
+# Configure API based on requested model
+# - OpenAI models: use OpenAI API directly
+# - OpenRouter-prefixed models: use OpenRouter
+# - MiniMax: route via OpenRouter to avoid provider/model-id drift
+##############################################
 case "$MODEL" in
-    gpt-4o|gpt-4|gpt-4-turbo|o1|o1-mini|o3-mini|gpt-5-mini)
+    gpt-4o|gpt-4|gpt-4-turbo|o1|o1-mini|o3-mini|gpt-5-mini|gpt-5.4-mini|gpt-5.4-mini-2026-03-17)
         # OpenAI models - use OpenAI API directly
         if [ -z "$SAVED_OPENAI_KEY" ]; then
             echo "✗ OPENAI_API_KEY not set in .env"
@@ -64,6 +88,70 @@ case "$MODEL" in
         echo "✓ Using OpenAI API"
         echo "  Model: $CODEX_MODEL"
         echo "  API Key: ${OPENAI_API_KEY:0:10}..."
+        PROVIDER="OpenAI"
+        AUTH_MODE="apikey"
+        API_BASE="https://api.openai.com/v1"
+
+        # Write provider config for Codex (~/.codex)
+        mkdir -p "$HOME/.codex"
+        cat > "$HOME/.codex/config.toml" << 'EOF'
+# Codex configuration for OpenAI (native)
+model_reasoning_effort = "medium"
+
+[shell_environment_policy]
+inherit = "all"
+EOF
+        cat > "$HOME/.codex/auth.json" << EOF
+{
+  "auth_mode": "apikey",
+  "OPENAI_API_KEY": "$OPENAI_API_KEY"
+}
+EOF
+        chmod 600 "$HOME/.codex/auth.json"
+        ;;
+
+    openai/*)
+        # OpenAI models via OpenRouter (with openai/ prefix)
+        if [ -z "$SAVED_OPENROUTER_KEY" ]; then
+            echo "✗ OPENROUTER_API_KEY not set in .env"
+            exit 1
+        fi
+        export OPENAI_API_KEY="$SAVED_OPENROUTER_KEY"
+        export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+        export OPENROUTER_APP_NAME="Codex CI Repair"
+        export OPENROUTER_SITE_URL="https://github.com/openai/codex"
+        CODEX_MODEL="$MODEL"
+        CONTEXT_MODEL="$MODEL"
+        echo "✓ Using OpenRouter for OpenAI models"
+        echo "  Model: $CODEX_MODEL"
+        echo "  API Key: ${OPENAI_API_KEY:0:10}..."
+        PROVIDER="OpenRouter"
+        AUTH_MODE="apikey"
+        API_BASE="$OPENAI_BASE_URL"
+
+        # Write provider config for Codex (~/.codex)
+        mkdir -p "$HOME/.codex"
+        cat > "$HOME/.codex/config.toml" << 'EOF'
+# Codex configuration for OpenRouter
+model_provider = "openrouter"
+model_reasoning_effort = "medium"
+
+[shell_environment_policy]
+inherit = "all"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+requires_openai_auth = true
+EOF
+        cat > "$HOME/.codex/auth.json" << EOF
+{
+  "auth_mode": "apikey",
+  "OPENAI_API_KEY": "$OPENAI_API_KEY"
+}
+EOF
+        chmod 600 "$HOME/.codex/auth.json"
         ;;
 
     anthropic/*)
@@ -78,62 +166,102 @@ case "$MODEL" in
         CONTEXT_MODEL="claude-opus-4"
         echo "✓ Using Anthropic API"
         echo "  Model: $CODEX_MODEL"
+        PROVIDER="Anthropic"
+        AUTH_MODE="apikey"
+        API_BASE="https://api.anthropic.com"
         ;;
 
     minimax*|minimax/*)
-        # MiniMax models (via OpenAI-compatible API or OpenRouter)
-        # Check if MiniMax API key is set (direct), otherwise use OpenRouter
-        if [ -n "$SAVED_MINIMAX_KEY" ]; then
-            # Direct MiniMax API (OpenAI-compatible)
-            export OPENAI_API_KEY="$SAVED_MINIMAX_KEY"
-            export OPENAI_BASE_URL="https://api.minimax.chat/v1"
-            CODEX_MODEL="$MODEL"
-            CONTEXT_MODEL="$MODEL"
-            echo "✓ Using MiniMax API (direct)"
-            echo "  Model: $CODEX_MODEL"
-            echo "  API Key: ${OPENAI_API_KEY:0:10}..."
-        elif [ -n "$SAVED_OPENROUTER_KEY" ]; then
-            # Via OpenRouter
-            export OPENAI_API_KEY="$SAVED_OPENROUTER_KEY"
-            export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-            # OpenRouter recommended headers (as env vars for some clients)
-            export OPENROUTER_APP_NAME="Codex CI Repair"
-            export OPENROUTER_SITE_URL="https://github.com/anthropics/codex"
-            CODEX_MODEL="$MODEL"
-            CONTEXT_MODEL="$MODEL"
-            echo "✓ Using OpenRouter for MiniMax"
-            echo "  Model: $CODEX_MODEL"
-            echo "  API Key: ${OPENAI_API_KEY:0:10}..."
-        else
-            echo "✗ No MiniMax API key found"
-            echo "  Set either MINIMAX_API_KEY or OPENROUTER_API_KEY in .env"
+        # Always use OpenRouter for MiniMax to ensure correct model ids
+        if [ -z "$SAVED_OPENROUTER_KEY" ]; then
+            echo "✗ OPENROUTER_API_KEY not set in .env (required for MiniMax)"
             exit 1
         fi
+        export OPENAI_API_KEY="$SAVED_OPENROUTER_KEY"
+        export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+        export OPENROUTER_APP_NAME="Codex CI Repair"
+        export OPENROUTER_SITE_URL="https://github.com/openai/codex"
+        CODEX_MODEL="$MODEL"
+        CONTEXT_MODEL="$MODEL"
+        echo "✓ Using OpenRouter for MiniMax"
+        echo "  Model: $CODEX_MODEL"
+        echo "  API Key: ${OPENAI_API_KEY:0:10}..."
+        PROVIDER="OpenRouter"
+        AUTH_MODE="apikey"
+        API_BASE="$OPENAI_BASE_URL"
+
+        # Write provider config for Codex (~/.codex)
+        mkdir -p "$HOME/.codex"
+        cat > "$HOME/.codex/config.toml" << 'EOF'
+# Codex configuration for MiniMax via OpenRouter
+model_provider = "openrouter"
+model_reasoning_effort = "medium"
+
+[shell_environment_policy]
+inherit = "all"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+requires_openai_auth = true
+EOF
+        cat > "$HOME/.codex/auth.json" << EOF
+{
+  "auth_mode": "apikey",
+  "OPENAI_API_KEY": "$OPENAI_API_KEY"
+}
+EOF
+        chmod 600 "$HOME/.codex/auth.json"
         ;;
 
     *)
         echo "✗ Unknown model: $MODEL"
         echo ""
         echo "Supported models:"
-        echo "  OpenAI:    gpt-4o, gpt-4, gpt-4-turbo, o1, o1-mini, o3-mini, gpt-5-mini"
-        echo "  Anthropic: anthropic/claude-opus-4, anthropic/claude-sonnet-4, anthropic/claude-sonnet-3.5"
-        echo "  MiniMax:   minimax-2.7, minimax-pro, minimax-* (via direct API or OpenRouter)"
+        echo "  OpenAI (direct):    gpt-4o, gpt-4, gpt-4-turbo, o1, o1-mini, o3-mini, gpt-5-mini, gpt-5.4-mini"
+        echo "  OpenAI (OpenRouter): openai/gpt-5-mini, openai/gpt-5.4-mini, openai/gpt-4o"
+        echo "  Anthropic:          anthropic/claude-opus-4, anthropic/claude-sonnet-4, anthropic/claude-sonnet-3.5"
+        echo "  MiniMax:            minimax/minimax-m2.5, minimax/minimax-m3, minimax-*"
         exit 1
         ;;
 esac
 
 echo ""
 
-# Memory args
-MEMORY_ARGS=""
-if [ "$ABLATION" != "baseline" ]; then
-    MEMORY_ROOT="data/back_trs"
-    [ "$DIRECTION" = "forward" ] && MEMORY_ROOT="data/fwr_trs"
-    MEMORY_ARGS="--memory-root $MEMORY_ROOT"
-fi
+# Config summary banner
+echo "CONFIG: auth=$AUTH_MODE | provider=$PROVIDER | codex_home=${CODEX_HOME:-$HOME/.codex} | endpoint=$API_BASE"
 
-# ALWAYS include context-model to separate results by model
-MEMORY_ARGS="$MEMORY_ARGS --context-model $CODEX_MODEL"
+# Build the run function for one combo
+run_one() {
+    local ablation="$1"; local direction="$2"
+    local memory_args=""
+    if [ "$ablation" != "baseline" ]; then
+        local memory_root="data/back_trs"
+        [ "$direction" = "forward" ] && memory_root="data/fwr_trs"
+        memory_args="--memory-root $memory_root"
+    fi
+    memory_args="$memory_args --context-model $CODEX_MODEL"
+
+    echo "=========================================="
+    echo "Run: ablation=$ablation | direction=$direction"
+    echo "=========================================="
+
+    if [ -z "$ISSUE_IDS" ]; then
+        PYTHONPATH=. python3 codex/scripts/run_codex_ci_repair.py \
+            --ablations "$ablation" \
+            $memory_args \
+            --workers "$WORKERS" \
+            --codex-command "codex exec --sandbox danger-full-access --model $CODEX_MODEL"
+    else
+        PYTHONPATH=. python3 codex/scripts/run_codex_ci_repair.py \
+            --issue-ids "$ISSUE_IDS" \
+            --ablations "$ablation" \
+            $memory_args \
+            --workers "$WORKERS" \
+            --codex-command "codex exec --sandbox danger-full-access --model $CODEX_MODEL"
+    fi
+}
 
 # Activate environment
 source .venv-codex/bin/activate
@@ -169,55 +297,116 @@ print(f"API endpoint: {base_url}")
 print(f"API key: {api_key[:15]}...")
 print("")
 
+def model_name_matches(requested: str, actual: str) -> bool:
+    return (
+        actual == requested
+        or actual.startswith(requested + "-")
+        or actual.endswith("/" + requested)
+        or actual == requested.replace("/", "")
+        or requested in actual
+    )
+
+def try_responses_api(client: OpenAI, model: str) -> tuple[str, str]:
+    # Prefer 'max_output_tokens'; fall back to 'max_completion_tokens'.
+    try:
+        r = client.responses.create(
+            model=model,
+            input="Respond with only: OK",
+            max_output_tokens=8,
+        )
+        text = getattr(r, "output_text", None)
+        if not text:
+            # Fallback parse
+            try:
+                parts = getattr(r, "output", []) or []
+                if parts and getattr(parts[0], "content", None):
+                    c0 = parts[0].content[0]
+                    text = getattr(c0, "text", "")
+            except Exception:
+                text = ""
+        return r.model or model, (text or "")
+    except Exception as e1:
+        # Retry with 'max_completion_tokens' if server expects that name
+        try:
+            r = client.responses.create(
+                model=model,
+                input="Respond with only: OK",
+                max_completion_tokens=8,
+            )
+            text = getattr(r, "output_text", None) or ""
+            return r.model or model, text
+        except Exception as e2:
+            raise RuntimeError(f"Responses API failed: {e1} | retry: {e2}")
+
+def try_chat_api(client: OpenAI, model: str) -> tuple[str, str]:
+    # GPT-5 family on Chat Completions expects 'max_completion_tokens'
+    kwargs = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Respond with only: OK"}],
+    }
+    if model.startswith("gpt-5") or model.startswith("o"):
+        kwargs["max_completion_tokens"] = 8
+    else:
+        kwargs["max_tokens"] = 10
+    r = client.chat.completions.create(**kwargs)
+    txt = r.choices[0].message.content or ""
+    return r.model, txt
+
 try:
     # For Anthropic models, skip this test (different API)
     if model.startswith('anthropic/'):
         print("✓ Anthropic model detected - skipping OpenAI API test")
         sys.exit(0)
 
-    # Test with OpenAI-compatible API
     client = OpenAI(base_url=base_url, api_key=api_key)
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": "Respond with only: OK"}],
-        max_tokens=10
-    )
+    use_responses = model.startswith('gpt-5') or model.startswith('o') or '-mini-202' in model
 
-    actual_model = response.model
-    response_text = response.choices[0].message.content or ""
+    actual_model = ""
+    response_text = ""
+
+    if use_responses:
+        try:
+            actual_model, response_text = try_responses_api(client, model)
+        except Exception as e_res:
+            # Fallback to chat API if responses path failed for non-Responses models
+            actual_model, response_text = try_chat_api(client, model)
+    else:
+        try:
+            actual_model, response_text = try_chat_api(client, model)
+        except Exception as e_chat:
+            # Some models only support Responses API
+            actual_model, response_text = try_responses_api(client, model)
 
     print(f"✓ Model responded successfully!")
     print(f"  Requested: {model}")
     print(f"  Actual:    {actual_model}")
     print(f"  Response:  {response_text[:50]}")
 
-    # Verify we got the requested model (allow version suffixes for OpenAI models)
-    # e.g., "gpt-4o" -> "gpt-4o-2024-08-06" is OK
-    if actual_model != model and not actual_model.startswith(model + "-"):
-        print(f"")
-        print(f"✗ FATAL: Model mismatch!")
+    if not model_name_matches(model, actual_model):
+        print("")
+        print("✗ FATAL: Model mismatch!")
         print(f"  You requested: {model}")
         print(f"  API returned:  {actual_model}")
-        print(f"")
-        print(f"This means the API is using a DIFFERENT model than requested.")
-        print(f"Stopping to prevent invalid results.")
+        print("")
+        print("This means the API is using a DIFFERENT model than requested.")
+        print("Stopping to prevent invalid results.")
         sys.exit(1)
     elif actual_model != model:
-        print(f"  Note: API returned versioned model: {actual_model}")
+        print(f"  Note: API returned full model path: {actual_model}")
 
     print("")
     print("✓ PRE-FLIGHT CHECK PASSED")
     print(f"  Confirmed: {actual_model} is working correctly")
 
 except Exception as e:
-    print(f"")
-    print(f"✗ FATAL: Model test failed!")
+    print("")
+    print("✗ FATAL: Model test failed!")
     print(f"  Model:  {model}")
     print(f"  Error:  {e}")
-    print(f"")
-    print(f"The specified model cannot be used. Stopping now.")
-    print(f"Fix the model name or API configuration before running.")
+    print("")
+    print("The specified model cannot be used. Stopping now.")
+    print("Fix the model name or API configuration before running.")
     sys.exit(1)
 EOF
 
@@ -234,39 +423,69 @@ fi
 echo "=========================================="
 echo ""
 
-# Run Codex
-echo "Running Codex..."
-echo ""
+# Allow per-model provider config written to ~/.codex
+export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 
-# Set Codex to use config inside codex directory
-export CODEX_HOME="$(pwd)/codex/.codex-config"
-
-# Build command - only pass --issue-ids if we have specific IDs
-if [ -z "$ISSUE_IDS" ]; then
-    # Empty: omit --issue-ids to use all issues from file
-    PYTHONPATH=. python3 codex/scripts/run_codex_ci_repair.py \
-        --ablations "$ABLATION" \
-        $MEMORY_ARGS \
-        --codex-command "codex exec --sandbox danger-full-access --model $CODEX_MODEL"
-else
-    # Specific IDs: pass them explicitly
-    PYTHONPATH=. python3 codex/scripts/run_codex_ci_repair.py \
-        --issue-ids "$ISSUE_IDS" \
-        --ablations "$ABLATION" \
-        $MEMORY_ARGS \
-        --codex-command "codex exec --sandbox danger-full-access --model $CODEX_MODEL"
+# If a repo filter is provided, build ISSUE_IDS from the dataset
+if [ -n "$REPO_SLUG" ]; then
+    echo "Finding issues for repo: $REPO_SLUG from $DATASET"
+ISSUE_IDS=$(DATASET="$DATASET" REPO_SLUG="$REPO_SLUG" python3 - << 'PY'
+import json, sys, os
+path = os.environ.get('DATASET') or 'data/eval_set.jsonl'
+repo = os.environ.get('REPO_SLUG')
+ids = []
+with open(path, 'r', encoding='utf-8') as f:
+    for line in f:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        slug = (str(row.get('repo_owner') or '').strip() + '/' + str(row.get('repo_name') or '').strip()).strip('/')
+        alt  = str(row.get('repo') or '').strip()
+        if slug == repo or alt == repo or alt.endswith('/'+repo.split('/')[-1]):
+            iid = str(row.get('instance_id') or row.get('id') or row.get('sha_fail') or '').strip()
+            if iid:
+                ids.append(iid)
+print(','.join(ids))
+PY
+)
+    export ISSUE_IDS
+    if [ -z "$ISSUE_IDS" ]; then
+        echo "✗ No matching issues found for $REPO_SLUG in $DATASET" >&2
+        exit 1
+    fi
+    echo "  Found issues: ${ISSUE_IDS}"
 fi
 
-EXIT_CODE=$?
+# Build ablation and direction sets
+if [ "$ABLATION" = "all" ]; then
+    ABLATIONS_LIST=(baseline L1 L2 L3 L1+L2 L1+L2+L3)
+else
+    ABLATIONS_LIST=($ABLATION)
+fi
+
+if [ "$DIRECTION" = "both" ]; then
+    DIRECTIONS_LIST=(backward forward)
+else
+    DIRECTIONS_LIST=($DIRECTION)
+fi
+
+TOTAL=0; FAILS=0
+for abl in "${ABLATIONS_LIST[@]}"; do
+  for dir in "${DIRECTIONS_LIST[@]}"; do
+    TOTAL=$((TOTAL+1))
+    if run_one "$abl" "$dir"; then
+      echo "✓ Completed: $abl | $dir"
+    else
+      echo "✗ Failed:    $abl | $dir"
+      FAILS=$((FAILS+1))
+    fi
+  done
+done
 
 echo ""
 echo "=========================================="
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "✓ SUCCESS!"
-    echo "Results: results/codex/$ABLATION/"
-else
-    echo "✗ FAILED (exit code: $EXIT_CODE)"
-fi
+echo "Completed $TOTAL runs. Failures: $FAILS"
+echo "Results: results/codex/"
 echo "=========================================="
 
-exit $EXIT_CODE
+exit $FAILS

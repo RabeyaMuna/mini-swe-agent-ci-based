@@ -213,13 +213,13 @@ test_script
 # CRITICAL_FINDINGS.md
 # SMOKING_GUN.mddata/ci_dataset.jsonl
 data/
-data/
 repo/
 execption/
 .venv-codex/
-.venv-harbor/
 
 # Codex project-specific config (contains API keys)
+codex/.codex-config/**
 
 # Codex config (contains API keys)
 codex/.codex-config/
+codex/.codex/

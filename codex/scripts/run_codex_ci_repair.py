@@ -10,6 +10,8 @@ Codex, then invokes `codex exec` from a checked-out failing repository.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import json
 import os
 import shlex
@@ -1049,7 +1051,7 @@ def run_codex(
     # Pass environment variables to subprocess
     # CRITICAL: Filter out OpenRouter key to prevent API key conflicts
     env = os.environ.copy()
-
+    
     # Remove OpenRouter variables if using OpenAI/Anthropic directly
     if 'OPENAI_API_KEY' in env and env.get('OPENAI_API_KEY', '').startswith('sk-proj-'):
         # Using OpenAI directly - remove OpenRouter
@@ -1062,6 +1064,7 @@ def run_codex(
         env.pop('OPENAI_BASE_URL', None)
 
     with open(transcript_path, 'w', encoding='utf-8') as f:
+        
         proc = subprocess.Popen(
             cmd,
             cwd=checkout,
@@ -1071,20 +1074,62 @@ def run_codex(
             text=True,
             env=env,  # Pass environment to subprocess
         )
-
+        
         # Send prompt to stdin
         if proc.stdin:
             proc.stdin.write(prompt)
             proc.stdin.close()
 
-        # Stream output line by line
+        # Extract expected model from command
+        expected_model = None
+        for i, arg in enumerate(cmd):
+            if arg == '--model' and i + 1 < len(cmd):
+                expected_model = cmd[i + 1]
+                break
+
+        # Stream output line by line and verify model
         if proc.stdout:
+            model_verified = False
+            detected_model = None
+            line_count = 0
+
             for line in proc.stdout:
+                # Check for model identification in first 20 lines
+                if line_count < 20:
+                    if line.startswith('model:'):
+                        detected_model = line.split('model:')[1].strip()
+                        if expected_model and detected_model != expected_model:
+                            print(f"\n{'='*80}")
+                            print(f"❌ MODEL MISMATCH ERROR!")
+                            print(f"{'='*80}")
+                            print(f"Expected model: {expected_model}")
+                            print(f"Detected model: {detected_model}")
+                            print(f"\nCodex is using a DIFFERENT model than requested!")
+                            print(f"Stopping execution to prevent incorrect results.")
+                            print(f"{'='*80}\n")
+                            proc.kill()
+                            raise RuntimeError(
+                                f"Model mismatch: expected '{expected_model}' but got '{detected_model}'. "
+                                f"Check your Codex configuration."
+                            )
+                        elif expected_model and detected_model == expected_model:
+                            model_verified = True
+                            print(f"✓ Model verified: {detected_model}\n")
+
+                line_count += 1
+
                 # Print to terminal (real-time visibility)
                 print(line, end='', flush=True)
                 # Save to file
                 f.write(line)
                 f.flush()
+
+            # If expected model was specified but never verified
+            if expected_model and not model_verified:
+                print(f"\n{'='*80}")
+                print(f"⚠️  WARNING: Could not verify model '{expected_model}'")
+                print(f"Codex output did not include model identification.")
+                print(f"{'='*80}\n")
 
         proc.wait(timeout=timeout)
 
@@ -1115,19 +1160,19 @@ def git_diff(checkout: Path, original_commit: str = None) -> str:
     )
     uncommitted = proc.stdout.strip()
 
-    # If original_commit provided, diff from it to HEAD
+    # If original_commit provided, diff working tree (staged+unstaged) against it
+    # This captures BOTH committed and uncommitted changes in one unified patch.
     if original_commit:
         proc = subprocess.run(
-            ["git", "diff", "--binary", original_commit, "HEAD"],
+            ["git", "diff", "--binary", original_commit],
             cwd=checkout,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
         )
-        committed_diff = proc.stdout.strip()
-        # Return committed changes if any, otherwise uncommitted
-        return committed_diff if committed_diff else uncommitted
+        unified = proc.stdout.strip()
+        return unified if unified else uncommitted
 
     # Fallback: try to get diff from last 5 commits (in case agent made commits)
     # This covers the case where agent committed changes
@@ -1167,19 +1212,18 @@ def changed_files(checkout: Path, original_commit: str = None) -> list[str]:
     )
     uncommitted_files = [x.strip() for x in proc.stdout.splitlines() if x.strip()]
 
-    # If original_commit provided, get files from commits
+    # If original_commit provided, get files changed in working tree vs base
     if original_commit:
         proc = subprocess.run(
-            ["git", "diff", "--name-only", original_commit, "HEAD"],
+            ["git", "diff", "--name-only", original_commit],
             cwd=checkout,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
         )
-        committed_files = [x.strip() for x in proc.stdout.splitlines() if x.strip()]
-        # Return committed files if any, otherwise uncommitted
-        return committed_files if committed_files else uncommitted_files
+        unified_files = [x.strip() for x in proc.stdout.splitlines() if x.strip()]
+        return unified_files if unified_files else uncommitted_files
 
     # Fallback: try recent commits
     proc = subprocess.run(
@@ -1385,6 +1429,26 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         problem_results.append({"problem": problem, **run_result})
         if run_result["returncode"] != 0:
             break
+        # Optional mid-issue checkpoint to avoid losing fixes if run stops
+        if getattr(args, "save_after_each_problem", True):
+            try:
+                save_patch_and_result(
+                    result_dir,
+                    checkout,
+                    issue,
+                    ablation,
+                    prediction_model_name(args),
+                    problem_results,
+                    verification,
+                    None,  # no external verification
+                    original_sha,
+                )
+                if getattr(args, "incremental_predictions", True):
+                    append_prediction_for_issue(
+                        args.output_root, ablation, issue_id(issue), args.context_model
+                    )
+            except Exception as exc:
+                print(f"[codex-ci-repair] WARNING: mid-issue save failed: {exc}")
 
     # Agent handles verification internally for each problem
     # No external verification needed
@@ -1467,7 +1531,34 @@ def parse_args() -> argparse.Namespace:
             "when set, otherwise 'codex'."
         ),
     )
+    parser.add_argument(
+        "--incremental-predictions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Append/update predictions.json after each issue completes. "
+            "Enabled by default to avoid data loss if a run stops early."
+        ),
+    )
+    parser.add_argument(
+        "--save-after-each-problem",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Write patch.diff/result.json after each problem within an issue. "
+            "Provides mid-issue checkpoints so partial work is preserved."
+        ),
+    )
     parser.add_argument("--refresh-checkout", action="store_true")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of issues to process in parallel (per ablation). "
+            "Use with care; heavy on network and disk. Default: 1."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -1531,6 +1622,41 @@ def consolidate_predictions(
     return predictions
 
 
+def _ablation_dir_name(ablation: str, context_model: str | None) -> str:
+    safe_ablation = ablation.replace("+", "_").lower()
+    if context_model:
+        model_suffix = f"_{context_model.replace('/', '_').replace('.', '_')}"
+        return f"{safe_ablation}{model_suffix}"
+    return safe_ablation
+
+
+def append_prediction_for_issue(
+    output_root: Path, ablation: str, issue_id: str, context_model: str | None = None
+) -> None:
+    """Append or update a single prediction in predictions.json for robustness.
+
+    Safe to call repeatedly; replaces existing entry for the same id.
+    """
+    ablation_dir = _ablation_dir_name(ablation, context_model)
+    results_dir = output_root / ablation_dir
+    result_file = results_dir / str(issue_id) / "result.json"
+    if not result_file.exists():
+        return  # nothing to append yet
+
+    prediction = prediction_from_result(result_file)
+
+    predictions_file = results_dir / "predictions.json"
+    # Single-process lock to avoid interleaved writes when --workers > 1
+    if not hasattr(append_prediction_for_issue, "_lock"):
+        append_prediction_for_issue._lock = threading.Lock()  # type: ignore[attr-defined]
+    with append_prediction_for_issue._lock:  # type: ignore[attr-defined]
+        existing: list[dict[str, Any]] = load_json(predictions_file, [])
+        # Replace entry for same id, else append
+        filtered = [p for p in existing if str(p.get("id")) != str(prediction.get("id"))]
+        filtered.append(prediction)
+        write_json(predictions_file, filtered)
+
+
 def consolidate_all_predictions(
     output_root: Path, ablations: list[str], context_model: str | None = None
 ) -> None:
@@ -1575,24 +1701,39 @@ def main() -> int:
         print(f"\n[codex-ci-repair] Starting ablation: {ablation}")
         print(f"[codex-ci-repair] Issues to process: {len(issue_ids)}")
 
-        failed_issues = []
+        failed_issues: list[tuple[str, str]] = []
 
-        for wanted_id in issue_ids:
+        def _process_one(wanted_id: str) -> tuple[str, str | None]:
             issue = issue_index.get(str(wanted_id))
             if issue is None:
-                print(f"[codex-ci-repair] WARNING: Issue {wanted_id} not found in dataset, skipping")
-                failed_issues.append((wanted_id, "not found in dataset"))
-                continue
-
+                return wanted_id, "not found in dataset"
             print(f"[codex-ci-repair] issue={wanted_id} ablation={ablation}")
-
             try:
                 run_issue(args, ablation, issue)
+                if args.incremental_predictions:
+                    try:
+                        append_prediction_for_issue(
+                            args.output_root, ablation, issue_id(issue), args.context_model
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[codex-ci-repair] WARNING: Could not append predictions for issue {issue_id(issue)}: {exc}"
+                        )
+                return wanted_id, None
             except Exception as exc:
-                print(f"[codex-ci-repair] ERROR processing issue {wanted_id}: {exc}")
-                failed_issues.append((wanted_id, str(exc)))
-                # Continue with next issue instead of crashing
-                continue
+                return wanted_id, str(exc)
+
+        with ThreadPoolExecutor(max_workers=max(1, int(args.workers))) as pool:
+            futures = {pool.submit(_process_one, wid): wid for wid in issue_ids}
+            for fut in as_completed(futures):
+                wid = futures[fut]
+                try:
+                    wid_done, err = fut.result()
+                except Exception as exc:
+                    err = str(exc)
+                if err:
+                    print(f"[codex-ci-repair] ERROR processing issue {wid}: {err}")
+                    failed_issues.append((wid, err))
 
         # Auto-consolidate predictions after processing all issues
         consolidate_predictions(args.output_root, ablation, args.context_model)
