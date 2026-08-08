@@ -109,4 +109,4 @@ ruff check src/
 
 - [Project Root README](../README.md) - Multi-agent benchmark overview
 - [Evaluation Scripts](../scripts/) - Analysis tools
-- [OpenHands Integration](../openhands/) - Alternative agent scaffold
+ - Codex Runner (see project root README) - Codex CLI–based agent

@@ -223,3 +223,8 @@ codex/.codex-config/**
 # Codex config (contains API keys)
 codex/.codex-config/
 codex/.codex/
+
+# Local Codex provider config (keep secrets out of git)
+codex/.codex-config/
+codex/.codex-config/auth.json
+codex/.codex-config/config.toml

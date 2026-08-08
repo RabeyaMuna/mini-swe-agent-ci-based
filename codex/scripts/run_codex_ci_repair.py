@@ -837,6 +837,12 @@ def infer_failure_type(ci_problem: dict[str, Any]) -> str:
 
 
 def extract_problem_list(ci_failure: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Simple fallback extraction of problems from CI failure.
+
+    This is only used when Stage 0 LLM decomposition fails.
+    Normally, baseline mode will use MemoryPlugin.decompose_only() instead.
+    """
     files = ci_failure.get("relevant_files") or []
     problems = []
     for idx, item in enumerate(files, start=1):
@@ -929,18 +935,36 @@ You are fixing a CI failure in this repository.
 - Determine the minimal fix needed
 - Implement and validate the fix
 
+**STEP 0: Check if problem still exists (REQUIRED)**
+Before attempting any fix:
+1. Run the verification command on ONLY the affected files (not the whole repo)
+2. Check if the specific error signals are still present
+3. If the errors are NOT found:
+   - Report "Problem already fixed by previous step"
+   - Commit any staged changes with message "Skip: problem already fixed"
+   - Exit successfully
+4. If errors ARE found: Proceed to fix
+
+Example for mypy errors:
+```bash
+# Check only affected files
+mypy path/to/affected_file.py 2>&1 | grep -E "line_number"
+# If no output -> Problem is fixed, skip to next
+```
+
 **For automated tool failures (formatters, linters, type checkers):**
 - Prefer running the tool with auto-fix flags: `black .`, `ruff --fix .`, `mypy --install-types`, etc.
 - Let the tool fix all affected files at once
 - Only manually edit if the tool cannot auto-fix
 
 **General workflow:**
-1. Inspect the repository and understand the problem from CI context
-2. Make the minimal correct change to fix the issue
-3. Do not modify unrelated files
-4. Commit your changes with a descriptive message
-5. OPTIONAL: Run the validation command ONLY on files you changed (not the whole repo)
-6. The fix should be committed in git (not as uncommitted changes)
+1. **CHECK if problem exists** (see STEP 0 above - REQUIRED)
+2. Inspect the repository and understand the problem from CI context
+3. Make the minimal correct change to fix the issue
+4. Do not modify unrelated files
+5. Commit your changes with a descriptive message
+6. OPTIONAL: Run the validation command ONLY on files you changed (not the whole repo)
+7. The fix should be committed in git (not as uncommitted changes)
 
 **Scope:**
 - Fix this problem only
@@ -1039,6 +1063,23 @@ You are fixing a CI failure in this repository using guidance from similar past 
 
 ## Instructions
 
+**STEP 0: Check if problem still exists (REQUIRED)**
+Before attempting any fix:
+1. Run the verification command on ONLY the affected files (not the whole repo)
+2. Check if the specific error signals are still present
+3. If the errors are NOT found:
+   - Report "Problem already fixed by previous step"
+   - Commit any staged changes with message "Skip: problem already fixed"
+   - Exit successfully
+4. If errors ARE found: Proceed to fix
+
+Example for mypy errors:
+```bash
+# Check only affected files
+mypy path/to/affected_file.py 2>&1 | grep -E "line_number"
+# If no output -> Problem is fixed, skip to next
+```
+
 **If repair plan is provided above:**
 - Follow the action steps as your primary repair strategy
 - The steps are based on similar past fixes that worked
@@ -1056,12 +1097,13 @@ You are fixing a CI failure in this repository using guidance from similar past 
 - Only manually edit if the tool cannot auto-fix
 
 **General workflow:**
-1. Inspect the repository and understand the problem
-2. Make the minimal correct change to fix the issue
-3. Do not modify unrelated files
-4. Commit your changes with a descriptive message
-5. OPTIONAL: Run validation ONLY on files you changed (not the whole repo)
-6. The fix should be committed in git (not as uncommitted changes)
+1. **CHECK if problem exists** (see STEP 0 above - REQUIRED)
+2. Inspect the repository and understand the problem
+3. Make the minimal correct change to fix the issue
+4. Do not modify unrelated files
+5. Commit your changes with a descriptive message
+6. OPTIONAL: Run validation ONLY on files you changed (not the whole repo)
+7. The fix should be committed in git (not as uncommitted changes)
 
 **Scope:**
 - Fix this problem only (do not fix unrelated issues)
@@ -1433,14 +1475,46 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         context_llm,
         args.generate_missing_analysis,
     )
-    # For baseline: extract problems from CI failure (simple extraction)
-    # For memory modes: let memory plugin decompose (uses LLM, smarter)
+    # Both baseline and memory modes use Stage 0 LLM decomposition
+    # Baseline: Stage 0 only (no memory retrieval)
+    # Memory modes: Stage 0 + full memory pipeline (Stages 1-9)
     if ablation.lower() == "baseline":
-        # Baseline: Simple CI extraction, no memory
-        ci_problems = extract_problem_list(ci_failure)
+        # Baseline: Use Stage 0 decomposition only (no memory retrieval)
+        print(f"[DEBUG] Baseline mode: Using Stage 0 LLM decomposition (no memory)")
+
+        if not context_llm:
+            # Fallback: If no LLM, use simple extraction
+            print(f"[DEBUG]   No LLM available, falling back to simple extraction")
+            ci_problems = extract_problem_list(ci_failure)
+        else:
+            # Use Stage 0 LLM decomposition (same as memory modes, but stop there)
+            try:
+                from memory_plugin import MemoryPlugin
+                temp_plugin = MemoryPlugin(
+                    memory_root=args.memory_root or Path("data/back_trs"),
+                    result_dir=str(result_dir),
+                    ablation="baseline",
+                    llm=context_llm,
+                    enabled=False  # Don't access memory, just use decompose_only
+                )
+                ci_problems = temp_plugin.decompose_only(
+                    ci_failure=ci_failure,
+                    verification=verification,
+                    issue_metadata={"task_id": issue_id(issue), "sha_fail": issue.get("sha_fail")}
+                )
+                # Add source tag
+                for prob in ci_problems:
+                    prob["source"] = "ci_failure"
+                    prob["repair_strategy"] = None  # No repair strategies in baseline
+                print(f"[DEBUG]   Stage 0 decomposed into {len(ci_problems)} problems")
+            except Exception as e:
+                print(f"[DEBUG]   Stage 0 decomposition failed: {e}")
+                print(f"[DEBUG]   Falling back to simple extraction")
+                ci_problems = extract_problem_list(ci_failure)
+
         memory_problems = []
     else:
-        # Memory modes: Let memory plugin decompose CI and search
+        # Memory modes: Let memory plugin decompose CI and search memory (full pipeline)
         _, memory_retrieval = load_memory_context(
             issue,
             ci_failure,
@@ -1455,7 +1529,6 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         memory_problems = memory_retrieval.get("problems", [])
 
         # Only extract CI problems as fallback if memory returned empty
-        # (Memory plugin's Stage 0 decomposition is better, but if it crashed, use this)
         ci_problems = extract_problem_list(ci_failure) if not memory_problems else []
 
     print(f"\n[DEBUG] Building unified problem list:")
@@ -1533,8 +1606,10 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
             args.dry_run,
         )
         problem_results.append({"problem": problem, **run_result})
-        if run_result["returncode"] != 0:
-            break
+
+        # Save intermediate results on failure too, so we capture partial fixes
+        failed = run_result["returncode"] != 0
+
         # Optional mid-issue checkpoint to avoid losing fixes if run stops
         if getattr(args, "save_after_each_problem", True):
             try:
@@ -1555,6 +1630,10 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
                     )
             except Exception as exc:
                 print(f"[codex-ci-repair] WARNING: mid-issue save failed: {exc}")
+
+        # Stop processing further problems if this one failed
+        if failed:
+            break
 
     # Agent handles verification internally for each problem
     # No external verification needed

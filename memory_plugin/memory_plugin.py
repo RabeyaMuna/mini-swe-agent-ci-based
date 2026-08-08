@@ -58,6 +58,38 @@ class MemoryPlugin:
             memory_levels=ablation
         )
 
+    def decompose_only(
+        self,
+        ci_failure: Dict[str, Any],
+        verification: Optional[Dict[str, Any]] = None,
+        issue_metadata: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Run Stage 0 only: Decompose CI failure into problems (no memory retrieval).
+
+        Used by baseline mode to get intelligent LLM-based problem decomposition
+        without accessing memory or repair strategies.
+
+        Returns:
+            List of decomposed problems with structure:
+            - problem: Description
+            - root_cause: Analysis
+            - files: List of affected files
+            - failure_type: Category
+            - failure_signals: Error messages
+            - verification_cmd: Validation command
+        """
+        if not self.llm:
+            raise ValueError("LLM client required for CI decomposition")
+
+        # Build query from raw CI data
+        query = self._build_query(ci_failure, verification, issue_metadata)
+
+        # Call STAIR retrieval's Stage 0 only
+        problems = self.retrieval.decompose_only(query)
+
+        return problems
+
     def retrieve(
         self,
         ci_failure: Dict[str, Any],

@@ -275,6 +275,24 @@ class STAIRRetrieval:
     # NEW PIPELINE STAGES (0-8)
     # ============================================================
 
+    def decompose_only(self, query: dict) -> list[dict]:
+        """
+        Run STAGE 0 only: Decompose CI failure into problems (no memory retrieval).
+
+        This is used by baseline mode to get intelligent problem decomposition
+        without accessing memory or repair strategies.
+
+        Returns:
+            List of decomposed problems (no repair strategies)
+        """
+        if not self.llm:
+            raise ValueError("LLM client required for CI decomposition")
+
+        print("[Memory] STAGE 0: Decomposing CI failure (baseline mode)...")
+        ci_problems = self._stage_0_decompose_ci_failure(query)
+        print(f"[Memory] STAGE 0: Decomposed into {len(ci_problems)} problems")
+        return ci_problems
+
     def _stage_0_decompose_ci_failure(self, query: dict) -> list[dict]:
         """
         STAGE 0: Decompose CI failure into structured problems.
