@@ -67,6 +67,10 @@ SAVED_ANTHROPIC_KEY="$ANTHROPIC_API_KEY"
 SAVED_OPENROUTER_KEY="$OPENROUTER_API_KEY"
 SAVED_MINIMAX_KEY="$MINIMAX_API_KEY"
 
+# Use PROJECT-LOCAL Codex config (not global!) - MUST BE SET EARLY
+PROJECT_CODEX_HOME="$PWD/.codex-local"
+export CODEX_HOME="$PROJECT_CODEX_HOME"
+
 # Clear ALL API-related environment variables to prevent conflicts
 unset OPENAI_API_KEY
 unset ANTHROPIC_API_KEY
@@ -98,22 +102,22 @@ case "$MODEL" in
         AUTH_MODE="apikey"
         API_BASE="https://api.openai.com/v1"
 
-        # Write provider config for Codex (~/.codex)
-        mkdir -p "$HOME/.codex"
-        cat > "$HOME/.codex/config.toml" << 'EOF'
+        # Write provider config for Codex (project-local)
+        mkdir -p "$CODEX_HOME"
+        cat > "$CODEX_HOME/config.toml" << 'EOF'
 # Codex configuration for OpenAI (native)
 model_reasoning_effort = "medium"
 
 [shell_environment_policy]
 inherit = "all"
 EOF
-        cat > "$HOME/.codex/auth.json" << EOF
+        cat > "$CODEX_HOME/auth.json" << EOF
 {
   "auth_mode": "apikey",
   "OPENAI_API_KEY": "$OPENAI_API_KEY"
 }
 EOF
-        chmod 600 "$HOME/.codex/auth.json"
+        chmod 600 "$CODEX_HOME/auth.json"
         ;;
 
     openai/*)
@@ -135,9 +139,9 @@ EOF
         AUTH_MODE="apikey"
         API_BASE="$OPENAI_BASE_URL"
 
-        # Write provider config for Codex (~/.codex)
-        mkdir -p "$HOME/.codex"
-        cat > "$HOME/.codex/config.toml" << 'EOF'
+        # Write provider config for Codex (project-local)
+        mkdir -p "$CODEX_HOME"
+        cat > "$CODEX_HOME/config.toml" << 'EOF'
 # Codex configuration for OpenRouter
 model_provider = "openrouter"
 model_reasoning_effort = "medium"
@@ -151,13 +155,13 @@ base_url = "https://openrouter.ai/api/v1"
 wire_api = "responses"
 requires_openai_auth = true
 EOF
-        cat > "$HOME/.codex/auth.json" << EOF
+        cat > "$CODEX_HOME/auth.json" << EOF
 {
   "auth_mode": "apikey",
   "OPENAI_API_KEY": "$OPENAI_API_KEY"
 }
 EOF
-        chmod 600 "$HOME/.codex/auth.json"
+        chmod 600 "$CODEX_HOME/auth.json"
         ;;
 
     anthropic/*)
@@ -196,9 +200,9 @@ EOF
         AUTH_MODE="apikey"
         API_BASE="$OPENAI_BASE_URL"
 
-        # Write provider config for Codex (~/.codex)
-        mkdir -p "$HOME/.codex"
-        cat > "$HOME/.codex/config.toml" << 'EOF'
+        # Write provider config for Codex (project-local)
+        mkdir -p "$CODEX_HOME"
+        cat > "$CODEX_HOME/config.toml" << 'EOF'
 # Codex configuration for MiniMax via OpenRouter
 model_provider = "openrouter"
 model_reasoning_effort = "medium"
@@ -212,13 +216,13 @@ base_url = "https://openrouter.ai/api/v1"
 wire_api = "responses"
 requires_openai_auth = true
 EOF
-        cat > "$HOME/.codex/auth.json" << EOF
+        cat > "$CODEX_HOME/auth.json" << EOF
 {
   "auth_mode": "apikey",
   "OPENAI_API_KEY": "$OPENAI_API_KEY"
 }
 EOF
-        chmod 600 "$HOME/.codex/auth.json"
+        chmod 600 "$CODEX_HOME/auth.json"
         ;;
 
     *)
@@ -235,8 +239,8 @@ esac
 
 echo ""
 
-# Config summary banner
-echo "CONFIG: auth=$AUTH_MODE | provider=$PROVIDER | codex_home=${CODEX_HOME:-$HOME/.codex} | endpoint=$API_BASE"
+# Config summary banner (CODEX_HOME already set early in script)
+echo "CONFIG: auth=$AUTH_MODE | provider=$PROVIDER | codex_home=$CODEX_HOME (project-local) | endpoint=$API_BASE"
 
 # Build the run function for one combo
 run_one() {
@@ -275,8 +279,7 @@ source .venv-codex/bin/activate
 # Export CODEX_MODEL so the Python test can see it
 export CODEX_MODEL
 
-# Allow per-model provider config written to ~/.codex
-export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+# CODEX_HOME already set to project-local at line 240 - do not override!
 
 # If a repo filter is provided, build ISSUE_IDS from the dataset
 if [ -n "$REPO_SLUG" ]; then

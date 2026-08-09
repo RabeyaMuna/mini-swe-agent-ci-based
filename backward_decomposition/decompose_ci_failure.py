@@ -3614,11 +3614,23 @@ def generate_l1_l2_l3_pipeline(
     )
     print(f"  Reduction: {len(original_problems) - len(deduplicated)} problems merged")
 
-    # Stage 2: Detect dependencies (LLM)
-    print("\n[Stage 2/5] Detecting dependencies with LLM...")
-    dependencies = _stage2_detect_dependencies_llm(deduplicated, llm)
-    print(f"  Dependencies found: {len(dependencies.get('dependency_edges', []))}")
-    print(f"  Repair order: {dependencies.get('repair_order', [])}")
+    # Stage 2: Detect dependencies + Generate repair sequence (UNIFIED LLM call)
+    print("\n[Stage 2/5] Analyzing dependencies and repair sequence...")
+    dep_result = _stage2_analyze_dependencies_and_sequence(deduplicated, llm)
+    print(f"  Dependencies found: {len(dep_result.get('dependencies', []))}")
+    print(f"  Repair sequence: {dep_result.get('repair_sequence', [])}")
+
+    # Populate dependency fields programmatically (no LLM)
+    print("  Populating dependency fields...")
+    deduplicated = _populate_dependency_fields(deduplicated, dep_result)
+
+    # Convert to old format for backward compatibility with build_memory
+    dependencies = {
+        "dependency_edges": [
+            {"from": d["from"], "to": d["to"]} for d in dep_result.get("dependencies", [])
+        ],
+        "repair_order": dep_result.get("repair_sequence", [])
+    }
 
     # Stage 3: Generate L1 (with NEW build_memory module)
     print("\n[Stage 3/5] Generating L1 (problem-level concrete failures)...")
@@ -3684,6 +3696,154 @@ def generate_l1_l2_l3_pipeline(
     return result
 
 
+def _stage2_analyze_dependencies_and_sequence(problems: list[dict], llm) -> dict:
+    """
+    NEW UNIFIED APPROACH:
+    Detect dependencies AND generate repair sequence in ONE LLM call.
+
+    Returns lightweight format:
+    {
+      "dependencies": [{"from": 2, "to": 3, "reason": "..."}],
+      "repair_sequence": [1, 2, 3]
+    }
+    """
+    # Build graph info from problems
+    graph_info = _build_graph_info_from_problems(problems)
+
+    # Prepare problem summary for LLM
+    problems_summary = []
+    for idx, prob in enumerate(problems, 1):
+        problems_summary.append({
+            "problem_id": idx,
+            "validation_order": prob.get("validation_order", "unknown"),
+            "validation_cmd": prob.get("validation_cmd", "unknown"),
+            "problem_type": prob.get("problem_type", "unknown"),
+            "failure_type": prob.get("failure_type", "unknown"),
+            "problem": prob.get("problem", "")[:300],
+            "root_cause": prob.get("root_cause", "")[:300],
+            "how_fixed": prob.get("how_fixed", "")[:300],
+            "affected_files": prob.get("affected_files", [])[:10],
+            "is_cascading": prob.get("is_cascading", False),
+        })
+
+    # Use NEW unified prompt
+    prompt = build_full_dependency_prompt(
+        problems=problems_summary,
+        graph_info=graph_info,
+        strict_json_rules=STRICT_JSON_RULES,
+    )
+
+    try:
+        time.sleep(3)  # Rate limiting
+        response = _invoke_json(llm, prompt)
+
+        if isinstance(response, dict) and "dependencies" in response and "repair_sequence" in response:
+            return response
+        else:
+            print("  WARNING: LLM returned invalid format, using fallback")
+            return _fallback_dependencies_and_sequence(problems)
+    except Exception as e:
+        print(f"  ERROR in unified dependency analysis: {e}")
+        return _fallback_dependencies_and_sequence(problems)
+
+
+def _build_graph_info_from_problems(problems: list[dict]) -> dict:
+    """Build graph info structure from problems for LLM context."""
+    # Group by validation
+    validation_groups = {}
+    for prob in problems:
+        val_order = prob.get("validation_order", 0)
+        val_cmd = prob.get("validation_cmd", "unknown")
+        if val_order not in validation_groups:
+            validation_groups[val_order] = {
+                "order": val_order,
+                "cmd": val_cmd,
+                "problem_ids": []
+            }
+        validation_groups[val_order]["problem_ids"].append(prob.get("problem_id", 0))
+
+    # File relationships
+    file_to_problems = {}
+    for prob in problems:
+        for file in prob.get("affected_files", []):
+            if file not in file_to_problems:
+                file_to_problems[file] = []
+            file_to_problems[file].append(prob.get("problem_id", 0))
+
+    return {
+        "validation_sequence": sorted(validation_groups.values(), key=lambda x: x["order"]),
+        "file_relationships": file_to_problems
+    }
+
+
+def _populate_dependency_fields(problems: list[dict], dep_result: dict) -> list[dict]:
+    """
+    Programmatically populate enabled/enabled_by/enabled_reason fields.
+    This is FAST - no LLM call needed.
+    """
+    # Initialize fields for all problems
+    for p in problems:
+        p["enabled"] = []
+        p["enabled_reason"] = []
+        p["enabled_by"] = []
+
+    # Populate from dependencies
+    dependencies = dep_result.get("dependencies", [])
+    for dep in dependencies:
+        from_id = dep["from"]
+        to_id = dep["to"]
+        reason = dep.get("reason", "")
+
+        # Find problems by problem_id
+        from_problem = None
+        to_problem = None
+        for p in problems:
+            if p.get("problem_id") == from_id:
+                from_problem = p
+            if p.get("problem_id") == to_id:
+                to_problem = p
+
+        if from_problem and to_problem:
+            # Add to enabled
+            from_problem["enabled"].append(to_id)
+            from_problem["enabled_reason"].append({
+                "problem_id": to_id,
+                "reason": reason
+            })
+
+            # Add to enabled_by (reverse)
+            to_problem["enabled_by"].append(from_id)
+
+    # Reorder problems by repair_sequence
+    repair_sequence = dep_result.get("repair_sequence", [])
+    if repair_sequence:
+        ordered_problems = []
+        for problem_id in repair_sequence:
+            for p in problems:
+                if p.get("problem_id") == problem_id:
+                    ordered_problems.append(p)
+                    break
+        # Add any missing problems (safety)
+        for p in problems:
+            if p not in ordered_problems:
+                ordered_problems.append(p)
+        return ordered_problems
+
+    return problems
+
+
+def _fallback_dependencies_and_sequence(problems: list[dict]) -> dict:
+    """Fallback when LLM fails - use validation_order."""
+    # No dependencies, just order by validation_order
+    sorted_problems = sorted(problems, key=lambda p: p.get("validation_order", 999))
+    repair_sequence = [p.get("problem_id", i) for i, p in enumerate(sorted_problems, 1)]
+
+    return {
+        "dependencies": [],
+        "repair_sequence": repair_sequence
+    }
+
+
 def _stage2_detect_dependencies_llm(problems: list[dict], llm) -> dict:
     """
     Stage 2: Detect dependencies between problems using LLM.
@@ -3713,7 +3873,7 @@ def _stage2_detect_dependencies_llm(problems: list[dict], llm) -> dict:
         )
     )
 
-    if problems_json_size < 20000 and len(problems) <= 20:
+    if problems_json_size < 50000 and len(problems) <= 20:
         # Small data - try full LLM
         print(
             f"  Dependencies: Full LLM approach ({problems_json_size} chars, {len(problems)} problems)"

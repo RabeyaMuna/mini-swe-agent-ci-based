@@ -77,7 +77,7 @@ PY
 fi
 
 # Build regex: ^(id1|id2|...|idN)$
-ISSUE_REGEX=$(python3 - << PY
+ISSUE_REGEX=$(ISSUE_IDS="$ISSUE_IDS" python3 - << 'PY'
 import re, os
 ids = [x.strip() for x in os.environ['ISSUE_IDS'].split(',') if x.strip()]
 safe = [re.escape(x) for x in ids]
@@ -92,7 +92,7 @@ if [ "$DIRECTION" = "both" ]; then DIRECTIONS=(backward forward); else DIRECTION
 run_one() {
   local ablation="$1"; local direction="$2"
   echo "→ Mini-SWE: abl=$ablation dir=$direction"
-  python3 scripts/run_miniswe_ci_bench.py \
+  PYTHONPATH=. python3 scripts/run_miniswe_ci_bench.py \
     --dataset "$DATASET" \
     --issue_regex "$ISSUE_REGEX" \
     --ablation "$ablation" \

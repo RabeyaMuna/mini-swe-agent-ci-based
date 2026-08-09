@@ -173,7 +173,7 @@ Examples
 bash ./run_codex_direct.sh "" all both gpt-5-mini    data/eval_set.jsonl  4
 
 # MiniMax M2.5 via OpenRouter, full memory, backward
-bash ./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5  data/eval_set.jsonl 4
+f
 
 # Snapshot model, baseline, backward, 6 workers
 bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini-2026-03-17  data/eval_set.jsonl 6

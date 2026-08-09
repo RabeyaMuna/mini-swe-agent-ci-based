@@ -228,3 +228,6 @@ codex/.codex/
 codex/.codex-config/
 codex/.codex-config/auth.json
 codex/.codex-config/config.toml
+
+# Project-local Codex config (contains API keys)
+.codex-local/
