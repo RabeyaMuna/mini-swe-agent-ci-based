@@ -125,8 +125,19 @@ class LitellmModel:
             model_lower = str(self.model_name).lower()
             temperature = 1 if "gpt-5" in model_lower else 0
 
+            # For GLM models, use openai/ prefix with custom base URL
+            # This tells LiteLLM to use OpenAI-compatible format
+            model_for_litellm = self.model_name
+            if "glm" in model_lower and not model_lower.startswith("openai/"):
+                # Use the actual model name from env or default
+                actual_model = os.getenv("GLM_MODEL_NAME", "glm-5.2")
+                # Strip any provider prefix for the actual API call
+                if "/" in actual_model:
+                    actual_model = actual_model.split("/")[-1]
+                model_for_litellm = f"openai/{actual_model}"
+
             completion_kwargs = {
-                "model": self.model_name,
+                "model": model_for_litellm,
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,

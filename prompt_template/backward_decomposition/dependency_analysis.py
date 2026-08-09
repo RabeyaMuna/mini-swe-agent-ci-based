@@ -92,7 +92,7 @@ Example 1 - With Dependencies:
 Input: [{{id:1, validation_order:8}}, {{id:2, validation_order:8}}, {{id:3, validation_order:11}}]
 Dependencies: 2 reveals 3
 Output: {{
-  "dependencies": [{{"from": 2, "to": 3, "reason": "..."}]},
+  "dependencies": [{{"from": 2, "to": 3, "reason": "..."}}],
   "repair_sequence": [1, 2, 3]
 }}
 
