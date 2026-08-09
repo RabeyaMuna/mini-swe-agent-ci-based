@@ -5,7 +5,9 @@ import os
 import re
 import tempfile
 import time
+from pathlib import Path
 from typing import Any
+
 from utilities.model_token_config import get_input_chunk_tokens
 
 # ── Optional third-party dependencies ─────────────────────────────────────────
@@ -1463,6 +1465,7 @@ class CILogAnalyzer:
         llm: Any,
         model_name: str,
         task_id: str,
+        output_dir: str | Path | None = None,
     ) -> None:
         if llm is None:
             raise RuntimeError(
@@ -1482,6 +1485,10 @@ class CILogAnalyzer:
             model_name=model_name,
             task_id=task_id,
         )
+        if output_dir is not None:
+            output_path = Path(output_dir)
+            self._inner.config["out_folder"] = str(output_path)
+            self._inner.config["exception_dir"] = str(output_path / "exceptions")
 
     def run(self) -> dict[str, Any]:
         return self._inner.run()
@@ -1496,6 +1503,7 @@ def _run_log_analysis(
     instance: dict[str, Any],
     llm: Any,
     model: str,
+    output_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """
     Run CI log analysis on an instance.
@@ -1522,6 +1530,7 @@ def _run_log_analysis(
         llm=llm,
         model_name=model,
         task_id=task_id,
+        output_dir=output_dir,
     )
     return analyzer.run()
 

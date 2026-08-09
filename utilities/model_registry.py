@@ -13,6 +13,11 @@ import re
 CANONICAL_MINIMAX_MODEL = "openrouter/minimax/minimax-m2.5"
 CANONICAL_ZAI_GLM_MODEL = "zai/glm-5.2"
 LEGACY_GLM_MODEL = "glm-4-plus"
+# GPT-5.4 models (using official OpenAI API model names)
+# gpt-5-mini -> latest snapshot
+# gpt-5.4-mini-2026-03-17 -> specific snapshot
+CANONICAL_GPT5_MINI_MODEL = "gpt-5-mini"
+CANONICAL_GPT54_MODEL = "gpt-5.4-mini"
 
 MINIMAX_ALIASES = {
     "minimax",
@@ -35,6 +40,23 @@ GLM_ALIASES = {
     "glm-5-2",
 }
 
+GPT5_MINI_ALIASES = {
+    "gpt-5-mini",
+    "gpt5-mini",
+    "gpt5mini",
+    "gpt_5_mini",
+}
+
+GPT54_ALIASES = {
+    "gpt-5.4",
+    "gpt5.4",
+    "gpt-5.4-mini",
+    "gpt5.4-mini",
+    "gpt-5.4-mini-2026-03-17",
+    "gpt5.4-mini-2026-03-17",
+    "gpt54",
+}
+
 
 _ALIASES = {
     **{alias: CANONICAL_MINIMAX_MODEL for alias in MINIMAX_ALIASES},
@@ -46,6 +68,9 @@ _ALIASES = {
     "openrouter/z-ai/glm-5.2": CANONICAL_ZAI_GLM_MODEL,
     # Keep the old GLM value valid for existing experiments.
     LEGACY_GLM_MODEL: LEGACY_GLM_MODEL,
+    # GPT-5 models
+    **{alias: CANONICAL_GPT5_MINI_MODEL for alias in GPT5_MINI_ALIASES},
+    **{alias: CANONICAL_GPT54_MODEL for alias in GPT54_ALIASES},
 }
 
 
@@ -90,6 +115,10 @@ def model_output_name(model_name: str | None) -> str:
         return "glm-5.2"
     if resolved == LEGACY_GLM_MODEL:
         return LEGACY_GLM_MODEL
+    if resolved == CANONICAL_GPT5_MINI_MODEL:
+        return "gpt-5-mini"
+    if resolved == CANONICAL_GPT54_MODEL:
+        return "gpt-5.4-mini"
 
     name = resolved
     if name.startswith("openrouter/"):

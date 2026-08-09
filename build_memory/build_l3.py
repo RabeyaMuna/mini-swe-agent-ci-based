@@ -4,8 +4,8 @@ L3 universal pattern builder.
 Generates reusable cross-repo patterns from L1 + L2 using LLM.
 """
 
-from typing import Any, Dict
 import json
+from typing import Any, Dict
 
 # Import L3 prompt from centralized location
 from prompt_template.memory_build import build_l3_prompt
@@ -69,19 +69,14 @@ def parse_json_from_text(text: str) -> Dict[str, Any]:
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
-        # Save for debugging
-        import tempfile
-
-        debug_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
-        debug_file.write(f"Original error: {e}\n\n")
-        debug_file.write(text)
-        debug_file.close()
-        raise ValueError(
-            f"Failed to parse JSON. Debug saved to: {debug_file.name}"
-        ) from e
+        raise ValueError(f"Failed to parse JSON: {e}") from e
 
 
-def generate_l3_with_llm(l1_memory: Dict, l2_memory: Dict, llm: Any) -> Dict[str, Any]:
+def generate_l3_with_llm(
+    l1_memory: Dict,
+    l2_memory: Dict,
+    llm: Any,
+) -> Dict[str, Any]:
     """
     Use LLM to analyze L1 + L2 and generate universal patterns.
 
@@ -96,50 +91,17 @@ def generate_l3_with_llm(l1_memory: Dict, l2_memory: Dict, llm: Any) -> Dict[str
     # Build prompt
     prompt = build_l3_prompt(l1_memory, l2_memory)
 
-    # DEBUG: Save prompt for inspection
-    import tempfile
-    from pathlib import Path
-
-    debug_dir = Path(
-        "/Users/rabeyakhatunmuna/Documents/mini-swe-agent-ci-based/data/debug"
-    )
-    debug_dir.mkdir(exist_ok=True)
-    issue_id = l1_memory.get("issue_id", "unknown")
-    with open(debug_dir / f"l3_prompt_{issue_id}.txt", "w") as f:
-        f.write(prompt)
-
     # Call LLM
     response = llm.invoke(prompt)
 
     # Parse response
     response_text = extract_text(response)
 
-    # DEBUG: Save response for inspection
-    with open(debug_dir / f"l3_response_{issue_id}.txt", "w") as f:
-        f.write(response_text)
-
-    # Debug: Check if response is empty
+    # Check if response is empty
     if not response_text or not response_text.strip():
-        import tempfile
+        raise ValueError("LLM returned empty response")
 
-        debug_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix="_empty_response.txt", delete=False
-        )
-        debug_file.write(f"Response object: {response}\n\n")
-        debug_file.write(f"Response type: {type(response)}\n\n")
-        debug_file.write(f"Response text: {response_text}\n")
-        debug_file.close()
-        raise ValueError(
-            f"LLM returned empty response. Debug saved to: {debug_file.name}"
-        )
-
-    l3_data = parse_json_from_text(response_text)
-
-    # DEBUG: Save parsed L3 data
-    with open(debug_dir / f"l3_parsed_{issue_id}.json", "w") as f:
-        json.dump(l3_data, f, indent=2)
-
-    return l3_data
+    return parse_json_from_text(response_text)
 
 
 def build_l3_memory(
@@ -202,7 +164,7 @@ def build_l3_memory(
         l3_data = generate_l3_with_llm(l1_memory, l2_memory, llm)
         universal_patterns = l3_data.get("universal_patterns", [])
 
-        # DEBUG: Show L3 generation results
+        # Report L3 generation results
         if not universal_patterns:
             print("  WARNING  L3 generated 0 patterns (LLM returned empty list)")
         else:

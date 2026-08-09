@@ -78,6 +78,38 @@ MODEL_CONFIGS: dict[str, ModelConfig] = {
         "requires_multi_stage": False,  # Can do single-stage analysis
         "supports_large_output": True,  # Supports 100k+ outputs
     },
+    "gpt-5-mini": {
+        "input_context_window": 400_000,  # GPT-5-mini: 400k total (same as 5.4-mini)
+        "input_chunk_tokens": 200_000,  # Safe: 200k input + 128k output + 20k prompt = 348k <= 400k OK
+        "input_chunk_chars": 800_000,  # ~4 chars per token
+        "output_max_tokens": 128_000,  # GPT-5-mini max output: 128k
+        "output_safe_tokens": 120_000,  # Safe limit with buffer (~94% of max)
+        "l1_chunk_size": 40,  # L1s per chunk (increased due to larger context)
+        "l1_max_total": 160,  # Max total L1s to process
+        "l2_batch_size": 50,  # Larger batch size
+        "l2_common_candidates": 300,  # Common problem candidates
+        "l2_consecutive_candidates": 400,  # Consecutive candidates
+        "decompose_max_files_per_chunk": 200,  # More files due to larger context
+        "decompose_max_changes_per_chunk": 1000,  # More changes due to larger context
+        "requires_multi_stage": False,  # Single-stage for most cases
+        "supports_large_output": True,  # Supports large outputs (128k)
+    },
+    "gpt-5.4": {
+        "input_context_window": 400_000,  # GPT-5.4-mini: 400k total, 272k max input
+        "input_chunk_tokens": 200_000,  # Safe: 200k input + 128k output + 20k prompt = 348k <= 400k OK
+        "input_chunk_chars": 800_000,  # ~4 chars per token
+        "output_max_tokens": 128_000,  # GPT-5.4-mini max output: 128k
+        "output_safe_tokens": 120_000,  # Safe limit with buffer (~94% of max)
+        "l1_chunk_size": 40,  # L1s per chunk (increased due to larger context)
+        "l1_max_total": 160,  # Max total L1s to process
+        "l2_batch_size": 50,  # Larger batch size
+        "l2_common_candidates": 300,  # Common problem candidates
+        "l2_consecutive_candidates": 400,  # Consecutive candidates
+        "decompose_max_files_per_chunk": 200,  # More files due to larger context
+        "decompose_max_changes_per_chunk": 1000,  # More changes due to larger context
+        "requires_multi_stage": False,  # Single-stage for most cases
+        "supports_large_output": True,  # Supports large outputs (128k)
+    },
     # Fallback/default configuration
     "default": {
         "input_context_window": 128_000,
@@ -138,6 +170,14 @@ def get_model_config(model_name: str | None) -> ModelConfig:
 
     if "minimax" in normalized or "m2.5" in normalized or "2.5" in normalized:
         return MODEL_CONFIGS["minimax-m2.5"]
+
+    # GPT-5.4 models (check specific version first)
+    if "gpt-5.4" in normalized or "gpt5.4" in normalized or "2026-03-17" in normalized:
+        return MODEL_CONFIGS["gpt-5.4"]
+
+    # GPT-5-mini models
+    if "gpt-5" in normalized or "gpt5" in normalized:
+        return MODEL_CONFIGS["gpt-5-mini"]
 
     # Fallback to default
     return MODEL_CONFIGS["default"]
@@ -305,7 +345,7 @@ def print_model_comparison():
     print("-" * 80)
 
     # Print each model
-    for model_key in ["minimax-m2.5", "glm-5.2"]:
+    for model_key in ["minimax-m2.5", "glm-5.2", "gpt-5-mini", "gpt-5.4"]:
         config = MODEL_CONFIGS[model_key]
         row = [
             model_key,
@@ -330,6 +370,9 @@ if __name__ == "__main__":
         "openrouter/z-ai/glm-5.2",
         "minimax-m2.5",
         "openrouter/minimax/minimax-m2.5",
+        "gpt-5-mini",
+        "gpt-5.4",
+        "gpt5.4",
         "unknown-model",
     ]
 

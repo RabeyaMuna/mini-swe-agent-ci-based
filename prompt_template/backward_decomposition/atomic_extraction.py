@@ -148,52 +148,94 @@ install CI step.
 
 ## ANALYSIS PROCESS (Dynamic - apply to each issue):
 
-STEP 2.1: For EACH file in CHANGES, answer these questions:
+STEP 2.1: For EACH individual before/after change in CHANGES, answer these questions:
   a) What changed? (BEFORE -> AFTER)
-  b) WHY did it need to change? (root cause)
-  c) What triggered this need? (dependency context, cascade explanation)
+  b) What exact failure signal or violated contract does the BEFORE state show?
+  c) What concrete problem would that failure signal cause in this validation?
+  d) WHY did it need to change? (root cause)
+  e) What triggered this need? (CI context, dependency context, cascade explanation)
+  f) What exact repair strategy does the AFTER state implement?
+  - A single file may contain multiple independent changes with different root
+    causes. Analyze every change in the file; mentioning the file once does not
+    mean all of its changes have been covered.
 
-STEP 2.2: Identify ROOT CAUSE patterns:
-  - List unique root causes found across all files
+STEP 2.2: Identify FAILURE and ROOT CAUSE patterns:
+  - List the exact failure signal/pattern for every affected file
+  - List the concrete problem represented by that signal
+  - List unique root causes and repair strategies across all files
+  - Failure signal/pattern = the observable invalid state, violated contract,
+    diagnostic, assertion mismatch, invalid value, or incompatible behavior
   - Root cause = the underlying WHY that triggered the change
   - Root cause is about REASON, not about WHAT changed
 
-STEP 2.3: Group files by ROOT CAUSE:
-  - Files with IDENTICAL root cause -> candidate for merging
-  - Files with DIFFERENT root causes -> must be separate problems
+STEP 2.3: Group files by FAILURE PATTERN + PROBLEM + ROOT CAUSE:
+  - Files are candidates for merging only when they have the SAME failure
+    pattern, SAME concrete problem, SAME root cause, and compatible repair strategy
+  - A shared validator or broad failure_type alone is NEVER sufficient to merge
+  - Files with different failure patterns, problems, root causes, or materially
+    different repair strategies must be separate problems
+  - Different changes within the SAME file must also be split when they have
+    different root causes and problems. The same file may appear in multiple problems.
 
 STEP 2.4: Apply MERGE/SPLIT decision:
 
   MERGE into ONE atomic problem when:
-  OK SAME root cause (WHY) across all files
-  OK Different changes (WHAT) are acceptable - these are variants
-  OK One root_cause explanation covers why ALL files changed
-  OK Example: 10 files, same root cause (package version upgrade),
-    different changes (header/trailer/spacing/imports) -> 1 problem
+  - SAME failure signal/pattern across all files
+  - SAME concrete problem and SAME root cause (WHY) across all files
+  - The fixes use the same repair strategy or true variants of that strategy
+  - One precise problem/root_cause/how_fixed explanation covers ALL files
+  - Example: 10 files violate the same formatter rule for the same reason and
+    are normalized by the same formatter operation -> 1 repeated problem
 
   SPLIT into SEPARATE atomic problems when:
-  FAIL DIFFERENT root causes (even if same validation!)
-  FAIL Cannot explain all files with one root cause
-  FAIL Mixing unrelated changes
+  - DIFFERENT failure signals or violated contracts
+  - DIFFERENT concrete problems or root causes (even if same validation!)
+  - Materially different repair strategies
+  - Cannot explain all files precisely with one problem and root cause
+  - Mixing unrelated changes
 
-## KEY INSIGHT: Same ROOT CAUSE + Different CHANGES = MERGE with variants
+## KEY INSIGHT: Merge only repeated instances of the SAME failure
 
-Root cause is about WHY (reason), not WHAT (manifestation):
-- WHY same + WHAT different = MERGE (variants of same problem)
-- WHY different = SPLIT (separate problems)
+The validator name or broad category does not define atomicity:
+- SAME failure pattern + SAME problem + SAME root cause + compatible fix = MERGE
+- Any material difference in those dimensions = SPLIT
 
 Think semantically:
-- "Why did these files need to change?"
-- If answer is SAME -> merge
-- If answer is DIFFERENT -> split
+- "What exact failure would each BEFORE state produce?"
+- "Why did it occur, and what repair does each AFTER state implement?"
+- Merge only when those answers describe the same repeatable problem pattern.
 
 3. Handle repeated failures across files dynamically.
-- Same validator plus same repair family across many files is one repeated problem pattern, even when files have variants.
-- Formatter/linter/doc-style variants are usually one problem when the same tool normalizes them, such as RST heading underline length, trailing
-whitespace, blank-line spacing, list/table spacing, import ordering, docstring style, quote style, or repeated lint codes.
+- Repeated failures across many files are one problem only when the validator,
+  failure pattern, concrete problem, root cause, and repair strategy match.
+- Formatter/linter/doc-style occurrences may be one problem when the same exact
+  rule or violated convention and the same normalization strategy apply, such
+  as repeated RST heading, trailing-whitespace, import-order, or quote-style
+  violations. Different rules or contracts remain separate problems.
 - For bulk changes, group by directory scope, file type, validator, and repair family.
-- Mention directory scope and important variants in problem/root_cause/how_fixed.
-- Do not list every file in prose because affected_files already contains exact paths.
+- Mention directory scope in problem and describe every distinct file-specific
+  failure and repair in root_cause/how_fixed. `affected_files` gives paths only;
+  it does not replace the evidence an agent needs to repair each file.
+- For each affected file, name the exact import statement, key, symbol,
+  annotation, expression, assertion, command, or document construct involved.
+  Use these stable identifiers instead of numeric line numbers.
+- If a merged problem would make the per-file explanation vague or excessively
+  compressed, split it into smaller problems by violated contract or repair
+  strategy.
+
+## DYNAMIC VALIDATOR CAPABILITY CHECK:
+- Derive what the named validation can detect from its command, `validates`,
+  source, evidence, CI output, and configuration; do not rely only on its name.
+- Ask whether reverting this specific change would make that validation fail.
+  If not, it does not belong to this validation's root cause.
+- Separate the substantive repair from incidental cleanup. Formatting caused by
+  editing code, an import added to support a new symbol, or a generated-file
+  refresh is not automatically an independent formatter, lint, or build issue.
+- Apply this reasoning to any setup, dependency, schema, compiler, build,
+  generated-code, lint, format, type, API, test, documentation, security, or
+  workflow validation.
+- Do not invent tool rules, error codes, constraints, or failure signals that
+  are absent from the supplied evidence.
 
 4. Keep setup/install enablement separate.
 - Examples: invalid pyproject metadata, missing dependency, wrong extras, incompatible tool version, broken pip/poetry install config, workflow
@@ -203,7 +245,8 @@ validation violations.
 
 5. Handle cascading fixes.
 - Cascading means one change caused or required another related change.
-- If all affected files share the same CI validation and repair family, they may be one atomic problem.
+- If all affected files share the same CI validation, failure pattern, concrete
+  problem, root cause, and compatible repair strategy, they may be one problem.
 - If related files are caught by different CI validations or require different repair strategies, split them into separate atomic problems.
 - For cascading problems, explain the triggering relationship in problem, root_cause, how_fixed, or why_fix_works.
 
@@ -236,6 +279,39 @@ QUALITY RULES:
   * BAD: "Updated dependencies", GOOD: "Updated numpy from >=1.24.0 to >=2.0.0,<2.5.0"
   * BAD: "Fixed type errors", GOOD: "Added cast(str, value) for type narrowing in 3 files"
   * BAD: "Improved formatting", GOOD: "Applied black formatting: added trailing commas, normalized quotes"
+
+## REPAIR EVIDENCE SPECIFICITY (CRITICAL FOR EVERY FAILURE FAMILY):
+- Never use only category labels such as "type issues", "API incompatibility",
+  "test fixes", "configuration problem", "formatting changes", "build update",
+  or "code modernization". A repair agent must be able to locate and reproduce
+  the fix from the description.
+- For EACH atomic problem, state in problem/root_cause/how_fixed:
+  1. the exact affected subject: package/key/command/target/rule/symbol/function/
+     parameter/expression/test assertion/document construct/artifact;
+  2. the exact BEFORE state or behavior that violated a requirement;
+  3. the exact expected contract or observable failure signal supported by the
+     CI, configuration, dependency context, test, or before/after evidence; and
+  4. the exact AFTER repair operation and important resulting value or behavior.
+- Adapt the evidence to the failure family:
+  * dependency/config/setup: exact package constraints, keys, values, commands,
+    missing/invalid references, and resolver/schema expectation;
+  * type/API/symbol/compiler: exact symbol or expression, old and required
+    types/signatures/shapes, and the annotation/guard/cast/import/call change;
+  * test/runtime: exact scenario, input or fixture, expected versus previous
+    output/state/exception, and behavior change;
+  * lint/format/docs: exact construct and transformation; include a rule/code
+    only when supplied by evidence;
+  * build/workflow/generated artifacts: exact target, command, path, option,
+    source-to-generated relationship, or environment assumption that changed.
+- Treat supporting edits as supporting details rather than root causes: for
+  example, an added import supports use of its symbol, and line wrapping may be
+  incidental to a semantic code repair.
+- If files violate different contracts, exhibit different failure signals, or
+  require materially different repair strategies, split them unless one precise
+  root-cause statement explains every file without category-level wording.
+- When an exact diagnostic is unavailable because CI stopped earlier, describe
+  only the mismatch demonstrated by BEFORE/AFTER and other supplied evidence;
+  do not fabricate a diagnostic, rule code, dependency constraint, or intent.
 - **CRITICAL - affected_files scope (VALIDATION GROUP BOUNDARIES):**
   * affected_files must ONLY include files from the CHANGES section (THIS validation group)
   * DO NOT include files from OTHER validation groups, even if they are cascading-related
@@ -257,28 +333,47 @@ QUALITY RULES:
 - In root_cause/how_fixed: Include EXACT package names and version constraints
 - Format: "package_name: old_version → new_version"
 - For multiple dependencies: List ALL with exact versions
+- Inspect EVERY dependency declaration in both before and after, including
+  multiple dependency changes within the same manifest file.
+- Classify each dependency operation accurately:
+  * added: package absent before → exact package and constraint after
+  * removed: exact package and constraint before → package absent after
+  * constraint changed: same package, exact old constraint → exact new constraint
+  * replaced: list ALL removed package specifications → list ALL added package specifications
+- When the same dependency operation appears in multiple groups/extras, name
+  every affected group/extra and do not treat the repetitions as new packages.
+- Do not let a separate config change in the same file (for example,
+  tool.uv.default-groups) hide or absorb package additions, removals,
+  replacements, or constraint changes.
+- Only claim that a package change caused a CI failure when CI context,
+  dependency context, or a related source adaptation supports that causal link.
+  Otherwise describe the exact manifest change without inventing a cause.
 - This applies to ALL dependency files: pyproject.toml, requirements.txt, package.json, Cargo.toml, etc.
 
 ## DECISION PRINCIPLES (Dynamic - apply to YOUR specific changes):
 
-PRINCIPLE 1: Root cause determines grouping
-- Analyze WHY each file changed (not just WHAT changed)
-- Group files that share the SAME underlying reason
-- Split files that have DIFFERENT underlying reasons
+PRINCIPLE 1: Failure pattern + problem + root cause determine grouping
+- Analyze WHAT fails, what problem it represents, and WHY each file changed
+- Group only files sharing the SAME failure pattern, problem, and root cause
+- Split files when any of those materially differ
 
 PRINCIPLE 2: Variants are acceptable in ONE problem
-- If 10 files changed for the SAME reason but in different ways, that's ONE problem
-- Variant changes (header vs trailer vs spacing) with SAME root cause = ONE problem
-- Describe variants in problem/root_cause/how_fixed, list ALL files in affected_files
+- Variants may share one problem only when they are manifestations of the same
+  failure pattern and root cause and use a compatible repair strategy
+- Different annotations, guards, APIs, assertions, rules, or behavior contracts
+  are not variants merely because the validator is the same
+- Describe every retained variant in problem/root_cause/how_fixed and list all
+  corresponding paths in affected_files
 
 PRINCIPLE 3: Validation boundary enforcement
 - Files in DIFFERENT validations = ALWAYS separate problems (already enforced)
-- Files in SAME validation but DIFFERENT root causes = MUST be separate problems
+- Files in SAME validation but different failure patterns, problems, root
+  causes, or repair strategies = separate problems
 
 PRINCIPLE 4: Test your grouping
-- Ask: "Can I explain why ALL these files changed with ONE root_cause statement?"
-- If YES -> merge into one problem
-- If NO -> split into separate problems
+- Ask: "Can one precise failure-pattern, problem, root-cause, and repair
+  explanation cover every affected file?"
+- If YES -> merge; if any part requires category-level or vague wording -> split
 
 FIELD GUIDANCE (Dynamic - based on YOUR analysis):
 
@@ -289,13 +384,15 @@ FIELD GUIDANCE (Dynamic - based on YOUR analysis):
   * For config changes: Include EXACT key names and values (old → new)
   * For code changes: Include EXACT symbols, types, imports changed
   * Explain what changed/broke that required these files to adapt
-  * For variants: describe the common root cause, not individual changes
+  * For variants: state the common root cause and the exact failure manifestation
+    in every affected file
   * For cascading: explain the dependency change that triggered adaptation with exact details
 
 - **problem**: What failed and scope
   * Describe the failure based on root_cause
   * Mention file count, directory scope if multiple files
-  * For variants: "X files with variant changes" (don't list all variants)
+  * A summary such as "X files with variant changes" is allowed only when
+    root_cause/how_fixed enumerate the exact file-specific manifestations
   * For cascading: explain the triggering relationship
 
 - **how_fixed**: What changed to address root_cause (WITH EXACT DETAILS)
@@ -303,7 +400,8 @@ FIELD GUIDANCE (Dynamic - based on YOUR analysis):
   * For dependency changes: "Updated package_name from old_version to new_version"
   * For config changes: "Changed key_name from old_value to new_value"
   * For code changes: "Added/removed/changed exact_symbol_name"
-  * For variants: "Fixed via X approach with variants (header/trailer/spacing changes)"
+  * For variants: name the exact repair applied in every affected file; do not
+    replace the details with a generic list of repair categories
   * For cascading: explain adaptation to new format/behavior with exact changes
   * NEVER use generic terms like "updated dependencies" - list exact package names and versions
 
@@ -317,6 +415,19 @@ FIELD GUIDANCE (Dynamic - based on YOUR analysis):
   * Do NOT omit files even if many
   * Do NOT include files from other validation groups
   * Do NOT include files with different root causes
+
+## CHANGE COVERAGE CHECK (MANDATORY BEFORE OUTPUT):
+- Re-read every individual before/after entry in CHANGES after drafting the
+  atomic problems.
+- Confirm that each dependency addition, removal, replacement, and constraint
+  change is explicitly described in at least one problem's root_cause or
+  how_fixed with exact package names and constraints.
+- Confirm that each independent config change is also explicitly described.
+- File coverage is not change coverage: listing pyproject.toml in
+  affected_files is insufficient when one or more package changes inside it
+  are missing from the explanation.
+- If changes within one file have different root causes, create separate
+  problems even though affected_files may contain the same path.
 
 OUTPUT FORMAT:
 {{

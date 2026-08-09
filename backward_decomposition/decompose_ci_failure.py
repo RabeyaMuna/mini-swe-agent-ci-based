@@ -75,7 +75,6 @@ from utilities.deterministic_diff_parser import (
     parse_diff_to_structured,
 )
 from utilities.diff_chunker import estimate_tokens
-from utilities.error_handler import EXECPTION_DIR
 from utilities.llm_invoker import invoke_llm_with_retry
 from utilities.llm_model import LitellmModel
 from utilities.model_registry import (
@@ -305,7 +304,9 @@ def _repo_checkout_path(issue: dict[str, Any]) -> str | None:
     return None
 
 
-def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
+def build_benchmark_ci_context(
+    issue: dict, llm: Any, output_dir: str | Path = "data/back_trs"
+) -> dict[str, Any]:
     """
     Build structured CI context for decomposition.
 
@@ -331,7 +332,9 @@ def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
 
     # Check cache first to avoid re-running CILogAnalyzer
     sha_fail = issue.get("sha_fail", "")
-    cache_file = PROJECT_ROOT / "data" / "log_details.json"
+    run_dir = Path(output_dir)
+    shared_cache_dir = PROJECT_ROOT / "data"
+    cache_file = shared_cache_dir / "log_details.json"
     cached_analysis = None
 
     if cache_file.exists() and sha_fail:
@@ -342,7 +345,10 @@ def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
                 (entry for entry in cache if entry.get("sha_fail") == sha_fail), None
             )
             if cached_analysis:
-                print(f"  [1/2] Loading cached CI log analysis for {sha_fail[:12]}...")
+                print(
+                    f"  [1/2] Loading cached CI log analysis for {sha_fail[:12]} "
+                    f"from {cache_file}..."
+                )
         except Exception as e:
             print(f"  WARNING:  Cache load failed: {e}, will re-analyze")
 
@@ -350,7 +356,12 @@ def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
         log_analysis = cached_analysis
     else:
         print("  [1/2] Building structured CI failure context with CILogAnalyzer...")
-        log_analysis = _run_log_analysis(issue, llm=llm, model=model_name)
+        log_analysis = _run_log_analysis(
+            issue,
+            llm=llm,
+            model=model_name,
+            output_dir=run_dir / "ci_log_analysis",
+        )
 
         # Save to cache immediately
         if sha_fail:
@@ -375,14 +386,14 @@ def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
                 with open(cache_file, "w") as f:
                     json.dump(existing_cache, f, indent=2)
-                print("       Saved CI log analysis to cache")
+                print(f"       Saved CI log analysis to {cache_file}")
             except Exception as e:
                 print(f"       WARNING: Failed to save log_details.json cache: {e}")
 
     context = _log_analysis_to_context(log_analysis, issue, workflow_profile={})
 
     # Check workflow validation cache
-    validation_cache_file = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
+    validation_cache_file = shared_cache_dir / "workflow_validation_cache.json"
     cached_validation = None
 
     if validation_cache_file.exists() and sha_fail:
@@ -399,7 +410,8 @@ def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
             )
             if cached_validation:
                 print(
-                    f"  [2/2] Loading cached workflow validation sequence for {sha_fail[:12]}..."
+                    "  [2/2] Loading cached workflow validation sequence for "
+                    f"{sha_fail[:12]} from {validation_cache_file}..."
                 )
         except Exception as e:
             print(f"  WARNING:  Validation cache load failed: {e}, will re-analyze")
@@ -464,7 +476,7 @@ def build_benchmark_ci_context(issue: dict, llm: Any) -> dict[str, Any]:
                 validation_cache_file.parent.mkdir(parents=True, exist_ok=True)
                 with open(validation_cache_file, "w") as f:
                     json.dump(existing_cache, f, indent=2)
-                print("Saved workflow validation to cache")
+                print(f"Saved workflow validation to {validation_cache_file}")
             except Exception as e:
                 print(f" Failed to save validation cache: {e}")
 
@@ -1959,26 +1971,18 @@ CRITICAL ANALYSIS INSTRUCTIONS:
    - What configuration/behavior changed in the caller?
    - Does this change affect the CURRENT validation?
 
-3. Decision:
-   - CASCADING: Caller change directly triggered callee adaptations
-     Example: "dev/pyproject.toml upgraded docstrfmt -> RST files reformatted"
+3. Classify the relationship:
+   - DEPENDENCY-DRIVEN/CASCADING: The caller change directly required the
+     callee adaptation. Name the exact caller, before -> after change, and the
+     behavior that forced the callee change.
+   - INDEPENDENT: No supplied caller change caused this validation failure.
 
-   - INDEPENDENT: Caller changed, but NOT in a way that affects this validation
-     Example: "dev/pyproject.toml changed mdformat, current validation is Black (unrelated)"
-
-4. Root cause format:
-   - If CASCADING: "Caller {{caller_file}} {{what_changed}}, triggering {{callee_adaptation}}"
-   - If INDEPENDENT: "{{standalone_issue}}, unrelated to {{caller_file}} changes"
-
-EXAMPLE (Cascading):
-  Caller: dev/pyproject.toml changed docstrfmt 1.5.0 -> 1.7.0
-  Callees: 85 RST files changed heading format
-  root_cause: "dev/pyproject.toml upgraded docstrfmt to 1.7.0, which enforces overline+underline heading style, requiring all RST files to update their heading format"
-
-EXAMPLE (Independent):
-  Caller: dev/pyproject.toml changed mdformat-beautysh 0.2.2 -> 1.0.0
-  Current file: exit_code_test.py (Black validation)
-  root_cause: "Long if-condition exceeds Black line length limit (standalone issue, unrelated to mdformat-beautysh change in dev/pyproject.toml)"
+4. Root-cause wording:
+   - For a dependency-driven problem, explain the exact causal chain using only
+     names, values, and versions supported by the context.
+   - For an independent problem, state that no supplied dependency or
+     configuration change triggered it. Do not list or describe unrelated
+     callers, packages, versions, files, or changes.
 """
 
 
@@ -2025,18 +2029,28 @@ DEPENDENCY CONTEXT:
 CRITICAL ANALYSIS INSTRUCTIONS:
 1. Review dependency_file_changes to see WHAT ACTUALLY CHANGED in config/dependency files
 2. Determine if the current file's changes are:
-   - CASCADING: Caused by changes in a dependency file (e.g., config version bump requires reformatting)
-   - INDEPENDENT: Unrelated to dependency file changes (e.g., config changed mdformat, but this is a Black issue)
+   - DEPENDENCY-DRIVEN/CASCADING: Directly required by a supplied dependency or
+     configuration change.
+   - INDEPENDENT: Not triggered by any supplied dependency or configuration
+     change.
 
-3. If CASCADING:
-   - root_cause: Explain how the dependency change triggered this fix
-   - how_fixed: Describe the cascading fix that adapts to the new dependency behavior
-   - Example: "dev/pyproject.toml upgraded docstrfmt, which enforces overline+underline style"
+3. If DEPENDENCY-DRIVEN/CASCADING:
+   - root_cause: Name the exact dependency/configuration before -> after change
+     and explain how it triggered the failure.
+   - how_fixed: Describe the exact downstream adaptation.
+   - For every package addition, removal, replacement, or version change,
+     identify the concrete constraint that made the old state fail and explain
+     why the complete new constraint or removal satisfies it.
+   - Cite only evidence present in dependency_file_changes or the supplied CI
+     context. Do not infer deprecation, replacement, incompatibility, or a
+     transitive constraint from the edit direction alone. When the evidence is
+     insufficient, state that the causal constraint is unspecified.
 
 4. If INDEPENDENT:
-   - Treat as a standalone issue
-   - Do NOT mention dependency files in root_cause/how_fixed
-   - Example: "Black line length violation (standalone formatting issue)"
+   - State that no supplied dependency or configuration change triggered the
+     issue.
+   - Do not list or describe unrelated dependency files, packages, versions,
+     or changes in root_cause/how_fixed.
 
 Use dependency_file_changes to make this determination accurately!
 """
@@ -2279,11 +2293,10 @@ def _split_chunk_and_requeue(
 
 
 def _save_debug_prompt(chunk: dict[str, Any], chunk_label: str, prompt: str) -> None:
-    debug_file = (
-        PROJECT_ROOT
-        / "data"
-        / "trs"
-        / f"debug_prompt_val{chunk.get('validation_order', '?')}_{chunk_label.replace('.', '_')}.txt"
+    output_dir = Path(chunk.get("_output_dir") or "data/back_trs")
+    debug_file = output_dir / "debug" / (
+        f"atomic_prompt_val{chunk.get('validation_order', '?')}_"
+        f"{chunk_label.replace('.', '_')}.txt"
     )
     debug_file.parent.mkdir(parents=True, exist_ok=True)
     debug_file.write_text(prompt, encoding="utf-8")
@@ -2497,6 +2510,7 @@ def analyze_validation_groups_with_reasoning(
     validation_sequence: list[dict[str, Any]],
     ci_context: dict[str, Any],
     llm: Any,
+    output_dir: str | Path = "data/back_trs",
 ) -> dict[str, Any]:
     """
     Analyze validation groups into atomic problems.
@@ -2544,6 +2558,7 @@ def analyze_validation_groups_with_reasoning(
         # SIMPLER: Attach all_validation_groups to val_group once
         # Then it flows down naturally with the chunk
         val_group["_all_validation_groups"] = all_validation_groups_summary
+        val_group["_output_dir"] = str(output_dir)
 
         validation_problems = _analyze_one_validation_group(
             val_order=val_order,
@@ -3223,6 +3238,7 @@ def analyze_diff_chunks(
     issue: dict,
     benchmark_context: dict[str, Any],
     llm: Any,
+    output_dir: str | Path = "data/back_trs",
 ) -> dict[str, Any]:
     """
     Three-step diff analysis with deterministic pre-processing:
@@ -3315,7 +3331,11 @@ def analyze_diff_chunks(
     # Step 3: Deep reasoning with full context + correlation
     print("  Step 3: Deep reasoning with correlation context...")
     reasoning_result = analyze_validation_groups_with_reasoning(
-        validation_groups, validation_sequence, ci_context, llm
+        validation_groups,
+        validation_sequence,
+        ci_context,
+        llm,
+        output_dir=output_dir,
     )
     # Log results
     atomic_problems = reasoning_result.get("atomic_problems", [])
@@ -3337,7 +3357,9 @@ def analyze_diff_chunks(
     }
 
 
-def decompose_issue(issue: dict, llm) -> dict:
+def decompose_issue(
+    issue: dict, llm, output_dir: str | Path = "data/back_trs"
+) -> dict:
     """
     Three-step reverse engineering from CI failure + ground truth diff:
 
@@ -3360,12 +3382,15 @@ def decompose_issue(issue: dict, llm) -> dict:
         benchmark_context = build_benchmark_ci_context(
             issue,
             llm=llm,
+            output_dir=output_dir,
         )
         if not validate_required_ci_inputs(benchmark_context):
             return {}
 
         # Three-step analysis
-        diff_context = analyze_diff_chunks(issue, benchmark_context, llm)
+        diff_context = analyze_diff_chunks(
+            issue, benchmark_context, llm, output_dir=output_dir
+        )
 
         atomic_problems = diff_context.get("atomic_problems", [])
         diff_context.get("sequential_workflow_metadata", {})
@@ -3481,7 +3506,7 @@ def decompose_issue(issue: dict, llm) -> dict:
 
 
 def generate_l1_l2_l3_pipeline(
-    decomposed_result: dict, llm, output_dir: str = "data"
+    decomposed_result: dict, llm, output_dir: str = "data/back_trs"
 ) -> dict:
     """
     Full L1/L2/L3 generation pipeline.
@@ -3664,7 +3689,11 @@ def generate_l1_l2_l3_pipeline(
 
     # Stage 5: Generate L3 (universal patterns with NEW build_memory module)
     print("\n[Stage 5/5] Generating L3 (universal patterns)...")
-    l3_memory = build_l3_memory(l1_memory=l1_memory, l2_memory=l2_memory, llm=llm)
+    l3_memory = build_l3_memory(
+        l1_memory=l1_memory,
+        l2_memory=l2_memory,
+        llm=llm,
+    )
     num_patterns = len(l3_memory.get("universal_patterns", []))
     print(f"  L3 universal patterns: {num_patterns}")
 
@@ -4263,7 +4292,7 @@ def _topological_sort_with_validation(
     return result
 
 
-def _append_to_memory_files(result: dict, output_dir: str = "data"):
+def _append_to_memory_files(result: dict, output_dir: str = "data/back_trs"):
     """
     Append a SINGLE result to memory files IMMEDIATELY.
 
@@ -4807,7 +4836,9 @@ def main():
         help="Path to eval issues (legacy mode)",
     )
     parser.add_argument(
-        "--output-dir", default="data", help="Output directory for memory files"
+        "--output-dir",
+        default="data/back_trs",
+        help="Directory for all run outputs (default: data/back_trs)",
     )
     parser.add_argument(
         "--model",
@@ -4893,7 +4924,12 @@ def main():
 
     # Prepare output path
     output_dir = Path(args.output_dir)
+    if not output_dir.is_absolute():
+        output_dir = PROJECT_ROOT / output_dir
+    output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    args.output_dir = str(output_dir)
+    print(f"Run output directory: {output_dir}")
 
     results = []
     errors = []
@@ -4935,7 +4971,9 @@ def main():
             else:
                 # Decompose
                 print("   Decomposing...")
-                decomposed_result = decompose_issue(issue, llm)
+                decomposed_result = decompose_issue(
+                    issue, llm, output_dir=args.output_dir
+                )
 
                 if "error" not in decomposed_result:
                     decomposed_cache[issue_id] = decomposed_result
@@ -5087,24 +5125,27 @@ def main():
         else:
             # Need to decompose from scratch
             print("  Not found in cache - Running full decomposition...")
-            decomposed_result = decompose_issue(issue, llm)
+            decomposed_result = decompose_issue(
+                issue, llm, output_dir=args.output_dir
+            )
 
-        # Check for errors - save ONLY to execption directory (NOT to decomposed_issues.json)
+        # Save failed issues under this run's output directory, not in the cache.
         if "error" in decomposed_result:
             errors.append(decomposed_result)
 
-            # Save error to execption directory ONLY
+            # Keep error artifacts scoped to the selected run directory.
             try:
-                EXECPTION_DIR.mkdir(exist_ok=True)
-                error_file = EXECPTION_DIR / f"{issue_id}.json"
+                error_dir = output_dir / "errors"
+                error_dir.mkdir(parents=True, exist_ok=True)
+                error_file = error_dir / f"{issue_id}.json"
                 with open(error_file, "w") as f:
                     json.dump(decomposed_result, f, indent=2)
-                print(f"  ERROR saved to: execption/{issue_id}.json")
+                print(f"  ERROR saved to: {error_file}")
             except Exception as save_error:
                 print(
-                    f"  WARNING: Could not save error to execption directory: {save_error}"
+                    f"  WARNING: Could not save error to {output_dir / 'errors'}: {save_error}"
                 )
-            # Do NOT add to decomposed_cache or results - errors go to execption/ only!
+            # Do not add errors to decomposed_cache or successful results.
         else:
             # Success - save to decomposed_issues.json
             decomposed_cache[issue_id] = decomposed_result
