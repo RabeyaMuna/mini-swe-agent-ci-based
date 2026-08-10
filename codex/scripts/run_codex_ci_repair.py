@@ -299,27 +299,39 @@ def prepare_repo_checkout(
     if result.returncode != 0:
         # Commit not in default branch - fetch it
         print(f"[codex] Commit {sha[:8]} not in default branch, fetching...")
-        fetch_result = subprocess.run(
-            ["git", "fetch", "origin", sha],
-            cwd=checkout,
-            capture_output=True,
-            text=True,
-        )
 
-        if fetch_result.returncode != 0:
-            # Try fetching all refs as fallback
-            subprocess.run(
-                ["git", "fetch", "--all", "--tags"],
+        # Try multiple fetch strategies
+        fetch_strategies = [
+            ["git", "fetch", "origin", sha],  # Direct commit fetch
+            ["git", "fetch", "origin", "+refs/pull/*/head:refs/remotes/origin/pr/*"],  # All PRs
+            ["git", "fetch", "--all", "--tags"],  # All branches and tags
+            ["git", "fetch", "--depth=1000"],  # Deeper history
+        ]
+
+        for fetch_cmd in fetch_strategies:
+            fetch_result = subprocess.run(
+                fetch_cmd,
                 cwd=checkout,
                 capture_output=True,
+                text=True,
             )
-
-        # Try checkout again
-        subprocess.run(
-            ["git", "checkout", "--force", sha],
-            cwd=checkout,
-            check=True,
-        )
+            if fetch_result.returncode == 0:
+                # Try checkout after successful fetch
+                checkout_result = subprocess.run(
+                    ["git", "checkout", "--force", sha],
+                    cwd=checkout,
+                    capture_output=True,
+                    text=True,
+                )
+                if checkout_result.returncode == 0:
+                    break  # Success!
+        else:
+            # Final attempt - if all strategies failed
+            subprocess.run(
+                ["git", "checkout", "--force", sha],
+                cwd=checkout,
+                check=True,  # Will raise if still fails
+            )
 
     subprocess.run(["git", "clean", "-fdx"], cwd=checkout, check=True)
 
