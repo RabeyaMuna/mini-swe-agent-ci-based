@@ -348,7 +348,40 @@ QUALITY RULES:
 - Only claim that a package change caused a CI failure when CI context,
   dependency context, or a related source adaptation supports that causal link.
   Otherwise describe the exact manifest change without inventing a cause.
+- EVERY package operation in CHANGES must be retained in atomic_problems. A
+  package operation may not be omitted merely because another configuration
+  change in the same manifest is the CI-visible failure.
+- If a package operation has a different failure pattern, problem, or root cause
+  from the other changes in that manifest, create a separate atomic problem for
+  it even though affected_files contains the same manifest path.
+- If the diff proves the exact package operation but the supplied evidence does
+  not establish the underlying resolver/API constraint, keep it as a separate
+  manifest-change problem and state that the exact causal constraint is not
+  supplied. Do not merge it into an unrelated config problem and do not invent
+  incompatibility, deprecation, availability, or replacement claims.
 - This applies to ALL dependency files: pyproject.toml, requirements.txt, package.json, Cargo.toml, etc.
+
+## DEPENDENCY AND CONFIG CONSTRAINT ANALYSIS:
+- For every changed package or config entry, analyze the evidence available for:
+  * exact declaration scope: dependency group, extra/feature, runtime/dev/build/
+    optional scope, workspace/member, source/index, or lockfile section;
+  * exact constraint dimensions: lower/upper bounds, pins, exclusions, extras/
+    features, environment markers, source URLs, checksums, and resolver settings;
+  * relevant environment dimensions: language/runtime version, operating system,
+    architecture, build backend/toolchain, installer/resolver version, and the CI
+    command that consumes the manifest or configuration;
+  * dependency relationships: direct versus transitive dependency, replacement/
+    rename, shared constraints, and source/API adaptations caused by the change.
+- Report only dimensions supported by CHANGES, CI context, dependency context, or
+  related adaptations. Mark an unsupported causal constraint as not supplied;
+  never guess it.
+- A removal is a substantive package/config operation and must remain in the
+  output. Do not retain only additions or AFTER values.
+- For multiline or structured config, preserve the complete key path and value,
+  including list/table members. Analyze each independent key separately.
+- Distinguish observed facts from inferred impact: exact before/after values are
+  facts; resolver, environment, API, build, or runtime consequences require
+  supporting evidence.
 
 ## DECISION PRINCIPLES (Dynamic - apply to YOUR specific changes):
 
@@ -422,6 +455,9 @@ FIELD GUIDANCE (Dynamic - based on YOUR analysis):
 - Confirm that each dependency addition, removal, replacement, and constraint
   change is explicitly described in at least one problem's root_cause or
   how_fixed with exact package names and constraints.
+- Count the distinct package operations in CHANGES and compare them with the
+  operations described in atomic_problems. The counts and exact before/after
+  specifications must match before returning JSON.
 - Confirm that each independent config change is also explicitly described.
 - File coverage is not change coverage: listing pyproject.toml in
   affected_files is insufficient when one or more package changes inside it
@@ -442,6 +478,18 @@ OUTPUT FORMAT:
       "root_cause": "Why it failed",
       "how_fixed": "What changed",
       "why_fix_works": "Why the fix solves it",
+      "change_details": [
+        {{
+          "file": "file1.py",
+          "subject": "exact package, config key, symbol, or changed construct",
+          "operation": "added, removed, replaced, constraint_changed, or adapted",
+          "before": "exact previous value or null",
+          "after": "exact new value or null",
+          "failure_signal": "observable violated constraint or mismatch",
+          "constraint_analysis": "why the previous state failed or, when unavailable, that the exact causal constraint is not supplied",
+          "environment_dependency_impact": "effect on resolution, environment, API, validator, build, test, or runtime"
+        }}
+      ],
       "affected_files": ["file1.py", "file2.py"],
       "problem_type": "primary or hidden - see rules below",
       "is_cascading": {is_cascading_json},
@@ -459,6 +507,13 @@ OUTPUT REQUIREMENTS:
 - validation_order must be the integer validation_order from VALIDATION CONTEXT.
 - validation_cmd must exactly match validation_cmd from VALIDATION CONTEXT.
 - failure_type must match failure_type from VALIDATION CONTEXT unless the value is empty.
+- change_details must be a non-empty array that covers every semantic change
+  represented by the problem. For config/dependency files it MUST include every
+  package added, removed, replaced, or constraint-changed and every independent
+  config-key change with exact before/after values.
+- Do not combine unrelated config and package operations into one change_details
+  item. Repeated declarations may share one item only when all affected scopes
+  are explicitly named in subject or environment_dependency_impact.
 - **CRITICAL: affected_files must be an array containing EVERY SINGLE file path from the CHANGES section above that is related to this problem.**
   * Count the files in CHANGES and ensure affected_files has the SAME COUNT if all files share the same problem.
   * DO NOT truncate, sample, or omit files - include EVERY file that has this issue.

@@ -5,8 +5,7 @@ This project runs two agents over a CI‑repair benchmark, with or without memor
 - codex (OpenAI Codex CLI)
 
 Supported agent models (exact list):
-- gpt-5-mini (OpenAI)
-- gpt-5.4-mini-2026-03-17 (OpenAI snapshot)
+- **gpt-5.4-mini** (OpenAI GPT-5.4 - recommended, latest version)
 - minimax/minimax-m2.5 (MiniMax M2.5 via OpenRouter)
 
 Ablations: BASELINE, L1, L1+L2, L1+L2+L3
@@ -36,24 +35,25 @@ npm install -g @openai/codex-cli
 codex --version
 ```
 
-- Put keys in .env at repo root
+- Create `.env` file at repo root with your API keys:
 ```ini
-# OpenAI (for GPT‑5 models)
-OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=https://api.openai.com/v1
+# OpenAI (for GPT-5.4 models)
+OPENAI_API_KEY=your-openai-api-key-here
 
 # OpenRouter (for MiniMax M2.5)
-OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_API_KEY=your-openrouter-api-key-here
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
 # GLM-5.2 via Z.ai (optional, for decomposition/memory build)
-GLM_API_KEY=...
+GLM_API_KEY=your-glm-api-key-here
 GLM_BASE_URL=https://api.z.ai/api/paas/v4
 GLM_MODEL_NAME=glm-5.2
 
 # HuggingFace (for dataset loading)
-HUGGINGFACE_TOKEN=hf_...
+HUGGINGFACE_TOKEN=your-huggingface-token-here
 ```
+
+> **Security**: Never commit `.env` file to git. It's already in `.gitignore`.
 
 ### Ubuntu Server / Remote Setup
 
@@ -115,28 +115,29 @@ codex --version
 
 **Step 5: Configure Environment Variables**
 ```bash
-# Create .env file (copy API keys from your local setup)
+# Create .env file (copy API keys from secure location - DO NOT commit to git)
 cat > .env << 'EOF'
-# OpenAI API Key
-OPENAI_API_KEY=sk-proj-...
-OPENAI_BASE_URL=https://api.openai.com/v1
+# OpenAI API Key (for GPT-5.4)
+OPENAI_API_KEY=your-openai-api-key-here
 
 # OpenRouter API Key (for MiniMax M2.5)
-OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_API_KEY=your-openrouter-api-key-here
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
-# GLM-5.2 via Z.ai Platform
-GLM_API_KEY=...
+# GLM-5.2 via Z.ai Platform (optional)
+GLM_API_KEY=your-glm-api-key-here
 GLM_BASE_URL=https://api.z.ai/api/paas/v4
 GLM_MODEL_NAME=glm-5.2
 
 # HuggingFace Token
-HUGGINGFACE_TOKEN=hf_...
+HUGGINGFACE_TOKEN=your-huggingface-token-here
 EOF
 
 # Secure the .env file
 chmod 600 .env
 ```
+
+> **Important**: Replace placeholder values with your actual API keys. Keep `.env` secure and never commit it.
 
 **Step 6: Configure Codex (Ubuntu-specific)**
 ```bash
@@ -188,7 +189,7 @@ tmux new -s decompose
 
 # Run your command
 source .venv/bin/activate
-python3 scripts/decompose_backward.py --batch --use-huggingface --dataset data/memory_set.jsonl --model gpt-5-mini --output-dir data/back_trs
+python3 scripts/decompose_backward.py --batch --use-huggingface --dataset data/memory_set.jsonl --model gpt-5.4-mini --output-dir data/back_trs
 
 # Detach from session: Press Ctrl+B, then D
 # Reattach later: tmux attach -t decompose
@@ -278,7 +279,7 @@ python3 scripts/decompose_backward.py \
   --batch \
   --use-huggingface \
   --dataset data/camel_memory_set.jsonl \
-  --model gpt-5-mini \
+  --model gpt-5.4-mini \
   --output-dir data/back_trs
 # Detach: Ctrl+B then D
 
@@ -287,7 +288,7 @@ nohup python3 scripts/decompose_backward.py \
   --batch \
   --use-huggingface \
   --dataset data/camel_memory_set.jsonl \
-  --model gpt-5-mini \
+  --model gpt-5.4-mini \
   --output-dir data/back_trs > decompose.log 2>&1 &
 
 # Monitor progress
@@ -295,7 +296,7 @@ tail -f decompose.log
 ```
 
 **Supported models for decomposition:**
-- `gpt-5-mini` (recommended for production)
+- `gpt-5.4-mini` (recommended - OpenAI GPT-5.4 latest)
 - `minimax2.5` (cost-effective alternative)
 - `glm5.2` (requires GLM_API_KEY in .env)
 
@@ -307,7 +308,7 @@ python3 scripts/run_eval.py \
   --issue-ids-file data/eval_issue_ids.json \
   --repos <comma repos> \
   --ablation <BASELINE|L1|L1+L2|L1+L2+L3> \
-  --model <minimax2.5|gpt-5-mini|gpt-5.4-mini-2026-03-17> \
+  --model <gpt-5.4-mini|minimax2.5> \
   --direction <backward|forward> \
   --workers <N>
 ```
@@ -362,56 +363,80 @@ python3 scripts/run_eval.py \
 Notes
 - Use one agent at a time (Mini‑SWE or Codex, not both concurrently).
 - --workers controls parallel issues per run (default 1). Try 4 or 6 on bigger machines.
-- Valid Mini‑SWE models: minimax2.5, gpt‑5‑mini, gpt‑5.4‑mini‑2026‑03‑17.
+- Valid Mini‑SWE models: `gpt-5.4-mini` (recommended), `minimax2.5`.
 
 ## 3) Run Codex (OpenAI Codex CLI agent)
 
-Key points
-- The wrapper auto‑configures the provider per model and writes ~/.codex on the fly.
-- Auth banner prints: auth mode, provider, endpoint, and CODEX_HOME.
-- Supported models: gpt‑5‑mini, gpt‑5.4‑mini‑2026‑03‑17, minimax/minimax‑m2.5.
-- Aliases: passing minimax or minimax2.5 is routed to minimax/minimax‑m2.5 automatically.
+### Key Points
+- Supported models: **`gpt-5.4-mini`** (recommended), `minimax/minimax-m2.5`
+- Environment variables must be loaded from `.env` before running
+- Use the wrapper script `./run_gpt54.sh` for easy setup
 
-### Quick Start (Ubuntu/macOS)
+### Quick Start - Wrapper Script (Recommended)
 
-**Simple wrapper script (recommended):**
+The `run_gpt54.sh` script automatically loads `.env` and uses GPT-5.4-mini:
+
 ```bash
-# Format: ./run_codex_simple.sh <model> <ablation> <direction> <issue-ids>
+# Activate environment
+source .venv-codex/bin/activate
 
-# Example 1: Baseline (no memory) with GPT-5 mini on specific issues
-./run_codex_simple.sh gpt-5-mini baseline backward 416,407,408
-
-# Example 2: Full memory (L1+L2+L3) with MiniMax
-./run_codex_simple.sh minimax2.5 L1+L2+L3 backward 416,407,408
-
-# Example 3: Single issue for debugging
-./run_codex_simple.sh gpt-5-mini baseline backward 416
+# Run with wrapper (auto-loads .env)
+./run_gpt54.sh                    # Uses defaults: baseline, backward, data/eval_set.jsonl, 1 issue
+./run_gpt54.sh baseline backward  # Specify ablation and direction
+./run_gpt54.sh L1+L2+L3 backward data/eval_set.jsonl 4  # Full memory, 4 workers
 ```
 
-**On Ubuntu server (in background):**
+### Manual Commands (Load .env First)
+
+**Before running any command, load environment variables:**
 ```bash
-# Using tmux (recommended)
+# Option 1: Source .env file
+set -a
+source .env
+set +a
+
+# Option 2: Export from .env
+export OPENAI_API_KEY=$(grep OPENAI_API_KEY .env | cut -d '=' -f2)
+```
+
+**Then run Codex:**
+```bash
+# Basic command with GPT-5.4-mini
+bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini "" data/eval_set.jsonl 1
+
+# Full memory (L1+L2+L3)
+bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
+
+# MiniMax model
+bash ./run_codex_direct.sh "" baseline backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
+```
+
+### Running on Server
+
+```bash
+# Using tmux (recommended for long-running jobs)
 tmux new -s codex
-source .venv/bin/activate
-./run_codex_simple.sh gpt-5-mini L1+L2+L3 backward 416,407,408
+source .venv-codex/bin/activate
+./run_gpt54.sh L1+L2+L3 backward data/eval_set.jsonl 4
 # Detach: Ctrl+B then D
 # Reattach later: tmux attach -t codex
 
 # Or using nohup
-nohup ./run_codex_simple.sh gpt-5-mini baseline backward 416,407,408 > codex.log 2>&1 &
+nohup ./run_gpt54.sh baseline backward data/eval_set.jsonl 4 > codex.log 2>&1 &
 tail -f codex.log
 ```
 
-**View results:**
+### View Results
+
 ```bash
 # Results are in: results/codex/<ablation>_<model>/<issue-id>/
-ls -la results/codex/baseline_gpt-5-mini/416/
+ls -la results/codex/baseline_gpt-5_4-mini/416/
 
 # View specific result
-cat results/codex/baseline_gpt-5-mini/416/result.json | python3 -m json.tool
+cat results/codex/baseline_gpt-5_4-mini/416/result.json | python3 -m json.tool
 
 # View generated patch
-cat results/codex/baseline_gpt-5-mini/416/patch.diff
+cat results/codex/baseline_gpt-5_4-mini/416/patch.diff
 ```
 
 Syntax
@@ -451,51 +476,49 @@ See codex/docs/reademe.md for how MiniMax M2.5 is wired via OpenRouter (OpenAI�
 - ChatGPT login is not required; runs use API keys from .env.
 
 
-### Mini‑SWE – 12 One‑Liners
+### Mini‑SWE – Quick Commands
 
 Run ALL eval_issues for each model, ablation, and direction (workers=4, dataset=data/eval_set.jsonl).
 
-# GPT‑5‑mini
+#### GPT-5.4-mini (Recommended)
 ```bash
-bash ./run_miniswe_direct.sh "" BASELINE backward gpt-5-mini "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" BASELINE forward  gpt-5-mini "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5-mini "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5-mini "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" BASELINE backward gpt-5.4-mini "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" BASELINE forward  gpt-5.4-mini "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini "" data/eval_set.jsonl 4
 ```
-# GPT‑5.4‑mini‑2026‑03‑17
-```bash
-bash ./run_miniswe_direct.sh "" BASELINE backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" BASELINE forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-```
-# MiniMax M2.5
+
+#### MiniMax M2.5
 ```bash
 bash ./run_miniswe_direct.sh "" BASELINE backward minimax2.5 "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" BASELINE forward  minimax2.5 "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" L1+L2+L3 backward minimax2.5 "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  minimax2.5 "" data/eval_set.jsonl 4
 ```
-### Codex – 12 One‑Liners
+### Codex – Quick Commands
 
-Run ALL eval_issues for each model, ablation, and direction (workers=4, dataset=data/eval_set.jsonl). The script auto‑configures provider and prints an auth banner.
+**Important**: Load environment variables before running: `set -a; source .env; set +a`
 
-# GPT ‑5 ‑mini
+#### Using Wrapper Script (Easiest - Auto-loads .env)
 ```bash
-bash ./run_codex_direct.sh "" baseline backward gpt-5-mini "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" baseline forward  gpt-5-mini "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5-mini "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5-mini "" data/eval_set.jsonl 4
+./run_gpt54.sh baseline backward data/eval_set.jsonl 4
+./run_gpt54.sh baseline forward  data/eval_set.jsonl 4
+./run_gpt54.sh L1+L2+L3 backward data/eval_set.jsonl 4
+./run_gpt54.sh L1+L2+L3 forward  data/eval_set.jsonl 4
 ```
-# GPT ‑5.4 ‑mini ‑2026 ‑03 ‑17
+
+#### Manual Commands with GPT-5.4-mini
 ```bash
-bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" baseline forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 4
+# Load .env first: set -a; source .env; set +a
+bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline forward  gpt-5.4-mini "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini "" data/eval_set.jsonl 4
 ```
-# MiniMax M2.5 (via OpenRouter)
+
+#### MiniMax M2.5 (via OpenRouter)
 ```bash
+# Load .env first: set -a; source .env; set +a
 bash ./run_codex_direct.sh "" baseline backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" baseline forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4

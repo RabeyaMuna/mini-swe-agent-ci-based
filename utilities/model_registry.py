@@ -13,10 +13,9 @@ import re
 CANONICAL_MINIMAX_MODEL = "openrouter/minimax/minimax-m2.5"
 CANONICAL_ZAI_GLM_MODEL = "zai/glm-5.2"
 LEGACY_GLM_MODEL = "glm-4-plus"
-# GPT-5.4 models (using official OpenAI API model names)
-# gpt-5-mini -> latest snapshot
-# gpt-5.4-mini-2026-03-17 -> specific snapshot
-CANONICAL_GPT5_MINI_MODEL = "gpt-5-mini"
+# GPT-5.4 models (using official OpenAI API - always use latest)
+# All aliases map to gpt-5.4-mini (latest version)
+CANONICAL_GPT5_MINI_MODEL = "gpt-5.4-mini"
 CANONICAL_GPT54_MODEL = "gpt-5.4-mini"
 
 MINIMAX_ALIASES = {

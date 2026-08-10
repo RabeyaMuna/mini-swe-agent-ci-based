@@ -2292,17 +2292,6 @@ def _split_chunk_and_requeue(
         queue.append((sub_chunk, depth + 1))
 
 
-def _save_debug_prompt(chunk: dict[str, Any], chunk_label: str, prompt: str) -> None:
-    output_dir = Path(chunk.get("_output_dir") or "data/back_trs")
-    debug_file = output_dir / "debug" / (
-        f"atomic_prompt_val{chunk.get('validation_order', '?')}_"
-        f"{chunk_label.replace('.', '_')}.txt"
-    )
-    debug_file.parent.mkdir(parents=True, exist_ok=True)
-    debug_file.write_text(prompt, encoding="utf-8")
-    print(f"      Saved debug: {debug_file}")
-
-
 def _build_atomic_problems(
     *,
     chunk: dict[str, Any],
@@ -2374,11 +2363,6 @@ def _build_atomic_problems(
 
         needs_retry = result == "SPLIT_REQUIRED" or (changes and not problems)
         if needs_retry and can_split:
-            if result != "SPLIT_REQUIRED":
-                print(
-                    f"      {label}: 0 problems for {len(changes)} changes - saving debug prompt"
-                )
-                _save_debug_prompt(current, label, prompt)
             print(f"      {label}: retrying with split")
             _split_chunk_and_requeue(
                 current, len(prompt), depth, model_limits, model_name, queue
