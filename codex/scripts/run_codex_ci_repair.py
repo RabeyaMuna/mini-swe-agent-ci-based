@@ -1718,6 +1718,15 @@ def parse_args() -> argparse.Namespace:
             "Provides mid-issue checkpoints so partial work is preserved."
         ),
     )
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Skip issue ids already present in this model/ablation's "
+            "predictions.json. Enabled by default; use --no-resume to rerun them."
+        ),
+    )
     parser.add_argument("--refresh-checkout", action="store_true")
     parser.add_argument(
         "--workers",
@@ -1805,6 +1814,23 @@ def _ablation_dir_name(ablation: str, context_model: str | None) -> str:
     return safe_ablation
 
 
+def existing_prediction_ids(
+    output_root: Path, ablation: str, context_model: str | None = None
+) -> set[str]:
+    """Return ids already recorded for one model/ablation run."""
+    predictions_file = (
+        output_root / _ablation_dir_name(ablation, context_model) / "predictions.json"
+    )
+    predictions = load_json(predictions_file, [])
+    if not isinstance(predictions, list):
+        return set()
+    return {
+        str(prediction.get("id"))
+        for prediction in predictions
+        if isinstance(prediction, dict) and prediction.get("id") is not None
+    }
+
+
 def append_prediction_for_issue(
     output_root: Path, ablation: str, issue_id: str, context_model: str | None = None
 ) -> None:
@@ -1880,15 +1906,32 @@ def main() -> int:
     issue_index = load_issue_index(args.dataset, args.hf_dataset)
 
     for ablation in ablations:
+        pending_issue_ids = issue_ids
+        if args.resume:
+            completed_ids = existing_prediction_ids(
+                args.output_root, ablation, args.context_model
+            )
+            pending_issue_ids = [
+                wanted_id
+                for wanted_id in issue_ids
+                if str(wanted_id) not in completed_ids
+            ]
+            skipped_count = len(issue_ids) - len(pending_issue_ids)
+            if skipped_count:
+                print(
+                    f"[codex-ci-repair] Resume: skipping {skipped_count} issue(s) "
+                    "already present in predictions.json"
+                )
+
         print(f"\n[codex-ci-repair] Starting ablation: {ablation}")
-        print(f"[codex-ci-repair] Issues to process: {len(issue_ids)}")
+        print(f"[codex-ci-repair] Issues to process: {len(pending_issue_ids)}")
 
         failed_issues = []
         if args.workers and args.workers > 1:
             print(f"[codex-ci-repair] Running with workers={args.workers}")
             tasks = {}
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
-                for wanted_id in issue_ids:
+                for wanted_id in pending_issue_ids:
                     issue = issue_index.get(str(wanted_id))
                     if issue is None:
                         print(f"[codex-ci-repair] WARNING: Issue {wanted_id} not found in dataset, skipping")
@@ -1907,7 +1950,7 @@ def main() -> int:
                     # Incremental predictions write after each completion
                     consolidate_predictions(args.output_root, ablation, args.context_model)
         else:
-            for wanted_id in issue_ids:
+            for wanted_id in pending_issue_ids:
                 issue = issue_index.get(str(wanted_id))
                 if issue is None:
                     print(f"[codex-ci-repair] WARNING: Issue {wanted_id} not found in dataset, skipping")

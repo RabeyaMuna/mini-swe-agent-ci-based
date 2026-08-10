@@ -514,6 +514,9 @@ Provider routing is selected from the model argument:
 - `minimax2.5`, `minimax-m2.5`, and `minimax/*` use OpenRouter.
 - Each model gets an isolated `.codex-local/<model>/` configuration, so
   concurrent GPT and MiniMax runs cannot overwrite one another.
+- Resume is enabled by default: issue IDs already present in that
+  model/ablation's `predictions.json` are skipped. Set `CODEX_RESUME=0` only
+  when you intentionally want to regenerate them.
 
 You can verify routing without starting a benchmark or making an API request:
 

@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from codex.scripts.run_codex_ci_repair import existing_prediction_ids  # noqa: E402
+
+
 LAUNCHER = PROJECT_ROOT / "run_codex_direct.sh"
 MINISWE_LAUNCHER = PROJECT_ROOT / "run_miniswe_direct.sh"
 
@@ -123,3 +129,19 @@ def test_miniswe_routes_gpt_and_minimax_to_their_required_providers(
     assert minimax_result.returncode == 0, minimax_result.stdout + minimax_result.stderr
     assert "Provider:  OpenRouter" in minimax_result.stdout
     assert "Endpoint:  https://openrouter.ai/api/v1" in minimax_result.stdout
+
+
+def test_codex_resume_reads_only_the_matching_prediction_file(tmp_path: Path) -> None:
+    results_root = tmp_path / "results" / "codex"
+    predictions_dir = results_root / "baseline_gpt-5_4-mini"
+    predictions_dir.mkdir(parents=True)
+    (predictions_dir / "predictions.json").write_text(
+        '[{"id": 1}, {"id": "43"}]', encoding="utf-8"
+    )
+
+    assert existing_prediction_ids(
+        results_root, "baseline", "gpt-5.4-mini"
+    ) == {"1", "43"}
+    assert existing_prediction_ids(
+        results_root, "baseline", "minimax/minimax-m2.5"
+    ) == set()

@@ -224,6 +224,13 @@ if [ "${CODEX_CONFIG_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 
+RESUME_ARGS=(--resume)
+case "${CODEX_RESUME:-1}" in
+    0|false|FALSE|no|NO)
+        RESUME_ARGS=(--no-resume)
+        ;;
+esac
+
 # Build the run function for one combo
 run_one() {
     local ablation="$1"; local direction="$2"
@@ -243,6 +250,7 @@ run_one() {
         PYTHONPATH=. python3 codex/scripts/run_codex_ci_repair.py \
             --ablations "$ablation" \
             $memory_args \
+            "${RESUME_ARGS[@]}" \
             --workers "$WORKERS" \
             --codex-command "codex exec --sandbox danger-full-access --model $CODEX_MODEL"
     else
@@ -250,6 +258,7 @@ run_one() {
             --issue-ids "$ISSUE_IDS" \
             --ablations "$ablation" \
             $memory_args \
+            "${RESUME_ARGS[@]}" \
             --workers "$WORKERS" \
             --codex-command "codex exec --sandbox danger-full-access --model $CODEX_MODEL"
     fi
