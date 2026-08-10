@@ -107,6 +107,7 @@ def resolve_model_alias(model_name: str | None) -> str | None:
 def model_output_name(model_name: str | None) -> str:
     """Return a stable, filesystem-friendly folder name for result paths."""
     resolved = resolve_model_alias(model_name) or "unknown-model"
+    original = (model_name or "").lower().strip()
 
     if resolved == CANONICAL_MINIMAX_MODEL:
         return "minimax-m2.5"
@@ -114,10 +115,15 @@ def model_output_name(model_name: str | None) -> str:
         return "glm-5.2"
     if resolved == LEGACY_GLM_MODEL:
         return LEGACY_GLM_MODEL
-    if resolved == CANONICAL_GPT5_MINI_MODEL:
-        return "gpt-5-mini"
-    if resolved == CANONICAL_GPT54_MODEL:
-        return "gpt-5.4-mini"
+
+    # For GPT-5 models: preserve the original input to distinguish gpt-5.4-mini vs gpt-5-mini
+    # Even though they resolve to the same underlying model, use different output names
+    if resolved == "gpt-5.4-mini":
+        # Check original input to determine output name
+        if "5.4" in original or "5-4" in original:
+            return "gpt-5.4-mini"
+        else:
+            return "gpt-5-mini"
 
     name = resolved
     if name.startswith("openrouter/"):
