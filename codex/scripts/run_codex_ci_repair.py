@@ -937,19 +937,28 @@ You are fixing a CI failure in this repository.
 
 **STEP 0: Check if problem still exists (REQUIRED)**
 Before attempting any fix:
-1. Run the verification command on ONLY the affected files (not the whole repo)
-2. Check if the specific error signals are still present
-3. If the errors are NOT found:
+1. **Verify file paths** - Sometimes CI logs provide incomplete/partial paths:
+   - If a file path doesn't exist, search for it: `find . -type f -name "$(basename <file>)"`
+   - Use the correct full path for all subsequent commands
+2. Run the verification command on ONLY the affected files (not the whole repo)
+3. Check if the specific error signals are still present
+4. If the errors are NOT found:
    - Report "Problem already fixed by previous step"
    - Commit any staged changes with message "Skip: problem already fixed"
    - Exit successfully
-4. If errors ARE found: Proceed to fix
+5. If errors ARE found: Proceed to fix
 
 Example for mypy errors:
 ```bash
-# Check only affected files
-mypy path/to/affected_file.py 2>&1 | grep -E "line_number"
-# If no output -> Problem is fixed, skip to next
+# Check only affected files (find correct path if needed)
+FILE="path/to/affected_file.py"
+if [ ! -f "$FILE" ]; then
+  FILE=$(find . -type f -name "$(basename $FILE)" | head -1)
+fi
+if [ -f "$FILE" ]; then
+  mypy "$FILE" 2>&1 | grep -E "line_number"
+  # If no output -> Problem is fixed, skip to next
+fi
 ```
 
 **For automated tool failures (formatters, linters, type checkers):**
@@ -1065,19 +1074,28 @@ You are fixing a CI failure in this repository using guidance from similar past 
 
 **STEP 0: Check if problem still exists (REQUIRED)**
 Before attempting any fix:
-1. Run the verification command on ONLY the affected files (not the whole repo)
-2. Check if the specific error signals are still present
-3. If the errors are NOT found:
+1. **Verify file paths** - Sometimes CI logs provide incomplete/partial paths:
+   - If a file path doesn't exist, search for it: `find . -type f -name "$(basename <file>)"`
+   - Use the correct full path for all subsequent commands
+2. Run the verification command on ONLY the affected files (not the whole repo)
+3. Check if the specific error signals are still present
+4. If the errors are NOT found:
    - Report "Problem already fixed by previous step"
    - Commit any staged changes with message "Skip: problem already fixed"
    - Exit successfully
-4. If errors ARE found: Proceed to fix
+5. If errors ARE found: Proceed to fix
 
 Example for mypy errors:
 ```bash
-# Check only affected files
-mypy path/to/affected_file.py 2>&1 | grep -E "line_number"
-# If no output -> Problem is fixed, skip to next
+# Check only affected files (find correct path if needed)
+FILE="path/to/affected_file.py"
+if [ ! -f "$FILE" ]; then
+  FILE=$(find . -type f -name "$(basename $FILE)" | head -1)
+fi
+if [ -f "$FILE" ]; then
+  mypy "$FILE" 2>&1 | grep -E "line_number"
+  # If no output -> Problem is fixed, skip to next
+fi
 ```
 
 **If repair plan is provided above:**
