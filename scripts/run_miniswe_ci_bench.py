@@ -63,6 +63,9 @@ def main() -> None:
     # Import and call the Typer command function directly
     from minisweagent.run.benchmarks.cibench import main as cibench_main  # type: ignore
 
+    # Use the cibench.yaml config which includes agent templates
+    config_path = Path(__file__).parent.parent / "miniswe-agent/src/minisweagent/config/benchmarks/cibench.yaml"
+
     cibench_main(
         dataset=str(Path(args.dataset)),
         split="train",  # not used for local JSONL
@@ -70,7 +73,7 @@ def main() -> None:
         workers=args.workers,
         model_name=resolved_model,
         model_class=None,
-        config_spec=[],
+        config_spec=[str(config_path)],  # Load cibench.yaml config
         filter_spec=args.issue_regex,
         slice_spec="",
         shuffle=False,
