@@ -140,6 +140,11 @@ def preflight_model(model: str) -> None:
     else:
         payload["max_tokens"] = 16
 
+    print(
+        f"[codex-ci-repair] Preflight: verifying {model} through {provider} "
+        "(request timeout: 20s)",
+        flush=True,
+    )
     r = requests.post(url, headers=_headers(token), json=payload, timeout=20)
     if r.status_code == 200:
         print("\n✓ Model verified: chat/completions")
@@ -1894,15 +1899,35 @@ def main() -> int:
     if args.direction == "forward" and str(args.memory_root).endswith("back_trs"):
         args.memory_root = PROJECT_ROOT / "data" / "fwr_trs"
 
-    # Pre-flight model verification and banner when a context model is provided
-    if args.context_model:
-        preflight_model(args.context_model)
     if args.issue_ids:
         issue_ids = [x.strip() for x in args.issue_ids.split(",") if x.strip()]
     else:
         issue_ids = load_issue_ids(args.issue_ids_file)
 
     ablations = [x.strip() for x in args.ablations.split(",") if x.strip()]
+
+    needs_processing = True
+    if args.resume:
+        needs_processing = any(
+            any(
+                str(wanted_id)
+                not in existing_prediction_ids(
+                    args.output_root, ablation, args.context_model
+                )
+                for wanted_id in issue_ids
+            )
+            for ablation in ablations
+        )
+
+    # Verify the model only when at least one selected issue still needs work.
+    if args.context_model and needs_processing:
+        preflight_model(args.context_model)
+    elif args.context_model:
+        print(
+            "[codex-ci-repair] Resume: all selected issues already exist; "
+            "skipping model preflight"
+        )
+
     issue_index = load_issue_index(args.dataset, args.hf_dataset)
 
     for ablation in ablations:

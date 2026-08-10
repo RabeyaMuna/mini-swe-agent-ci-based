@@ -267,6 +267,9 @@ run_one() {
 # Activate environment
 source .venv-codex/bin/activate
 
+# Stream Python progress immediately when stdout is redirected by nohup.
+export PYTHONUNBUFFERED=1
+
 # Export CODEX_MODEL so the Python test can see it
 export CODEX_MODEL
 
