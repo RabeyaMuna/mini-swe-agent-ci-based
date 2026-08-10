@@ -300,15 +300,32 @@ def prepare_repo_checkout(
         # Commit not in default branch - fetch it
         print(f"[codex] Commit {sha[:8]} not in default branch, fetching...")
 
+        # First, unshallow the repository if it's shallow
+        is_shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=checkout,
+            capture_output=True,
+            text=True,
+        ).stdout.strip() == "true"
+
+        if is_shallow:
+            print(f"[codex] Repository is shallow, unshallowing...")
+            subprocess.run(
+                ["git", "fetch", "--unshallow"],
+                cwd=checkout,
+                capture_output=True,
+                text=True,
+            )
+
         # Try multiple fetch strategies
         fetch_strategies = [
-            ["git", "fetch", "origin", sha],  # Direct commit fetch
-            ["git", "fetch", "origin", "+refs/pull/*/head:refs/remotes/origin/pr/*"],  # All PRs
-            ["git", "fetch", "--all", "--tags"],  # All branches and tags
-            ["git", "fetch", "--depth=1000"],  # Deeper history
+            (["git", "fetch", "origin", sha], "direct commit fetch"),
+            (["git", "fetch", "origin", "+refs/pull/*/head:refs/remotes/origin/pr/*"], "all PR refs"),
+            (["git", "fetch", "--all"], "all branches"),
         ]
 
-        for fetch_cmd in fetch_strategies:
+        checkout_succeeded = False
+        for fetch_cmd, description in fetch_strategies:
             fetch_result = subprocess.run(
                 fetch_cmd,
                 cwd=checkout,
@@ -324,9 +341,13 @@ def prepare_repo_checkout(
                     text=True,
                 )
                 if checkout_result.returncode == 0:
-                    break  # Success!
-        else:
-            # Final attempt - if all strategies failed
+                    print(f"[codex] ✓ Successfully fetched via {description}")
+                    checkout_succeeded = True
+                    break
+
+        if not checkout_succeeded:
+            # Final attempt - if all strategies failed, this will raise
+            print(f"[codex] ✗ All fetch strategies failed, attempting final checkout...")
             subprocess.run(
                 ["git", "checkout", "--force", sha],
                 cwd=checkout,
