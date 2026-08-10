@@ -4,9 +4,9 @@ This project runs two agents over a CI‑repair benchmark, with or without memor
 - mini‑swe‑agent
 - codex (OpenAI Codex CLI)
 
-Supported agent models (exact list):
-- **gpt-5.4-mini** (OpenAI GPT-5.4 - recommended, latest version)
-- `minimax2.5` (MiniMax M2.5 via OpenRouter; resolves to `openrouter/minimax/minimax-m2.5`)
+Common agent models:
+- **gpt-5.4-mini** (routed directly to OpenAI)
+- `minimax2.5` (routed through OpenRouter; canonical Codex slug `minimax/minimax-m2.5`)
 
 Ablations: BASELINE, L1, L1+L2, L1+L2+L3
 Directions: backward (data/back_trs) or forward (data/fwr_trs)
@@ -475,9 +475,17 @@ Pass an empty issue list (`""`) to use every ID in
 `data/eval_issue_ids.json`. Pass `all` for the ablation or `both` for the
 direction to run all supported combinations.
 
-> The wrapper automatically activates `.venv-codex` when that directory
-> exists. If you maintain separate Mini-SWE and Codex environments, use the
-> direct runner above to guarantee that `.venv-miniswe` remains active.
+> The wrapper automatically loads `.env` and prefers `.venv-miniswe`. It falls
+> back to `.venv-codex` only when the dedicated Mini-SWE environment is absent.
+> GPT models receive only the OpenAI credential; MiniMax receives only the
+> OpenRouter credential.
+
+Verify Mini-SWE routing without making an API request:
+
+```bash
+MINISWE_CONFIG_ONLY=1 bash ./run_miniswe_direct.sh 1 baseline backward gpt-5.4-mini
+MINISWE_CONFIG_ONLY=1 bash ./run_miniswe_direct.sh 1 baseline backward minimax2.5
+```
 
 Notes:
 
@@ -489,38 +497,32 @@ Notes:
 ## 3) Run Codex (OpenAI Codex CLI agent)
 
 ### Key Points
-- Supported models: **`gpt-5.4-mini`** (recommended), `minimax/minimax-m2.5`
-- Environment variables must be loaded from `.env` before running
-- Use the wrapper script `./run_gpt54.sh` for easy setup
+- GPT/OpenAI and MiniMax/OpenRouter routing is automatic.
+- The launcher loads `.env`; only the matching provider key is passed onward.
+- Use `run_codex_direct.sh` for both providers.
 
-### Quick Start - Wrapper Script (Recommended)
+### Direct Codex Commands (Provider Configuration Is Automatic)
 
-The `run_gpt54.sh` script automatically loads `.env` and uses GPT-5.4-mini:
+After pulling the repository, put `OPENAI_API_KEY` and/or
+`OPENROUTER_API_KEY` in the repository's `.env`. The launcher loads `.env`
+itself. Do not manually edit `.codex-local/config.toml`.
+
+Provider routing is selected from the model argument:
+
+- `gpt-*`, `chatgpt-*`, `o<number>*`, and `codex-*` use OpenAI directly.
+- `openai/<model>` is normalized to the native OpenAI model name.
+- `minimax2.5`, `minimax-m2.5`, and `minimax/*` use OpenRouter.
+- Each model gets an isolated `.codex-local/<model>/` configuration, so
+  concurrent GPT and MiniMax runs cannot overwrite one another.
+
+You can verify routing without starting a benchmark or making an API request:
 
 ```bash
-# Activate environment
-source .venv-codex/bin/activate
-
-# Run with wrapper (auto-loads .env)
-./run_gpt54.sh                    # Uses defaults: baseline, backward, data/eval_set.jsonl, 1 issue
-./run_gpt54.sh baseline backward  # Specify ablation and direction
-./run_gpt54.sh L1+L2+L3 backward data/eval_set.jsonl 4  # Full memory, 4 workers
+CODEX_CONFIG_ONLY=1 bash ./run_codex_direct.sh 1 baseline backward gpt-5.4-mini
+CODEX_CONFIG_ONLY=1 bash ./run_codex_direct.sh 1 baseline backward minimax2.5
 ```
 
-### Manual Commands (Load .env First)
-
-**Before running any command, load environment variables:**
-```bash
-# Option 1: Source .env file
-set -a
-source .env
-set +a
-
-# Option 2: Export from .env
-export OPENAI_API_KEY=$(grep OPENAI_API_KEY .env | cut -d '=' -f2)
-```
-
-**Then run Codex:**
+Then run Codex:
 ```bash
 # Basic command with GPT-5.4-mini
 bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini "" data/eval_set.jsonl 1
@@ -568,13 +570,13 @@ bash ./run_codex_direct.sh "<ids or empty>" <ablation> <direction> <model> [repo
 Examples
 ```bash
 # All issues, ALL ablations, BOTH directions, GPT‑5‑mini, 4 workers
-bash ./run_codex_direct.sh "" all both gpt-5-mini    data/eval_set.jsonl  4
+bash ./run_codex_direct.sh "" all both gpt-5-mini "" data/eval_set.jsonl 4
 
 # MiniMax M2.5 via OpenRouter, full memory, backward
-f
+bash ./run_codex_direct.sh "" L1+L2+L3 backward minimax2.5 "" data/eval_set.jsonl 4
 
 # Snapshot model, baseline, backward, 6 workers
-bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini-2026-03-17  data/eval_set.jsonl 6
+bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini-2026-03-17 "" data/eval_set.jsonl 6
 
 # Filter issues by repo slug (use dataset to expand IDs)
 bash ./run_codex_direct.sh "" L1 backward minimax/minimax-m2.5 agno-agi/agno data/eval_set.jsonl 4
@@ -600,6 +602,7 @@ See codex/docs/reademe.md for how MiniMax M2.5 is wired via OpenRouter (OpenAI�
 ### Mini‑SWE – Quick Commands
 
 Run ALL eval_issues for each model, ablation, and direction (workers=4, dataset=data/eval_set.jsonl).
+The wrapper loads `.env` and selects OpenAI or OpenRouter automatically.
 
 #### GPT-5.4-mini (Recommended)
 ```bash
@@ -618,19 +621,10 @@ bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  minimax2.5 "" data/eval_set.js
 ```
 ### Codex – Quick Commands
 
-**Important**: Load environment variables before running: `set -a; source .env; set +a`
-
-#### Using Wrapper Script (Easiest - Auto-loads .env)
-```bash
-./run_gpt54.sh baseline backward data/eval_set.jsonl 4
-./run_gpt54.sh baseline forward  data/eval_set.jsonl 4
-./run_gpt54.sh L1+L2+L3 backward data/eval_set.jsonl 4
-./run_gpt54.sh L1+L2+L3 forward  data/eval_set.jsonl 4
-```
+The launcher automatically loads `.env` and creates the correct provider configuration.
 
 #### Manual Commands with GPT-5.4-mini
 ```bash
-# Load .env first: set -a; source .env; set +a
 bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" baseline forward  gpt-5.4-mini "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
@@ -639,7 +633,6 @@ bash ./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini "" data/eval_set.js
 
 #### MiniMax M2.5 (via OpenRouter)
 ```bash
-# Load .env first: set -a; source .env; set +a
 bash ./run_codex_direct.sh "" baseline backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" baseline forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4

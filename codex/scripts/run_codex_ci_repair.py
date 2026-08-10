@@ -88,25 +88,44 @@ def preflight_model(model: str) -> None:
         return
 
     model = canonical_model(model) or model
-    provider = "openai" if model.startswith("gpt-") else "openrouter"
+    configured_provider = os.environ.get("CODEX_PROVIDER", "").strip().lower()
+    is_openai_model = model.startswith(("gpt-", "chatgpt-", "codex-")) or (
+        len(model) > 1 and model[0] == "o" and model[1].isdigit()
+    )
+    provider = (
+        configured_provider
+        if configured_provider in {"openai", "openrouter"}
+        else ("openai" if is_openai_model else "openrouter")
+    )
     if provider == "openai":
-        endpoint = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        endpoint = os.environ.get(
+            "CODEX_API_BASE",
+            os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        )
         key_env = "OPENAI_API_KEY"
         token = os.environ.get("OPENAI_API_KEY", "").strip()
     else:
-        endpoint = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        endpoint = os.environ.get(
+            "CODEX_API_BASE",
+            os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        )
         key_env = "OPENROUTER_API_KEY"
         token = os.environ.get("OPENROUTER_API_KEY", "").strip()
 
     # Ensure Codex sees OpenAI-compatible env regardless of provider
     if provider == "openai":
-        os.environ.setdefault("OPENAI_BASE_URL", endpoint)
+        os.environ["OPENAI_BASE_URL"] = endpoint
     else:
         os.environ["OPENAI_BASE_URL"] = endpoint
         if token:
             os.environ["OPENAI_API_KEY"] = token
 
-    code_home = PROJECT_ROOT / "codex" / ".codex-config"
+    configured_code_home = os.environ.get("CODEX_HOME", "").strip()
+    code_home = (
+        Path(configured_code_home).expanduser()
+        if configured_code_home
+        else PROJECT_ROOT / "codex" / ".codex-config"
+    )
     code_home.mkdir(parents=True, exist_ok=True)
     _print_auth_banner(provider, endpoint, code_home)
 
@@ -1148,16 +1167,23 @@ def run_codex(
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Pass environment variables to subprocess
-    # CRITICAL: Filter out OpenRouter key to prevent API key conflicts
+    # Keep subprocess credentials aligned with the provider selected by the
+    # launcher. Do not infer the provider from the shape of an API key.
     env = os.environ.copy()
-    
-    # Remove OpenRouter variables if using OpenAI/Anthropic directly
-    if 'OPENAI_API_KEY' in env and env.get('OPENAI_API_KEY', '').startswith('sk-proj-'):
-        # Using OpenAI directly - remove OpenRouter
+
+    selected_provider = env.get("CODEX_PROVIDER", "").strip().lower()
+    if selected_provider == "openai":
         env.pop('OPENROUTER_API_KEY', None)
-        env.pop('OPENAI_BASE_URL', None)
+        env.pop('OPENROUTER_BASE_URL', None)
+        env.pop('MINIMAX_API_KEY', None)
+        env.pop('ANTHROPIC_API_KEY', None)
+        env['OPENAI_BASE_URL'] = env.get('CODEX_API_BASE', 'https://api.openai.com/v1')
+    elif selected_provider == "openrouter":
+        env.pop('ANTHROPIC_API_KEY', None)
+        env.pop('MINIMAX_API_KEY', None)
+        env['OPENAI_BASE_URL'] = env.get('CODEX_API_BASE', 'https://openrouter.ai/api/v1')
     elif 'ANTHROPIC_API_KEY' in env:
-        # Using Anthropic directly - remove OpenAI/OpenRouter
+        # Backward-compatible cleanup for callers that do not use the launcher.
         env.pop('OPENROUTER_API_KEY', None)
         env.pop('OPENAI_API_KEY', None)
         env.pop('OPENAI_BASE_URL', None)

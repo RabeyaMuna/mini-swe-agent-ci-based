@@ -34,10 +34,20 @@ fi
 ABLATION=${2:-all}
 DIRECTION=${3:-both}
 MODEL=${4:-gpt-5-mini}
-# Canonicalize MiniMax aliases so codex gets the routed slug
 REPO_SLUG=${5:-}
 DATASET=${6:-data/eval_set.jsonl}
 WORKERS=${7:-1}
+
+# Canonicalize model aliases before selecting the provider or CODEX_HOME.
+# OpenAI's API uses unprefixed model ids; MiniMax uses its OpenRouter slug.
+case "$MODEL" in
+    openai/*)
+        MODEL="${MODEL#openai/}"
+        ;;
+    minimax|minimax2.5|minimax-m2.5)
+        MODEL="minimax/minimax-m2.5"
+        ;;
+esac
 
 echo "=========================================="
 echo "CODEX CLI - Multi-Model Support"
@@ -45,11 +55,6 @@ echo "=========================================="
 if [ -z "$ISSUE_IDS" ]; then
     echo "Issues:    ALL (from eval_set.jsonl or eval_issue_ids.json)"
 else
-case "" in
-    minimax|minimax2.5|minimax-m2.5)
-        MODEL="minimax/minimax-m2.5"
-        ;;
-esac
     echo "Issues:    $ISSUE_IDS"
 fi
 echo "Ablation:  $ABLATION"
@@ -67,8 +72,15 @@ SAVED_ANTHROPIC_KEY="$ANTHROPIC_API_KEY"
 SAVED_OPENROUTER_KEY="$OPENROUTER_API_KEY"
 SAVED_MINIMAX_KEY="$MINIMAX_API_KEY"
 
-# Use PROJECT-LOCAL Codex config (not global!) - MUST BE SET EARLY
-PROJECT_CODEX_HOME="$PWD/.codex-local"
+# Use a separate project-local Codex home for every model. Provider and auth
+# settings are machine-local Codex settings, so sharing one config.toml lets a
+# concurrent OpenRouter run overwrite an OpenAI run (and vice versa).
+MODEL_CONFIG_NAME=$(printf '%s' "$MODEL" | tr '/.' '__' | tr -cd 'A-Za-z0-9_-')
+if [ -z "$MODEL_CONFIG_NAME" ]; then
+    echo "ERROR: Could not derive a safe Codex config name from model: $MODEL" >&2
+    exit 1
+fi
+PROJECT_CODEX_HOME="$PWD/.codex-local/$MODEL_CONFIG_NAME"
 export CODEX_HOME="$PROJECT_CODEX_HOME"
 
 # Clear ALL API-related environment variables to prevent conflicts
@@ -77,15 +89,19 @@ unset ANTHROPIC_API_KEY
 unset OPENROUTER_API_KEY
 unset MINIMAX_API_KEY
 unset OPENAI_BASE_URL
+unset OPENROUTER_BASE_URL
+unset OPENROUTER_APP_NAME
+unset OPENROUTER_SITE_URL
+unset CODEX_PROVIDER
+unset CODEX_API_BASE
 
 ##############################################
 # Configure API based on requested model
 # - OpenAI models: use OpenAI API directly
-# - OpenRouter-prefixed models: use OpenRouter
 # - MiniMax: route via OpenRouter to avoid provider/model-id drift
 ##############################################
 case "$MODEL" in
-    gpt-4o|gpt-4|gpt-4-turbo|o1|o1-mini|o3-mini|gpt-5-mini|gpt-5.4-mini|gpt-5.4-mini-2026-03-17)
+    gpt-*|chatgpt-*|o[0-9]*|codex-*)
         # OpenAI models - use OpenAI API directly
         if [ -z "$SAVED_OPENAI_KEY" ]; then
             echo "ERROR: OPENAI_API_KEY not set in .env"
@@ -101,6 +117,8 @@ case "$MODEL" in
         PROVIDER="OpenAI"
         AUTH_MODE="apikey"
         API_BASE="https://api.openai.com/v1"
+        export CODEX_PROVIDER="openai"
+        export CODEX_API_BASE="$API_BASE"
 
         # Write provider config for Codex (project-local)
         mkdir -p "$CODEX_HOME"
@@ -110,50 +128,6 @@ model_reasoning_effort = "medium"
 
 [shell_environment_policy]
 inherit = "all"
-EOF
-        cat > "$CODEX_HOME/auth.json" << EOF
-{
-  "auth_mode": "apikey",
-  "OPENAI_API_KEY": "$OPENAI_API_KEY"
-}
-EOF
-        chmod 600 "$CODEX_HOME/auth.json"
-        ;;
-
-    openai/*)
-        # OpenAI models via OpenRouter (with openai/ prefix)
-        if [ -z "$SAVED_OPENROUTER_KEY" ]; then
-            echo "ERROR: OPENROUTER_API_KEY not set in .env"
-            exit 1
-        fi
-        export OPENAI_API_KEY="$SAVED_OPENROUTER_KEY"
-        export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-        export OPENROUTER_APP_NAME="Codex CI Repair"
-        export OPENROUTER_SITE_URL="https://github.com/openai/codex"
-        CODEX_MODEL="$MODEL"
-        CONTEXT_MODEL="$MODEL"
-        echo "Using OpenRouter for OpenAI models"
-        echo "  Model: $CODEX_MODEL"
-        echo "  API Key: ${OPENAI_API_KEY:0:10}..."
-        PROVIDER="OpenRouter"
-        AUTH_MODE="apikey"
-        API_BASE="$OPENAI_BASE_URL"
-
-        # Write provider config for Codex (project-local)
-        mkdir -p "$CODEX_HOME"
-        cat > "$CODEX_HOME/config.toml" << 'EOF'
-# Codex configuration for OpenRouter
-model_provider = "openrouter"
-model_reasoning_effort = "medium"
-
-[shell_environment_policy]
-inherit = "all"
-
-[model_providers.openrouter]
-name = "OpenRouter"
-base_url = "https://openrouter.ai/api/v1"
-wire_api = "responses"
-requires_openai_auth = true
 EOF
         cat > "$CODEX_HOME/auth.json" << EOF
 {
@@ -199,6 +173,8 @@ EOF
         PROVIDER="OpenRouter"
         AUTH_MODE="apikey"
         API_BASE="$OPENAI_BASE_URL"
+        export CODEX_PROVIDER="openrouter"
+        export CODEX_API_BASE="$API_BASE"
 
         # Write provider config for Codex (project-local)
         mkdir -p "$CODEX_HOME"
@@ -229,8 +205,7 @@ EOF
         echo "ERROR: Unknown model: $MODEL"
         echo ""
         echo "Supported models:"
-        echo "  OpenAI (direct):    gpt-4o, gpt-4, gpt-4-turbo, o1, o1-mini, o3-mini, gpt-5-mini, gpt-5.4-mini"
-        echo "  OpenAI (OpenRouter): openai/gpt-5-mini, openai/gpt-5.4-mini, openai/gpt-4o"
+        echo "  OpenAI (direct):    any gpt-*, chatgpt-*, o<number>*, or codex-* model"
         echo "  Anthropic:          anthropic/claude-opus-4, anthropic/claude-sonnet-4, anthropic/claude-sonnet-3.5"
         echo "  MiniMax:            minimax/minimax-m2.5, minimax/minimax-m3, minimax-*"
         exit 1
@@ -241,6 +216,13 @@ echo ""
 
 # Config summary banner (CODEX_HOME already set early in script)
 echo "CONFIG: auth=$AUTH_MODE | provider=$PROVIDER | codex_home=$CODEX_HOME (project-local) | endpoint=$API_BASE"
+
+# Allow tests and operators to verify routing/configuration without starting a
+# benchmark or making a model request.
+if [ "${CODEX_CONFIG_ONLY:-0}" = "1" ]; then
+    echo "Configuration-only check complete; no API request was made."
+    exit 0
+fi
 
 # Build the run function for one combo
 run_one() {
@@ -279,7 +261,7 @@ source .venv-codex/bin/activate
 # Export CODEX_MODEL so the Python test can see it
 export CODEX_MODEL
 
-# CODEX_HOME already set to project-local at line 240 - do not override!
+# CODEX_HOME is already isolated by model above - do not override it.
 
 # If a repo filter is provided, build ISSUE_IDS from the dataset
 if [ -n "$REPO_SLUG" ]; then

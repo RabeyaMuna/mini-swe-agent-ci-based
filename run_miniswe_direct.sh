@@ -22,20 +22,76 @@ REPO_SLUG=${5:-}
 DATASET=${6:-data/eval_set.jsonl}
 WORKERS=${7:-1}
 
+# Load provider credentials from the project file, then expose only the key
+# selected by the model. Keeping the unused key present-but-empty prevents
+# python-dotenv from loading it again inside the Mini-SWE process.
+[ -f .env ] && source .env
+SAVED_OPENAI_KEY="${OPENAI_API_KEY:-}"
+SAVED_OPENROUTER_KEY="${OPENROUTER_API_KEY:-}"
+SAVED_OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+
+unset OPENAI_API_KEY
+unset OPENAI_BASE_URL
+unset OPENROUTER_API_KEY
+unset OPENROUTER_BASE_URL
+
+case "$MODEL" in
+  gpt-*|chatgpt-*|o[0-9]*|openai/gpt-*|openai/chatgpt-*|openai/o[0-9]*)
+    if [ -z "$SAVED_OPENAI_KEY" ]; then
+      echo "ERROR: OPENAI_API_KEY not set in .env" >&2
+      exit 1
+    fi
+    export OPENAI_API_KEY="$SAVED_OPENAI_KEY"
+    export OPENROUTER_API_KEY=""
+    export OPENROUTER_BASE_URL=""
+    PROVIDER="OpenAI"
+    API_BASE="https://api.openai.com/v1"
+    ;;
+  minimax|minimax2.5|minimax-2.5|minimaxm2.5|minimax-m2.5|minimax_m2.5|minimax/*|openrouter/minimax/*)
+    if [ -z "$SAVED_OPENROUTER_KEY" ]; then
+      echo "ERROR: OPENROUTER_API_KEY not set in .env (required for MiniMax)" >&2
+      exit 1
+    fi
+    export OPENAI_API_KEY=""
+    export OPENROUTER_API_KEY="$SAVED_OPENROUTER_KEY"
+    export OPENROUTER_BASE_URL="$SAVED_OPENROUTER_BASE_URL"
+    PROVIDER="OpenRouter"
+    API_BASE="$OPENROUTER_BASE_URL"
+    ;;
+  *)
+    echo "ERROR: Unsupported Mini-SWE model: $MODEL" >&2
+    echo "Use a GPT/OpenAI model or minimax2.5." >&2
+    exit 1
+    ;;
+esac
+
 echo "════ Mini-SWE-Agent Runner ═════════════════════════════════════"
 echo "Issues:    ${ISSUE_IDS:-ALL from data/eval_issue_ids.json}"
 if [ -n "$REPO_SLUG" ]; then echo "Repo:      $REPO_SLUG (from $DATASET)"; fi
 echo "Ablation:  $ABLATION"
 echo "Direction: $DIRECTION"
 echo "Model:     $MODEL"
+echo "Provider:  $PROVIDER"
+echo "Endpoint:  $API_BASE"
 echo "Dataset:   $DATASET"
 echo "════════════════════════════════════════════════════════════════"
 
-# Ensure venv
-if [ -d .venv-codex ]; then source .venv-codex/bin/activate; fi
+if [ "${MINISWE_CONFIG_ONLY:-0}" = "1" ]; then
+  echo "Configuration-only check complete; no API request was made."
+  exit 0
+fi
 
-# Load env for keys
-[ -f .env ] && source .env
+# Prefer the dedicated Mini-SWE environment; retain .venv-codex as a fallback
+# for installations that intentionally share the benchmark dependencies.
+if [ -f .venv-miniswe/bin/activate ]; then
+  source .venv-miniswe/bin/activate
+elif [ -f .venv-codex/bin/activate ]; then
+  source .venv-codex/bin/activate
+else
+  echo "ERROR: No Mini-SWE environment found." >&2
+  echo "Create .venv-miniswe as described in README.md, then rerun." >&2
+  exit 1
+fi
 
 # Expand repo filter into issue list if provided
 if [ -n "$REPO_SLUG" ]; then
