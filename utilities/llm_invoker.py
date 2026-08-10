@@ -24,6 +24,10 @@ except Exception:
 
 LOGGER = logging.getLogger(__name__)
 
+
+class LLMTransientConnectionError(RuntimeError):
+    """A transport failure that remained unavailable after bounded retries."""
+
 # Minimal health check prompt to test API connectivity
 HEALTH_CHECK_PROMPT = "Reply with exactly: OK"
 
@@ -147,7 +151,10 @@ def _check_api_health(llm: Any, verbose: bool = False) -> bool:
             print("          -> Testing API connectivity with health check...")
 
         # Use a minimal prompt to check connectivity (very fast)
-        response = llm.invoke(HEALTH_CHECK_PROMPT)
+        try:
+            response = llm.invoke(HEALTH_CHECK_PROMPT, max_tokens=8)
+        except TypeError:
+            response = llm.invoke(HEALTH_CHECK_PROMPT)
         content = str(getattr(response, "content", response) or "").strip()
 
         # Any response means API is back
@@ -249,6 +256,13 @@ def invoke_llm_with_retry(
                 if max_tokens
                 else llm.invoke(prompt)
             )
+
+        # Some wrappers return an empty Result with an embedded error instead
+        # of raising. Promote that error so transient transport failures enter
+        # the retry/backoff path instead of looking like empty model output.
+        response_error = str(getattr(response, "error", "") or "").strip()
+        if response_error:
+            raise RuntimeError(response_error)
 
         content = str(getattr(response, "content", response) or "").strip()
 
@@ -459,7 +473,10 @@ def invoke_llm_with_retry(
                 LOGGER.error(
                     f"Connection error persists after {max_connection_retries} retries: {exc}"
                 )
-                return [] if parse_json else ""
+                raise LLMTransientConnectionError(
+                    "LLM connection remained unavailable after "
+                    f"{max_connection_retries} retries: {exc}"
+                ) from exc
 
         # --------------------------------------------------------
         # ERROR TYPE 4: Malformed/Truncated JSON

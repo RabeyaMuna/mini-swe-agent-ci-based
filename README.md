@@ -1,12 +1,12 @@
 # CI‑Repair Bench – Clean Setup & Run (Mini‑SWE + Codex)
 
-This project runs two agents over a CI‑repair benchmark, with or without memory, across three models. One agent at a time.
+This project runs two agents over a CI‑repair benchmark, with or without memory, across the supported models. One agent at a time.
 - mini‑swe‑agent
 - codex (OpenAI Codex CLI)
 
 Supported agent models (exact list):
 - **gpt-5.4-mini** (OpenAI GPT-5.4 - recommended, latest version)
-- minimax/minimax-m2.5 (MiniMax M2.5 via OpenRouter)
+- `minimax2.5` (MiniMax M2.5 via OpenRouter; resolves to `openrouter/minimax/minimax-m2.5`)
 
 Ablations: BASELINE, L1, L1+L2, L1+L2+L3
 Directions: backward (data/back_trs) or forward (data/fwr_trs)
@@ -15,7 +15,102 @@ Notes
 - GLM 5.2 may be used only for decomposition/memory build, not as an agent model.
 - predictions.json is updated incrementally after each issue so crashes do not lose patches.
 
-## 0) Install Once
+## 0A) Mini-SWE-Agent-only Setup (Codex Not Required)
+
+Use this setup when you want to run only Mini-SWE-Agent. It does **not**
+install or require the Codex CLI, Node.js, a ChatGPT login, or Docker.
+
+### Prerequisites
+
+- Python 3.10 or newer
+- Git
+- Internet access for model API calls and cloning benchmark repositories
+
+On Ubuntu, install the system prerequisites with:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git
+```
+
+### Create a standalone Mini-SWE environment
+
+Run these commands from the repository root:
+
+```bash
+python3 -m venv .venv-miniswe
+source .venv-miniswe/bin/activate
+python -m pip install --upgrade pip wheel
+python -m pip install -e ./miniswe-agent
+```
+
+The editable Mini-SWE-Agent install includes the runner dependencies such as
+LiteLLM, `datasets`, the memory backends, and embedding libraries. You do not
+need `requirements-codex.txt` for Mini-SWE-Agent.
+
+Activate this environment again whenever you open a new terminal:
+
+```bash
+source .venv-miniswe/bin/activate
+```
+
+### Configure the model API key
+
+Create the local environment file:
+
+```bash
+cp -n .env.example .env
+```
+
+Then add the key for the model you will use:
+
+```ini
+# Required for --model gpt-5.4-mini
+OPENAI_API_KEY=your-openai-api-key-here
+
+# Required for --model minimax2.5
+OPENROUTER_API_KEY=your-openrouter-api-key-here
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+```
+
+Only one provider key is required when you run only one model. Never commit
+the `.env` file.
+
+### Verify the Mini-SWE installation
+
+```bash
+python -c "import minisweagent, litellm, datasets; print('Mini-SWE-Agent dependencies are installed')"
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py --help
+test -f data/eval_set.jsonl && echo "Evaluation dataset found"
+```
+
+For a first API-backed smoke run, use one issue and one worker:
+
+```bash
+set -a
+source .env
+set +a
+
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset data/eval_set.jsonl \
+  --issue_regex '^(43)$' \
+  --ablation baseline \
+  --direction backward \
+  --model gpt-5.4-mini \
+  --workers 1
+```
+
+Replace `43` with an `instance_id` present in `data/eval_set.jsonl`. Baseline
+runs do not require memory files. The L1, L1+L2, and L1+L2+L3 modes require
+the appropriate files under `data/back_trs/` or `data/fwr_trs/`.
+
+Mini-SWE-Agent clones each benchmark repository and runs its repair commands
+locally. A particular benchmark project may therefore require its own tools
+(for example `uv`, Poetry, Node.js, or Rust), even though those tools are not
+required by the Mini-SWE runner itself. Repositories are cached under `repo/`;
+set `MSWEA_REPO_CACHE_ROOT` to use a different cache directory.
+
+## 0B) Combined Mini-SWE + Codex Setup
 
 ### macOS / Local Development Setup
 
@@ -302,68 +397,94 @@ tail -f decompose.log
 
 ## 2) Run Mini‑SWE‑Agent (evaluation runner)
 
-Syntax
+Complete the [Mini-SWE-Agent-only setup](#0a-mini-swe-agent-only-setup-codex-not-required)
+first, then activate its environment and load `.env`:
+
 ```bash
-python3 scripts/run_eval.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --repos <comma repos> \
-  --ablation <BASELINE|L1|L1+L2|L1+L2+L3> \
+source .venv-miniswe/bin/activate
+set -a
+source .env
+set +a
+```
+
+### Direct runner
+
+This is the recommended command when Mini-SWE-Agent has its own environment:
+
+```bash
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset data/eval_set.jsonl \
+  --issue_regex '<regular expression over instance_id>' \
+  --ablation <baseline|L1|L1+L2|L1+L2+L3> \
+  --direction backward \
   --model <gpt-5.4-mini|minimax2.5> \
-  --direction <backward|forward> \
   --workers <N>
 ```
 
-Examples
+Examples:
+
 ```bash
-# Baseline (no memory), backward, MiniMax
-python3 scripts/run_eval.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --repos crewai,camel \
-  --ablation BASELINE \
+# One issue, baseline (no memory), MiniMax through OpenRouter
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset data/eval_set.jsonl \
+  --issue_regex '^(43)$' \
+  --ablation baseline \
   --model minimax2.5 \
   --direction backward \
-  --workers 4
+  --workers 1
 
-# Baseline, backward (3 repos)
-python3 scripts/run_eval.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --repos crewai,flower,camel \
-  --ablation BASELINE \
-  --model minimax2.5 \
-  --direction backward \
-  --workers 4
-
-# Full memory L1+L2+L3, backward
-python3 scripts/run_eval.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --repos crewai,camel \
+# Several issues with full backward memory, GPT-5.4 Mini
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset data/eval_set.jsonl \
+  --issue_regex '^(43|111|121)$' \
   --ablation L1+L2+L3 \
-  --model minimax2.5 \
   --direction backward \
-  --workers 4
-
-# L1+L2, backward (3 repos)
-python3 scripts/run_eval.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --repos crewai,flower,camel \
-  --ablation L1+L2 \
-  --model minimax2.5 \
-  --direction backward \
-  --workers 4
-
-# L1 only, backward (3 repos)
-python3 scripts/run_eval.py \
-  --issue-ids-file data/eval_issue_ids.json \
-  --repos crewai,flower,camel \
-  --ablation L1 \
-  --model minimax2.5 \
-  --direction backward \
+  --model gpt-5.4-mini \
   --workers 4
 ```
-Notes
-- Use one agent at a time (Mini‑SWE or Codex, not both concurrently).
-- --workers controls parallel issues per run (default 1). Try 4 or 6 on bigger machines.
-- Valid Mini‑SWE models: `gpt-5.4-mini` (recommended), `minimax2.5`.
+
+Results are written incrementally under:
+
+```text
+results/miniswe-agent/<ablation>_<model>/
+```
+
+### Convenience wrapper
+
+The wrapper accepts a comma-separated issue list and can run several ablations
+or both directions:
+
+```bash
+./run_miniswe_direct.sh \
+  "43,111,121" \
+  L1+L2+L3 \
+  backward \
+  gpt-5.4-mini \
+  "" \
+  data/eval_set.jsonl \
+  4
+```
+
+Arguments, in order, are:
+
+```text
+issue_ids  ablation  direction  model  optional_repo_slug  dataset  workers
+```
+
+Pass an empty issue list (`""`) to use every ID in
+`data/eval_issue_ids.json`. Pass `all` for the ablation or `both` for the
+direction to run all supported combinations.
+
+> The wrapper automatically activates `.venv-codex` when that directory
+> exists. If you maintain separate Mini-SWE and Codex environments, use the
+> direct runner above to guarantee that `.venv-miniswe` remains active.
+
+Notes:
+
+- Run Mini-SWE and Codex separately; concurrent jobs may contend for repository caches.
+- `--workers` controls parallel issues. Start with `1`, then increase it based on CPU, memory, and API rate limits.
+- Valid Mini-SWE model aliases are `gpt-5.4-mini` and `minimax2.5`.
+- `baseline` ignores memory. Other ablations load backward or forward memory according to `--direction`.
 
 ## 3) Run Codex (OpenAI Codex CLI agent)
 

@@ -75,7 +75,10 @@ from utilities.deterministic_diff_parser import (
     parse_diff_to_structured,
 )
 from utilities.diff_chunker import estimate_tokens
-from utilities.llm_invoker import invoke_llm_with_retry
+from utilities.llm_invoker import (
+    LLMTransientConnectionError,
+    invoke_llm_with_retry,
+)
 from utilities.llm_model import LitellmModel
 from utilities.model_registry import (
     configure_model_environment,
@@ -2319,6 +2322,15 @@ def _build_atomic_problems(
             problems = (
                 [] if result == "SPLIT_REQUIRED" else _extract_atomic_problems(result)
             )
+        except LLMTransientConnectionError:
+            # Network availability says nothing about chunk size. Abort this
+            # issue as retryable instead of splitting related changes or
+            # returning a partial decomposition.
+            print(
+                f"      FAIL {label}: connection retries exhausted; "
+                "aborting this issue without splitting the chunk"
+            )
+            raise
         except Exception as exc:
             print(f"      FAIL {label} ERROR: {type(exc).__name__}: {str(exc)[:200]}")
             result, problems = "SPLIT_REQUIRED", []
