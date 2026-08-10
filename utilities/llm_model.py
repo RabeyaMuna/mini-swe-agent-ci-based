@@ -80,13 +80,21 @@ class LitellmModel:
             os.getenv("OPENROUTER_BASE_URL"),
         )
 
-    def invoke(self, prompt: Any, max_tokens: int | None = None):
+    def invoke(
+        self,
+        prompt: Any,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        response_format: dict[str, Any] | None = None,
+    ):
         """
         Invoke the LLM with a prompt.
 
         Args:
             prompt: String prompt or list of messages
             max_tokens: Maximum output tokens (auto-detected if None)
+            reasoning_effort: Optional provider-normalized reasoning level
+            response_format: Optional structured-output format
 
         Returns:
             Result object with .content and .raw_response attributes
@@ -143,6 +151,10 @@ class LitellmModel:
                 "max_tokens": max_tokens,
                 "timeout": int(os.getenv("LITELLM_TIMEOUT", "600")),
             }
+            if reasoning_effort:
+                completion_kwargs["reasoning_effort"] = reasoning_effort
+            if response_format:
+                completion_kwargs["response_format"] = response_format
             if self.api_key:
                 completion_kwargs["api_key"] = self.api_key
             if self.api_base:
@@ -161,8 +173,22 @@ class LitellmModel:
                 prompt_tokens = getattr(usage, "prompt_tokens", "?")
                 completion_tokens = getattr(usage, "completion_tokens", "?")
                 total_tokens = getattr(usage, "total_tokens", "?")
+                completion_details = getattr(
+                    usage, "completion_tokens_details", None
+                )
+                if isinstance(completion_details, dict):
+                    reasoning_tokens = completion_details.get("reasoning_tokens")
+                else:
+                    reasoning_tokens = getattr(
+                        completion_details, "reasoning_tokens", None
+                    )
+                reasoning_suffix = (
+                    f", reasoning={reasoning_tokens}"
+                    if reasoning_tokens is not None
+                    else ""
+                )
                 print(
-                    f"      [API] finish_reason={finish_reason}, tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
+                    f"      [API] finish_reason={finish_reason}, tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}{reasoning_suffix}"
                 )
             else:
                 print(f"      [API] finish_reason={finish_reason}, no usage data")
@@ -186,7 +212,7 @@ class LitellmModel:
                 )
                 print(f"       max_tokens setting: {max_tokens or 16000}")
                 print(
-                    "       Chunk too large - reduce max_changes_per_chunk or simplify prompt"
+                    "       Generation exhausted its output budget; inspect reasoning usage before splitting input"
                 )
 
             # Return result

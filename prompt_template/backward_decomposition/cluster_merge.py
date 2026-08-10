@@ -35,6 +35,8 @@ KEEP SEPARATE if ANY true:
 FAIL Root causes are DIFFERENT
 FAIL Fixes require DIFFERENT approaches
 FAIL Problems have different complexity levels
+FAIL One problem is a configuration-key repair and another is a package,
+     environment, resolver, API-adaptation, or deprecation/replacement repair with a different causal explanation
 
 IMPORTANT: Be CONSERVATIVE. When in doubt, keep problems SEPARATE.
 
@@ -74,6 +76,15 @@ WRITING GUIDELINES:
 - For "root_cause": Describe WHY it failed (technical reason, not problem references)
 - For "how_fixed": Describe the fix approach (not "Fixed problem 1 by...")
 - For "why_fix_works": Explain why the fix solves the issue (technical explanation)
+- Treat BEFORE as the pre-fix state and AFTER as the applied repair. Preserve
+  that direction exactly; never reverse an addition/removal/replacement.
+- Preserve every exact configuration key, package name, version constraint,
+  source, extra/group, and old -> new value present in the input problems.
+- If problems are merged, the merged problem/root_cause/how_fixed must retain
+  the union of ALL input operations. A concise rewrite must not drop package or
+  configuration details.
+- Sharing the same manifest path or validation command is not a reason to merge
+  independent configuration and package problems.
 
 EXAMPLE 1 - All merged:
 Input: Problems 1, 2, 3 all have same root cause

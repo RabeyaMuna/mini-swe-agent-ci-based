@@ -170,6 +170,9 @@ def invoke_llm_with_retry(
     llm: Any,
     prompt: str,
     max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+    response_format: dict[str, Any] | None = None,
+    length_signal: str = "SPLIT_REQUIRED",
     parse_json: bool = True,
     json_repair_prompt_template: str | None = None,
     max_rate_limit_retries: int = 3,
@@ -190,6 +193,9 @@ def invoke_llm_with_retry(
         llm: Language model instance with .invoke() method
         prompt: The prompt to send to the LLM
         max_tokens: Maximum tokens for response (optional)
+        reasoning_effort: Optional provider-normalized reasoning level
+        response_format: Optional structured-output format
+        length_signal: Value returned when generation exhausts its output budget
         parse_json: Whether to parse response as JSON (default: True)
         json_repair_prompt_template: Custom repair prompt template with {content} placeholder
         max_rate_limit_retries: Maximum retries for rate limit errors (default: 3)
@@ -228,14 +234,21 @@ def invoke_llm_with_retry(
     # ============================================================
     try:
         try:
+            invoke_kwargs: dict[str, Any] = {}
+            if max_tokens:
+                invoke_kwargs["max_tokens"] = max_tokens
+            if reasoning_effort:
+                invoke_kwargs["reasoning_effort"] = reasoning_effort
+            if response_format:
+                invoke_kwargs["response_format"] = response_format
+            response = llm.invoke(prompt, **invoke_kwargs)
+        except TypeError:
+            # Compatibility fallback for simpler model wrappers.
             response = (
                 llm.invoke(prompt, max_tokens=max_tokens)
                 if max_tokens
                 else llm.invoke(prompt)
             )
-        except TypeError:
-            # Some LLMs don't support max_tokens parameter
-            response = llm.invoke(prompt)
 
         content = str(getattr(response, "content", response) or "").strip()
 
@@ -270,6 +283,9 @@ def invoke_llm_with_retry(
                     llm=llm,
                     prompt=prompt,
                     max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
+                    response_format=response_format,
+                    length_signal=length_signal,
                     parse_json=parse_json,
                     json_repair_prompt_template=json_repair_prompt_template,
                     max_rate_limit_retries=max_rate_limit_retries,
@@ -324,6 +340,9 @@ def invoke_llm_with_retry(
                         llm=llm,
                         prompt=prompt,
                         max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
+                        response_format=response_format,
+                        length_signal=length_signal,
                         parse_json=parse_json,
                         json_repair_prompt_template=json_repair_prompt_template,
                         max_rate_limit_retries=max_rate_limit_retries,
@@ -413,6 +432,9 @@ def invoke_llm_with_retry(
                     llm=llm,
                     prompt=prompt,
                     max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
+                    response_format=response_format,
+                    length_signal=length_signal,
                     parse_json=parse_json,
                     json_repair_prompt_template=json_repair_prompt_template,
                     max_rate_limit_retries=max_rate_limit_retries,
@@ -492,9 +514,11 @@ def invoke_llm_with_retry(
         # Special handling for length limit
         if finish_reason == "length":
             if verbose:
-                print("          -> Returning 'SPLIT_REQUIRED' signal for auto-retry")
-            LOGGER.warning("Length limit hit, chunk needs splitting")
-            return "SPLIT_REQUIRED"
+                print(
+                    f"          -> Returning {length_signal!r}; output budget was exhausted"
+                )
+            LOGGER.warning("Length limit hit; generation exhausted output budget")
+            return length_signal
 
         LOGGER.warning(
             f"LLM empty content. Prompt size: {len(prompt)} chars. {error_details}"
@@ -538,7 +562,18 @@ If the output is truncated, close the current JSON structure conservatively and 
 """
 
     try:
-        repaired_response = llm.invoke(repair_prompt)
+        repair_max_tokens = min(max_tokens or 8_000, 8_000)
+        try:
+            repaired_response = llm.invoke(
+                repair_prompt,
+                max_tokens=repair_max_tokens,
+                reasoning_effort="low" if reasoning_effort else None,
+                response_format=response_format,
+            )
+        except TypeError:
+            repaired_response = llm.invoke(
+                repair_prompt, max_tokens=repair_max_tokens
+            )
         repaired_content = str(
             getattr(repaired_response, "content", repaired_response) or ""
         ).strip()

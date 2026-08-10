@@ -1039,7 +1039,9 @@ def _chunk_by_dependency_clusters(
 
 
 def format_structured_for_llm(
-    chunk: dict[str, Any], max_changes_per_file: int = 3
+    chunk: dict[str, Any],
+    max_changes_per_file: int | None = 3,
+    max_chars_per_value: int | None = 80,
 ) -> str:
     """
     Format structured chunk for LLM prompt.
@@ -1049,7 +1051,9 @@ def format_structured_for_llm(
 
     Args:
         chunk: Structured diff chunk
-        max_changes_per_file: Maximum example changes to show per file (default: 3)
+        max_changes_per_file: Maximum changes to show per file, or None for all.
+        max_chars_per_value: Maximum characters per before/after value, or None
+            to preserve complete values.
     """
     lines = []
 
@@ -1070,12 +1074,20 @@ def format_structured_for_llm(
             f"{file_path}: {len(changes)} changes ({modified}M, {added}A, {deleted}D)"
         )
 
-        # Show up to max_changes_per_file example changes
-        examples = changes[:max_changes_per_file]
+        # Classification can request every complete change so later reasoning is
+        # not biased toward only the first config key or package operation.
+        examples = (
+            changes
+            if max_changes_per_file is None
+            else changes[:max_changes_per_file]
+        )
         for change in examples:
             change_type = change.get("change_type", "")
-            before = (change.get("before", "") or "")[:80]  # Limit to 80 chars
-            after = (change.get("after", "") or "")[:80]
+            before = change.get("before", "") or ""
+            after = change.get("after", "") or ""
+            if max_chars_per_value is not None:
+                before = before[:max_chars_per_value]
+                after = after[:max_chars_per_value]
 
             if change_type == "modified" and before and after:
                 lines.append(f"  - Modified: '{before}' -> '{after}'")

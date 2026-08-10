@@ -146,6 +146,28 @@ VISIBILITY RULE:
 - visibility="primary" if at least one file appears in FILES VISIBLE IN CI FAILURE LOGS
 - visibility="hidden" otherwise
 
+## CONFIGURATION AND PACKAGE CHANGE COVERAGE
+
+Classification is file-level, but your analysis must be operation-aware. For
+every configuration or dependency file, inspect EVERY supplied before/after
+entry, not only the first visible CI error. A single manifest may contain an
+independent tool-key removal, package replacement, version-bound change, source
+change, extra/group change, and related environment adaptation.
+
+- BEFORE is the pre-fix state; AFTER is the applied repair. Never reverse them.
+- Do not let one configuration failure hide package additions, removals,
+  replacements, or version changes in the same file.
+- In change_scope_summary, enumerate every exact changed key and every exact
+  old/new package specification, including repeated declaration scopes.
+- For package changes, note supported candidate impacts involving project
+  runtime/tool versions, resolver constraints, environment compatibility,
+  package replacement/deprecation, or related API/source adaptations.
+- Do not assert deprecation or incompatibility without evidence. When the diff
+  proves the package operation but not its reason, state that the causal
+  constraint must be resolved during atomic analysis.
+- A file still appears exactly once in classification; change_scope_summary
+  preserves all independent operations for later atomic splitting.
+
 ## OUTPUT FORMAT
 
 Return ONLY a JSON array with this format:
@@ -157,6 +179,7 @@ Return ONLY a JSON array with this format:
     "failure_type": "<category>",
     "issue_type": "<specific>",
     "change_type": "<code|dependency|config>",
+    "change_scope_summary": ["<exact before -> after operation>", "..."],
     "visibility": "<primary|hidden>",
     "files": [...],
     "total_files": <int>,
@@ -173,6 +196,9 @@ REQUIREMENTS:
 - visibility must be "primary" or "hidden".
 - Every changed file in this chunk must appear exactly once.
 - Do not include files that are not in this chunk.
+- change_scope_summary must cover every semantic operation represented by the
+  files in this classification entry. For config/dependency files, it must name
+  every changed key/package and exact before/after value.
 
 CRITICAL - Semantic Issue Type:
 - issue_type must describe the ACTUAL PROBLEM being fixed (semantic meaning)
@@ -272,6 +298,21 @@ Config/dependency/tooling files must be classified dynamically:
   source/docs/test changes, and each VALIDATIONS item's effective_cmd,
   validates, source, and evidence.
 
+CONFIGURATION AND PACKAGE CHANGE COVERAGE:
+- Inspect EVERY before/after entry for each configuration/dependency file.
+- BEFORE is the pre-fix state and AFTER is the applied repair; never reverse the
+  direction when describing the change.
+- Do not classify a manifest only by its first visible configuration failure.
+  Retain every package addition, removal, replacement, version/source/extra
+  change, environment constraint, and independent configuration-key change.
+- Populate change_scope_summary with one exact before -> after statement for
+  every semantic operation. Include exact package names, complete constraints,
+  and declaration scopes.
+- Identify supported candidate package problems from project setup, runtime or
+  tool versions, resolver/environment constraints, deprecation/replacement, and
+  related source/API adaptations. If evidence does not establish the cause,
+  say the causal constraint requires atomic analysis; do not invent it.
+
 VISIBILITY CLASSIFICATION:
 - "primary" = file appears in "FILES VISIBLE IN CI FAILURE LOGS" above
 - "hidden" = file does NOT appear in CI logs (enablement fix, cascaded fix)
@@ -286,11 +327,16 @@ Return JSON array:
     "failure_type": "<category>",
     "issue_type": "<specific>",
     "change_type": "<code|dependency|config>",
+    "change_scope_summary": ["<exact before -> after operation>", "..."],
     "visibility": "<primary|hidden>",
     "files": [...],
     "total_files": <int>
   }}
 ]
+
+Every classification entry must include a non-empty change_scope_summary that
+collectively covers all semantic changes in its files. Listing a config file
+without its package/key operations is incomplete classification.
 
 {strict_json_rules}
 """

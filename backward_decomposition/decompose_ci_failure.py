@@ -612,7 +612,7 @@ def _build_caller_callee_contexts(
         # Build caller info
         caller_info = {
             "file": caller,
-            "changes": _compact_changes(
+            "changes": _compact_dependency_changes(
                 file_changes_lookup.get(caller, []), max_changes=3
             ),
             "role": _classify_file_type_for_role(caller),
@@ -623,7 +623,7 @@ def _build_caller_callee_contexts(
         for callee in callees:
             callee_info = {
                 "file": callee,
-                "changes": _compact_changes(
+                "changes": _compact_dependency_changes(
                     file_changes_lookup.get(callee, []), max_changes=3
                 ),
                 "role": _classify_file_type_for_role(callee),
@@ -657,7 +657,9 @@ def _classify_file_type_for_role(file_path: str) -> str:
         return "other"
 
 
-def _compact_changes(changes: list[dict], max_changes: int = 3) -> list[dict]:
+def _compact_dependency_changes(
+    changes: list[dict], max_changes: int = 3
+) -> list[dict]:
     """Compact changes to first N with truncated before/after."""
     compacted = []
     for change in changes[:max_changes]:
@@ -731,6 +733,18 @@ def merge_chunks_by_validation(
         if item.get("order") is not None
     }
 
+    def _change_scope_summary(entry: dict[str, Any]) -> list[str]:
+        value = entry.get("change_scope_summary") or []
+        if isinstance(value, str):
+            value = [value]
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    def _extend_change_scope(target: dict[str, Any], entry: dict[str, Any]) -> None:
+        target.setdefault("change_scope_summary", [])
+        for item in _change_scope_summary(entry):
+            if item not in target["change_scope_summary"]:
+                target["change_scope_summary"].append(item)
+
     for chunk in chunk_findings:
         for val_entry in chunk.get("validations_in_this_chunk", []):
             val_order = val_entry.get("validation_order")
@@ -769,6 +783,7 @@ def merge_chunks_by_validation(
                             "has_pattern": False,
                             "total_files": 0,
                             "dependency_contexts": [],
+                            "change_scope_summary": [],
                         }
 
                     validation_groups[key]["chunks"].append(chunk["chunk_index"])
@@ -778,6 +793,12 @@ def merge_chunks_by_validation(
                     # Don't add changes here - they'll be populated from structured_chunks below
                     validation_groups[key]["total_files"] += sub_problem.get(
                         "total_files", len(sub_problem.get("files", []))
+                    )
+                    _extend_change_scope(
+                        validation_groups[key],
+                        sub_problem
+                        if sub_problem.get("change_scope_summary")
+                        else val_entry,
                     )
 
                     # Cross-chunk pattern detection
@@ -824,6 +845,7 @@ def merge_chunks_by_validation(
                         else "",
                         "change_type": val_entry.get("change_type", ""),
                         "visibility": val_entry.get("visibility", ""),
+                        "change_scope_summary": [],
                     }
 
                 validation_groups[key]["chunks"].append(chunk["chunk_index"])
@@ -832,6 +854,7 @@ def merge_chunks_by_validation(
                 validation_groups[key]["total_files"] += val_entry.get(
                     "total_files", len(val_entry.get("files", []))
                 )
+                _extend_change_scope(validation_groups[key], val_entry)
                 if is_cascading:
                     validation_groups[key]["is_cascading"] = True
                     if dependency_type and not validation_groups[key].get(
@@ -1037,11 +1060,26 @@ def _chunk_by_dependencies(
         callee_files = [c.get("file") for c in dep_context.get("callees", [])]
         dep_files = [caller_file] + callee_files if caller_file else callee_files
 
-        # Gather all changes for these files
-        dep_changes = [
+        # Gather all changes for these files. Keep file groups intact so an
+        # individual caller/callee is not cut into unrelated line fragments.
+        caller_changes = [
             change
             for change in val_group.get("all_changes", [])
-            if change.get("file") in dep_files
+            if caller_file and change.get("file") == caller_file
+        ]
+        callee_changes = {
+            callee_file: [
+                change
+                for change in val_group.get("all_changes", [])
+                if change.get("file") == callee_file
+            ]
+            for callee_file in callee_files
+            if callee_file
+        }
+        dep_changes = caller_changes + [
+            change
+            for callee_file in callee_files
+            for change in callee_changes.get(callee_file, [])
         ]
 
         if not dep_changes:
@@ -1063,22 +1101,49 @@ def _chunk_by_dependencies(
             )
             chunks.append(chunk)
         else:
-            # Too many changes - split callees but keep caller context in each chunk
-            for start_idx in range(0, len(dep_changes), max_changes_per_chunk):
-                chunk_changes = dep_changes[
-                    start_idx : start_idx + max_changes_per_chunk
-                ]
+            # Split by callee file groups and repeat the complete caller changes
+            # in every chunk. A single large file group may exceed the nominal
+            # limit because preserving the dependency evidence is more important
+            # than slicing related semantic changes apart.
+            callee_batches = []
+            current_batch = []
+            current_count = len(caller_changes)
+            effective_limit = max(
+                max_changes_per_chunk,
+                len(caller_changes) + (1 if callee_files else 0),
+            )
+            for callee_file in callee_files:
+                file_change_count = len(callee_changes.get(callee_file, []))
+                if current_batch and current_count + file_change_count > effective_limit:
+                    callee_batches.append(current_batch)
+                    current_batch = []
+                    current_count = len(caller_changes)
+                current_batch.append(callee_file)
+                current_count += file_change_count
+            if current_batch or not callee_files:
+                callee_batches.append(current_batch)
 
+            for batch_index, batch_callees in enumerate(callee_batches, 1):
+                chunk_changes = list(caller_changes)
+                for callee_file in batch_callees:
+                    chunk_changes.extend(callee_changes.get(callee_file, []))
+                batch_context = copy.deepcopy(dep_context)
+                batch_context["callees"] = [
+                    callee
+                    for callee in dep_context.get("callees", [])
+                    if callee.get("file") in batch_callees
+                ]
+                batch_files = ([caller_file] if caller_file else []) + batch_callees
                 chunk = _copy_validation_chunk_metadata(
                     val_group,
                     {
                         "validation_cmd": val_group.get("validation_cmd", ""),
                         "failure_type": val_group.get("failure_type", ""),
                         "issue_type": val_group.get("issue_type", ""),
-                        "all_files": dep_files,
+                        "all_files": batch_files,
                         "all_changes": chunk_changes,
-                        "dependency_contexts": [dep_context],  # Keep dependency context
-                        "chunk_info": f"Dependency chunk {start_idx // max_changes_per_chunk + 1}: {caller_file} -> callees (partial)",
+                        "dependency_contexts": [batch_context],
+                        "chunk_info": f"Dependency chunk {batch_index}: {caller_file} -> {len(batch_callees)} callees",
                     },
                 )
                 chunks.append(chunk)
@@ -1113,6 +1178,7 @@ def _chunk_by_dependencies(
                     "issue_type": val_group.get("issue_type", ""),
                     "all_files": list(set(ch.get("file") for ch in chunk_changes)),
                     "all_changes": chunk_changes,
+                    "dependency_contexts": [],
                     "chunk_info": f"Non-dependency changes {start_idx + 1}-{start_idx + len(chunk_changes)}",
                 },
             )
@@ -1530,79 +1596,51 @@ def _cluster_and_merge_problems(
 
 def _reorder_by_repair_trajectory(
     problems: list[dict[str, Any]],
+    dependency_result: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Reorder problems by repair trajectory (LLM already assigned problem_type).
+    Reorder problems using their declared order and analyzed dependencies.
 
-    Order:
-    1. CI workflow validation_order
-    2. Primary problems before hidden problems within the same validation_order
-    3. Config/dependency changes before source changes within the same priority
+    Before dependency analysis, preserve the order already declared by each
+    problem's repair_sequence_index/problem_id, falling back to input order.
+    Do not infer priority from filenames, text markers, problem_type, or other
+    heuristics.
+
+    After dependency analysis, populate each problem's enabled/enabled_by fields
+    and follow dependency_result.repair_sequence exactly. Problem IDs remain
+    stable because dependency edges refer to those IDs; only
+    repair_sequence_index is updated to reflect the new list position.
     """
     if not problems:
         return problems
 
-    def _problem_sort_key(problem: dict[str, Any]) -> tuple[int, int, int, int, int]:
-        try:
-            validation_order = int(problem.get("validation_order", 999))
-        except (TypeError, ValueError):
-            validation_order = 999
+    if dependency_result is not None:
+        reordered = _populate_dependency_fields(problems, dependency_result)
+        for index, problem in enumerate(reordered, 1):
+            problem["repair_sequence_index"] = index
+    else:
+        indexed_problems = list(enumerate(problems))
 
-        problem_type_rank = 0 if problem.get("problem_type") == "primary" else 1
-        files = problem.get("affected_files", [])
-        text = " ".join(
-            str(problem.get(field, "")).lower()
-            for field in ["validation_cmd", "failure_type", "issue_type", "problem"]
-        )
-        config_rank = (
-            0
-            if any(
-                str(file_path).endswith(
-                    (".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".lock")
-                )
-                for file_path in files
+        def _problem_sort_key(
+            indexed_problem: tuple[int, dict[str, Any]],
+        ) -> tuple[int, int]:
+            input_index, problem = indexed_problem
+            declared_order = problem.get(
+                "repair_sequence_index", problem.get("problem_id", input_index + 1)
             )
-            else 1
-        )
-        if any(marker in text for marker in ["install", "setup", "dependency"]):
-            dependency_rank = 0
-        elif config_rank == 0:
-            dependency_rank = 1
-        elif any(
-            marker in text
-            for marker in [
-                "format",
-                "formatter",
-                "docstrfmt",
-                "lint",
-                "ruff",
-                "black",
-                "mypy",
-                "type",
-            ]
-        ):
-            dependency_rank = 2
-        elif (
-            problem.get("is_cascading")
-            and str(problem.get("dependency_type", "")).upper()
-        ):
-            dependency_rank = 3
-        else:
-            dependency_rank = 2
-        original_id = int(problem.get("problem_id", 10**9) or 10**9)
-        return (
-            problem_type_rank,
-            validation_order,
-            dependency_rank,
-            config_rank,
-            original_id,
-        )
+            try:
+                declared_order = int(declared_order)
+            except (TypeError, ValueError):
+                declared_order = input_index + 1
+            return (declared_order, input_index)
 
-    reordered = sorted(problems, key=_problem_sort_key)
-    reordered = _apply_cascading_dependency_order(reordered)
-    for idx, prob in enumerate(reordered, 1):
-        prob["problem_id"] = idx
-        prob["repair_sequence_index"] = idx
+        reordered = [
+            problem
+            for _, problem in sorted(indexed_problems, key=_problem_sort_key)
+        ]
+        for index, problem in enumerate(reordered, 1):
+            problem["problem_id"] = index
+            problem["repair_sequence_index"] = index
 
     primary_problems = [
         problem for problem in reordered if problem.get("problem_type") == "primary"
@@ -1615,88 +1653,6 @@ def _reorder_by_repair_trajectory(
     print(f"    Total reordered: {len(reordered)}")
 
     return reordered
-
-
-def _apply_cascading_dependency_order(
-    problems: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Move cascading adaptations after likely source/doc/config problems."""
-    ordered = list(problems)
-
-    def _safe_validation_order(problem: dict[str, Any]) -> int:
-        try:
-            return int(problem.get("validation_order", 999))
-        except (TypeError, ValueError):
-            return 999
-
-    def _is_adaptation(problem: dict[str, Any]) -> bool:
-        files = [str(file_path) for file_path in problem.get("affected_files", [])]
-        source_like_file = any(
-            file_path.endswith(
-                (
-                    ".rst",
-                    ".md",
-                    ".toml",
-                    ".yaml",
-                    ".yml",
-                    ".json",
-                    ".ini",
-                    ".cfg",
-                    ".lock",
-                )
-            )
-            for file_path in files
-        )
-        return (
-            bool(problem.get("is_cascading"))
-            and not source_like_file
-            and bool(str(problem.get("dependency_type", "")).strip())
-        )
-
-    def _is_likely_dependency_source(problem: dict[str, Any]) -> bool:
-        text = " ".join(
-            str(problem.get(field, "")).lower()
-            for field in ["validation_cmd", "failure_type", "issue_type", "problem"]
-        )
-        return any(
-            marker in text
-            for marker in [
-                "docstrfmt",
-                "rst",
-                "format",
-                "formatter",
-                "config",
-                "dependency",
-                "setup",
-            ]
-        )
-
-    changed = True
-    while changed:
-        changed = False
-        for idx, problem in enumerate(list(ordered)):
-            if not _is_adaptation(problem):
-                continue
-            _safe_validation_order(problem)
-            source_indices = [
-                source_idx
-                for source_idx, source in enumerate(ordered)
-                if source is not problem
-                and _is_likely_dependency_source(source)
-                and (
-                    source.get("problem_type") == problem.get("problem_type")
-                    or source.get("problem_type") == "primary"
-                )
-            ]
-            if not source_indices:
-                continue
-            target_idx = max(source_indices) + 1
-            if idx < target_idx - 1:
-                ordered.pop(idx)
-                ordered.insert(target_idx - 1, problem)
-                changed = True
-                break
-    return ordered
 
 
 def _validation_group_sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
@@ -1732,38 +1688,34 @@ def _validation_info(
     )
 
 
-def _compact_changes(
-    changes: list[dict[str, Any]], max_per_field: int = 600
-) -> list[dict[str, Any]]:
-    """Compress changes to fit more in one chunk."""
-    return [
-        {
-            "file": change.get("file", ""),
-            "before": _compact_text(change.get("before", ""), max_per_field),
-            "after": _compact_text(change.get("after", ""), max_per_field),
-        }
-        for change in changes
-    ]
-
-
 def _atomic_changes_data(chunk: dict[str, Any]) -> dict[str, Any]:
+    """Keep complete before/after evidence for model-driven atomic analysis.
+
+    Capacity management happens at the validation-change chunk level. Clipping
+    individual fields here can silently remove config keys, dependency changes,
+    or source adaptations and makes whole-diff coverage impossible.
+    """
     changes = chunk.get("all_changes", [])
-    if len(changes) > 100:
-        max_per_field = 400
-    elif len(changes) > 60:
-        max_per_field = 500
-    else:
-        max_per_field = 600
 
     return {
         "validation_cmd": chunk.get("validation_cmd", ""),
         "failure_type": chunk.get("failure_type", ""),
         "issue_type": chunk.get("issue_type", ""),
+        "classification_change_scope_summary": chunk.get(
+            "change_scope_summary", []
+        ),
         "files_count": len(
             {change.get("file", "") for change in changes if change.get("file")}
         ),
         "changes_count": len(changes),
-        "changes": _compact_changes(changes, max_per_field),
+        "changes": [
+            {
+                "file": change.get("file", ""),
+                "before": str(change.get("before", "") or ""),
+                "after": str(change.get("after", "") or ""),
+            }
+            for change in changes
+        ],
     }
 
 
@@ -2203,9 +2155,9 @@ def _split_chunk_for_capacity(
 ) -> list[dict[str, Any]]:
     """
     Single splitting strategy, tried in priority order:
-    1. By change_type (config/dependency/code) when more than one is present.
-    2. Dependency-aware (keeping caller + callees together) when dependency
-       contexts exist.
+    1. Dependency-aware (keeping caller + callees together) when dependency
+       contexts exist, including across config/dependency/code types.
+    2. By change_type (config/dependency/code) when more than one is present.
     3. Evenly by change count.
 
     Returns [] when there's only one change left (caller treats as terminal).
@@ -2213,6 +2165,23 @@ def _split_chunk_for_capacity(
     changes = chunk.get("all_changes", [])
     if len(changes) <= 1:
         return []
+
+    num_splits = _split_count_for_atomic_chunk(prompt_size, len(changes), model_name)
+
+    dependency_contexts = chunk.get("dependency_contexts") or []
+    if dependency_contexts:
+        max_changes_per_chunk = max(1, len(changes) // num_splits)
+        sub_chunks = _chunk_by_dependencies(
+            chunk, dependency_contexts, max_changes_per_chunk
+        )
+        if len(sub_chunks) > 1:
+            return sub_chunks
+        if sub_chunks and sub_chunks[0].get("dependency_contexts"):
+            # No safe dependency-preserving split exists. Requeue once as a
+            # terminal chunk so the caller sends it intact instead of falling
+            # through to type/even splitting.
+            sub_chunks[0]["_dependency_preserved_terminal"] = True
+            return sub_chunks
 
     change_type_groups = _group_changes_by_type(changes)
     non_empty_types = [
@@ -2233,17 +2202,6 @@ def _split_chunk_for_capacity(
             }
             for change_type in non_empty_types
         ]
-
-    num_splits = _split_count_for_atomic_chunk(prompt_size, len(changes), model_name)
-
-    dependency_contexts = chunk.get("dependency_contexts") or []
-    if dependency_contexts:
-        max_changes_per_chunk = max(1, len(changes) // num_splits)
-        sub_chunks = _chunk_by_dependencies(
-            chunk, dependency_contexts, max_changes_per_chunk
-        )
-        if len(sub_chunks) > 1:
-            return sub_chunks
 
     return _split_change_chunk_evenly(chunk, num_splits)
 
@@ -2332,7 +2290,11 @@ def _build_atomic_problems(
             current, val_info, ci_context, failed_validation_order
         )
         fits, reason = _fits_model_capacity(prompt, current, model_limits)
-        can_split = len(changes) > 1 and depth < MAX_SPLIT_DEPTH
+        can_split = (
+            len(changes) > 1
+            and depth < MAX_SPLIT_DEPTH
+            and not current.get("_dependency_preserved_terminal")
+        )
 
         if not fits:
             if can_split:
@@ -2937,7 +2899,11 @@ def _classify_chunk_with_dependencies(
         chunk_index=chunk_index,
         total_chunks=total_chunks,
         files_in_chunk=files_in_chunk,
-        formatted_chunk=format_structured_for_llm(chunk, max_changes_per_file=1),
+        formatted_chunk=format_structured_for_llm(
+            chunk,
+            max_changes_per_file=None,
+            max_chars_per_value=None,
+        ),
         dependency_info=dependency_info,
         strict_json_rules=STRICT_JSON_RULES,
     )
@@ -3130,7 +3096,11 @@ def _classify_chunk_regular(
         chunk_index=chunk_index,
         total_chunks=total_chunks,
         files_in_chunk=files_in_chunk,
-        formatted_chunk=format_structured_for_llm(chunk, max_changes_per_file=2),
+        formatted_chunk=format_structured_for_llm(
+            chunk,
+            max_changes_per_file=None,
+            max_chars_per_value=None,
+        ),
         strict_json_rules=STRICT_JSON_RULES,
     )
 
@@ -3629,9 +3599,12 @@ def generate_l1_l2_l3_pipeline(
     print(f"  Dependencies found: {len(dep_result.get('dependencies', []))}")
     print(f"  Repair sequence: {dep_result.get('repair_sequence', [])}")
 
-    # Populate dependency fields programmatically (no LLM)
-    print("  Populating dependency fields...")
-    deduplicated = _populate_dependency_fields(deduplicated, dep_result)
+    # Populate dependency fields and apply the analyzed repair sequence while
+    # preserving the stable problem IDs referenced by dependency edges.
+    print("  Populating dependency fields and applying repair sequence...")
+    deduplicated = _reorder_by_repair_trajectory(
+        deduplicated, dependency_result=dep_result
+    )
 
     # Convert to old format for backward compatibility with build_memory
     dependencies = {
@@ -3723,20 +3696,27 @@ def _stage2_analyze_dependencies_and_sequence(problems: list[dict], llm) -> dict
     # Build graph info from problems
     graph_info = _build_graph_info_from_problems(problems)
 
-    # Prepare problem summary for LLM
+    # Preserve complete problem evidence for cross-chunk dependency recovery.
+    # These problems may have been generated from separate capacity chunks, so
+    # truncating their causal fields here can hide the only shared API/config/
+    # dependency signal that connects them.
     problems_summary = []
     for idx, prob in enumerate(problems, 1):
         problems_summary.append({
-            "problem_id": idx,
+            "problem_id": prob.get("problem_id", idx),
             "validation_order": prob.get("validation_order", "unknown"),
             "validation_cmd": prob.get("validation_cmd", "unknown"),
             "problem_type": prob.get("problem_type", "unknown"),
             "failure_type": prob.get("failure_type", "unknown"),
-            "problem": prob.get("problem", "")[:300],
-            "root_cause": prob.get("root_cause", "")[:300],
-            "how_fixed": prob.get("how_fixed", "")[:300],
-            "affected_files": prob.get("affected_files", [])[:10],
+            "issue_type": prob.get("issue_type", "unknown"),
+            "problem": prob.get("problem", ""),
+            "root_cause": prob.get("root_cause", ""),
+            "how_fixed": prob.get("how_fixed", ""),
+            "why_fix_works": prob.get("why_fix_works", ""),
+            "affected_files": prob.get("affected_files", []),
             "is_cascading": prob.get("is_cascading", False),
+            "dependency_type": prob.get("dependency_type", ""),
+            "cascade_explanation": prob.get("cascade_explanation", ""),
         })
 
     # Use NEW unified prompt

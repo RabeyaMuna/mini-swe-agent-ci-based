@@ -35,6 +35,23 @@ GRAPH INFO (structural CI information):
 TASK:
 Detect dependencies AND generate optimal repair sequence in ONE analysis.
 
+## CROSS-CHUNK DEPENDENCY RECONCILIATION
+
+The problems may have been extracted from different change chunks. Treat this
+as the global reconciliation pass: compare every problem with every other
+problem and recover semantic relationships that earlier file-graph or chunking
+stages may not have discovered. Absence of an edge in GRAPH INFO does not prove
+that two problems are independent.
+
+Use exact subjects and before/after evidence in problem, root_cause, how_fixed,
+why_fix_works, dependency_type, and cascade_explanation. Look for relationships
+such as configuration or dependency changes requiring source/test adaptations,
+API or symbol changes requiring caller updates, generated artifacts following
+source changes, and one repaired validation revealing or enabling another.
+Create an edge only when the supplied problem evidence supports the causal
+direction; do not invent a relationship merely because files or validations are
+similar.
+
 ORGANIZE BY:
 1. CI validation sequence (validation_order: 1 → 8 → 11)
 2. File dependencies from graph_info (config → code)
