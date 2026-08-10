@@ -15,14 +15,12 @@ import threading
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import time
 import requests
 from pathlib import Path
 from typing import Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables from .env file at project root
 try:
@@ -35,6 +33,7 @@ except ImportError:
 
 from memory_plugin import MemoryPlugin
 from utilities.ci_log_analyzer import _run_log_analysis
+from utilities.git_checkout import prepare_repo_checkout as prepare_git_checkout
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -260,104 +259,12 @@ def prepare_repo_checkout(
     """
     Prepare a repository checkout at the failing commit.
 
-    Simple approach: Clone directly from GitHub to the checkout directory.
+    Delegates to utilities.git_checkout.prepare_repo_checkout for the actual work.
 
     Returns:
         The SHA of the checkout commit (for later diff comparison)
     """
-    sha = str(issue.get("sha_fail") or "").strip()
-    slug = repo_slug(issue)
-    if not slug:
-        raise ValueError(f"Issue {issue_id(issue)} has no repo owner/name")
-    if not sha:
-        raise ValueError(f"Issue {issue_id(issue)} has no sha_fail")
-
-    # Remove old checkout if refresh requested
-    if checkout.exists() and refresh:
-        shutil.rmtree(checkout)
-
-    if dry_run and not (checkout / ".git").exists():
-        checkout.mkdir(parents=True, exist_ok=True)
-        return sha  # Return the SHA even in dry run
-
-    # Clone directly from GitHub
-    if not (checkout / ".git").exists():
-        checkout.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["git", "clone", f"https://github.com/{slug}.git", str(checkout)],
-            check=True,
-        )
-
-    # Try to checkout the commit - if it fails, fetch it first
-    result = subprocess.run(
-        ["git", "checkout", "--force", sha],
-        cwd=checkout,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        # Commit not in default branch - fetch it
-        print(f"[codex] Commit {sha[:8]} not in default branch, fetching...")
-
-        # First, unshallow the repository if it's shallow
-        is_shallow = subprocess.run(
-            ["git", "rev-parse", "--is-shallow-repository"],
-            cwd=checkout,
-            capture_output=True,
-            text=True,
-        ).stdout.strip() == "true"
-
-        if is_shallow:
-            print(f"[codex] Repository is shallow, unshallowing...")
-            subprocess.run(
-                ["git", "fetch", "--unshallow"],
-                cwd=checkout,
-                capture_output=True,
-                text=True,
-            )
-
-        # Try multiple fetch strategies
-        fetch_strategies = [
-            (["git", "fetch", "origin", sha], "direct commit fetch"),
-            (["git", "fetch", "origin", "+refs/pull/*/head:refs/remotes/origin/pr/*"], "all PR refs"),
-            (["git", "fetch", "--all"], "all branches"),
-        ]
-
-        checkout_succeeded = False
-        for fetch_cmd, description in fetch_strategies:
-            fetch_result = subprocess.run(
-                fetch_cmd,
-                cwd=checkout,
-                capture_output=True,
-                text=True,
-            )
-            if fetch_result.returncode == 0:
-                # Try checkout after successful fetch
-                checkout_result = subprocess.run(
-                    ["git", "checkout", "--force", sha],
-                    cwd=checkout,
-                    capture_output=True,
-                    text=True,
-                )
-                if checkout_result.returncode == 0:
-                    print(f"[codex] ✓ Successfully fetched via {description}")
-                    checkout_succeeded = True
-                    break
-
-        if not checkout_succeeded:
-            # Final attempt - if all strategies failed, this will raise
-            print(f"[codex] ✗ All fetch strategies failed, attempting final checkout...")
-            subprocess.run(
-                ["git", "checkout", "--force", sha],
-                cwd=checkout,
-                check=True,  # Will raise if still fails
-            )
-
-    subprocess.run(["git", "clean", "-fdx"], cwd=checkout, check=True)
-
-    # Return the SHA we checked out (for later diff comparison)
-    return sha
+    return prepare_git_checkout(issue, checkout, refresh, dry_run)
 
 
 def make_context_llm(model: str | None) -> Any:
