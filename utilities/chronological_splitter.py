@@ -40,24 +40,27 @@ def split_chronologically(
         cutoff = int(len(sorted_issues) * memory_ratio)
         return sorted_issues[:cutoff], sorted_issues[cutoff:]
 
-    # Per-repository chronological split
+    # Per-repository chronological split (by repo_name ONLY, ignoring owner)
     repos = defaultdict(list)
     for issue in dataset:
-        repo = (
-            f"{issue.get('repo_owner', 'unknown')}/{issue.get('repo_name', 'unknown')}"
-        )
-        repos[repo].append(issue)
+        # Use ONLY repo_name, ignore repo_owner to group forks together
+        repo_name = issue.get('repo_name', 'unknown')
+        repos[repo_name].append(issue)
 
     memory_set = []
     eval_set = []
 
-    for repo, issues in repos.items():
+    for repo_name, issues in repos.items():
         # Issues are already sorted by commit_date
-        cutoff = int(len(issues) * memory_ratio)
 
-        # Handle edge cases
-        if cutoff == 0:
-            cutoff = 1
+        # Single-issue repos: skip memory, all go to eval
+        if len(issues) == 1:
+            eval_set.extend(issues)
+            continue
+
+        cutoff = max(1, int(len(issues) * memory_ratio))  # At least 1 in memory
+
+        # Ensure we don't put ALL in memory (leave at least 1 for eval)
         if cutoff >= len(issues):
             cutoff = len(issues) - 1
 
