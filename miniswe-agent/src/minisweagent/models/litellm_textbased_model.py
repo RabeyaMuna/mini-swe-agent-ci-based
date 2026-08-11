@@ -19,6 +19,11 @@ class LitellmTextbasedModel(LitellmModel):
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
         try:
+            # Fix max_tokens in kwargs too (they can override model_kwargs)
+            # Use the parent class's static method for consistency
+            if self._requires_max_completion_tokens(self.config.model_name) and "max_tokens" in kwargs:
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+
             return litellm.completion(
                 model=self.config.model_name, messages=messages, **(self.config.model_kwargs | kwargs)
             )

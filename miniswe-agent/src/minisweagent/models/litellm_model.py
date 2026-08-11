@@ -63,27 +63,62 @@ class LitellmModel:
         # Fix max_tokens -> max_completion_tokens for GPT-4o and newer models
         self._fix_max_tokens_parameter()
 
-    def _fix_max_tokens_parameter(self):
-        """Convert max_tokens to max_completion_tokens for GPT-4o and newer models."""
-        model_name = str(self.config.model_name).lower().removeprefix("openai/")
-        is_gpt4o_or_newer = (
-            model_name.startswith("gpt-5")
-            or model_name.startswith("gpt-4o")
-            or model_name.startswith("chatgpt-4o")
-            or (len(model_name) > 1 and model_name[0] == "o" and model_name[1].isdigit())
-        )
+    @staticmethod
+    def _requires_max_completion_tokens(model_name: str) -> bool:
+        """
+        Check if a model requires max_completion_tokens instead of max_tokens.
 
-        if is_gpt4o_or_newer and "max_tokens" in self.config.model_kwargs:
+        Returns True for:
+        - GPT-5 series (gpt-5.x, gpt-5.4-mini, etc.)
+        - GPT-4o series (gpt-4o, gpt-4o-mini, chatgpt-4o-latest, etc.)
+        - o-series reasoning models (o1, o3, o3-mini, etc.)
+
+        Returns False for:
+        - Codex models (codex, code-davinci-002, etc.)
+        - GPT-4 non-o models (gpt-4, gpt-4-turbo, etc.)
+        - GPT-3.5 models (gpt-3.5-turbo, etc.)
+        - All other models
+        """
+        normalized = str(model_name).lower().removeprefix("openai/").removeprefix("azure/")
+
+        # GPT-5 series
+        if normalized.startswith("gpt-5"):
+            return True
+
+        # GPT-4o series (but not gpt-4 without 'o')
+        if normalized.startswith("gpt-4o") or normalized.startswith("chatgpt-4o"):
+            return True
+
+        # o-series reasoning models (o1, o3, etc.)
+        # Must start with 'o' followed by a digit
+        if len(normalized) > 1 and normalized[0] == "o" and normalized[1].isdigit():
+            return True
+
+        # All other models use max_tokens
+        return False
+
+    def _fix_max_tokens_parameter(self):
+        """Convert max_tokens to max_completion_tokens for compatible models."""
+        if not self._requires_max_completion_tokens(self.config.model_name):
+            # Model uses max_tokens (codex, gpt-4, gpt-3.5, etc.) - no conversion needed
+            return
+
+        if "max_tokens" in self.config.model_kwargs:
             max_tokens_value = self.config.model_kwargs.pop("max_tokens")
             self.config.model_kwargs["max_completion_tokens"] = max_tokens_value
             logger.info(
-                "Converted max_tokens=%s -> max_completion_tokens for model: %s",
+                "[Model Init] Converted max_tokens=%s -> max_completion_tokens for: %s",
                 max_tokens_value,
                 self.config.model_name
             )
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
         try:
+            # Fix max_tokens in kwargs too (they can override model_kwargs)
+            if self._requires_max_completion_tokens(self.config.model_name) and "max_tokens" in kwargs:
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+                logger.debug("[Query] Converted max_tokens in kwargs for: %s", self.config.model_name)
+
             return litellm.completion(
                 model=self.config.model_name,
                 messages=messages,
