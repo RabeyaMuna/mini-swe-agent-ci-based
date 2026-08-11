@@ -345,6 +345,10 @@ class STAIRRetrieval:
         # Not cached - generate with LLM
         print(f"[Memory] STAGE 0: Decomposing CI failure with LLM...")
 
+        # ALWAYS generate full decomposition with L1/L2/L3 queries
+        # Ablation filtering happens during retrieval, not here
+        # This ensures all ablations (baseline, L1, L1+L2, L1+L2+L3) use same decomposition
+
         # Extract workflow name for L1 query
         workflow_name = query.get("workflow_name", "")
         if not workflow_name:
