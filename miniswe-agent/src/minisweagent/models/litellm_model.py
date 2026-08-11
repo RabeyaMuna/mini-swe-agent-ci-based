@@ -60,6 +60,28 @@ class LitellmModel:
         if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
             litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
 
+        # Fix max_tokens -> max_completion_tokens for GPT-4o and newer models
+        self._fix_max_tokens_parameter()
+
+    def _fix_max_tokens_parameter(self):
+        """Convert max_tokens to max_completion_tokens for GPT-4o and newer models."""
+        model_name = str(self.config.model_name).lower().removeprefix("openai/")
+        is_gpt4o_or_newer = (
+            model_name.startswith("gpt-5")
+            or model_name.startswith("gpt-4o")
+            or model_name.startswith("chatgpt-4o")
+            or (len(model_name) > 1 and model_name[0] == "o" and model_name[1].isdigit())
+        )
+
+        if is_gpt4o_or_newer and "max_tokens" in self.config.model_kwargs:
+            max_tokens_value = self.config.model_kwargs.pop("max_tokens")
+            self.config.model_kwargs["max_completion_tokens"] = max_tokens_value
+            logger.info(
+                "Converted max_tokens=%s -> max_completion_tokens for model: %s",
+                max_tokens_value,
+                self.config.model_name
+            )
+
     def _query(self, messages: list[dict[str, str]], **kwargs):
         try:
             return litellm.completion(
