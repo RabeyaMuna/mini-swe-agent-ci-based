@@ -84,6 +84,64 @@ def test_openai_and_minimax_use_isolated_provider_configs(tmp_path: Path) -> Non
     assert (openai_home / "config.toml").read_text() == openai_config_before
 
 
+def test_openai_launcher_blocks_dotenv_from_restoring_openrouter(
+    tmp_path: Path,
+) -> None:
+    activate = tmp_path / ".venv-codex" / "bin" / "activate"
+    activate.parent.mkdir(parents=True)
+    activate.write_text("", encoding="utf-8")
+
+    capture_path = tmp_path / "provider-env.txt"
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        "{\n"
+        "  printf 'OPENAI=%s\\n' \"${OPENAI_API_KEY:+set}\"\n"
+        "  printf 'OPENROUTER_KEY=%s\\n' \"${OPENROUTER_API_KEY:-}\"\n"
+        "  printf 'OPENROUTER_BASE=%s\\n' \"${OPENROUTER_BASE_URL:-}\"\n"
+        "  printf 'PROVIDER=%s\\n' \"${CODEX_PROVIDER:-}\"\n"
+        "} > \"$ROUTING_CAPTURE_PATH\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+            "OPENAI_API_KEY": "sk-openai-test-only",
+            "OPENROUTER_API_KEY": "sk-openrouter-test-only",
+            "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+            "ROUTING_CAPTURE_PATH": str(capture_path),
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(LAUNCHER),
+            "1",
+            "baseline",
+            "backward",
+            "gpt-5.4-mini",
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture_path.read_text(encoding="utf-8").splitlines() == [
+        "OPENAI=set",
+        "OPENROUTER_KEY=",
+        "OPENROUTER_BASE=",
+        "PROVIDER=openai",
+    ]
+
+
 def _configure_miniswe(tmp_path: Path, model: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     for name in (

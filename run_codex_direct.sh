@@ -107,8 +107,15 @@ case "$MODEL" in
             echo "ERROR: OPENAI_API_KEY not set in .env"
             exit 1
         fi
-        # Set ONLY OpenAI key, everything else stays unset
+        # Set only the OpenAI credential. Keep the unused provider variables
+        # present-but-empty so python-dotenv (loaded by the benchmark runner)
+        # cannot restore OpenRouter values from .env in secondary context and
+        # decomposition calls.
         export OPENAI_API_KEY="$SAVED_OPENAI_KEY"
+        export OPENROUTER_API_KEY=""
+        export OPENROUTER_BASE_URL=""
+        export MINIMAX_API_KEY=""
+        export ANTHROPIC_API_KEY=""
         CODEX_MODEL="$MODEL"
         CONTEXT_MODEL="$MODEL"
         echo "Using OpenAI API"

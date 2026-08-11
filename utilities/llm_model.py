@@ -74,11 +74,25 @@ class LitellmModel:
                 os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
             )
 
-        # Default to OpenRouter
-        return (
-            os.getenv("OPENROUTER_API_KEY"),
-            os.getenv("OPENROUTER_BASE_URL"),
-        )
+        # OpenAI models must never inherit OpenRouter credentials merely because
+        # both keys are present in the project .env file. An explicit
+        # ``openrouter/`` prefix above remains the opt-in route through
+        # OpenRouter.
+        openai_name = lowered.removeprefix("openai/")
+        if openai_name.startswith(("gpt-", "chatgpt-", "codex-")) or (
+            len(openai_name) > 1
+            and openai_name[0] == "o"
+            and openai_name[1].isdigit()
+        ):
+            return (
+                os.getenv("OPENAI_API_KEY"),
+                os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+            )
+
+        # Do not silently send unknown models to a billable provider. Let
+        # LiteLLM resolve an explicitly prefixed provider or report a clear
+        # configuration error.
+        return (None, None)
 
     def invoke(
         self,

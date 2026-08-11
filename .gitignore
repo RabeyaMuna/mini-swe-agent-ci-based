@@ -231,3 +231,4 @@ codex/.codex-config/config.toml
 
 # Project-local Codex config (contains API keys)
 .codex-local/
+tests/

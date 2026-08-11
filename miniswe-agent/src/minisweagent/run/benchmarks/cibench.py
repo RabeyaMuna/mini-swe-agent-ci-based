@@ -2110,11 +2110,23 @@ def process_instance(
                 # Expected: {"llm_selection": {"separate_problems": [...]}}
                 if ci_memory and "problems" in ci_memory:
                     problems_from_memory = ci_memory.get("problems", [])
-                    # Convert each problem to the expected format with source="previous experience"
+                    # Convert each problem to the expected format
+                    # Determine source based on whether problem has repair strategy:
+                    # - BASELINE mode: no repair_strategy -> "ci failure"
+                    # - MEMORY modes (L1/L2/L3): has repair_strategy -> "previous experience"
                     separate_problems = []
                     for prob in problems_from_memory:
+                        # Check if problem has a non-empty repair strategy
+                        repair_strat = prob.get("repair_strategy")
+                        has_repair = (
+                            repair_strat is not None
+                            and isinstance(repair_strat, dict)
+                            and bool(repair_strat)
+                        )
+                        source = "previous experience" if has_repair else "ci failure"
+
                         separate_problems.append({
-                            "source": "previous experience",
+                            "source": source,
                             "problem": prob.get("problem", ""),
                             "root_cause": prob.get("root_cause", ""),
                             "files": prob.get("files", []),
