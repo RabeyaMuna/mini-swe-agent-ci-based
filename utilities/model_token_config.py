@@ -48,8 +48,8 @@ class ModelConfig(TypedDict):
 MODEL_CONFIGS: dict[str, ModelConfig] = {
     "minimax-m2.5": {
         "input_context_window": 196_608,  # Actual limit from litellm (was 245k, corrected)
-        "input_chunk_tokens": 100_000,  # Safe: 100k input + 65k output + 10k prompt = 175k <= 197k OK
-        "input_chunk_chars": 400_000,  # ~4 chars per token
+        "input_chunk_tokens": 60_000,  # FIXED: Was 100k but API hard limit ~128k. 60k chunk + 3k prompt + 65k output = 128k total
+        "input_chunk_chars": 240_000,  # ~4 chars per token (60k * 4)
         "output_max_tokens": 65_536,  # ACTUAL limit from litellm (was 16k - WRONG!)
         "output_safe_tokens": 60_000,  # Safe limit with buffer (~92% of max)
         "l1_chunk_size": 15,  # L1s per chunk (was 5)
@@ -64,8 +64,8 @@ MODEL_CONFIGS: dict[str, ModelConfig] = {
     },
     "glm-5.2": {
         "input_context_window": 1_000_000,  # 1M tokens - HUGE!
-        "input_chunk_tokens": 800_000,  # OPTIMIZED: 800k input + 131k output + 20k overhead = 951k <= 1M OK
-        "input_chunk_chars": 3_200_000,  # ~4 chars per token (800k tokens)
+        "input_chunk_tokens": 100_000,  # FIXED: Was 800k but Z.ai API has hard limit ~128k. 100k chunk + 3k prompt + 25k buffer = 128k
+        "input_chunk_chars": 400_000,  # ~4 chars per token (100k tokens)
         "output_max_tokens": 131_072,  # Native Z.ai provider limit (128k)
         "output_safe_tokens": 120_000,  # Safe limit with buffer (~92% of max)
         "l1_chunk_size": 80,  # OPTIMIZED: 80 L1s per chunk (was 15)

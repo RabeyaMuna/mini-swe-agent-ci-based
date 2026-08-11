@@ -96,8 +96,26 @@ class DefaultAgent:
             except InterruptAgentFlow as e:
                 self.add_messages(*e.messages)
             except Exception as e:
-                self.handle_uncaught_exception(e)
-                raise
+                # FIX: Handle ContextWindowExceededError gracefully
+                import litellm.exceptions
+                if isinstance(e, litellm.exceptions.ContextWindowExceededError):
+                    logger.error(f"Context window exceeded at step {self.n_calls}. Saving partial result.")
+                    self.add_messages({
+                        "role": "exit",
+                        "content": "ContextWindowExceeded",
+                        "extra": {
+                            "exit_status": "ContextWindowExceeded",
+                            "submission": "",
+                            "error": str(e),
+                            "steps_completed": self.n_calls,
+                            "cost": self.cost
+                        }
+                    })
+                    break  # Exit gracefully instead of raising
+                else:
+                    # Other exceptions: handle as before
+                    self.handle_uncaught_exception(e)
+                    raise
             finally:
                 self.save(self.config.output_path)
             if self.messages[-1].get("role") == "exit":

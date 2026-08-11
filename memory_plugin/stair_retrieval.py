@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 
+from memory_plugin.decomposition_cache import get_global_cache
 from utilities.llm_invoker import (
     STRICT_JSON_RULES,
     invoke_llm_with_retry,
@@ -183,21 +184,39 @@ class STAIRRetrieval:
         filtered_matches = self._stage_2_per_problem_filtering(per_problem_matches, query)
         print(f"[Memory] STAGE 2: Filtered {len(filtered_matches)} problem match sets")
 
-        # Check if all matches filtered out - return CI problems as-is
+        # Check if all matches filtered out
+        # FIXED: Use correct keys (l1_filtered, not l1_matches) after STAGE 2 filtering
         total_filtered = sum(
-            len(fm.get('l1_matches', [])) + len(fm.get('l2_matches', [])) + len(fm.get('l3_matches', []))
+            len(fm.get('l1_filtered', [])) + len(fm.get('l2_filtered', [])) + len(fm.get('l3_filtered', []))
             for fm in filtered_matches
         )
         if total_filtered == 0:
-            print("[Memory] STAGE 2: All matches filtered out - returning decomposed CI problems")
-            return {"problems": ci_problems}
+            print("[Memory] STAGE 2: No relevant matches - will still check common patterns in STAGE 6")
+            # Don't return early - STAGE 6 can still find common problems
+            # even if no individual CI problem matched memory
 
         # ============================================================
         # STAGE 3: Enrich CI problems with repair strategies
         # ============================================================
         print("[Memory] STAGE 3: Enriching CI problems with repair strategies...")
         enriched_ci = self._stage_3_enrich_ci_problems(filtered_matches, query)
-        print(f"[Memory] STAGE 3: Enriched {len(enriched_ci)} CI problems")
+        print(f"[Memory] STAGE 3: Enriched {len(enriched_ci)} CI problems (from {len(ci_problems)} original)")
+
+        # CRITICAL FIX: Ensure ALL original CI problems are included
+        # Even if a CI problem had no matches in memory, it must still be in the final output
+        enriched_ci_ids = {p.get('problem', '') for p in enriched_ci}
+        for orig_ci_prob in ci_problems:
+            if orig_ci_prob.get('problem', '') not in enriched_ci_ids:
+                # This CI problem had no matches - add it without repair strategy
+                print(f"[Memory] STAGE 3: Adding unmatched CI problem: {orig_ci_prob.get('problem', '')[:50]}...")
+                enriched_ci.append({
+                    **orig_ci_prob,
+                    "problem_type": "ci_failure",
+                    "repair_strategy": None,  # No matches found
+                    "source": "ci_failure_no_matches"
+                })
+
+        print(f"[Memory] STAGE 3: Total CI problems (including unmatched): {len(enriched_ci)}")
 
         # ============================================================
         # STAGE 4: Extract dependency problems
@@ -305,8 +324,36 @@ class STAIRRetrieval:
         - failure_signals: Error messages
 
         Returns 1-N problems (1 if single failure, N if multiple different issues)
+
+        CACHE: Results are cached by sha_fail in data/decomposition_cache.json
         """
-        prompt = f"""Decompose CI failure into structured problems.
+        # Check cache first
+        sha_fail = query.get("sha_fail", "")
+        cache = get_global_cache()
+
+        if sha_fail and cache.has(sha_fail):
+            cached_problems = cache.get_problems(sha_fail)
+            if cached_problems:
+                print(f"[Memory] STAGE 0: Using cached decomposition for {sha_fail[:12]} ({len(cached_problems)} problems)")
+                # Debug output
+                for i, p in enumerate(cached_problems, 1):
+                    print(f"[Memory]   Problem {i}: {p.get('problem', 'N/A')}")
+                    print(f"[Memory]     Files: {', '.join(p.get('files', [])[:3])}")
+                    print(f"[Memory]     Type: {p.get('failure_type', 'unknown')}")
+                return cached_problems
+
+        # Not cached - generate with LLM
+        print(f"[Memory] STAGE 0: Decomposing CI failure with LLM...")
+
+        # Extract workflow name for L1 query
+        workflow_name = query.get("workflow_name", "")
+        if not workflow_name:
+            workflow_path = query.get("workflow_path", "")
+            if workflow_path:
+                from pathlib import Path
+                workflow_name = Path(workflow_path).name
+
+        prompt = f"""Decompose CI failure into structured problems with level-specific queries.
 
 **CI Failure Data:**
 ```json
@@ -315,31 +362,76 @@ class STAIRRetrieval:
 
 **Task:**
 Analyze the CI failure and decompose it into individual problems.
+For EACH problem, create structured query objects for L1/L2/L3 retrieval.
 
 - If CI has ONE main failure → Return 1 problem
 - If CI has MULTIPLE different failures → Return N problems (one per distinct issue)
 
-For EACH problem, extract:
-1. **problem**: Clear description of what failed
-2. **root_cause**: Why this failure happens (your analysis from error signals)
-3. **files**: List of affected files
-4. **failure_type**: Category (type_checking, linting, test_failure, build, formatting, dependency, etc.)
-5. **failure_signals**: List of key error messages/patterns
-6. **verification_cmd**: Command to verify this specific problem (from CI or inferred)
+**Query Structure Rules:**
+
+**L1 Query** (Repo + Workflow Specific):
+- problem: SAME as top-level problem
+- root_cause: SAME as top-level root_cause
+- files: SAME as top-level files
+- failure_types: Array with 2 strings ["Category", "Sub-category"]
+- repo: "{query.get('repo', '')}"
+- workflow_name: "{workflow_name}"
+- failure_signals: Array mixing evidence, error messages, tool names, patterns
+
+**L2 Query** (Repo-Level):
+- problem: SAME as L1
+- root_cause: SAME as L1
+- files: SAME as L1
+- failure_types: SAME as L1
+- repo: "{query.get('repo', '')}"
+- NO workflow_name (this is the ONLY difference from L1)
+- failure_signals: SAME as L1
+
+**L3 Query** (Universal):
+- problem: GENERIC abstract version (no specific file/repo names)
+- root_cause: GENERIC abstract version
+- NO files, NO repo, NO workflow_name
+- failure_types: SAME categories as L1/L2
+- failure_signals: Abstract patterns (file.py → file, black-jupyter → formatting-tool)
 
 **Return JSON:**
 ```json
 {{
   "problems": [
     {{
-      "problem": "Specific problem description",
-      "root_cause": "Root cause analysis",
+      "problem": "Clear specific description",
+      "root_cause": "Why this failure happens",
       "files": ["file1.py", "file2.py"],
-      "failure_type": "type_checking",
+      "failure_type": "formatting",
       "failure_signals": ["error message 1", "error message 2"],
-      "verification_cmd": "./dev/test.sh"
-    }},
-    // ... more problems if applicable
+      "verification_cmd": "./test.sh",
+
+      "query": {{
+        "l1": {{
+          "problem": "SAME as top-level problem",
+          "root_cause": "SAME as top-level root_cause",
+          "files": ["SAME as top-level files"],
+          "failure_types": ["Code Formatting", "Pre-commit hook auto-fix"],
+          "repo": "{query.get('repo', '')}",
+          "workflow_name": "{workflow_name}",
+          "failure_signals": ["black-jupyter reformatted file.py", "exit code 1", "black-jupyter", "ruff"]
+        }},
+        "l2": {{
+          "problem": "SAME as l1",
+          "root_cause": "SAME as l1",
+          "files": ["SAME as l1"],
+          "failure_types": ["SAME as l1"],
+          "repo": "{query.get('repo', '')}",
+          "failure_signals": ["SAME as l1"]
+        }},
+        "l3": {{
+          "problem": "Generic abstract version (e.g., 'Formatting tool auto-fixed code during CI')",
+          "root_cause": "Generic version (e.g., 'Code had pre-existing formatting violations')",
+          "failure_types": ["SAME as l1"],
+          "failure_signals": ["formatting tool reformatted file", "exit code 1", "formatting-tool", "linter"]
+        }}
+      }}
+    }}
   ]
 }}
 ```
@@ -350,6 +442,12 @@ For EACH problem, extract:
         response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
         result = response if isinstance(response, dict) else {}
         problems = result.get("problems", [])
+
+        # Save to cache
+        if sha_fail and problems:
+            model_name = getattr(self.llm, "model_name", "unknown")
+            cache.set(sha_fail, query, problems, model=model_name)
+            print(f"[Memory] STAGE 0: Cached decomposition for {sha_fail[:12]}")
 
         # Debug output
         for i, p in enumerate(problems, 1):
@@ -364,6 +462,9 @@ For EACH problem, extract:
     ) -> list[dict]:
         """
         STAGE 1: For EACH CI problem, do separate L1/L2/L3 retrieval.
+
+        Uses structured queries from problem.query.l1/l2/l3 if available.
+        Falls back to building queries from problem data if not.
 
         Returns:
             [
@@ -381,17 +482,20 @@ For EACH problem, extract:
         for idx, ci_prob in enumerate(ci_problems):
             print(f"[Memory]   Retrieving for problem {idx+1}: {ci_prob.get('problem', 'N/A')[:50]}...")
 
-            # Build specialized query for this specific problem
-            problem_query = {
-                **query,
-                "problem_description": ci_prob.get("problem", ""),
-                "problem_files": ci_prob.get("files", []),
-                "problem_signals": ci_prob.get("failure_signals", []),
-                "problem_type": ci_prob.get("failure_type", ""),
-            }
-
-            # Do cosine search with problem-specific query
-            retrieved = self._stage_1_cosine_search_original(problem_query, top_k)
+            # Check if problem has structured queries
+            if "query" in ci_prob and isinstance(ci_prob["query"], dict):
+                # Use pre-built structured queries
+                retrieved = self._stage_1_cosine_search_with_structured_queries(ci_prob, query, top_k)
+            else:
+                # Fallback: Build query from problem data (backward compatibility)
+                problem_query = {
+                    **query,
+                    "problem_description": ci_prob.get("problem", ""),
+                    "problem_files": ci_prob.get("files", []),
+                    "problem_signals": ci_prob.get("failure_signals", []),
+                    "problem_type": ci_prob.get("failure_type", ""),
+                }
+                retrieved = self._stage_1_cosine_search_original(problem_query, top_k)
 
             per_problem_matches.append({
                 "ci_problem": ci_prob,
@@ -543,17 +647,39 @@ For EACH problem, extract:
 
         Find problems that must be fixed BEFORE CI problems.
         Uses enabled[] chains and dependency relationships.
+
+        ONLY extracts dependencies for CI problems that had similarity matches.
+        If a CI problem has no matches, we skip dependency extraction for it.
         """
-        # Collect all L1/L2/L3 data
+        # Collect L1/L2/L3 data ONLY from CI problems that had matches
         all_l1 = []
         all_l2 = []
         all_l3 = []
+        skipped_count = 0
+
         for match_set in filtered_matches:
-            all_l1.extend(match_set.get("l1_filtered", []))
-            all_l2.extend(match_set.get("l2_filtered", []))
-            all_l3.extend(match_set.get("l3_filtered", []))
+            ci_prob = match_set.get("ci_problem", {})
+
+            # Check if this CI problem had any matches (similarity found)
+            has_l1 = len(match_set.get("l1_filtered", [])) > 0
+            has_l2 = len(match_set.get("l2_filtered", [])) > 0
+            has_l3 = len(match_set.get("l3_filtered", [])) > 0
+
+            if has_l1 or has_l2 or has_l3:
+                # This CI problem has similarity - extract dependencies
+                all_l1.extend(match_set.get("l1_filtered", []))
+                all_l2.extend(match_set.get("l2_filtered", []))
+                all_l3.extend(match_set.get("l3_filtered", []))
+            else:
+                # No similarity - skip dependency extraction for this CI problem
+                skipped_count += 1
+                print(f"[Memory] STAGE 4: Skipping dependencies for '{ci_prob.get('problem', '')[:50]}...' (no similarity)")
+
+        if skipped_count > 0:
+            print(f"[Memory] STAGE 4: Skipped dependency extraction for {skipped_count} CI problem(s) without matches")
 
         if not (all_l1 or all_l2 or all_l3):
+            print("[Memory] STAGE 4: No dependencies (no CI problems had similarity matches)")
             return []
 
         compact = {
@@ -645,17 +771,39 @@ Return empty list if no dependencies found.
 
         Find problems that appear AFTER fixing CI problems.
         Uses enabled[] chains and causal relationships.
+
+        ONLY extracts consecutive problems for CI problems that had similarity matches.
+        If a CI problem has no matches, we skip consecutive extraction for it.
         """
-        # Collect all L1/L2/L3 data
+        # Collect L1/L2/L3 data ONLY from CI problems that had matches
         all_l1 = []
         all_l2 = []
         all_l3 = []
+        skipped_count = 0
+
         for match_set in filtered_matches:
-            all_l1.extend(match_set.get("l1_filtered", []))
-            all_l2.extend(match_set.get("l2_filtered", []))
-            all_l3.extend(match_set.get("l3_filtered", []))
+            ci_prob = match_set.get("ci_problem", {})
+
+            # Check if this CI problem had any matches (similarity found)
+            has_l1 = len(match_set.get("l1_filtered", [])) > 0
+            has_l2 = len(match_set.get("l2_filtered", [])) > 0
+            has_l3 = len(match_set.get("l3_filtered", [])) > 0
+
+            if has_l1 or has_l2 or has_l3:
+                # This CI problem has similarity - extract consecutive problems
+                all_l1.extend(match_set.get("l1_filtered", []))
+                all_l2.extend(match_set.get("l2_filtered", []))
+                all_l3.extend(match_set.get("l3_filtered", []))
+            else:
+                # No similarity - skip consecutive extraction for this CI problem
+                skipped_count += 1
+                print(f"[Memory] STAGE 5: Skipping consecutive for '{ci_prob.get('problem', '')[:50]}...' (no similarity)")
+
+        if skipped_count > 0:
+            print(f"[Memory] STAGE 5: Skipped consecutive extraction for {skipped_count} CI problem(s) without matches")
 
         if not (all_l1 or all_l2 or all_l3):
+            print("[Memory] STAGE 5: No consecutive problems (no CI problems had similarity matches)")
             return []
 
         compact = {
@@ -981,6 +1129,115 @@ Result: 1 → 2 → 3
     # ============================================================
     # ORIGINAL METHODS (used by new pipeline)
     # ============================================================
+
+    def _stage_1_cosine_search_with_structured_queries(
+        self, problem: dict, query: dict, top_k: int
+    ) -> dict[str, list]:
+        """
+        Stage 1: Cosine similarity search using structured queries from problem.
+
+        Uses problem.query.l1/l2/l3 structured queries instead of building them.
+        """
+        structured_queries = problem.get("query", {})
+
+        # L1: Use structured query if available
+        if "l1" in self.enabled_levels:
+            if self.l1_embeddings is None:
+                self.l1_embeddings = self._compute_embeddings(self.l1_memory, "l1")
+
+            l1_query_obj = structured_queries.get("l1", {})
+            l1_query_str = self._build_search_string_from_structured_query(l1_query_obj, "l1")
+
+            l1_results = self._retrieve_topk(
+                l1_query_str,
+                self.l1_memory,
+                self.l1_embeddings,
+                top_k,
+                filters={
+                    "repo": l1_query_obj.get("repo") or query.get("repo"),
+                    "workflow": l1_query_obj.get("workflow_name") or query.get("workflow_name"),
+                },
+            )
+        else:
+            l1_results = []
+
+        # L2: Use structured query if available
+        if "l2" in self.enabled_levels:
+            if self.l2_embeddings is None:
+                self.l2_embeddings = self._compute_embeddings(self.l2_memory, "l2")
+
+            l2_query_obj = structured_queries.get("l2", {})
+            l2_query_str = self._build_search_string_from_structured_query(l2_query_obj, "l2")
+
+            l2_results = self._retrieve_topk(
+                l2_query_str,
+                self.l2_memory,
+                self.l2_embeddings,
+                top_k,
+                filters={"repo": l2_query_obj.get("repo") or query.get("repo")},
+            )
+        else:
+            l2_results = []
+
+        # L3: Use structured query if available
+        if "l3" in self.enabled_levels:
+            if self.l3_embeddings is None:
+                self.l3_embeddings = self._compute_embeddings(self.l3_memory, "l3")
+
+            l3_query_obj = structured_queries.get("l3", {})
+            l3_query_str = self._build_search_string_from_structured_query(l3_query_obj, "l3")
+
+            l3_results = self._retrieve_topk(
+                l3_query_str,
+                self.l3_memory,
+                self.l3_embeddings,
+                top_k,
+                filters={},  # No filters for cross-repo
+            )
+        else:
+            l3_results = []
+
+        return {"l1": l1_results, "l2": l2_results, "l3": l3_results}
+
+    def _build_search_string_from_structured_query(self, query_obj: dict, level: str) -> str:
+        """
+        Convert structured query object to search string.
+
+        Args:
+            query_obj: Structured query with fields like problem, root_cause, files, etc.
+            level: "l1", "l2", or "l3"
+
+        Returns:
+            Space-separated search string
+        """
+        if not query_obj:
+            return ""
+
+        parts = []
+
+        # Add level-specific fields
+        if level == "l1":
+            parts.append(query_obj.get("repo", ""))
+            parts.append(query_obj.get("workflow_name", ""))
+        elif level == "l2":
+            parts.append(query_obj.get("repo", ""))
+
+        # Common fields across all levels
+        parts.append(query_obj.get("problem", ""))
+        parts.append(query_obj.get("root_cause", ""))
+
+        # Add files (only for L1/L2)
+        if level in ["l1", "l2"]:
+            parts.extend(query_obj.get("files", []))
+
+        # Add failure types (array of 2 strings)
+        parts.extend(query_obj.get("failure_types", []))
+
+        # Add failure signals (array)
+        parts.extend(query_obj.get("failure_signals", []))
+
+        # Filter out empty strings and join
+        return " ".join(str(p) for p in parts if p)
 
     def _stage_1_cosine_search_original(self, query: dict, top_k: int) -> dict[str, list]:
         """
@@ -1604,8 +1861,14 @@ If no consecutive problems found, return empty array: {{"consecutive_problems": 
                 item
                 for item in self.l2_memory
                 if self._same_repo(item.get("repo"), repo)
+                and self._same_workflow(
+                    item.get("workflow_name") or item.get("workflow"), workflow
+                )
             ]
             total_l2_issues = len(self._unique_issue_keys(l2_scope))
+            print(
+                f"[Memory] Stage 4: L2 scope - {len(l2_scope)} entries, {total_l2_issues} unique issues"
+            )
             for item in l2_scope:
                 flattened_problems.extend(
                     self._extract_problem_candidates(
@@ -1614,7 +1877,16 @@ If no consecutive problems found, return empty array: {{"consecutive_problems": 
                 )
 
         if not flattened_problems:
+            print("[Memory] Stage 4: No problems found in L1/L2 for this repo+workflow")
             return []
+
+        # Early exit: Need at least 3 unique issues to establish commonality
+        total_unique_issues = max(total_l1_issues, total_l2_issues)
+        if total_unique_issues < 3:
+            print(f"[Memory] Stage 4: Only {total_unique_issues} unique issue(s) found - need at least 3 to establish commonality. Skipping common pattern detection.")
+            return []
+
+        print(f"[Memory] Stage 4: Found {total_unique_issues} unique issues - proceeding with common pattern detection")
 
         # Step 2: Cluster flattened problems (deterministic)
         clusters = self._cluster_problem_candidates_for_common(flattened_problems)
@@ -2598,12 +2870,33 @@ Return JSON:
 
         Key: Frequency was calculated deterministically by counting distinct issue_ids.
         LLM decides if the pattern is real/relevant, NOT the frequency.
+
+        OPTIMIZATION: Single-problem clusters are auto-accepted without LLM call.
         """
         if not common_candidates:
             return []
 
+        # OPTIMIZATION: Filter out single-occurrence clusters (not "common")
+        # Common patterns must appear in at least 2 different issues
+        single_occurrence_clusters = []
+        multi_occurrence_clusters = []
+
+        for candidate in common_candidates:
+            # Check how many distinct issues had this problem
+            distinct_count = candidate.get("distinct_issue_count", 0)
+            if distinct_count <= 1:
+                # Only appeared in 1 issue - NOT common, skip it
+                single_occurrence_clusters.append(candidate)
+            else:
+                # Appeared in 2+ issues - potential common pattern
+                multi_occurrence_clusters.append(candidate)
+
+        print(f"[Memory] Common pattern filtering: {len(single_occurrence_clusters)} single-occurrence (skipped - not common), {len(multi_occurrence_clusters)} multi-occurrence (validate as common)")
+
+        # Skip single-occurrence clusters entirely (they're not "common")
+        # Only validate multi-occurrence clusters with LLM
         accepted = []
-        for chunk in self._chunk_list(common_candidates, max_items=10):
+        for chunk in self._chunk_list(multi_occurrence_clusters, max_items=10):
             prompt = f"""Decide which recurring CI memory clusters are true repo common problem patterns.
 
 **Current CI Failure:**

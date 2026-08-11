@@ -32,6 +32,11 @@ except ImportError:
     pass  # dotenv not installed, rely on environment variables
 
 from memory_plugin import MemoryPlugin
+from codex.scripts.ci_repair_prompts import (
+    prompt_cache_info,
+    prompt_mode,
+    render_ci_repair_prompt,
+)
 from utilities.ci_log_analyzer import _run_log_analysis
 from utilities.git_checkout import prepare_repo_checkout as prepare_git_checkout
 
@@ -861,11 +866,7 @@ def compose_baseline_prompt(
     files = problem.get("files", [])
     signals = problem.get("failure_signals", [])
 
-    return f"""# CI Repair Task
-
-You are fixing a CI failure in this repository.
-
-## Problem To Fix
+    dynamic_context = f"""## Problem To Fix
 
 **[Problem {problem.get('number', '')} of {problem_count}]**
 
@@ -890,75 +891,8 @@ You are fixing a CI failure in this repository.
 
 ## CI Verification Details
 {validation_markdown(verification)}
-
-## Instructions
-
-**Your Task:**
-- Analyze the CI failure context above
-- Identify the root cause from error signals and relevant files
-- Determine the minimal fix needed
-- Implement and validate the fix
-
-**STEP 0: Check if problem still exists (REQUIRED)**
-Before attempting any fix:
-1. **Verify file paths** - Sometimes CI logs provide incomplete/partial paths:
-   - If a file path doesn't exist, search for it: `find . -type f -name "$(basename <file>)"`
-   - Use the correct full path for all subsequent commands
-2. Run the verification command on ONLY the affected files (not the whole repo)
-3. Check if the specific error signals are still present
-4. If the errors are NOT found:
-   - Report "Problem already fixed by previous step"
-   - Commit any staged changes with message "Skip: problem already fixed"
-   - Exit successfully
-5. If errors ARE found: Proceed to fix
-
-Example for mypy errors:
-```bash
-# Check only affected files (find correct path if needed)
-FILE="path/to/affected_file.py"
-if [ ! -f "$FILE" ]; then
-  FILE=$(find . -type f -name "$(basename $FILE)" | head -1)
-fi
-if [ -f "$FILE" ]; then
-  mypy "$FILE" 2>&1 | grep -E "line_number"
-  # If no output -> Problem is fixed, skip to next
-fi
-```
-
-**For automated tool failures (formatters, linters, type checkers):**
-- Prefer running the tool with auto-fix flags: `black .`, `ruff --fix .`, `mypy --install-types`, etc.
-- Let the tool fix all affected files at once
-- Only manually edit if the tool cannot auto-fix
-
-**General workflow:**
-1. **CHECK if problem exists** (see STEP 0 above - REQUIRED)
-2. Inspect the repository and understand the problem from CI context
-3. Make the minimal correct change to fix the issue
-4. Do not modify unrelated files
-5. Commit your changes with a descriptive message
-6. OPTIONAL: Run the validation command ONLY on files you changed (not the whole repo)
-7. The fix should be committed in git (not as uncommitted changes)
-
-**Scope:**
-- Fix this problem only
-- Preserve existing behavior unless proven wrong by CI
-- Do not remove tests or weaken checks
-- Do not update dependencies unless required by the fix
-- Do NOT run validation on the entire repository (may have unrelated failures)
-- If you verify, run validation ONLY on the specific files you changed
-
-**Important:**
-- COMMIT your changes (don't leave as uncommitted diff)
-- Use descriptive commit messages
-- Don't worry if repo-wide validation fails due to other issues
-- Your fix should address the specific problem described above
-
-**Final report:**
-- Root cause identified
-- Files changed
-- Whether validation passed on YOUR changes (not whole repo)
-- Any remaining risks
 """
+    return render_ci_repair_prompt("baseline", dynamic_context)
 
 
 def compose_memory_prompt(
@@ -1005,11 +939,7 @@ Pitfalls to Avoid:
 
 **IMPORTANT:** The repair plan above is based on similar past fixes that worked. Follow the action steps as your primary strategy."""
 
-    return f"""# CI Repair Task
-
-You are fixing a CI failure in this repository using guidance from similar past fixes.
-
-## Problem To Fix
+    dynamic_context = f"""## Problem To Fix
 
 **[Problem {problem.get('number', '')} of {problem_count}]**
 
@@ -1033,80 +963,8 @@ You are fixing a CI failure in this repository using guidance from similar past 
 
 ## CI Verification Details
 {validation_markdown(verification)}
-
-## Instructions
-
-**STEP 0: Check if problem still exists (REQUIRED)**
-Before attempting any fix:
-1. **Verify file paths** - Sometimes CI logs provide incomplete/partial paths:
-   - If a file path doesn't exist, search for it: `find . -type f -name "$(basename <file>)"`
-   - Use the correct full path for all subsequent commands
-2. Run the verification command on ONLY the affected files (not the whole repo)
-3. Check if the specific error signals are still present
-4. If the errors are NOT found:
-   - Report "Problem already fixed by previous step"
-   - Commit any staged changes with message "Skip: problem already fixed"
-   - Exit successfully
-5. If errors ARE found: Proceed to fix
-
-Example for mypy errors:
-```bash
-# Check only affected files (find correct path if needed)
-FILE="path/to/affected_file.py"
-if [ ! -f "$FILE" ]; then
-  FILE=$(find . -type f -name "$(basename $FILE)" | head -1)
-fi
-if [ -f "$FILE" ]; then
-  mypy "$FILE" 2>&1 | grep -E "line_number"
-  # If no output -> Problem is fixed, skip to next
-fi
-```
-
-**If repair plan is provided above:**
-- Follow the action steps as your primary repair strategy
-- The steps are based on similar past fixes that worked
-- Pay attention to the pitfalls listed
-- Run the validation command specified
-
-**If repair plan is missing or incomplete:**
-- Use the problem description, root cause, and error signals above
-- Identify the fix from the affected files
-- Make the minimal correct change
-
-**For automated tool failures (formatters, linters, type checkers):**
-- Prefer running the tool with auto-fix flags: `black .`, `ruff --fix .`, `mypy --install-types`, etc.
-- Let the tool fix all affected files at once
-- Only manually edit if the tool cannot auto-fix
-
-**General workflow:**
-1. **CHECK if problem exists** (see STEP 0 above - REQUIRED)
-2. Inspect the repository and understand the problem
-3. Make the minimal correct change to fix the issue
-4. Do not modify unrelated files
-5. Commit your changes with a descriptive message
-6. OPTIONAL: Run validation ONLY on files you changed (not the whole repo)
-7. The fix should be committed in git (not as uncommitted changes)
-
-**Scope:**
-- Fix this problem only (do not fix unrelated issues)
-- Preserve existing behavior unless proven wrong by CI
-- Do not remove tests or weaken checks
-- Do not update dependencies unless required by the fix
-- Do NOT run validation on the entire repository (may have unrelated failures)
-- If you verify, run validation ONLY on the specific files you changed
-
-**Important:**
-- COMMIT your changes (don't leave as uncommitted diff)
-- Use descriptive commit messages
-- Don't worry if repo-wide validation fails due to other issues
-- Your fix should address the specific problem described above
-
-**Final report:**
-- Root cause identified
-- Files changed
-- Whether validation passed on YOUR changes (not whole repo)
-- Any remaining risks
 """
+    return render_ci_repair_prompt("memory", dynamic_context)
 
 
 def compose_issue_document(
@@ -1123,9 +981,9 @@ def compose_issue_document(
     Baseline mode: Full CI failure analysis, agent analyzes from scratch
     Memory mode: Self-contained problem with repair strategy
     """
-    is_baseline = ablation.lower() == "baseline"
+    mode = prompt_mode(ablation)
 
-    if is_baseline:
+    if mode == "baseline":
         return compose_baseline_prompt(
             issue, ci_failure, verification, problem, problem_count
         )
@@ -1577,6 +1435,14 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
             len(problems),
             ablation,
         )
+        cache_info = prompt_cache_info(document)
+        print(
+            "[Prompt cache] "
+            f"layout={cache_info['layout']} "
+            f"template={cache_info['template_fingerprint']} "
+            f"stable_chars={cache_info['stable_prefix_chars']} "
+            f"dynamic_chars={cache_info['dynamic_context_chars']}"
+        )
         prompt_path = write_issue_document(result_dir, problem, document)
         transcript_path = result_dir / f"codex_transcript_problem_{problem['number']}.txt"
         # Ensure Codex command has a model flag; if missing, inject canonical model
@@ -1594,7 +1460,9 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
             args.timeout,
             args.dry_run,
         )
-        problem_results.append({"problem": problem, **run_result})
+        problem_results.append(
+            {"problem": problem, "prompt_cache": cache_info, **run_result}
+        )
 
         # Save intermediate results on failure too, so we capture partial fixes
         failed = run_result["returncode"] != 0

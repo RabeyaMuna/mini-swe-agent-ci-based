@@ -344,8 +344,10 @@ def build_benchmark_ci_context(
         try:
             with open(cache_file) as f:
                 cache = json.load(f)
+            # Match by full sha_fail (exact match)
             cached_analysis = next(
-                (entry for entry in cache if entry.get("sha_fail") == sha_fail), None
+                (entry for entry in cache if entry.get("sha_fail") == sha_fail),
+                None
             )
             if cached_analysis:
                 print(
@@ -403,12 +405,9 @@ def build_benchmark_ci_context(
         try:
             with open(validation_cache_file) as f:
                 validation_cache = json.load(f)
+            # Match by full sha_fail (exact match)
             cached_validation = next(
-                (
-                    entry
-                    for entry in validation_cache
-                    if entry.get("sha_fail") == sha_fail
-                ),
+                (entry for entry in validation_cache if entry.get("sha_fail") == sha_fail),
                 None,
             )
             if cached_validation:

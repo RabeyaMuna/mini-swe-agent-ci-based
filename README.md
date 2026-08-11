@@ -537,6 +537,33 @@ bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.js
 bash ./run_codex_direct.sh "" baseline backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 ```
 
+### Prompt caching and dynamic issues
+
+The repair prompt is arranged as a stable instruction prefix followed by an
+explicit dynamic-context boundary. Repository metadata, CI logs, problem
+details, package/configuration evidence, verification data, and memory repair
+plans remain in the dynamic suffix and are generated independently for every
+issue.
+
+OpenAI prompt caching is automatic for eligible requests. The runner prints a
+line like this before each Codex problem:
+
+```text
+[Prompt cache] layout=stable_prefix_dynamic_suffix_v1 template=... stable_chars=... dynamic_chars=...
+```
+
+The template fingerprint covers only the stable prefix. Editing the repair
+instructions automatically changes the fingerprint, so the edited prompt gets
+a normal cache miss and becomes a new cacheable prefix. Dynamic issue changes
+do not change that fingerprint and cannot reuse another issue's dynamic data.
+When direct LiteLLM calls return cache accounting, their API log also includes
+`cached_input=<tokens>`.
+
+Caching does not cache answers and does not reduce the model's reasoning
+effort. It discounts matching input tokens only; output and reasoning tokens
+are still billed normally. A first request, an edited prefix, or a provider
+without a matching recent prefix will run normally as a cache miss.
+
 ### Running on Server
 
 ```bash

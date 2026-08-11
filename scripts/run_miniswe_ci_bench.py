@@ -85,6 +85,10 @@ def main() -> None:
         memory_plugin_path=None,
         save_memory=True,
         context_model=resolved_model,
+        # FIX: Increase limits to handle LimitsExceeded errors
+        step_limit=50,              # Default: 0 (unlimited) - now limited to 50 steps
+        cost_limit=5.0,             # Default: 0 (unlimited) - now limited to $5
+        wall_time_limit_seconds=600 # 10 minutes per issue
     )
 
 

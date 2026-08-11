@@ -173,6 +173,15 @@ class LitellmModel:
                 prompt_tokens = getattr(usage, "prompt_tokens", "?")
                 completion_tokens = getattr(usage, "completion_tokens", "?")
                 total_tokens = getattr(usage, "total_tokens", "?")
+                prompt_details = getattr(usage, "prompt_tokens_details", None)
+                if isinstance(prompt_details, dict):
+                    cached_tokens = prompt_details.get("cached_tokens")
+                    cache_write_tokens = prompt_details.get("cache_write_tokens")
+                else:
+                    cached_tokens = getattr(prompt_details, "cached_tokens", None)
+                    cache_write_tokens = getattr(
+                        prompt_details, "cache_write_tokens", None
+                    )
                 completion_details = getattr(
                     usage, "completion_tokens_details", None
                 )
@@ -187,8 +196,15 @@ class LitellmModel:
                     if reasoning_tokens is not None
                     else ""
                 )
+                cache_suffix = (
+                    f", cached_input={cached_tokens}"
+                    if cached_tokens is not None
+                    else ""
+                )
+                if cache_write_tokens is not None:
+                    cache_suffix += f", cache_write={cache_write_tokens}"
                 print(
-                    f"      [API] finish_reason={finish_reason}, tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}{reasoning_suffix}"
+                    f"      [API] finish_reason={finish_reason}, tokens: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}{cache_suffix}{reasoning_suffix}"
                 )
             else:
                 print(f"      [API] finish_reason={finish_reason}, no usage data")
