@@ -18,10 +18,15 @@ def _ablation_to_miniswe(ablation: str) -> tuple[bool, str]:
     """Map our ablation string to Mini-SWE's memory flags.
 
     Returns: (memory_enabled, memory_ablation_levels)
+
+    NOTE: For custom memory plugin integration:
+    - memory_enabled=True always (plugin handles decomposition for all modes)
+    - memory_ablation_levels="" for baseline (decompose_only, no retrieval)
+    - memory_ablation_levels="L1", "L1+L2", or "L1+L2+L3" for memory modes
     """
     a = (ablation or "").strip().lower()
     if a == "baseline":
-        return False, "L1+L2+L3"  # value unused when disabled
+        return True, ""  # Empty levels = baseline mode (decompose only, no retrieval)
     if a in {"l1", "l1+ l2", "l1+l2", "l1_l2", "l1+l2+l3", "l1_l2_l3"}:
         # normalize with pluses
         a = a.replace("_", "+").replace(" ", "")

@@ -147,11 +147,15 @@ class STAIRRetrieval:
         Returns:
             {"problems": [...]} - All problems with complete, standardized structure
         """
-        if self.baseline_mode:
-            return {"problems": []}
-
         if not self.llm:
             raise ValueError("LLM client required for all stages")
+
+        # Baseline mode: Run STAGE 0 only (decompose, no memory retrieval)
+        if self.baseline_mode or len(self.enabled_levels) == 0:
+            print("[Memory] BASELINE MODE: Running STAGE 0 decomposition only (no memory retrieval)")
+            ci_problems = self._stage_0_decompose_ci_failure(query)
+            print(f"[Memory] STAGE 0: Decomposed into {len(ci_problems)} problems")
+            return {"problems": ci_problems}
 
         # ============================================================
         # STAGE 0: Decompose CI failure into structured problems
