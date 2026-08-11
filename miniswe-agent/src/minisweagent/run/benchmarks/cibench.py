@@ -117,6 +117,55 @@ REPO_CACHE_ROOT = Path(
     os.getenv("MSWEA_REPO_CACHE_ROOT") or (PROJECT_ROOT / "repo")
 ).resolve()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retry helper for network operations
+# ─────────────────────────────────────────────────────────────────────────────
+def _retry_with_backoff(
+    func,
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+    backoff_multiplier: float = 2.0,
+    exceptions=(Exception,),
+):
+    """
+    Retry a function with exponential backoff.
+
+    Args:
+        func: Callable to retry
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds before first retry
+        backoff_multiplier: Multiplier for exponential backoff
+        exceptions: Tuple of exception types to catch and retry
+
+    Returns:
+        Result of successful function call
+
+    Raises:
+        Last exception if all retries fail
+    """
+    delay = initial_delay
+    last_exception = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except exceptions as exc:
+            last_exception = exc
+            if attempt < max_retries:
+                logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries + 1} failed: {exc}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+                delay *= backoff_multiplier
+            else:
+                logger.error(
+                    f"All {max_retries + 1} attempts failed. Last error: {exc}"
+                )
+
+    raise last_exception or RuntimeError("Retry failed with no exception captured")
+
 # Automated fix tools for mechanical/static problems (formatting, linting, style)
 AUTOMATED_TOOLS = [
     {
@@ -200,20 +249,55 @@ def _make_context_llm(
     model_name = resolve_model_alias(context_model or model_config.get("model_name"))
     model_kwargs = dict(model_config.get("model_kwargs") or {})
 
+    # These options belong to the repair agent, which is given a Bash tool.
+    # Phase A/C context extraction is a plain text completion, so forwarding
+    # tool controls without a tools array makes OpenAI reject the request.
+    for tool_only_param in (
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "functions",
+        "function_call",
+    ):
+        model_kwargs.pop(tool_only_param, None)
+
+    # GPT-5 and o-series reasoning models should use the provider's default
+    # sampling behavior. The shared CI config's temperature is intended for
+    # MiniMax and can be invalid for OpenAI reasoning models.
+    lowered_model_name = str(model_name or "").lower().removeprefix("openai/")
+    if lowered_model_name.startswith("gpt-5") or (
+        len(lowered_model_name) > 1
+        and lowered_model_name[0] == "o"
+        and lowered_model_name[1].isdigit()
+    ):
+        model_kwargs.pop("temperature", None)
+
     if not model_name:
         logger.warning("[CIBench] Could not build context LLM: no model configured")
         return None
 
     def _call(prompt: str) -> str:
-        try:
+        def _make_llm_call():
             response = litellm.completion(
                 model=str(model_name),
                 messages=[{"role": "user", "content": prompt}],
                 **model_kwargs,
             )
-            return str(response.choices[0].message.content or "").strip()
+            content = str(response.choices[0].message.content or "").strip()
+            if not content:
+                raise RuntimeError("LLM returned empty content")
+            return content
+
+        try:
+            return _retry_with_backoff(
+                _make_llm_call,
+                max_retries=3,
+                initial_delay=2.0,
+                backoff_multiplier=2.0,
+                exceptions=(Exception,),
+            )
         except Exception as exc:
-            logger.warning("[CIBench] context LLM call failed: %s", exc)
+            logger.warning("[CIBench] context LLM call failed after retries: %s", exc)
             return ""
 
     return _call
@@ -439,15 +523,23 @@ def _load_hf_index() -> Dict[str, Dict[str, Any]]:
         _hf_logger.setLevel(_logging.ERROR)
 
         # Try common split names - dataset uses 'train' as the only split
-        try:
+        def _load_with_retries():
             for split_name in ("test", "train", "validation", "all"):
                 try:
                     ds = load_dataset(_HF_DATASET_NAME, split=split_name)
-                    break
+                    return ds
                 except Exception:
                     continue
-            else:
-                raise RuntimeError(f"No usable split found in {_HF_DATASET_NAME}")
+            raise RuntimeError(f"No usable split found in {_HF_DATASET_NAME}")
+
+        try:
+            ds = _retry_with_backoff(
+                _load_with_retries,
+                max_retries=3,
+                initial_delay=2.0,
+                backoff_multiplier=2.0,
+                exceptions=(Exception,),
+            )
         finally:
             _hf_logger.setLevel(_prev_level)
         index: Dict[str, Dict[str, Any]] = {}
@@ -1172,39 +1264,99 @@ def setup_local_environment(
         logger.info(
             "[CIBench] Cloning %s -> shared cache %s", clone_url, repo_cache_path
         )
-        result = subprocess.run(
-            ["git", "clone", "--quiet", clone_url, str(repo_cache_path)],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"git clone failed for {repo_owner}/{repo_name}:\n{result.stderr[:800]}"
+
+        def _do_clone():
+            result = subprocess.run(
+                ["git", "clone", "--quiet", clone_url, str(repo_cache_path)],
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
+            if result.returncode != 0:
+                error_msg = result.stderr[:800]
+                # Check if it's a network-related error that we should retry
+                if any(
+                    err in error_msg.lower()
+                    for err in [
+                        "could not resolve host",
+                        "connection",
+                        "network",
+                        "timeout",
+                        "temporary failure",
+                    ]
+                ):
+                    raise RuntimeError(
+                        f"Network error during git clone for {repo_owner}/{repo_name}:\n{error_msg}"
+                    )
+                else:
+                    # Non-network error, don't retry
+                    raise RuntimeError(
+                        f"git clone failed for {repo_owner}/{repo_name}:\n{error_msg}"
+                    )
+            return result
+
+        _retry_with_backoff(
+            _do_clone,
+            max_retries=3,
+            initial_delay=2.0,
+            backoff_multiplier=2.0,
+            exceptions=(RuntimeError,),
+        )
     else:
         logger.info("[CIBench] Reusing shared cache at %s", repo_cache_path)
-        fetch_result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo_cache_path),
-                "fetch",
-                "--all",
-                "--tags",
-                "--prune",
-                "--quiet",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if fetch_result.returncode != 0:
-            logger.warning(
-                "[CIBench] git fetch failed for shared cache %s:\n%s",
-                repo_cache_path,
-                fetch_result.stderr[:800],
+
+        def _do_fetch():
+            fetch_result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo_cache_path),
+                    "fetch",
+                    "--all",
+                    "--tags",
+                    "--prune",
+                    "--quiet",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
+            if fetch_result.returncode != 0:
+                error_msg = fetch_result.stderr[:800]
+                # Check if it's a network-related error
+                if any(
+                    err in error_msg.lower()
+                    for err in [
+                        "could not resolve host",
+                        "connection",
+                        "network",
+                        "timeout",
+                        "temporary failure",
+                    ]
+                ):
+                    raise RuntimeError(
+                        f"Network error during git fetch for {repo_cache_path}:\n{error_msg}"
+                    )
+                else:
+                    # Non-network error, just log warning
+                    logger.warning(
+                        "[CIBench] git fetch failed for shared cache %s:\n%s",
+                        repo_cache_path,
+                        error_msg,
+                    )
+            return fetch_result
+
+        try:
+            _retry_with_backoff(
+                _do_fetch,
+                max_retries=3,
+                initial_delay=2.0,
+                backoff_multiplier=2.0,
+                exceptions=(RuntimeError,),
+            )
+        except RuntimeError:
+            # Fetch failure is not critical, we can continue with cached version
+            pass
     _ensure_commit_available(repo_cache_path, sha_fail, remote="origin")
 
     # ── Per-instance working copy ─────────────────────────────────────────────
@@ -1279,15 +1431,100 @@ def setup_local_environment(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _repair_strategy_text(strategy: Any) -> str:
+    """Render MemoryPlugin repair guidance without discarding its structure."""
+    if not strategy:
+        return ""
+    if not isinstance(strategy, dict):
+        return str(strategy)
+
+    lines = []
+    summary = str(strategy.get("summary") or "").strip()
+    if summary:
+        lines.append(f"Summary: {summary}")
+
+    actions = strategy.get("actions") or []
+    if not isinstance(actions, list):
+        actions = [actions]
+    for index, action in enumerate(actions, 1):
+        if action:
+            lines.append(f"Action {index}: {action}")
+
+    validation_cmd = str(
+        strategy.get("validation_cmd")
+        or strategy.get("verification_cmd")
+        or ""
+    ).strip()
+    if validation_cmd:
+        lines.append(f"Validate: {validation_cmd}")
+
+    pitfalls = strategy.get("pitfalls") or []
+    if not isinstance(pitfalls, list):
+        pitfalls = [pitfalls]
+    for pitfall in pitfalls:
+        if pitfall:
+            lines.append(f"Avoid: {pitfall}")
+
+    return "\n".join(lines)
+
+
+def _normalize_memory_problem_for_agent(
+    problem: Dict[str, Any], problem_id: int
+) -> Dict[str, Any]:
+    """Preserve MemoryPlugin data while adding Mini-SWE's task-field aliases."""
+    normalized = dict(problem)
+    repair_strategy = normalized.get("repair_strategy")
+    has_repair_strategy = isinstance(repair_strategy, dict) and bool(repair_strategy)
+    problem_type = str(normalized.get("problem_type") or "").strip().lower()
+
+    if problem_type == "ci_failure" or (
+        not problem_type and not has_repair_strategy
+    ):
+        source = "ci failure"
+    else:
+        source = "previous experience"
+
+    verification_cmd = (
+        normalized.get("verification_cmd")
+        or normalized.get("validation_cmd")
+        or (
+            repair_strategy.get("validation_cmd")
+            if isinstance(repair_strategy, dict)
+            else ""
+        )
+    )
+
+    normalized.update(
+        {
+            "problem_id": normalized.get("problem_id") or problem_id,
+            "problem_statement": normalized.get("problem_statement")
+            or normalized.get("problem")
+            or "",
+            "error_details": normalized.get("error_details")
+            or normalized.get("failure_signals")
+            or [],
+            "fix_strategy": normalized.get("fix_strategy")
+            or _repair_strategy_text(repair_strategy),
+            "verification_cmd": verification_cmd or "",
+            "validation_cmd": verification_cmd or "",
+            "issue_type": normalized.get("issue_type") or problem_type,
+            "source": source,
+        }
+    )
+    return normalized
+
+
 def _analyze_repair_with_llm(
     problem: Dict[str, Any], context_llm: Any
 ) -> Dict[str, Any]:
     """Analyze problem and generate repair plan (automated tool or manual fix)."""
 
-    problem_statement = problem.get("problem_statement", "")
-    error_details = problem.get("error_details", [])
+    problem_statement = problem.get("problem_statement") or problem.get("problem", "")
+    error_details = problem.get("error_details") or problem.get("failure_signals", [])
     root_cause = problem.get("root_cause", "")
-    fix_strategy = problem.get("fix_strategy", "")
+    fix_strategy = problem.get("fix_strategy") or _repair_strategy_text(
+        problem.get("repair_strategy")
+    )
     files = problem.get("files", [])
 
     file_items = files if isinstance(files, list) else [files]
@@ -1431,13 +1668,20 @@ def _build_single_problem_task(
     """Build focused repair task with automated tool detection or manual repair instructions."""
 
     # Extract problem fields
-    problem_statement = problem.get("problem_statement", "")
-    error_details = problem.get("error_details", [])
+    problem_statement = problem.get("problem_statement") or problem.get("problem", "")
+    error_details = problem.get("error_details") or problem.get("failure_signals", [])
     root_cause = problem.get("root_cause", "")
-    fix_strategy = problem.get("fix_strategy", "")
+    fix_strategy = problem.get("fix_strategy") or _repair_strategy_text(
+        problem.get("repair_strategy")
+    )
     files = problem.get("files", [])
-    issue_type = problem.get("issue_type", "")
+    issue_type = problem.get("issue_type") or problem.get("problem_type", "")
     failure_type = problem.get("failure_type") or problem.get("error_type") or ""
+    verification_cmd = (
+        problem.get("verification_cmd")
+        or problem.get("validation_cmd")
+        or ""
+    )
 
     # Combine problem_statement and error_details if both exist
     full_problem = problem_statement
@@ -1447,6 +1691,8 @@ def _build_single_problem_task(
                 msg = detail.get("message", "")
                 if msg and msg not in full_problem:
                     full_problem += f"\n{msg}"
+            elif detail and str(detail) not in full_problem:
+                full_problem += f"\n{detail}"
 
     # Analyze repair approach with LLM
     repair_type = "manual"
@@ -1500,6 +1746,9 @@ Affected Files:
 
 Repair Plan:
 {repair_plan_formatted}
+
+Validation Command:
+{verification_cmd or "Determine from the CI workflow and run the relevant check."}
 """
 
 
@@ -1831,6 +2080,12 @@ def _run_sequential_repair(
             previous_start_time = getattr(agent, "_start_time", start_time)
             previous_wall_limit = getattr(agent.config, "wall_time_limit_seconds", 0)
 
+            # Each atomic problem is a fresh agent run in the same repaired
+            # workspace. Reset per-run counters so an earlier problem cannot
+            # exhaust the next problem's step/cost budget.
+            agent.n_calls = 0
+            agent.cost = 0.0
+
             # ALWAYS set timeout for THIS problem (don't rely on previous state)
             agent.config.wall_time_limit_seconds = per_problem_timeout
             agent._start_time = start_time
@@ -2035,6 +2290,7 @@ def process_instance(
     ci_ctx = {}
     ci_memory: Dict[str, Any] = {}  # full memory retrieval result - saved to trajectory
     extra_info: Dict[str, Any] = {}
+    prediction_ready = True
 
     # ── Phase 1: build enriched CI problem statement using shared cache ──────
     try:
@@ -2114,26 +2370,11 @@ def process_instance(
                     # Determine source based on whether problem has repair strategy:
                     # - BASELINE mode: no repair_strategy -> "ci failure"
                     # - MEMORY modes (L1/L2/L3): has repair_strategy -> "previous experience"
-                    separate_problems = []
-                    for prob in problems_from_memory:
-                        # Check if problem has a non-empty repair strategy
-                        repair_strat = prob.get("repair_strategy")
-                        has_repair = (
-                            repair_strat is not None
-                            and isinstance(repair_strat, dict)
-                            and bool(repair_strat)
-                        )
-                        source = "previous experience" if has_repair else "ci failure"
-
-                        separate_problems.append({
-                            "source": source,
-                            "problem": prob.get("problem", ""),
-                            "root_cause": prob.get("root_cause", ""),
-                            "files": prob.get("files", []),
-                            "failure_type": prob.get("failure_type", ""),
-                            "repair_strategy": prob.get("repair_strategy", {}),
-                            "validation_cmd": prob.get("verification_cmd") or prob.get("validation_cmd", ""),
-                        })
+                    separate_problems = [
+                        _normalize_memory_problem_for_agent(prob, index)
+                        for index, prob in enumerate(problems_from_memory, 1)
+                        if isinstance(prob, dict)
+                    ]
 
                     # Add to ci_memory in the expected structure
                     if "llm_selection" not in ci_memory:
@@ -2238,7 +2479,7 @@ def process_instance(
         # ══════════════════════════════════════════════════════════════════
         # SEQUENTIAL REPAIR: Fix problems one-by-one, collect ONE final diff
         # ══════════════════════════════════════════════════════════════════
-        if problems and len(problems) > 1:
+        if problems:
             # SEQUENTIAL REPAIR MODE: Fix problems one at a time in same workspace
             # Agent fixes Problem 1 → modifies files
             # Agent fixes Problem 2 → modifies more files
@@ -2267,15 +2508,16 @@ def process_instance(
                 f"{sequential_metadata.get('total_problems', 0)} problems fixed"
             )
         else:
-            # STANDARD MODE: Fix all problems together (old behavior)
-            logger.info("[CIBench] Standard repair mode: single agent call")
-            info = agent.run(task)
-            exit_status = info.get("exit_status")
-
-            # Agent submits via:
-            #   echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat <testbed_path>/patch.txt
-            raw_submission = info.get("submission") or ""
-            diff = _extract_diff(raw_submission)
+            # Never replace failed/empty decomposition with a generic task: that
+            # produces a patch unrelated to the atomic CI problems and then marks
+            # the issue complete. Leave it retryable instead.
+            prediction_ready = False
+            exit_status = "problem_generation_failed"
+            extra_info["problem_generation_error"] = (
+                "MemoryPlugin returned no CI-derived problems for the selected "
+                f"ablation level {memory_ablation_levels or 'baseline'}"
+            )
+            logger.error("[CIBench] %s", extra_info["problem_generation_error"])
 
         # ── Phase 4: save memory record ───────────────────────────────────────
         if save_memory and diff and ci_ctx and memory_root:
@@ -2324,7 +2566,13 @@ def process_instance(
             )
             logger.info("[CIBench] Saved trajectory to '%s'", traj_path)
 
-        update_preds_file(output_dir / "preds.json", instance_id, sha_fail, diff)
+        if prediction_ready:
+            update_preds_file(output_dir / "preds.json", instance_id, sha_fail, diff)
+        else:
+            logger.error(
+                "[CIBench] Not recording %s in preds.json; problem generation must be retried",
+                instance_id,
+            )
         progress_manager.on_instance_end(instance_id, exit_status)
 
 

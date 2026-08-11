@@ -613,6 +613,39 @@ def validation_markdown(verification: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def _ci_problem_to_unified(
+    ci_failure: dict[str, Any], ci_problem: dict[str, Any]
+) -> dict[str, Any]:
+    """Preserve either the current Stage 0 schema or the legacy CI schema."""
+    files = ci_problem.get("files") or []
+    if not files and ci_problem.get("file"):
+        files = [ci_problem["file"]]
+    elif not isinstance(files, list):
+        files = [files]
+
+    failure_signals = ci_problem.get("failure_signals") or []
+    if not failure_signals:
+        failure_signals = extract_error_signals_from_ci(ci_failure, ci_problem)
+
+    return {
+        **ci_problem,
+        "problem": ci_problem.get("problem")
+        or ci_problem.get("reason")
+        or f"Fix {ci_problem.get('file', 'CI failure')}",
+        "root_cause": ci_problem.get("root_cause")
+        or "Analyze from CI failure context below",
+        "files": files,
+        "failure_signals": failure_signals,
+        "repair_strategy": None,
+        "failure_type": ci_problem.get("failure_type")
+        or infer_failure_type(ci_problem),
+        "verification_cmd": ci_problem.get("verification_cmd")
+        or ci_problem.get("validation_cmd")
+        or ci_problem.get("failed_cmd", ""),
+        "source": "ci_failure",
+    }
+
+
 def build_unified_problem_list(
     ci_failure: dict[str, Any],
     ci_problems: list[dict[str, Any]],
@@ -638,19 +671,10 @@ def build_unified_problem_list(
     # Baseline: Use CI decomposition only (no memory)
     if ablation.lower() == "baseline":
         print(f"[DEBUG] Baseline mode: Building {len(ci_problems)} CI problems (no memory)")
-        unified = []
-        for ci_prob in ci_problems:
-            ci_signals = extract_error_signals_from_ci(ci_failure, ci_prob)
-            unified.append({
-                "problem": ci_prob.get("reason") or f"Fix {ci_prob.get('file', 'CI failure')}",
-                "root_cause": "Analyze from CI failure context below",
-                "files": [ci_prob.get("file")] if ci_prob.get("file") else [],
-                "failure_signals": ci_signals,
-                "repair_strategy": None,  # No memory guidance
-                "failure_type": infer_failure_type(ci_prob),
-                "verification_cmd": ci_prob.get("failed_cmd", ""),
-                "source": "ci_failure",
-            })
+        unified = [
+            _ci_problem_to_unified(ci_failure, ci_prob)
+            for ci_prob in ci_problems
+        ]
 
         # Add sequential numbers
         for idx, prob in enumerate(unified, 1):
@@ -669,19 +693,10 @@ def build_unified_problem_list(
             print(f"[DEBUG] Falling back to CI decomposition: {len(ci_problems)} problems")
 
             # Use same structure as baseline mode
-            unified = []
-            for ci_prob in ci_problems:
-                ci_signals = extract_error_signals_from_ci(ci_failure, ci_prob)
-                unified.append({
-                    "problem": ci_prob.get("reason") or f"Fix {ci_prob.get('file', 'CI failure')}",
-                    "root_cause": "Analyze from CI failure context below",
-                    "files": [ci_prob.get("file")] if ci_prob.get("file") else [],
-                    "failure_signals": ci_signals,
-                    "repair_strategy": None,  # No memory guidance
-                    "failure_type": infer_failure_type(ci_prob),
-                    "verification_cmd": ci_prob.get("failed_cmd", ""),
-                    "source": "ci_failure",  # Mark as CI-derived
-                })
+            unified = [
+                _ci_problem_to_unified(ci_failure, ci_prob)
+                for ci_prob in ci_problems
+            ]
 
             # Add sequential numbers
             for idx, prob in enumerate(unified, 1):
