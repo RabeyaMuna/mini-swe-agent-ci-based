@@ -265,12 +265,29 @@ def _make_context_llm(
     # sampling behavior. The shared CI config's temperature is intended for
     # MiniMax and can be invalid for OpenAI reasoning models.
     lowered_model_name = str(model_name or "").lower().removeprefix("openai/")
-    if lowered_model_name.startswith("gpt-5") or (
+    is_gpt5_or_o_series = lowered_model_name.startswith("gpt-5") or (
         len(lowered_model_name) > 1
         and lowered_model_name[0] == "o"
         and lowered_model_name[1].isdigit()
-    ):
+    )
+
+    # GPT-4o and newer models (GPT-5, o-series) use 'max_completion_tokens' instead of 'max_tokens'
+    is_gpt4o_or_newer = (
+        is_gpt5_or_o_series
+        or lowered_model_name.startswith("gpt-4o")
+        or lowered_model_name.startswith("chatgpt-4o")
+    )
+
+    if is_gpt5_or_o_series:
         model_kwargs.pop("temperature", None)
+
+    if is_gpt4o_or_newer and "max_tokens" in model_kwargs:
+        # Convert max_tokens to max_completion_tokens for newer OpenAI models
+        model_kwargs["max_completion_tokens"] = model_kwargs.pop("max_tokens")
+        logger.info(
+            "[CIBench] Converted max_tokens -> max_completion_tokens for %s",
+            model_name
+        )
 
     if not model_name:
         logger.warning("[CIBench] Could not build context LLM: no model configured")
@@ -2419,7 +2436,28 @@ def process_instance(
 
     try:
         env, testbed_path = setup_local_environment(config, instance, instance_dir)
-        model_ = get_model(config=config.get("model", {}))
+
+        # Fix max_tokens -> max_completion_tokens for GPT-4o and newer models
+        model_config = dict(config.get("model", {}))
+        model_kwargs = dict(model_config.get("model_kwargs", {}))
+        model_name = str(resolve_model_alias(model_config.get("model_name", ""))).lower().removeprefix("openai/")
+
+        is_gpt4o_or_newer = (
+            model_name.startswith("gpt-5")
+            or model_name.startswith("gpt-4o")
+            or model_name.startswith("chatgpt-4o")
+            or (len(model_name) > 1 and model_name[0] == "o" and model_name[1].isdigit())
+        )
+
+        if is_gpt4o_or_newer and "max_tokens" in model_kwargs:
+            model_kwargs["max_completion_tokens"] = model_kwargs.pop("max_tokens")
+            model_config["model_kwargs"] = model_kwargs
+            logger.info(
+                "[CIBench] Converted max_tokens -> max_completion_tokens for agent model: %s",
+                model_name
+            )
+
+        model_ = get_model(config=model_config)
         agent = ProgressTrackingAgent(
             model_,
             env,
