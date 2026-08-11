@@ -87,14 +87,22 @@ def cleanup_predictions_file(file_path: Path, dry_run: bool = False) -> tuple[in
     return original_count, removed_count
 
 
-def find_prediction_files(path: Path) -> list[Path]:
+def find_prediction_files(path: Path, verbose: bool = False) -> list[Path]:
     """Find all preds.json and predictions.json files in a directory tree."""
     if path.is_file():
         return [path]
 
+    if verbose:
+        print(f"🔍 Scanning {path} for prediction files...")
+
     files = []
     for pattern in ['**/preds.json', '**/predictions.json']:
-        files.extend(path.glob(pattern))
+        if verbose:
+            print(f"   Looking for {pattern}...")
+        matches = list(path.glob(pattern))
+        if verbose and matches:
+            print(f"   Found {len(matches)} file(s)")
+        files.extend(matches)
 
     return sorted(set(files))
 
@@ -130,6 +138,11 @@ Examples:
         action='store_true',
         help='Do not create backup files (not recommended)'
     )
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Show detailed progress information'
+    )
 
     args = parser.parse_args()
 
@@ -138,24 +151,28 @@ Examples:
         sys.exit(1)
 
     # Find all prediction files
-    files = find_prediction_files(args.path)
+    files = find_prediction_files(args.path, verbose=args.verbose)
 
     if not files:
         print(f"⚠️  No prediction files found in {args.path}")
         print("   Looking for: preds.json, predictions.json")
         sys.exit(0)
 
-    print(f"Found {len(files)} prediction file(s)")
+    print(f"\n📋 Found {len(files)} prediction file(s)")
     print()
 
     # Process each file
     total_entries = 0
     total_removed = 0
 
-    for file_path in files:
+    for idx, file_path in enumerate(files, 1):
+        if args.verbose or len(files) > 1:
+            print(f"[{idx}/{len(files)}] Processing {file_path.relative_to(args.path if args.path.is_dir() else args.path.parent)}...")
         count, removed = cleanup_predictions_file(file_path, dry_run=args.dry_run)
         total_entries += count
         total_removed += removed
+        if args.verbose:
+            print()
 
     # Summary
     print()
