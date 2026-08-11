@@ -78,11 +78,11 @@ def main() -> None:
         slice_spec="",
         shuffle=False,
         redo_existing=False,
-        memory_enabled=memory_enabled,
-        memory_root=str(memory_root) if memory_enabled else None,
+        memory_enabled=True,  # Always enable for custom plugin (even baseline uses decompose_only)
+        memory_root=str(memory_root),
         memory_top_k=args.memory_top_k,
         memory_ablation_levels=memory_levels,
-        memory_plugin_path=None,
+        memory_plugin_path="memory_plugin.memory_plugin:MemoryPlugin",  # Use custom plugin!
         save_memory=True,
         context_model=resolved_model,
         # NOTE: step_limit, cost_limit, wall_time_limit_seconds removed
