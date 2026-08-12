@@ -14,12 +14,21 @@ Usage:
 import logging
 import os
 import time
+import warnings
 from typing import Any
 
 import litellm
 
 from utilities.model_registry import resolve_model_alias
 from utilities.model_token_config import get_output_safe_tokens
+
+# Suppress Pydantic serialization warnings from LiteLLM responses
+warnings.filterwarnings(
+    "ignore",
+    message=".*Pydantic serializer warnings.*",
+    category=UserWarning,
+    module="pydantic.main"
+)
 
 LOGGER = logging.getLogger(__name__)
 

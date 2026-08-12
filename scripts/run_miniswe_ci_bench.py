@@ -8,10 +8,19 @@ importing the Typer command function directly and invoking it with options.
 from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 from typing import Optional
 
 from utilities.model_registry import resolve_model_alias, model_output_name
+
+# Suppress Pydantic serialization warnings from LiteLLM/minimax responses
+warnings.filterwarnings(
+    "ignore",
+    message=".*Pydantic serializer warnings.*",
+    category=UserWarning,
+    module="pydantic.main"
+)
 
 
 def _ablation_to_miniswe(ablation: str) -> tuple[bool, str]:
