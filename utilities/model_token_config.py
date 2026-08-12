@@ -79,9 +79,9 @@ MODEL_CONFIGS: dict[str, ModelConfig] = {
         "supports_large_output": True,  # Supports 100k+ outputs
     },
     "gpt-5-mini": {
-        "input_context_window": 400_000,  # GPT-5-mini: 400k total (same as 5.4-mini)
-        "input_chunk_tokens": 200_000,  # Safe: 200k input + 128k output + 20k prompt = 348k <= 400k OK
-        "input_chunk_chars": 800_000,  # ~4 chars per token
+        "input_context_window": 272_000,  # GPT-5-mini: 272k INPUT limit (not 400k total)
+        "input_chunk_tokens": 100_000,  # FIXED: 100k chunk + 30k prompt overhead + buffer = ~140k <= 272k INPUT limit
+        "input_chunk_chars": 400_000,  # ~4 chars per token
         "output_max_tokens": 128_000,  # GPT-5-mini max output: 128k
         "output_safe_tokens": 120_000,  # Safe limit with buffer (~94% of max)
         "l1_chunk_size": 40,  # L1s per chunk (increased due to larger context)
@@ -95,9 +95,9 @@ MODEL_CONFIGS: dict[str, ModelConfig] = {
         "supports_large_output": True,  # Supports large outputs (128k)
     },
     "gpt-5.4": {
-        "input_context_window": 400_000,  # GPT-5.4-mini: 400k total, 272k max input
-        "input_chunk_tokens": 200_000,  # Safe: 200k input + 128k output + 20k prompt = 348k <= 400k OK
-        "input_chunk_chars": 800_000,  # ~4 chars per token
+        "input_context_window": 272_000,  # GPT-5.4-mini: 272k INPUT limit (not 400k total)
+        "input_chunk_tokens": 100_000,  # FIXED: 100k chunk + 30k prompt overhead + buffer = ~140k <= 272k INPUT limit
+        "input_chunk_chars": 400_000,  # ~4 chars per token
         "output_max_tokens": 128_000,  # GPT-5.4-mini max output: 128k
         "output_safe_tokens": 120_000,  # Safe limit with buffer (~94% of max)
         "l1_chunk_size": 40,  # L1s per chunk (increased due to larger context)

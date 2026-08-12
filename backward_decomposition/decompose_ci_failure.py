@@ -535,14 +535,29 @@ def _compact_context_for_diff_analysis(
     issue: dict,
     benchmark_context: dict[str, Any],
 ) -> dict[str, Any]:
+    """
+    Build CI failure context for diff analysis.
+
+    IMPORTANT: Include ALL detailed information from log_analysis so decomposition
+    can create SPECIFIC problems, not vague generic ones!
+    """
     context = benchmark_context.get("context") or {}
+    log_analysis = benchmark_context.get("log_analysis") or {}
+
     return {
         "issue_id": _issue_id(issue),
         "repo": issue.get("repo_name", issue.get("repo")),
         "workflow_path": benchmark_context.get("workflow_path"),
+        # Summary level (quick overview)
         "overall_failure_reasons": context.get("overall_failure_reasons", []),
         "overall_error_types": context.get("overall_error_types", []),
         "failed_jobs": context.get("failed_jobs", []),
+        # DETAILED CONTEXT (from CILogAnalyzer) - THIS IS CRITICAL!
+        "error_context": log_analysis.get("error_context", []),  # Detailed explanation
+        "failure_signals": log_analysis.get("failure_signals", []),  # Observable patterns
+        "relevant_files": log_analysis.get("relevant_files", []),  # Files with line numbers
+        "error_types": log_analysis.get("error_types", []),  # Detailed with evidence
+        "failed_job": log_analysis.get("failed_job", []),  # Job/step/command details
     }
 
 

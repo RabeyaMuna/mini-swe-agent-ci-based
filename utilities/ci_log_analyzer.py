@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from utilities.model_token_config import get_input_chunk_tokens
+from utilities.llm_invoker import invoke_llm_with_retry
 
 # ── Optional third-party dependencies ─────────────────────────────────────────
 try:
@@ -247,7 +248,25 @@ class CILogAnalyzerLLM:
             print(f"\nProcessing Step: {step_name}")
 
             try:
-                log_text = log if isinstance(log, str) else "\n".join(log)
+                # Handle different log formats
+                if isinstance(log, str):
+                    log_text = log
+                elif isinstance(log, list):
+                    # List of strings: join them
+                    if log and isinstance(log[0], str):
+                        log_text = "\n".join(log)
+                    # List of dicts with 'log' key: extract and join
+                    elif log and isinstance(log[0], dict):
+                        log_text = "\n".join(item.get("log", "") for item in log if isinstance(item, dict))
+                    else:
+                        log_text = ""
+                else:
+                    log_text = str(log) if log else ""
+
+                if not log_text or len(log_text.strip()) == 0:
+                    print(f"  ⚠️  Skipping step '{step_name}': empty log content")
+                    continue
+
                 total_tokens = self._estimate_tokens(log_text)
 
                 print(f"Token count for '{step_name}': {total_tokens}")
@@ -728,7 +747,7 @@ of the CI failure for this step using the following STRICT JSON schema
             try:
                 # Use invoke_llm_with_retry with max_tokens as CEILING (not target)
                 # LLM outputs only what's needed, up to this limit
-                from utilities.llm_invoker import invoke_llm_with_retry
+      
                 response = invoke_llm_with_retry(
                     llm=self.llm,
                     prompt=prompt,
@@ -997,14 +1016,36 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
     # ------------------------------------------------------------------
     def run(self) -> dict[str, Any]:
         print(f"Fully Autonomous Execution for Commit: {self.sha_fail}")
+
+        # Check if logs are available (use self.ci_log for CILogAnalyzerLLM)
+        logs_to_check = getattr(self, 'logs', None) or getattr(self, 'ci_log', None)
+        if not logs_to_check or (isinstance(logs_to_check, str) and len(logs_to_check.strip()) == 0):
+            return {
+                "error": "No CI logs available in dataset for this issue.",
+                "sha_fail": self.sha_fail,
+                "id": self.task_id,
+                "reason": "empty_logs",
+            }
+
         selected_logs = self.ci_log_analysis()
+        if not selected_logs:
+            return {
+                "error": "CI log analysis produced no usable step data.",
+                "sha_fail": self.sha_fail,
+                "id": self.task_id,
+                "reason": "no_steps_extracted",
+            }
+
         log_details = self.generate_log_summary(selected_logs)
         if not log_details:
             return {
-                "error": "No step summaries produced — all CI log steps failed to parse.",
+                "error": "Failed to generate structured summary from CI log steps.",
                 "sha_fail": self.sha_fail,
                 "id": self.task_id,
+                "reason": "summary_generation_failed",
+                "steps_count": len(selected_logs),
             }
+
         generated_summary = self.full_content_summary(
             log_details, workflow_details=self.workflow
         )
@@ -1416,7 +1457,11 @@ def _make_langchain_llm(llm: Any) -> Any:
         def __init__(self, fn: Any) -> None:
             self._fn = fn
 
-        def invoke(self, messages: Any) -> Any:
+        def invoke(self, messages: Any, **_kwargs: Any) -> Any:
+            # Generation controls such as ``max_tokens`` are optional hints.
+            # Plain callables do not expose a standard way to receive them, so
+            # accept and ignore those controls instead of failing the summary
+            # stage with an unexpected-keyword TypeError.
             # Extract text from a list of messages or pass through a plain string
             if isinstance(messages, list):
                 content = " ".join(getattr(m, "content", str(m)) for m in messages)
@@ -1506,12 +1551,16 @@ def _run_log_analysis(
     output_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """
-    Run CI log analysis on an instance.
+    Run CI log analysis on an instance with caching.
+
+    Checks cache first for faster reuse across ablations and agents.
+    If not cached, generates analysis and saves to shared cache.
 
     Args:
         instance: Benchmark instance with logs, workflow, sha_fail
         llm: LLM instance
         model: Model name
+        output_dir: Optional output directory for intermediate files
 
     Returns:
         Analysis result with error_context, relevant_files, error_types, failed_job
@@ -1522,17 +1571,36 @@ def _run_log_analysis(
     workflow_path = str(instance.get("workflow_path") or "")
     logs = instance.get("logs") or instance.get("log") or ""
 
-    analyzer = CILogAnalyzer(
-        logs=logs,
+    # Use shared cache utility - checks cache first, generates if missing
+    from utilities.ci_cache import load_structured_ci_failure
+
+    result = load_structured_ci_failure(
         sha_fail=sha_fail,
+        issue_id=task_id,
+        logs=logs,
         workflow=workflow,
         workflow_path=workflow_path,
         llm=llm,
         model_name=model,
-        task_id=task_id,
-        output_dir=output_dir,
     )
-    return analyzer.run()
+
+    # If cache utility didn't return a result, fall back to direct analysis
+    # (shouldn't happen, but defensive programming)
+    if not result:
+        print(f"    Warning: Cache utility returned empty result, running analyzer directly")
+        analyzer = CILogAnalyzer(
+            logs=logs,
+            sha_fail=sha_fail,
+            workflow=workflow,
+            workflow_path=workflow_path,
+            llm=llm,
+            model_name=model,
+            task_id=task_id,
+            output_dir=output_dir,
+        )
+        result = analyzer.run()
+
+    return result
 
 
 def _log_analysis_to_context(

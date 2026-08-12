@@ -446,7 +446,7 @@ PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
 Results are written incrementally under:
 
 ```text
-results/miniswe-agent/<ablation>_<model>/
+results/miniswe-agent/<direction>/<ablation>_<model>/
 ```
 
 ### Convenience wrapper
@@ -473,7 +473,13 @@ issue_ids  ablation  direction  model  optional_repo_slug  dataset  workers
 
 Pass an empty issue list (`""`) to use every ID in
 `data/eval_issue_ids.json`. Pass `all` for the ablation or `both` for the
-direction to run all supported combinations.
+direction to run all supported combinations. The optional fifth argument also
+accepts comma-separated short repository names or exact `owner/repo` slugs.
+
+```bash
+bash ./run_miniswe_direct.sh "" BASELINE backward gpt-5.4-mini \
+  "agno,axolotl,camel,crewai,django-import-export" data/eval_set.jsonl 4
+```
 
 > The wrapper automatically loads `.env` and prefers `.venv-miniswe`. It falls
 > back to `.venv-codex` only when the dedicated Mini-SWE environment is absent.
@@ -582,19 +588,19 @@ tail -f codex.log
 ### View Results
 
 ```bash
-# Results are in: results/codex/<ablation>_<model>/<issue-id>/
-ls -la results/codex/baseline_gpt-5_4-mini/416/
+# Results are in: results/codex/<direction>/<ablation>_<model>/<issue-id>/
+ls -la results/codex/backward/baseline_gpt-5_4-mini/416/
 
 # View specific result
-cat results/codex/baseline_gpt-5_4-mini/416/result.json | python3 -m json.tool
+cat results/codex/backward/baseline_gpt-5_4-mini/416/result.json | python3 -m json.tool
 
 # View generated patch
-cat results/codex/baseline_gpt-5_4-mini/416/patch.diff
+cat results/codex/backward/baseline_gpt-5_4-mini/416/patch.diff
 ```
 
 Syntax
 ```bash
-bash ./run_codex_direct.sh "<ids or empty>" <ablation> <direction> <model> [repo_slug] [dataset] [workers]
+bash ./run_codex_direct.sh "<ids or empty>" <ablation> <direction> <model> [repo_filters] [dataset] [workers]
 ```
 
 Examples
@@ -610,12 +616,20 @@ bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini-2026-03-17 "" data/
 
 # Filter issues by repo slug (use dataset to expand IDs)
 bash ./run_codex_direct.sh "" L1 backward minimax/minimax-m2.5 agno-agi/agno data/eval_set.jsonl 4
+
+# Filter by several short repo names; short names include every matching owner
+bash ./run_codex_direct.sh "" L1+L2+L3 forward minimax/minimax-m2.5 \
+  "agno,axolotl,camel,crewai,django-import-export" data/eval_set.jsonl 4
 ```
 
 Outputs
-- results/codex/<ablation>_<model>/issue_id/ contains checkout, transcripts, patch.diff, result.json
+- results/codex/<direction>/<ablation>_<model>/issue_id/ contains checkout, transcripts, patch.diff, result.json
 - predictions.json is updated after each issue to avoid data loss on crashes
 - For multi‑problem issues, Codex fixes one problem at a time in the same checkout and writes one unified patch.diff
+
+Direction-specific output directories keep backward and forward resume state
+separate. Existing legacy results directly under `results/codex/` are preserved
+but are not treated as completed by new direction-aware runs.
 
 ## 4) Non‑OpenAI with Codex (MiniMax M2.5)
 
@@ -659,6 +673,16 @@ bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini "" data/eval_set.js
 bash ./run_codex_direct.sh "" baseline forward  gpt-5.4-mini "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini "" data/eval_set.jsonl 4
+
+bash ./run_codex_direct.sh \
+  "" \
+  L1+L2+L3 \
+  forward \
+  minimax/minimax-m2.5 \
+  "agno,axolotl,camel,crewai,django-import-export" \
+  data/eval_set.jsonl \
+  4
+
 ```
 
 #### MiniMax M2.5 (via OpenRouter)

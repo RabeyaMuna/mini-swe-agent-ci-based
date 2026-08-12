@@ -4,6 +4,7 @@
 # Memory Building & Retrieval
 sentence-transformers>=2.7.0
 fastembed>=0.8.0
+accelerate>=0.20.0  # Required for embeddings and memory retrieval
 
 # Data Processing
 numpy>=1.26.0

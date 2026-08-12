@@ -11,13 +11,51 @@ Cache file: data/decomposition_cache.json
 
 Format:
 {
-  "sha_fail": {
-    "query": {...},  # Input query (CI failure data)
-    "problems": [...],  # STAGE 0 output (decomposed problems)
-    "timestamp": "2024-01-15T10:30:00",
-    "model": "glm-5.2"
-  }
+  "sha_fail": [
+    {
+      "problem": "...",
+      "root_cause": "...",
+      "files": [...],
+      "failure_type": "...",
+      "failure_signals": [...],
+      "verification_cmd": "...",
+      "query": {
+        "l1": {
+          "problem": "...",
+          "root_cause": "...",
+          "files": [...],
+          "failure_types": [...],
+          "repo": "...",
+          "workflow_name": "...",  # From dataset
+          "workflow_path": "...",  # From dataset
+          "failure_signals": [...]
+        },
+        "l2": {
+          "problem": "...",
+          "root_cause": "...",
+          "files": [...],
+          "failure_types": [...],
+          "repo": "...",
+          "failure_signals": [...]
+          # NO workflow_name (repo-level only)
+        },
+        "l3": {
+          "problem": "...",  # Generic/abstract
+          "root_cause": "...",  # Generic/abstract
+          "failure_types": [...],
+          "failure_signals": [...]
+          # NO repo, NO workflow (universal)
+        }
+      }
+    }
+  ]
 }
+
+Note:
+- Cache stores problems array DIRECTLY at sha_fail key
+- workflow_name and workflow_path from dataset → stored in query.l1
+- validation_sequence is automatically removed
+- Old format is NOT supported - entries will be skipped
 """
 
 from __future__ import annotations
@@ -44,14 +82,29 @@ class DecompositionCache:
         self._load_cache()
 
     def _load_cache(self) -> None:
-        """Load cache from disk."""
+        """Load cache from disk (new format only)."""
         if not self.cache_file.exists():
             self._cache = {}
             return
 
         try:
             with open(self.cache_file) as f:
-                self._cache = json.load(f)
+                loaded_cache = json.load(f)
+
+            # NEW FORMAT ONLY: {"sha_fail": [problems]}
+            new_cache = {}
+            for sha_fail, entry in loaded_cache.items():
+                # Only accept list format (new format)
+                if isinstance(entry, list):
+                    # Clean problems (remove validation_sequence)
+                    new_cache[sha_fail] = [self._clean_problem(dict(p)) for p in entry if isinstance(p, dict)]
+                else:
+                    # Old format detected - skip it
+                    print(f"[Cache] Skipping old-format entry for {sha_fail[:12]} (run from scratch to regenerate)")
+                    continue
+
+            self._cache = new_cache
+
         except Exception as e:
             print(f"Warning: Failed to load decomposition cache: {e}")
             self._cache = {}
@@ -65,7 +118,7 @@ class DecompositionCache:
         except Exception as e:
             print(f"Warning: Failed to save decomposition cache: {e}")
 
-    def get(self, sha_fail: str) -> dict[str, Any] | None:
+    def get(self, sha_fail: str) -> list[dict[str, Any]] | None:
         """
         Get cached decomposition for a commit.
 
@@ -73,7 +126,7 @@ class DecompositionCache:
             sha_fail: Commit SHA (full or short)
 
         Returns:
-            Cached entry with 'query' and 'problems', or None if not cached
+            Cached problems array (direct list), or None if not cached
         """
         if not sha_fail:
             return None
@@ -89,6 +142,12 @@ class DecompositionCache:
 
         return None
 
+    def _clean_problem(self, problem: dict[str, Any]) -> dict[str, Any]:
+        """Remove unwanted fields from problem."""
+        # Remove validation_sequence (not needed)
+        problem.pop("validation_sequence", None)
+        return problem
+
     def set(
         self,
         sha_fail: str,
@@ -97,23 +156,23 @@ class DecompositionCache:
         model: str = "unknown",
     ) -> None:
         """
-        Cache decomposition result.
+        Cache decomposition result in simplified format.
 
         Args:
             sha_fail: Commit SHA
-            query: Input query (CI failure data)
+            query: Input query (CI failure data) - NOT saved, only used for reference
             problems: STAGE 0 output (decomposed problems)
-            model: Model used for decomposition
+            model: Model used for decomposition - NOT saved, only for backwards compatibility
         """
         if not sha_fail:
             return
 
-        self._cache[sha_fail] = {
-            "query": query,
-            "problems": problems,
-            "timestamp": datetime.now().isoformat(),
-            "model": model,
-        }
+        # Clean problems: remove validation_sequence and other unwanted fields
+        cleaned_problems = [self._clean_problem(dict(p)) for p in problems]
+
+        # Save problems array directly (simplified format)
+        # workflow_name and workflow_path are already in each problem's query (l1/l2/l3)
+        self._cache[sha_fail] = cleaned_problems
         self._save_cache()
 
     def has(self, sha_fail: str) -> bool:
@@ -139,16 +198,18 @@ class DecompositionCache:
 
     def get_query(self, sha_fail: str) -> dict[str, Any] | None:
         """
-        Get cached query for a commit.
+        DEPRECATED: Query is no longer stored in cache (workflow_name/workflow_path
+        are now in each problem's query.l1/l2 objects).
 
         Args:
             sha_fail: Commit SHA
 
         Returns:
-            Cached query, or None if not cached
+            None (query no longer stored)
         """
-        entry = self.get(sha_fail)
-        return entry.get("query") if entry else None
+        # Query is no longer stored - workflow_name and workflow_path
+        # are embedded in each problem's query.l1 and query.l2 objects
+        return None
 
     def get_problems(self, sha_fail: str) -> list[dict[str, Any]] | None:
         """
@@ -160,8 +221,8 @@ class DecompositionCache:
         Returns:
             Cached problems list, or None if not cached
         """
-        entry = self.get(sha_fail)
-        return entry.get("problems") if entry else None
+        # Cache now stores problems array directly
+        return self.get(sha_fail)
 
     def stats(self) -> dict[str, Any]:
         """
@@ -173,21 +234,18 @@ class DecompositionCache:
         if not self._cache:
             return {
                 "total_entries": 0,
-                "models": {},
                 "total_problems": 0,
             }
 
-        models = {}
         total_problems = 0
 
         for entry in self._cache.values():
-            model = entry.get("model", "unknown")
-            models[model] = models.get(model, 0) + 1
-            total_problems += len(entry.get("problems", []))
+            # Entry is now a list of problems directly
+            if isinstance(entry, list):
+                total_problems += len(entry)
 
         return {
             "total_entries": len(self._cache),
-            "models": models,
             "total_problems": total_problems,
             "avg_problems_per_entry": (
                 total_problems / len(self._cache) if self._cache else 0

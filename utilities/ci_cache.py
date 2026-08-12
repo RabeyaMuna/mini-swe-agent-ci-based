@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_DETAILS_PATH = PROJECT_ROOT / "data" / "log_details.json"  # Standardized location
 VALIDATION_CACHE_PATH = PROJECT_ROOT / "data" / "workflow_validation_cache.json"
+EXCEPTION_DIR = PROJECT_ROOT / "exception"  # Error logs go here
 
 
 def load_structured_ci_failure(
@@ -43,14 +45,29 @@ def load_structured_ci_failure(
         )
         result = analyzer.run()
         if result:
-            save_structured_ci_failure_cache(
-                issue_id=str(issue_id or sha_fail or "unknown"),
-                sha_fail=sha_fail,
-                structured_failure=result,
-            )
+            # Don't save error results to cache - log them to exception folder
+            if "error" in result:
+                _save_error_to_exception_folder(
+                    issue_id=str(issue_id or sha_fail or "unknown"),
+                    sha_fail=sha_fail,
+                    error_data=result,
+                )
+                print(f"    ⚠️  CI log parsing failed for {issue_id}: {result.get('error')}")
+                return {}  # Return empty dict, not error dict
+            else:
+                save_structured_ci_failure_cache(
+                    issue_id=str(issue_id or sha_fail or "unknown"),
+                    sha_fail=sha_fail,
+                    structured_failure=result,
+                )
         return result
     except Exception as e:
         print(f"    Warning: Could not generate structured CI failure: {e}")
+        _save_error_to_exception_folder(
+            issue_id=str(issue_id or sha_fail or "unknown"),
+            sha_fail=sha_fail,
+            error_data={"error": str(e), "traceback": __import__('traceback').format_exc()},
+        )
         return {}
 
 
@@ -87,6 +104,16 @@ def load_validation_sequence(
         )
     except Exception as e:
         print(f"    Warning: Could not generate validation sequence: {e}")
+        return empty_validation_result(workflow_path)
+
+    # Check for errors in generated result
+    if "error" in generated:
+        _save_error_to_exception_folder(
+            issue_id=issue_id,
+            sha_fail=sha_fail,
+            error_data=generated,
+        )
+        print(f"    ⚠️  Workflow validation failed for {issue_id}: {generated.get('error')}")
         return empty_validation_result(workflow_path)
 
     result = {
@@ -175,6 +202,33 @@ def read_json_list(path: Path) -> List[Dict]:
         print(f"    Warning: Could not read cache {path}: {e}")
         return []
     return data if isinstance(data, list) else []
+
+
+def _save_error_to_exception_folder(
+    *,
+    issue_id: str,
+    sha_fail: str,
+    error_data: Dict,
+) -> None:
+    """Save error data to exception/ folder instead of cache."""
+    EXCEPTION_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Create timestamped error file
+    timestamp = int(time.time())
+    error_file = EXCEPTION_DIR / f"ci_failure_{issue_id}_{sha_fail[:8]}_{timestamp}.json"
+
+    with open(error_file, "w") as f:
+        json.dump(
+            {
+                "issue_id": issue_id,
+                "sha_fail": sha_fail,
+                "timestamp": timestamp,
+                **error_data,
+            },
+            f,
+            indent=2,
+        )
+    print(f"    📝 Error logged to: {error_file.relative_to(PROJECT_ROOT)}")
 
 
 def cache_entry_matches(entry: Dict, sha_fail: str, issue_id: str) -> bool:

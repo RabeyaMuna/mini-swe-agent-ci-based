@@ -15,6 +15,7 @@ CHANGE_TYPE_CONTEXTS = {
     "code": "These are SOURCE CODE changes (.py, .rst, .md). Focus on code logic, formatting, type annotations, and documentation fixes.",
 }
 
+
 def build_atomic_prompt(
     ci_context: Dict[str, Any],
     failed_validation_order: Any,
@@ -111,7 +112,6 @@ VALIDATION CONTEXT:
 - validates: {val_info.get("validates", "Code quality/formatting")}
 - failure_type: {failure_type}
 - issue_type_hint: {chunk.get("issue_type", "")}
-- classification_change_scope_summary: {json.dumps(chunk.get("change_scope_summary", []), ensure_ascii=False)}
 - change_type: {change_type.upper()}
 - FAILED_VALIDATION_ORDER: {failed_validation_order} (CI stopped here)
 - is_cascading: {chunk.get("is_cascading", False)}
@@ -123,45 +123,6 @@ VALIDATION CONTEXT:
 CHANGES:
 {changes_json}
 
-## MANDATORY CONFIGURATION PRESERVATION AND CAUSAL REASONING
-
-Preserve EVERY configuration-related operation shown in CHANGES. Configuration
-coverage is operation-level, not file-level: mentioning a manifest or config
-path in affected_files does not cover the keys, packages, groups, commands,
-versions, sources, extras, markers, or environment constraints changed inside
-that file.
-
-For EACH configuration operation:
-1. State the exact BEFORE value/state and exact AFTER value/state.
-2. Identify whether it was added, removed, replaced, renamed, enabled/disabled,
-   or had a constraint/value changed.
-3. Explain the most plausible reason the modification was required using the
-   supplied project and CI evidence: project setup, installer/resolver behavior,
-   runtime/language/tool versions, operating system or architecture constraints,
-   package availability/deprecation/replacement, transitive constraints, or
-   correlated source/test/API adaptations.
-4. Clearly distinguish evidence from inference. Use wording such as "the
-   supplied changes support..." for supported reasoning. If multiple causes are
-   possible, list the supported possibilities and say which evidence would
-   distinguish them. If none is supported, state that the exact causal reason
-   is not supplied; never invent one.
-5. Keep an existing configuration problem and create additional atomic problems
-   for package/environment operations when they have different failure patterns
-   or causes. Never replace the config problem with the package problem, or the
-   package problem with the config problem.
-
-FINAL FIELD REQUIREMENTS FOR CONFIGURATION CHANGES:
-- problem: name the exact invalid/risky prior configuration and its possible
-  install, resolution, build, validation, API, or runtime consequence.
-- root_cause: explain why EACH changed key/package/constraint needed modification
-  based on issue, project setup, environment, dependency, and adaptation evidence.
-- how_fixed: enumerate ALL applied BEFORE -> AFTER operations exactly, including
-  removals. Do not summarize them as "updated configuration" or "updated
-  dependencies" and do not reverse the diff direction.
-- why_fix_works: connect every applied operation to the failure or compatibility
-  risk it resolves; when causality is not supplied, state the bounded expected
-  effect without presenting speculation as fact.
-
 {dependency_context}
 
 {cascading_context}
@@ -170,43 +131,6 @@ FINAL FIELD REQUIREMENTS FOR CONFIGURATION CHANGES:
 
 TASK:
 Infer the actual CI step problem fixed by these before/after changes.
-
-## MANDATORY WHOLE-DIFF COVERAGE
-
-Reason over every semantic before/after operation in CHANGES, regardless of
-file type or technology. Do not stop after explaining the first CI-visible
-failure. That failure may only be the first blocker, while other configuration,
-dependency, workflow, source, test, build, or documentation changes repair
-problems that become visible afterward.
-
-Before returning JSON, perform an internal coverage audit:
-1. Enumerate every independent changed subject in every change.
-2. Map each subject to an atomic problem whose problem/root_cause/how_fixed
-   states the exact old and new value or behavior.
-3. Preserve a valid configuration problem when other changes in the same file
-   require additional dependency, compatibility, API, build, or runtime problems.
-4. Split changes into separate problems when their failure pattern or root cause
-   differs; never erase one problem merely because another fails earlier.
-5. For dependency changes, reason about deprecation or replacement, version and
-   environment compatibility, resolver constraints, extras, transitive effects,
-   and correlated source adaptations only when supplied evidence supports them.
-   If the causal reason is not established, still report the exact change and
-   explicitly state that the causal constraint is not supplied.
-
-The final atomic_problems array must collectively cover every semantic operation
-in CHANGES. Do not output the internal checklist.
-
-The classification_change_scope_summary is an internal coverage handoff, not a
-replacement for CHANGES. Every operation named there must be represented in the
-final problem/root_cause/how_fixed text. Preserve all valid configuration-key
-problems while adding separate package or environment problems when their
-failure pattern or cause differs.
-
-DIFF DIRECTION IS AUTHORITATIVE:
-- BEFORE is the broken/pre-fix project state.
-- AFTER is the ground-truth repair that was actually applied.
-- how_fixed must describe BEFORE -> AFTER exactly. Never claim that an AFTER
-  value was restored to BEFORE, or that a removed key/package was added.
 
 This group contains only {change_type.upper()} changes. Preserve concrete details from those changes. CI steps may include setup, installation,
 dependency resolution, environment preparation, formatting, linting, type checking, tests, docs checks, build steps, and workflow-local commands.
@@ -361,8 +285,7 @@ QUALITY RULES:
   "test fixes", "configuration problem", "formatting changes", "build update",
   or "code modernization". A repair agent must be able to locate and reproduce
   the fix from the description.
-- For EACH atomic problem, place all repair evidence directly in
-  problem/root_cause/how_fixed (there is no separate change-details field):
+- For EACH atomic problem, state in problem/root_cause/how_fixed:
   1. the exact affected subject: package/key/command/target/rule/symbol/function/
      parameter/expression/test assertion/document construct/artifact;
   2. the exact BEFORE state or behavior that violated a requirement;
@@ -487,9 +410,7 @@ PRINCIPLE 4: Test your grouping
 
 FIELD GUIDANCE (Dynamic - based on YOUR analysis):
 
-- **root_cause**: The underlying WHY, derived from the issue constraints,
-  dependency evidence, CI context, and before/after changes, that applies to ALL
-  affected files
+- **root_cause**: The underlying WHY that applies to ALL affected files
   * Must be specific to THIS issue's context with EXACT details
   * Include EXACT package names, versions, config values, symbols, commands
   * For dependency changes: List EXACT version constraints (before → after)
@@ -507,9 +428,8 @@ FIELD GUIDANCE (Dynamic - based on YOUR analysis):
     root_cause/how_fixed enumerate the exact file-specific manifestations
   * For cascading: explain the triggering relationship
 
-- **how_fixed**: The exact actionable fixes needed to address root_cause
-  * Describe every required fix across affected files with EXACT specifics so a
-    repair agent can reproduce it without another details field
+- **how_fixed**: What changed to address root_cause (WITH EXACT DETAILS)
+  * Describe the fix that applies across affected files with EXACT specifics
   * For dependency changes: "Updated package_name from old_version to new_version"
   * For config changes: "Changed key_name from old_value to new_value"
   * For code changes: "Added/removed/changed exact_symbol_name"
@@ -550,20 +470,21 @@ OUTPUT FORMAT:
   "atomic_problems": [
     {{
       "problem_id": 1,
-      "validation_order": {validation_order},
-      "validation_cmd": {validation_cmd_json},
-      "failure_type": {failure_type_json},
+      "validation_order": < add the validation order the proiblem falls under >,
+      "validation_cmd": < add the validation command the problem falls under >,
+      "failure_type": < add the failure type the problem is associated with >,
       "issue_type": "specific_error_code_or_type",
-      "problem": "What broke, including the violated constraint and exact affected subjects",
-      "root_cause": "Why it failed based on issue constraints, dependency evidence, CI context, and before/after evidence",
-      "how_fixed": "Exact actionable fixes needed, including old and new values or behavior for every affected subject",
+      "problem": "Description of what broke to cause the failure",
+      "root_cause": "Why it failed based on the evidence or failure signal",
+      "how_fixed": "what are the changes made and how to fix the problem",
       "why_fix_works": "Why the fix solves it",
       "affected_files": ["file1.py", "file2.py"],
       "problem_type": "primary or hidden - see rules below",
       "is_cascading": {is_cascading_json},
       "dependency_type": {dependency_type_json},
       "cascade_explanation": {cascade_explanation_json}
-    }}
+    }},
+    // Additional problems if any
   ]
 }}
 
@@ -574,11 +495,13 @@ OUTPUT REQUIREMENTS:
 - validation_order must be the integer validation_order from VALIDATION CONTEXT.
 - validation_cmd must exactly match validation_cmd from VALIDATION CONTEXT.
 - failure_type must match failure_type from VALIDATION CONTEXT unless the value is empty.
-- problem, root_cause, and how_fixed together must cover every semantic change.
-  For config/dependency files, how_fixed MUST name every package or key added,
-  removed, replaced, or constraint-changed with exact before/after values and
-  declaration scopes. Separate unrelated operations into different problems
-  when they do not share one root cause.
+- change_details must be a non-empty array that covers every semantic change
+  represented by the problem. For config/dependency files it MUST include every
+  package added, removed, replaced, or constraint-changed and every independent
+  config-key change with exact before/after values.
+- Do not combine unrelated config and package operations into one change_details
+  item. Repeated declarations may share one item only when all affected scopes
+  are explicitly named in subject or environment_dependency_impact.
 - **CRITICAL: affected_files must be an array containing EVERY SINGLE file path from the CHANGES section above that is related to this problem.**
   * Count the files in CHANGES and ensure affected_files has the SAME COUNT if all files share the same problem.
   * DO NOT truncate, sample, or omit files - include EVERY file that has this issue.
@@ -599,3 +522,4 @@ OUTPUT REQUIREMENTS:
 """
 
     return prompt
+

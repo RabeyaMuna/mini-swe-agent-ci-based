@@ -1,12 +1,14 @@
 #!/bin/bash
 # Run Mini-SWE-Agent (CIBench) over eval issues with consistent flags
-# Usage: ./run_miniswe_direct.sh <issue-ids> [ablation] [direction] [model] [repo_slug] [dataset]
+# Usage: ./run_miniswe_direct.sh <issue-ids> [ablation] [direction] [model] [repo_filters] [dataset] [workers]
 #   <issue-ids>: Comma-separated IDs, or empty string "" to use data/eval_issue_ids.json, or omit to RUN ALL
 #   [ablation]:  baseline|L1|L2|L3|L1+L2|L1+L2+L3|all   (default: all)
 #   [direction]: backward|forward|both                   (default: both)
 #   [model]:     gpt-5-mini | gpt-5.4-mini-2026-03-17 | minimax/minimax-m2.5 (default: gpt-5-mini)
-#   [repo_slug]: Optional owner/repo to filter IDs from dataset (overrides <issue-ids>)
+#   [repo_filters]: Optional comma-separated repo names or owner/repo slugs
+#                   (overrides <issue-ids>)
 #   [dataset]:   Path to eval_set.jsonl (default: data/eval_set.jsonl)
+#   [workers]:   Parallel issues per ablation (default: 1)
 
 set -euo pipefail
 
@@ -18,9 +20,10 @@ fi
 ABLATION=${2:-all}
 DIRECTION=${3:-both}
 MODEL=${4:-gpt-5-mini}
-REPO_SLUG=${5:-}
+REPO_FILTERS=${5:-}
 DATASET=${6:-data/eval_set.jsonl}
 WORKERS=${7:-1}
+RESULTS_ROOT=${MINISWE_RESULTS_ROOT:-results/miniswe-agent}
 
 # Load provider credentials from the project file, then expose only the key
 # selected by the model. Keeping the unused key present-but-empty prevents
@@ -67,7 +70,7 @@ esac
 
 echo "════ Mini-SWE-Agent Runner ═════════════════════════════════════"
 echo "Issues:    ${ISSUE_IDS:-ALL from data/eval_issue_ids.json}"
-if [ -n "$REPO_SLUG" ]; then echo "Repo:      $REPO_SLUG (from $DATASET)"; fi
+if [ -n "$REPO_FILTERS" ]; then echo "Repos:     $REPO_FILTERS (from $DATASET)"; fi
 echo "Ablation:  $ABLATION"
 echo "Direction: $DIRECTION"
 echo "Model:     $MODEL"
@@ -93,28 +96,67 @@ else
   exit 1
 fi
 
-# Expand repo filter into issue list if provided
-if [ -n "$REPO_SLUG" ]; then
-  ISSUE_IDS=$(DATASET="$DATASET" REPO_SLUG="$REPO_SLUG" python3 - << 'PY'
-import json, os
+# Suppress tokenizers parallelism warning from sentence-transformers
+export TOKENIZERS_PARALLELISM=false
+
+# Expand repo filters into an issue list. Short names match all owners while
+# owner/name values match only that exact repository.
+if [ -n "$REPO_FILTERS" ]; then
+  ISSUE_IDS=$(DATASET="$DATASET" REPO_FILTERS="$REPO_FILTERS" python3 - << 'PY'
+import json
+import os
+import sys
+
 path = os.environ['DATASET']
-repo = os.environ['REPO_SLUG']
+filters = [
+    value.strip().lower()
+    for value in os.environ['REPO_FILTERS'].split(',')
+    if value.strip()
+]
+matches = {repo_filter: 0 for repo_filter in filters}
 ids = []
+seen_ids = set()
 with open(path, 'r', encoding='utf-8') as f:
   for line in f:
     if not line.strip():
       continue
     row = json.loads(line)
-    slug = (str(row.get('repo_owner') or '').strip() + '/' + str(row.get('repo_name') or '').strip()).strip('/')
-    alt  = str(row.get('repo') or '').strip()
-    if slug == repo or alt == repo or alt.endswith('/'+repo.split('/')[-1]):
+    owner = str(row.get('repo_owner') or '').strip().lower()
+    name = str(row.get('repo_name') or '').strip().lower()
+    alternate = str(row.get('repo') or '').strip().lower()
+    slug = f'{owner}/{name}'.strip('/')
+    row_matched = False
+    for repo_filter in filters:
+      if '/' in repo_filter:
+        matched = repo_filter == slug or repo_filter == alternate
+      else:
+        matched = repo_filter == name or repo_filter == alternate.rsplit('/', 1)[-1]
+      if matched:
+        matches[repo_filter] += 1
+        row_matched = True
+    if row_matched:
       iid = str(row.get('instance_id') or row.get('id') or row.get('sha_fail') or '').strip()
-      if iid:
+      if iid and iid not in seen_ids:
         ids.append(iid)
+        seen_ids.add(iid)
+
+unmatched = [repo_filter for repo_filter, count in matches.items() if count == 0]
+if unmatched:
+  print(
+      'ERROR: No matching issues for repo filter(s): ' + ', '.join(unmatched),
+      file=sys.stderr,
+  )
+  raise SystemExit(2)
+
+print(
+    f'Matched {len(ids)} unique issues from {len(filters)} repo filter(s).',
+    file=sys.stderr,
+)
 print(','.join(ids))
 PY
 )
-  if [ -z "$ISSUE_IDS" ]; then echo "✗ No matching issues for $REPO_SLUG" >&2; exit 1; fi
+  if [ -z "$ISSUE_IDS" ]; then echo "✗ No matching issues for $REPO_FILTERS" >&2; exit 1; fi
+  echo "Selected issue IDs: $ISSUE_IDS"
 fi
 
 # If ISSUE_IDS empty, use eval_issue_ids.json
@@ -154,6 +196,7 @@ run_one() {
     --ablation "$ablation" \
     --direction "$direction" \
     --model "$MODEL" \
+    --output_root "$RESULTS_ROOT/$direction" \
     --workers "$WORKERS"
 }
 
@@ -171,6 +214,10 @@ done
 
 echo "════════════════════════════════════════════════════════════════"
 echo "Mini-SWE runs: $TOTAL  failures: $FAILS"
-echo "Results: results/miniswe-agent/"
+if [ "$DIRECTION" = "both" ]; then
+  echo "Results: $RESULTS_ROOT/{backward,forward}/"
+else
+  echo "Results: $RESULTS_ROOT/$DIRECTION/"
+fi
 echo "════════════════════════════════════════════════════════════════"
 exit $FAILS

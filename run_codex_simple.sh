@@ -10,6 +10,9 @@
 
 set -e
 
+# Suppress tokenizers parallelism warning from sentence-transformers
+export TOKENIZERS_PARALLELISM=false
+
 MODEL=${1:-gpt-5-mini}
 ABLATION=${2:-baseline}
 DIRECTION=${3:-backward}

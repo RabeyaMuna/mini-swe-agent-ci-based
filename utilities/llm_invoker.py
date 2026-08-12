@@ -28,6 +28,24 @@ LOGGER = logging.getLogger(__name__)
 class LLMTransientConnectionError(RuntimeError):
     """A transport failure that remained unavailable after bounded retries."""
 
+
+def _requires_max_completion_tokens(model_name: str) -> bool:
+    """Check if model requires max_completion_tokens instead of max_tokens."""
+    if not model_name:
+        return False
+    normalized = str(model_name).lower().removeprefix("openai/").removeprefix("azure/")
+    # GPT-5 series
+    if normalized.startswith("gpt-5"):
+        return True
+    # GPT-4o series
+    if normalized.startswith("gpt-4o") or normalized.startswith("chatgpt-4o"):
+        return True
+    # o-series (o1, o3, etc.)
+    if len(normalized) > 1 and normalized[0] == "o" and normalized[1].isdigit():
+        return True
+    return False
+
+
 # Minimal health check prompt to test API connectivity
 HEALTH_CHECK_PROMPT = "Reply with exactly: OK"
 
@@ -152,7 +170,11 @@ def _check_api_health(llm: Any, verbose: bool = False) -> bool:
 
         # Use a minimal prompt to check connectivity (very fast)
         try:
-            response = llm.invoke(HEALTH_CHECK_PROMPT, max_tokens=8)
+            model_name = getattr(llm, 'model_name', '') or getattr(llm, 'model', '')
+            if _requires_max_completion_tokens(model_name):
+                response = llm.invoke(HEALTH_CHECK_PROMPT, max_completion_tokens=8)
+            else:
+                response = llm.invoke(HEALTH_CHECK_PROMPT, max_tokens=8)
         except TypeError:
             response = llm.invoke(HEALTH_CHECK_PROMPT)
         content = str(getattr(response, "content", response) or "").strip()
@@ -243,19 +265,22 @@ def invoke_llm_with_retry(
         try:
             invoke_kwargs: dict[str, Any] = {}
             if max_tokens:
-                invoke_kwargs["max_tokens"] = max_tokens
+                # GPT-5/GPT-4o require max_completion_tokens, not max_tokens
+                model_name = getattr(llm, 'model_name', '') or getattr(llm, 'model', '')
+                if _requires_max_completion_tokens(model_name):
+                    invoke_kwargs["max_completion_tokens"] = max_tokens
+                else:
+                    invoke_kwargs["max_tokens"] = max_tokens
             if reasoning_effort:
                 invoke_kwargs["reasoning_effort"] = reasoning_effort
             if response_format:
                 invoke_kwargs["response_format"] = response_format
             response = llm.invoke(prompt, **invoke_kwargs)
         except TypeError:
-            # Compatibility fallback for simpler model wrappers.
-            response = (
-                llm.invoke(prompt, max_tokens=max_tokens)
-                if max_tokens
-                else llm.invoke(prompt)
-            )
+            # Compatibility fallback for wrappers whose ``invoke`` method only
+            # accepts the prompt. Retrying with the same token keyword would
+            # reproduce the TypeError and get converted into empty content.
+            response = llm.invoke(prompt)
 
         # Some wrappers return an empty Result with an embedded error instead
         # of raising. Promote that error so transient transport failures enter

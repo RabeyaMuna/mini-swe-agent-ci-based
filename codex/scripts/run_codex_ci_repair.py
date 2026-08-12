@@ -17,6 +17,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import requests
 from pathlib import Path
@@ -184,6 +185,22 @@ def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def write_json_atomic(path: Path, data: Any) -> None:
+    """Atomically replace a JSON file after writing it in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        with temp_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def write_text(path: Path, text: str) -> None:
@@ -438,31 +455,25 @@ def load_or_generate_verification(
             )
 
         try:
-            from utilities.ci_workflow_aware_retrieval import (
-                analyze_workflow_from_benchmark,
-            )
+            # Use shared cache utility - checks cache first, generates if missing
+            from utilities.ci_cache import load_validation_sequence
 
-            verification = analyze_workflow_from_benchmark(
+            verification = load_validation_sequence(
+                issue_id=issue_id(issue),
+                sha_fail=str(issue.get("sha_fail") or ""),
                 workflow_content=str(issue.get("workflow") or ""),
                 workflow_path=str(issue.get("workflow_path") or ""),
                 repo_path=str(checkout),
                 llm=context_llm,
-                issue_id=issue_id(issue),
-                sha_fail=str(issue.get("sha_fail") or ""),
+                save=True,  # Auto-save to cache if generated
             )
-            verification["source"] = "ci_workflow_aware_retrieval"
-
-            # Save to shared cache for future runs
-            print(f"[codex] Saving workflow verification to cache: {workflow_cache}")
-            _append_to_cache(workflow_cache, verification)
+            verification["source"] = verification.get("source") or "workflow_cache"
 
         except Exception as exc:
             raise RuntimeError(
                 f"Workflow verification generation failed for issue "
                 f"{issue_id(issue)}: {exc}"
             ) from exc
-        else:
-            verification["source"] = verification.get("source") or "workflow_cache"
 
     write_json(out_json, verification)
     return verification
@@ -510,6 +521,8 @@ def load_memory_context(
                 "task_id": issue_id(issue),
                 "sha_fail": issue.get("sha_fail"),
                 "repo": repo_slug(issue),
+                "workflow_name": issue.get("workflow_name", ""),
+                "workflow_path": issue.get("workflow_path", ""),
             }
         )
 
@@ -1145,6 +1158,57 @@ def run_codex(
     return {"returncode": proc.returncode, "elapsed_seconds": elapsed, "dry_run": False}
 
 
+def _run_git_diff(
+    checkout: Path, revision_args: list[str], *, force_binary: bool = False
+) -> subprocess.CompletedProcess[bytes]:
+    """Run git diff as bytes so non-UTF-8 repository content is safe."""
+    command = ["git"]
+    attributes_file = None
+    try:
+        if force_binary:
+            attributes_file = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8"
+            )
+            attributes_file.write("* binary\n")
+            attributes_file.flush()
+            command.extend(["-c", f"core.attributesFile={attributes_file.name}"])
+
+        command.extend(["diff", "--binary", *revision_args])
+        return subprocess.run(
+            command,
+            cwd=checkout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    finally:
+        if attributes_file is not None:
+            attributes_file.close()
+
+
+def _decode_git_diff(checkout: Path, revision_args: list[str]) -> tuple[str, int]:
+    """Return a UTF-8-safe patch, falling back to Git binary patch records."""
+    proc = _run_git_diff(checkout, revision_args)
+    try:
+        return proc.stdout.decode("utf-8"), proc.returncode
+    except UnicodeDecodeError as exc:
+        print(
+            "[save_patch_and_result] Non-UTF-8 bytes in git diff "
+            f"at offset {exc.start}; regenerating affected content as a binary patch"
+        )
+
+    binary_proc = _run_git_diff(checkout, revision_args, force_binary=True)
+    try:
+        # Preserve the terminating newline: Git binary patch records are
+        # invalid if callers strip their final line ending.
+        patch = binary_proc.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            "Git binary diff unexpectedly contained non-UTF-8 bytes"
+        ) from exc
+    return patch, binary_proc.returncode
+
+
 def git_diff(checkout: Path, original_commit: str = None) -> str:
     """
     Get diff of all changes made by agent (committed + uncommitted).
@@ -1153,41 +1217,18 @@ def git_diff(checkout: Path, original_commit: str = None) -> str:
     before the agent ran, not just uncommitted working directory changes.
     """
     # Try to get uncommitted changes first
-    proc = subprocess.run(
-        ["git", "diff", "--binary", "HEAD"],
-        cwd=checkout,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    uncommitted = proc.stdout.strip()
+    uncommitted, _ = _decode_git_diff(checkout, ["HEAD"])
 
     # If original_commit provided, diff working tree (staged+unstaged) against it
     # This captures BOTH committed and uncommitted changes in one unified patch.
     if original_commit:
-        proc = subprocess.run(
-            ["git", "diff", "--binary", original_commit],
-            cwd=checkout,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        unified = proc.stdout.strip()
+        unified, _ = _decode_git_diff(checkout, [original_commit])
         return unified if unified else uncommitted
 
     # Fallback: try to get diff from last 5 commits (in case agent made commits)
     # This covers the case where agent committed changes
-    proc = subprocess.run(
-        ["git", "diff", "--binary", "HEAD~5..HEAD"],
-        cwd=checkout,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    recent_commits = proc.stdout.strip() if proc.returncode == 0 else ""
+    recent_diff, returncode = _decode_git_diff(checkout, ["HEAD~5..HEAD"])
+    recent_commits = recent_diff if returncode == 0 else ""
 
     # Return whichever has content
     return recent_commits if recent_commits else uncommitted
@@ -1277,6 +1318,10 @@ def save_patch_and_result(
     print(f"[save_patch_and_result] Changed files: {len(files)} files")
     print(f"[save_patch_and_result] Writing to {result_dir / 'patch.diff'}")
 
+    # Ensure patch ends with newline (required by git apply)
+    if diff and not diff.endswith('\n'):
+        diff = diff + '\n'
+
     write_text(result_dir / "patch.diff", diff)
     write_json(
         result_dir / "result.json",
@@ -1362,7 +1407,13 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
                 ci_problems = temp_plugin.decompose_only(
                     ci_failure=ci_failure,
                     verification=verification,
-                    issue_metadata={"task_id": issue_id(issue), "sha_fail": issue.get("sha_fail")}
+                    issue_metadata={
+                        "task_id": issue_id(issue),
+                        "sha_fail": issue.get("sha_fail"),
+                        "repo": repo_slug(issue),
+                        "workflow_name": issue.get("workflow_name", ""),
+                        "workflow_path": issue.get("workflow_path", ""),
+                    }
                 )
                 # Add source tag
                 for prob in ci_problems:
@@ -1432,6 +1483,10 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
             None,
             original_sha,
         )
+        if getattr(args, "incremental_predictions", True):
+            append_prediction_for_issue(
+                args.output_root, ablation, issue_id(issue), args.context_model
+            )
         return
 
     print(f"\n[DEBUG] Problems to fix (one by one):")
@@ -1496,10 +1551,6 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
                     None,  # no external verification
                     original_sha,
                 )
-                if getattr(args, "incremental_predictions", True):
-                    append_prediction_for_issue(
-                        args.output_root, ablation, issue_id(issue), args.context_model
-                    )
             except Exception as exc:
                 print(f"[codex-ci-repair] WARNING: mid-issue save failed: {exc}")
 
@@ -1527,6 +1578,10 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
     )
 
     print(f"[DEBUG] ✓ Saved patch.diff and result.json")
+    if getattr(args, "incremental_predictions", True):
+        append_prediction_for_issue(
+            args.output_root, ablation, issue_id(issue), args.context_model
+        )
 
 
 def prediction_model_name(args: argparse.Namespace) -> str:
@@ -1660,6 +1715,15 @@ def prediction_from_result(result_file: Path) -> dict[str, Any]:
     }
 
 
+def prediction_has_patch(prediction: Any) -> bool:
+    """Return whether a prediction is complete enough to skip on resume."""
+    if not isinstance(prediction, dict):
+        return False
+    if prediction.get("patch_generated") is False:
+        return False
+    return bool(str(prediction.get("diff") or "").strip())
+
+
 def consolidate_predictions(
     output_root: Path, ablation: str, context_model: str | None = None
 ) -> list[dict[str, Any]]:
@@ -1681,15 +1745,57 @@ def consolidate_predictions(
     results_dir = output_root / ablation_dir
     predictions_file = results_dir / "predictions.json"
 
-    predictions = [
+    local_predictions = [
         prediction_from_result(result_file)
         for result_file in sorted(results_dir.glob("*/result.json"))
     ]
 
-    # Write consolidated file
-    if predictions:
-        write_json(predictions_file, predictions)
-        print(f"\n[codex-ci-repair] Consolidated {len(predictions)} predictions -> {predictions_file}")
+    # Consolidation is intentionally merge-only. Existing uploaded predictions
+    # are the resume ledger and must never disappear merely because their
+    # per-issue result directories are not present on this machine.
+    import fcntl
+
+    lock_file = predictions_file.with_suffix(".lock")
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with lock_file.open("w") as lock_fd:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        try:
+            predictions = load_json(predictions_file, [])
+            if not isinstance(predictions, list):
+                raise ValueError(f"Expected a JSON list in {predictions_file}")
+
+            existing_indexes = {
+                str(prediction.get("id")): index
+                for index, prediction in enumerate(predictions)
+                if isinstance(prediction, dict) and prediction.get("id") is not None
+            }
+            additions = 0
+            replacements = 0
+            for prediction in local_predictions:
+                prediction_id = str(prediction.get("id"))
+                existing_index = existing_indexes.get(prediction_id)
+                if existing_index is None:
+                    predictions.append(prediction)
+                    existing_indexes[prediction_id] = len(predictions) - 1
+                    additions += 1
+                elif (
+                    not prediction_has_patch(predictions[existing_index])
+                    and prediction_has_patch(prediction)
+                ):
+                    predictions[existing_index] = prediction
+                    replacements += 1
+
+            if additions or replacements:
+                write_json_atomic(predictions_file, predictions)
+        finally:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+    if additions or replacements:
+        print(
+            f"\n[codex-ci-repair] Added {additions} missing predictions and "
+            f"completed {replacements} previously empty predictions "
+            f"-> {predictions_file}"
+        )
 
     return predictions
 
@@ -1705,7 +1811,7 @@ def _ablation_dir_name(ablation: str, context_model: str | None) -> str:
 def existing_prediction_ids(
     output_root: Path, ablation: str, context_model: str | None = None
 ) -> set[str]:
-    """Return ids already recorded for one model/ablation run."""
+    """Return IDs with non-empty patches for one model/ablation run."""
     predictions_file = (
         output_root / _ablation_dir_name(ablation, context_model) / "predictions.json"
     )
@@ -1715,35 +1821,81 @@ def existing_prediction_ids(
     return {
         str(prediction.get("id"))
         for prediction in predictions
-        if isinstance(prediction, dict) and prediction.get("id") is not None
+        if isinstance(prediction, dict)
+        and prediction.get("id") is not None
+        and prediction_has_patch(prediction)
     }
 
 
 def append_prediction_for_issue(
     output_root: Path, ablation: str, issue_id: str, context_model: str | None = None
-) -> None:
-    """Append or update a single prediction in predictions.json for robustness.
+) -> bool:
+    """Append new prediction to predictions.json - SKIP if ID already exists.
 
-    Safe to call repeatedly; replaces existing entry for the same id.
+    IMPORTANT: Only appends NEW IDs, never overwrites existing entries.
+    This prevents data loss when multiple processes or manual updates occur.
     """
+    import fcntl
+
     ablation_dir = _ablation_dir_name(ablation, context_model)
     results_dir = output_root / ablation_dir
     result_file = results_dir / str(issue_id) / "result.json"
     if not result_file.exists():
-        return  # nothing to append yet
+        return False  # nothing to append yet
 
     prediction = prediction_from_result(result_file)
+    new_id = str(prediction.get("id"))
+    if not prediction_has_patch(prediction):
+        raise RuntimeError(
+            f"Issue {new_id} completed without generating a patch; "
+            "leaving it pending for the next resume run"
+        )
 
     predictions_file = results_dir / "predictions.json"
-    # Single-process lock to avoid interleaved writes when --workers > 1
-    if not hasattr(append_prediction_for_issue, "_lock"):
-        append_prediction_for_issue._lock = threading.Lock()  # type: ignore[attr-defined]
-    with append_prediction_for_issue._lock:  # type: ignore[attr-defined]
-        existing: list[dict[str, Any]] = load_json(predictions_file, [])
-        # Replace entry for same id, else append
-        filtered = [p for p in existing if str(p.get("id")) != str(prediction.get("id"))]
-        filtered.append(prediction)
-        write_json(predictions_file, filtered)
+    lock_file = predictions_file.with_suffix(".lock")
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_file, "w") as lock_fd:
+        # Acquire exclusive lock
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        try:
+            # Read current file state
+            existing = load_json(predictions_file, [])
+            if not isinstance(existing, list):
+                raise ValueError(f"Expected a JSON list in {predictions_file}")
+
+            # Check if ID already exists - SKIP if present
+            existing_index = next(
+                (
+                    index
+                    for index, item in enumerate(existing)
+                    if isinstance(item, dict) and str(item.get("id")) == new_id
+                ),
+                None,
+            )
+            if existing_index is not None:
+                if prediction_has_patch(existing[existing_index]):
+                    print(
+                        f"  [codex-ci-repair] Skipping {new_id}: "
+                        "a completed prediction already exists"
+                    )
+                    return False
+
+                existing[existing_index] = prediction
+                write_json_atomic(predictions_file, existing)
+                print(
+                    f"  [codex-ci-repair] Completed previously empty prediction "
+                    f"{new_id} in predictions.json"
+                )
+                return True
+
+            # Only append if NEW
+            existing.append(prediction)
+            write_json_atomic(predictions_file, existing)
+            print(f"  [codex-ci-repair] Appended {new_id} to predictions.json")
+            return True
+        finally:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
 
 def consolidate_all_predictions(
@@ -1813,6 +1965,7 @@ def main() -> int:
 
     issue_index = load_issue_index(args.dataset, args.hf_dataset)
 
+    total_failed_issues = 0
     for ablation in ablations:
         pending_issue_ids = issue_ids
         if args.resume:
@@ -1855,8 +2008,6 @@ def main() -> int:
                     except Exception as exc:
                         print(f"[codex-ci-repair] ERROR processing issue {wid}: {exc}")
                         failed_issues.append((wid, str(exc)))
-                    # Incremental predictions write after each completion
-                    consolidate_predictions(args.output_root, ablation, args.context_model)
         else:
             for wanted_id in pending_issue_ids:
                 issue = issue_index.get(str(wanted_id))
@@ -1874,14 +2025,10 @@ def main() -> int:
                     failed_issues.append((wanted_id, str(exc)))
                     # Continue with next issue instead of crashing
                     continue
-                # Incremental predictions write after each issue (serial mode)
-                consolidate_predictions(args.output_root, ablation, args.context_model)
-
-        # Auto-consolidate predictions after processing all issues
-        consolidate_predictions(args.output_root, ablation, args.context_model)
         print(f"[codex-ci-repair] Completed ablation: {ablation}")
 
         if failed_issues:
+            total_failed_issues += len(failed_issues)
             print(f"\n[codex-ci-repair] WARNING: {len(failed_issues)} issues failed:")
             for issue_id, error in failed_issues[:10]:  # Show first 10
                 print(f"  - {issue_id}: {error[:100]}")
@@ -1892,7 +2039,7 @@ def main() -> int:
     # Top-level consolidation disabled to avoid mixing different runs
     # consolidate_all_predictions(args.output_root, ablations, args.context_model)
 
-    return 0
+    return 1 if total_failed_issues else 0
 
 
 if __name__ == "__main__":

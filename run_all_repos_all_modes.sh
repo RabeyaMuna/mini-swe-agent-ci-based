@@ -18,6 +18,9 @@ DIRECTION=${DIRECTION:-backward}  # Default direction, can override with: DIRECT
 # Activate venv
 source .venv/bin/activate
 
+# Suppress tokenizers parallelism warning from sentence-transformers
+export TOKENIZERS_PARALLELISM=false
+
 echo "Repos: $REPOS"
 echo "Model: $MODEL"
 echo "Direction: $DIRECTION"
