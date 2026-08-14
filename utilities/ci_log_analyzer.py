@@ -465,6 +465,9 @@ Do NOT use ``` or ```json.
 }}
 
 Rules:
+- Include files that appear in error messages OR files being tested/executed when the failure occurred
+- For test failures: include test files and source files mentioned in test output
+- For infrastructure/dependency failures: include files that were being processed when failure occurred
 - If no files exist, return: "relevant_files": []
 - If no failures exist, return: "relevant_failures": [] AND "failure_signals": []
 - Output plain JSON only — no text before or after.
@@ -750,12 +753,15 @@ of the CI failure for this step using the following STRICT JSON schema
 
 - "relevant_files":
   - Consider all chunk-level data ("relevant_files", "relevant_failures", and summaries),
-    but INCLUDE a file ONLY if:
+    and INCLUDE a file if:
       * it is clearly linked to a failing test, assertion error, runtime exception,
         dependency error, configuration error, or critical warning in THIS STEP, OR
-      * the log explicitly states that the failure occurs in that file.
-  - It is OK to discard files that appear in chunk-level "relevant_files" if they were only
-    mentioned in setup/installation and are not clearly tied to the failure.
+      * the log explicitly states that the failure occurs in that file, OR
+      * it is a test file that was being executed when the failure occurred (even if the
+        failure itself is infrastructure/dependency related), OR
+      * it is a source file imported/used by tests that failed or were running at failure time.
+  - For infrastructure failures (DNS, cache download, etc.): include test files that were
+    queued or executing when the external failure occurred.
   - Deduplicate by "file" path. If the same file appears with different reasons, merge
     them into one concise, evidence-based "reason".
   - "line_number":

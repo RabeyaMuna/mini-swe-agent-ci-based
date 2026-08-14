@@ -21,6 +21,7 @@ def normalize_text(
     normalize_unicode: bool = True,
     remove_control_chars: bool = True,
     collapse_whitespace: bool = True,
+    remove_special_tokens: bool = True,
 ) -> str:
     """
     Comprehensive text normalization to handle ANY encoding/character issues.
@@ -32,11 +33,13 @@ def normalize_text(
         normalize_unicode: Normalize to NFC form (composed characters)
         remove_control_chars: Remove control characters (except \n, \t, \r)
         collapse_whitespace: Collapse multiple spaces/newlines
+        remove_special_tokens: Remove LLM special tokens (<|endoftext|>, etc.)
 
     Returns:
         Normalized text safe for LLM processing and JSON serialization
 
     Handles:
+    - Special LLM tokens (<|endoftext|>, <|im_start|>, etc.)
     - All BOM types (UTF-8, UTF-16 LE/BE, UTF-32 LE/BE)
     - Control characters (except newline, tab, carriage return)
     - Invalid Unicode sequences
@@ -56,6 +59,20 @@ def normalize_text(
     """
     if not text:
         return text
+
+    # Step 0: Remove special LLM tokens that cause encoding errors
+    if remove_special_tokens:
+        # Remove common special tokens that appear in logs
+        special_tokens = [
+            '<|endoftext|>',
+            '<|startoftext|>',
+            '<|end|>',
+            '<|start|>',
+            '<|im_start|>',
+            '<|im_end|>',
+        ]
+        for token in special_tokens:
+            text = text.replace(token, '')
 
     # Step 1: Remove all types of BOM (Byte Order Mark)
     if remove_bom:

@@ -148,7 +148,6 @@ def save_validation_sequence_cache(
     ]
     cache.append(
         {
-            "issue_id": issue_id,
             "id": issue_id,
             "sha_fail": sha_fail,
             "workflow_path": workflow_path,
@@ -174,7 +173,6 @@ def save_structured_ci_failure_cache(
         if not cache_entry_matches(entry, sha_fail, issue_id)
     ]
     entry = dict(structured_failure)
-    entry.setdefault("issue_id", issue_id)
     entry.setdefault("id", issue_id)
     entry.setdefault("sha_fail", sha_fail)
     cache.append(entry)
@@ -235,7 +233,7 @@ def cache_entry_matches(entry: Dict, sha_fail: str, issue_id: str) -> bool:
     """Return whether a cache entry matches an issue id or failing SHA."""
     if not isinstance(entry, dict):
         return False
-    entry_id = str(entry.get("issue_id") or entry.get("id") or "")
+    entry_id = str(entry.get("id") or "")
     entry_sha = str(entry.get("sha_fail") or "")
     return bool(
         (sha_fail and entry_sha == str(sha_fail))
