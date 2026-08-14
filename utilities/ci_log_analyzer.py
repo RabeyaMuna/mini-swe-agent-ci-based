@@ -465,10 +465,22 @@ Do NOT use ``` or ```json.
 }}
 
 Rules:
-- Include files that appear in error messages OR files being tested/executed when the failure occurred
-- For test failures: include test files and source files mentioned in test output
-- For infrastructure/dependency failures: include files that were being processed when failure occurred
-- If no files exist, return: "relevant_files": []
+- **CRITICAL**: Include ALL files that have DIRECT or INDIRECT relevance to the CI failure
+- Include files from ALL error types (test failures, setup errors, infrastructure errors, dependency errors, etc.)
+- **MUST extract files from:**
+  * ANY traceback or exception (Python, Java, etc.) - extract the file path from stack traces
+  * Error messages that mention file paths
+  * Files being tested/executed when failure occurred
+  * Setup/installation scripts that failed (e.g., install.py, setup.py, build scripts)
+  * Configuration files involved in infrastructure failures (e.g., CI config, dependency files)
+  * ANY file mentioned in logs where an error/failure occurred, regardless of error category
+- **Examples of files to include:**
+  * Test failures: test files + source files mentioned in test output
+  * Setup/installation errors: installation scripts, setup.py, requirements files
+  * Build errors: build scripts, Makefile, build configuration
+  * Infrastructure errors: CI workflow files, environment setup scripts
+  * Dependency errors: pyproject.toml, package.json, requirements.txt, lock files
+- If no files exist in the logs, return: "relevant_files": []
 - If no failures exist, return: "relevant_failures": [] AND "failure_signals": []
 - Output plain JSON only — no text before or after.
 
@@ -752,23 +764,32 @@ of the CI failure for this step using the following STRICT JSON schema
   - If nothing meaningful appears, use an empty list [].
 
 - "relevant_files":
-  - Consider all chunk-level data ("relevant_files", "relevant_failures", and summaries),
-    and INCLUDE a file if:
-      * it is clearly linked to a failing test, assertion error, runtime exception,
-        dependency error, configuration error, or critical warning in THIS STEP, OR
-      * the log explicitly states that the failure occurs in that file, OR
-      * it is a test file that was being executed when the failure occurred (even if the
-        failure itself is infrastructure/dependency related), OR
-      * it is a source file imported/used by tests that failed or were running at failure time.
-  - For infrastructure failures (DNS, cache download, etc.): include test files that were
-    queued or executing when the external failure occurred.
+  - **CRITICAL**: Include ALL files with DIRECT or INDIRECT relevance to THIS STEP's failure
+  - Consider all chunk-level data ("relevant_files", "relevant_failures", and summaries)
+  - **MUST INCLUDE files from:**
+      * ANY traceback, exception, or stack trace (extract file paths from ALL tracebacks)
+      * Failing tests, assertion errors, runtime exceptions
+      * Setup/installation scripts that failed (install.py, setup.py, build.sh, etc.)
+      * Configuration files in dependency/environment errors (pyproject.toml, package.json, etc.)
+      * Build/compilation errors (Makefile, build scripts, source files)
+      * Files explicitly mentioned in error messages or failure logs
+      * Test files that were being executed when failure occurred (even for infrastructure failures)
+      * Source files imported/used by tests that failed or were running at failure time
+  - **DO NOT exclude files just because:**
+      * They are setup/installation scripts
+      * The error is "infrastructure" or "environment" related
+      * The failure happened during setup rather than test execution
+      * The file is a dependency/configuration file
+  - For infrastructure failures (DNS, cache, CUDA version, etc.): include BOTH:
+      * Files that caused or contributed to the infrastructure failure (e.g., installation scripts)
+      * Test files that were queued or executing when the external failure occurred
   - Deduplicate by "file" path. If the same file appears with different reasons, merge
     them into one concise, evidence-based "reason".
   - "line_number":
-      * Use the failing line number if it is clearly shown in the logs,
+      * Use the failing line number if it is clearly shown in the logs (e.g., from traceback)
       * otherwise null.
-  - If no file clearly meets these conditions, return "relevant_files": [].
-  - provide evidence-based "reasoning" explaining how this file is tied to the CI failure.
+  - If no file appears in any log/error/traceback, return "relevant_files": [].
+  - Provide evidence-based "reason" explaining how this file is tied to the CI failure.
 
 - "error_types":
   - Describe the kinds of errors visible in this STEP:
