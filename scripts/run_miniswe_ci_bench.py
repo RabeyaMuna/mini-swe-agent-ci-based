@@ -69,7 +69,9 @@ def main() -> None:
     memory_enabled, memory_levels = _ablation_to_miniswe(args.ablation)
     memory_root = Path("data/back_trs" if args.direction == "backward" else "data/fwr_trs").resolve()
 
-    # Build output directory: results/miniswe-agent/<ablation>_<model>/
+    # Build output directory: <output_root>/<ablation>_<model>/
+    # NOTE: For baseline, output_root should be "results/miniswe-agent" (no direction subdir)
+    #       For memory modes, output_root should be "results/miniswe-agent/<direction>"
     safe_ablation = args.ablation.replace("+", "_").lower()
     output_dir = Path(args.output_root) / f"{safe_ablation}_{model_slug}"
     output_dir.mkdir(parents=True, exist_ok=True)

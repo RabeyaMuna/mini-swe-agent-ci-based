@@ -24,6 +24,10 @@ from utilities.llm_invoker import (
 )
 
 
+class DecompositionGenerationError(RuntimeError):
+    """Raised when valid CI analysis cannot be decomposed into valid problems."""
+
+
 class STAIRRetrieval:
     """
     STAIR-inspired hierarchical memory retrieval.
@@ -346,6 +350,20 @@ class STAIRRetrieval:
                     print(f"[Memory]     Type: {p.get('failure_type', 'unknown')}")
                 return cached_problems
 
+        evidence_fields = (
+            "error_context",
+            "failure_signals",
+            "relevant_files",
+            "error_types",
+        )
+        if not isinstance(query, dict) or not any(
+            query.get(field) for field in evidence_fields
+        ):
+            raise DecompositionGenerationError(
+                "CI log analysis is empty or malformed: expected at least one of "
+                + ", ".join(evidence_fields)
+            )
+
         # Not cached - generate with LLM
         print(f"[Memory] STAGE 0: Decomposing CI failure with LLM...")
 
@@ -448,8 +466,29 @@ For EACH problem, create structured query objects for L1/L2/L3 retrieval.
 """
 
         response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
-        result = response if isinstance(response, dict) else {}
-        problems = result.get("problems", [])
+        if not isinstance(response, dict):
+            raise DecompositionGenerationError(
+                "Stage-0 decomposition LLM returned malformed output: expected "
+                f"a JSON object with a 'problems' array, got {type(response).__name__}"
+            )
+
+        raw_problems = response.get("problems")
+        if not isinstance(raw_problems, list) or not raw_problems:
+            raise DecompositionGenerationError(
+                "Stage-0 decomposition LLM returned no problems; the response "
+                "must contain a non-empty 'problems' array"
+            )
+
+        problems = []
+        for index, problem in enumerate(raw_problems, 1):
+            if not isinstance(problem, dict) or not str(
+                problem.get("problem") or ""
+            ).strip():
+                raise DecompositionGenerationError(
+                    "Stage-0 decomposition LLM returned malformed problem "
+                    f"{index}: each problem must be an object with a description"
+                )
+            problems.append(problem)
 
         # Save to cache
         if sha_fail and problems:

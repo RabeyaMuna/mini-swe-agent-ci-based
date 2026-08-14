@@ -373,8 +373,8 @@ tmux new -s decompose
 python3 scripts/decompose_backward.py \
   --batch \
   --use-huggingface \
-  --dataset data/camel_memory_set.jsonl \
-  --model gpt-5.4-mini \
+  --dataset data/memory_set.jsonl \
+  --model glm5.2 \
   --output-dir data/back_trs
 # Detach: Ctrl+B then D
 
@@ -446,6 +446,10 @@ PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
 Results are written incrementally under:
 
 ```text
+# For baseline (no directional memory):
+results/miniswe-agent/baseline_<model>/
+
+# For L1, L1+L2, L1+L2+L3 (with directional memory):
 results/miniswe-agent/<direction>/<ablation>_<model>/
 ```
 
@@ -498,7 +502,8 @@ Notes:
 - Run Mini-SWE and Codex separately; concurrent jobs may contend for repository caches.
 - `--workers` controls parallel issues. Start with `1`, then increase it based on CPU, memory, and API rate limits.
 - Valid Mini-SWE model aliases are `gpt-5.4-mini` and `minimax2.5`.
-- `baseline` ignores memory. Other ablations load backward or forward memory according to `--direction`.
+- `baseline` ignores memory and saves results directly to `results/miniswe-agent/baseline_<model>/` (no direction subdirectory).
+- Other ablations (L1, L1+L2, L1+L2+L3) load backward or forward memory according to `--direction` and save to `results/miniswe-agent/<direction>/<ablation>_<model>/`.
 
 ## 3) Run Codex (OpenAI Codex CLI agent)
 
@@ -648,18 +653,25 @@ See codex/docs/reademe.md for how MiniMax M2.5 is wired via OpenRouter (OpenAIâ€
 Run ALL eval_issues for each model, ablation, and direction (workers=4, dataset=data/eval_set.jsonl).
 The wrapper loads `.env` and selects OpenAI or OpenRouter automatically.
 
+**Note:** For baseline, the direction parameter is ignored since baseline doesn't use directional memory.
+Results are saved to `results/miniswe-agent/baseline_<model>/`
+
 #### GPT-5.4-mini (Recommended)
 ```bash
+# Baseline (direction parameter is ignored, results saved to results/miniswe-agent/baseline_gpt-5.4-mini/)
 bash ./run_miniswe_direct.sh "" BASELINE backward gpt-5.4-mini "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" BASELINE forward  gpt-5.4-mini "" data/eval_set.jsonl 4
+
+# Memory modes (results saved to results/miniswe-agent/<direction>/l1_l2_l3_gpt-5.4-mini/)
 bash ./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini "" data/eval_set.jsonl 4
 ```
 
 #### MiniMax M2.5
 ```bash
+# Baseline (direction parameter is ignored, results saved to results/miniswe-agent/baseline_minimax-m2.5/)
 bash ./run_miniswe_direct.sh "" BASELINE backward minimax2.5 "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" BASELINE forward  minimax2.5 "" data/eval_set.jsonl 4
+
+# Memory modes (results saved to results/miniswe-agent/<direction>/l1_l2_l3_minimax-m2.5/)
 bash ./run_miniswe_direct.sh "" L1+L2+L3 backward minimax2.5 "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  minimax2.5 "" data/eval_set.jsonl 4
 ```

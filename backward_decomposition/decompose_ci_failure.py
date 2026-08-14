@@ -25,6 +25,7 @@ import argparse
 import copy
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -4314,7 +4315,7 @@ def _append_to_memory_files(result: dict, output_dir: str = "data/back_trs"):
             pattern_with_meta["source_repo"] = l3_memory.get("repo", "")
             l3_patterns.append(pattern_with_meta)
 
-    # APPEND to each file
+    # APPEND to each file (using atomic writes to prevent corruption)
     if l1_memory:
         failure_memory_path = back_trs_dir / "failure_memory.json"
         existing = []
@@ -4322,8 +4323,21 @@ def _append_to_memory_files(result: dict, output_dir: str = "data/back_trs"):
             with open(failure_memory_path, "r") as f:
                 existing = json.load(f)
         existing.append(l1_memory)  # Append complete issue record
-        with open(failure_memory_path, "w") as f:
-            json.dump(existing, f, indent=2)
+
+        # Atomic write: write to temp file, then rename
+        import tempfile
+        temp_fd, temp_path = tempfile.mkstemp(dir=back_trs_dir, suffix='.tmp')
+        try:
+            with os.fdopen(temp_fd, 'w') as f:
+                json.dump(existing, f, indent=2)
+            # Atomic rename (safe even if interrupted)
+            os.replace(temp_path, failure_memory_path)
+        except:
+            # Clean up temp file on error
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+
         num_problems = len(l1_memory.get("problems", []))
         print(
             f"  OK Appended issue {issue_id} with {num_problems} problems to failure_memory.json"
@@ -4336,8 +4350,19 @@ def _append_to_memory_files(result: dict, output_dir: str = "data/back_trs"):
             with open(repo_memory_path, "r") as f:
                 existing = json.load(f)
         existing.append(l2_memory)
-        with open(repo_memory_path, "w") as f:
-            json.dump(existing, f, indent=2)
+
+        # Atomic write: write to temp file, then rename
+        import tempfile
+        temp_fd, temp_path = tempfile.mkstemp(dir=back_trs_dir, suffix='.tmp')
+        try:
+            with os.fdopen(temp_fd, 'w') as f:
+                json.dump(existing, f, indent=2)
+            os.replace(temp_path, repo_memory_path)
+        except:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+
         print("  OK Appended 1 issue to repo_memory.json")
 
     if l3_patterns:
@@ -4347,8 +4372,19 @@ def _append_to_memory_files(result: dict, output_dir: str = "data/back_trs"):
             with open(cross_memory_path, "r") as f:
                 existing = json.load(f)
         existing.extend(l3_patterns)
-        with open(cross_memory_path, "w") as f:
-            json.dump(existing, f, indent=2)
+
+        # Atomic write: write to temp file, then rename
+        import tempfile
+        temp_fd, temp_path = tempfile.mkstemp(dir=back_trs_dir, suffix='.tmp')
+        try:
+            with os.fdopen(temp_fd, 'w') as f:
+                json.dump(existing, f, indent=2)
+            os.replace(temp_path, cross_memory_path)
+        except:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+
         print(f"  OK Appended {len(l3_patterns)} patterns to cross_memory.json")
 
 

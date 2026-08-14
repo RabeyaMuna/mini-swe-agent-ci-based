@@ -817,6 +817,28 @@ def remove_from_preds_file(output_path: Path, instance_id: str) -> None:
             )
 
 
+def update_problems_file(
+    output_path: Path,
+    instance_id: str,
+    problems: list,
+) -> None:
+    """
+    Save the problems list that was provided to the agent for this instance.
+
+    This helps track what the agent was asked to fix, separate from the final patch.
+    Format: {"id": instance_id, "problems": [...]}
+    """
+    with _OUTPUT_FILE_LOCK:
+        data = _read_preds(output_path)
+        data[instance_id] = {
+            "id": instance_id,
+            "problems": problems or [],
+        }
+        output_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Local environment setup  (clone -> checkout -> LocalEnvironment)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1407,9 +1429,19 @@ def setup_local_environment(
     _ensure_commit_available(testbed_path, sha_fail, remote="origin")
     _prepare_worktree(testbed_path, sha_fail)
 
-    # ── Try installing repo dependencies (resilient - continues on failure) ────
-    sha_fail = instance.get("sha_fail", "")
-    _try_install_dependencies(testbed_path, sha_fail)
+    # Broad dependency installation is intentionally opt-in. CI benchmark repos
+    # frequently require unavailable services, runtimes, compilers, or Docker,
+    # and eager installation can consume the repair budget before diagnosis.
+    # The default prompt instead permits a narrow per-repository environment
+    # (for example .ci-repair-venv) that is reused by sequential problem runs.
+    if bool(config.get("run", {}).get("auto_install_dependencies", False)):
+        sha_fail = instance.get("sha_fail", "")
+        _try_install_dependencies(testbed_path, sha_fail)
+    else:
+        logger.info(
+            "[CIBench] Skipping broad automatic dependency installation; "
+            "the agent may perform bounded targeted setup"
+        )
 
     # ── Build LocalEnvironment ────────────────────────────────────────────────
     # Strip environment_class from the env config dict (LocalEnvironment doesn't accept it).
@@ -1733,13 +1765,17 @@ This problem can be solved completely by running these commands:
 {repair_plan}
 
 [WARN] CRITICAL INSTRUCTIONS:
-1. Execute the Install command EXACTLY as shown above
-2. Execute the Run/Fix command EXACTLY as shown above
-3. DO NOT manually edit any files - the automated tool will fix them
-4. DO NOT explore or analyze files - just run the commands
-5. After running both commands, the problem will be fixed
+1. First inspect the tool configuration and confirm that every target path exists
+2. Confirm the reported failure is within that tool's configured scope
+3. If the tool is unavailable, install it in the repository-local environment
+   or tool cache rather than globally; preserve the requested version when one
+   is specified
+4. Execute the Run/Fix command with the verified target paths
+5. Inspect the resulting diff and run the relevant check command when feasible
+6. DO NOT manually edit files when the confirmed problem is purely mechanical
 
-The automated tool handles all file changes. Your job is to execute the commands, not edit files."""
+The automated tool should make the mechanical changes, but you must verify its
+scope, output, and resulting diff before finishing."""
     else:
         # Manual fix or hybrid - use plan as-is
         repair_plan_formatted = repair_plan
@@ -2370,6 +2406,8 @@ def process_instance(
                     "task_id": issue_id,
                     "sha_fail": sha_fail,
                     "repo": instance.get("repo_name", ""),
+                    "workflow_name": instance.get("workflow_name", ""),
+                    "workflow_path": instance.get("workflow_path", ""),
                 }
 
                 ci_memory = memory_plugin.retrieve(
@@ -2402,6 +2440,7 @@ def process_instance(
             except Exception as e:
                 logger.warning(f"[CIBench] Memory retrieval failed: {e}")
                 logger.debug(f"[CIBench] Memory retrieval traceback:\n{traceback.format_exc()}")
+                extra_info["problem_generation_error"] = str(e)
                 ci_memory = {}
 
         # Build task/problem statement
@@ -2551,9 +2590,10 @@ def process_instance(
             # the issue complete. Leave it retryable instead.
             prediction_ready = False
             exit_status = "problem_generation_failed"
-            extra_info["problem_generation_error"] = (
+            extra_info.setdefault(
+                "problem_generation_error",
                 "MemoryPlugin returned no CI-derived problems for the selected "
-                f"ablation level {memory_ablation_levels or 'baseline'}"
+                f"ablation level {memory_ablation_levels or 'baseline'}",
             )
             logger.error("[CIBench] %s", extra_info["problem_generation_error"])
 
@@ -2606,6 +2646,9 @@ def process_instance(
 
         if prediction_ready:
             update_preds_file(output_dir / "preds.json", instance_id, sha_fail, diff)
+            # Also save the problems that were provided to the agent
+            problems_list = ci_memory.get("problems", [])
+            update_problems_file(output_dir / "problems.json", instance_id, problems_list)
         else:
             logger.error(
                 "[CIBench] Not recording %s in preds.json; problem generation must be retried",

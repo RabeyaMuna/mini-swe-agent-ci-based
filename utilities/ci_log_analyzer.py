@@ -5,11 +5,13 @@ import os
 import re
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 from utilities.model_token_config import get_input_chunk_tokens
 from utilities.llm_invoker import invoke_llm_with_retry
+from utilities.text_normalizer import normalize_log_text
 
 # ── Optional third-party dependencies ─────────────────────────────────────────
 try:
@@ -54,7 +56,51 @@ except ImportError:
             self.content = content
 
 
-# ── JSON Cleaning Utility ──────────────────────────────────────────────────────
+# ── JSON Repair Utilities ─────────────────────────────────────────────────────
+def _repair_truncated_json(content: str) -> str:
+    """
+    Attempt to repair truncated JSON by closing open structures.
+
+    Handles:
+    - Incomplete strings
+    - Unclosed arrays
+    - Unclosed objects
+    - Mixed nesting
+    """
+    if not content.strip():
+        return content
+
+    content = content.strip()
+
+    # Count open/close brackets and braces
+    open_braces = content.count('{') - content.count('}')
+    open_brackets = content.count('[') - content.count(']')
+
+    # Remove incomplete trailing string (ends without closing quote)
+    # Match: "text but no closing quote at end
+    if content.count('"') % 2 != 0:
+        # Find last complete string
+        last_quote = content.rfind('"')
+        # If there's text after the last quote that doesn't close it
+        if last_quote > 0:
+            # Check if this is an opening quote
+            quotes_before = content[:last_quote].count('"')
+            if quotes_before % 2 == 0:
+                # This is an opening quote - remove everything after previous char
+                # Find the last complete element
+                content = content[:last_quote].rstrip(', ')
+
+    # Close open structures
+    # Remove any trailing incomplete value (e.g., "key": partial)
+    content = re.sub(r',?\s*"[^"]*":\s*[^,}\]]*$', '', content)
+
+    # Add closing brackets/braces
+    content += ']' * open_brackets
+    content += '}' * open_braces
+
+    return content
+
+
 def _clean_malformed_json(content: str) -> str:
     """
     Clean common LLM JSON errors:
@@ -62,8 +108,12 @@ def _clean_malformed_json(content: str) -> str:
     - Trailing commas
     - Missing commas
     - Extra text before/after JSON
+    - Truncated JSON
     """
-    # Remove markdown fences
+    # STEP 1: Repair truncated JSON first
+    content = _repair_truncated_json(content)
+
+    # STEP 2: Remove markdown fences
     content = re.sub(r"```(?:json)?\s*\n?(.*?)\n?```", r"\1", content, flags=re.DOTALL)
 
     # Fix trailing commas before } or ]
@@ -262,6 +312,9 @@ class CILogAnalyzerLLM:
                         log_text = ""
                 else:
                     log_text = str(log) if log else ""
+
+                # Normalize text to handle ANY encoding issues (BOM, control chars, etc.)
+                log_text = normalize_log_text(log_text)
 
                 if not log_text or len(log_text.strip()) == 0:
                     print(f"  ⚠️  Skipping step '{step_name}': empty log content")
@@ -747,41 +800,88 @@ of the CI failure for this step using the following STRICT JSON schema
             try:
                 # Use invoke_llm_with_retry with max_tokens as CEILING (not target)
                 # LLM outputs only what's needed, up to this limit
-      
-                response = invoke_llm_with_retry(
-                    llm=self.llm,
-                    prompt=prompt,
-                    max_tokens=8000,  # Maximum limit (LLM outputs only what's needed)
-                    parse_json=False  # We parse JSON ourselves below
-                )
-                content = self.load_json_maybe_fenced(response)
+                max_tokens = 8000  # Initial limit
+
+                # Adaptive retry: if response is truncated, reduce chunk size
+                for attempt in range(2):  # Max 2 attempts
+                    response = invoke_llm_with_retry(
+                        llm=self.llm,
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        parse_json=False  # We parse JSON ourselves below
+                    )
+                    content = self.load_json_maybe_fenced(response)
+
+                    # Check if response looks truncated (doesn't end with } or ])
+                    content_stripped = content.strip()
+                    is_truncated = (
+                        content_stripped
+                        and not content_stripped.endswith('}')
+                        and not content_stripped.endswith(']')
+                        and len(content_stripped) > 100
+                    )
+
+                    if not is_truncated:
+                        break  # Success!
+
+                    # Response was truncated - reduce max_tokens and retry
+                    if attempt == 0:
+                        print(f"  ⚠ Response truncated, retrying with reduced max_tokens...")
+                        max_tokens = 4000  # Reduce to 4K
+                    else:
+                        print(f"  ⚠ Response still truncated after retry")
+                        # Continue with truncated response - repair will handle it
 
                 if not content or not content.strip():
                     raise ValueError(
                         "LLM returned an empty response for generate_log_summary"
                     )
 
+                # Check if LLM returned an error response
+                if isinstance(content, dict) and "error" in content:
+                    raise ValueError(f"LLM returned error: {content.get('error')}")
+
                 try:
                     summary = json.loads(content)
-                except json.JSONDecodeError:
-                    # Try cleaning malformed JSON first
+                except json.JSONDecodeError as json_err:
+                    # Try repairing truncated/malformed JSON
                     try:
                         cleaned = _clean_malformed_json(content)
                         summary = json.loads(cleaned)
+                        print(f"  ✓ Repaired malformed JSON for step '{step_name}'")
                     except json.JSONDecodeError:
-                        # Fall back to demjson3
+                        # Fall back to demjson3 for lenient parsing
                         if demjson3 is not None:
                             try:
                                 cleaned = _clean_malformed_json(content)
                                 summary = demjson3.decode(cleaned)
+                                print(f"  ✓ Parsed with demjson3 for step '{step_name}'")
                             except Exception as dec_err:
+                                # Log the exact parse error with context
+                                error_context = content[:500] if len(content) > 500 else content
                                 raise ValueError(
-                                    f"JSON parse failed: {dec_err} | raw: {content[:200]}"
+                                    f"JSON parse failed after all attempts.\n"
+                                    f"Original error: {json_err}\n"
+                                    f"Demjson3 error: {dec_err}\n"
+                                    f"Content preview: {error_context}"
                                 )
                         else:
+                            # No demjson3, provide detailed error
+                            error_context = content[:500] if len(content) > 500 else content
                             raise ValueError(
-                                f"JSON parse failed (demjson3 not installed) | raw: {content[:200]}"
+                                f"JSON parse failed (demjson3 not installed).\n"
+                                f"Error: {json_err}\n"
+                                f"Content preview: {error_context}\n"
+                                f"Hint: Install demjson3 for more lenient JSON parsing"
                             )
+
+                # Validate that we got a valid summary structure
+                if not isinstance(summary, dict):
+                    raise ValueError(f"Expected dict, got {type(summary)}")
+
+                # Check for required fields
+                if "step_name" not in summary:
+                    summary["step_name"] = step_name
 
                 log_details.append(summary)
             except Exception as e:

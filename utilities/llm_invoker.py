@@ -578,9 +578,16 @@ def invoke_llm_with_retry(
     # ============================================================
     parsed = _load_json_flexible(content)
 
-    # Successfully parsed
-    if parsed is not None and parsed not in ([], {}):
-        return parsed
+    # Successfully parsed (including valid empty arrays/objects)
+    if parsed is not None:
+        # Check if content was literally "[]" or "{}" - valid empty responses
+        content_stripped = content.strip()
+        if content_stripped in ('[]', '{}') or (content_stripped.startswith('[') and content_stripped.endswith(']')) or (content_stripped.startswith('{') and content_stripped.endswith('}')):
+            # Valid JSON structure (even if empty)
+            return parsed
+        # Non-empty parsed result
+        if parsed not in ([], {}):
+            return parsed
 
     # ============================================================
     # STEP 5: Attempt JSON repair

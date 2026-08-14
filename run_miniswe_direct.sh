@@ -190,13 +190,21 @@ if [ "$DIRECTION" = "both" ]; then DIRECTIONS=(backward forward); else DIRECTION
 run_one() {
   local ablation="$1"; local direction="$2"
   echo "→ Mini-SWE: abl=$ablation dir=$direction"
+
+  # For baseline, don't use direction in output path (baseline doesn't use directional memory)
+  local ablation_lower=$(echo "$ablation" | tr '[:upper:]' '[:lower:]')
+  local output_root="$RESULTS_ROOT"
+  if [ "$ablation_lower" != "baseline" ]; then
+    output_root="$RESULTS_ROOT/$direction"
+  fi
+
   PYTHONPATH=. python3 scripts/run_miniswe_ci_bench.py \
     --dataset "$DATASET" \
     --issue_regex "$ISSUE_REGEX" \
     --ablation "$ablation" \
     --direction "$direction" \
     --model "$MODEL" \
-    --output_root "$RESULTS_ROOT/$direction" \
+    --output_root "$output_root" \
     --workers "$WORKERS"
 }
 
@@ -214,10 +222,15 @@ done
 
 echo "════════════════════════════════════════════════════════════════"
 echo "Mini-SWE runs: $TOTAL  failures: $FAILS"
-if [ "$DIRECTION" = "both" ]; then
-  echo "Results: $RESULTS_ROOT/{backward,forward}/"
+
+# Show output locations based on ablation mode
+ABLATION_LOWER=$(echo "$ABLATION" | tr '[:upper:]' '[:lower:]')
+if [ "$ABLATION_LOWER" = "baseline" ]; then
+  echo "Results: $RESULTS_ROOT/baseline_<model>/"
+elif [ "$DIRECTION" = "both" ]; then
+  echo "Results: $RESULTS_ROOT/{backward,forward}/<ablation>_<model>/"
 else
-  echo "Results: $RESULTS_ROOT/$DIRECTION/"
+  echo "Results: $RESULTS_ROOT/$DIRECTION/<ablation>_<model>/"
 fi
 echo "════════════════════════════════════════════════════════════════"
 exit $FAILS

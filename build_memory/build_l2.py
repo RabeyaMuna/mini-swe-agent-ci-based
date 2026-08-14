@@ -100,6 +100,49 @@ AUTOMATED_TOOLS = [
         "file_pattern": "*.py",
         "fixes": ["unused imports", "unused variables"],
     },
+    {
+    "tool": "yamllint",
+    "purpose": "YAML linter for syntax, indentation, whitespace, and style violations",
+    "install_command": "pip install yamllint",
+    "fix_command": None,
+    "file_pattern": ["*.yml", "*.yaml"],
+    "fixes": [],
+    "note": "Detects YAML violations but does not automatically modify files.",
+},
+{
+    "tool": "yamlfmt",
+    "purpose": "YAML formatter",
+    "install_command": "go install github.com/google/yamlfmt/cmd/yamlfmt@latest",
+    "fix_command": "yamlfmt {{file_or_dir}}",
+    "file_pattern": ["*.yml", "*.yaml"],
+    "fixes": [
+        "YAML formatting",
+        "indentation",
+        "trailing whitespace",
+    ],
+},
+{
+    "tool": "prettier",
+    "purpose": "YAML, JSON, Markdown, and other file formatter",
+    "install_command": "npm install -g prettier",
+    "fix_command": "prettier --write {{file_or_dir}}",
+    "file_pattern": ["*.yml", "*.yaml", "*.json", "*.md"],
+    "fixes": [
+        "YAML indentation",
+        "trailing whitespace",
+        "YAML formatting",
+        "YAML style"
+    ],
+    "note": "Can automatically format GitHub Actions workflow YAML files.",
+},
+{
+    "tool": "yapf",
+    "purpose": "Python code formatter",
+    "install_command": "pip install yapf",
+    "fix_command": "yapf -i {{file_or_dir}}",
+    "file_pattern": "*.py",
+    "fixes": ["code formatting", "style violations"],
+},
 ]
 
 

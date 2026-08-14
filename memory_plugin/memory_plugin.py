@@ -185,6 +185,17 @@ class MemoryPlugin:
         # Normalize repo name (handle both "owner/repo" and "repo" formats)
         repo_raw = issue_metadata.get("repo", "")
         repo_normalized = repo_raw.split("/")[-1] if "/" in repo_raw else repo_raw
+        workflow_path = (
+            ci_failure.get("workflow_path")
+            or verification.get("workflow_path")
+            or issue_metadata.get("workflow_path")
+            or ""
+        )
+        workflow_name = (
+            ci_failure.get("workflow_name")
+            or issue_metadata.get("workflow_name")
+            or (Path(workflow_path).stem if workflow_path else "")
+        )
 
         return {
             # ============================================================
@@ -197,8 +208,8 @@ class MemoryPlugin:
             # Repository info (for L1/L2 filtering)
             # ============================================================
             "repo": repo_normalized,  # Use normalized name for matching
-            "workflow_name": ci_failure.get("workflow_name", ""),
-            "workflow_path": ci_failure.get("workflow_path", ""),
+            "workflow_name": workflow_name,
+            "workflow_path": workflow_path,
 
             # ============================================================
             # Complete CI failure info (pass EVERYTHING for L1/L2/L3)
@@ -207,7 +218,14 @@ class MemoryPlugin:
             "failure_signals": ci_failure.get("failure_signals", []),
             "relevant_files": ci_failure.get("relevant_files", []),
             "error_types": ci_failure.get("error_types", []),
-            "failed_jobs": ci_failure.get("failed_jobs", []),
+            # The CI log analyzer writes ``failed_job`` while some older
+            # callers use ``failed_jobs``.  Accept both so a cached analyzer
+            # result does not lose the failing command during decomposition.
+            "failed_jobs": (
+                ci_failure.get("failed_jobs")
+                or ci_failure.get("failed_job")
+                or []
+            ),
 
             # ============================================================
             # Validation info (for repair strategies)

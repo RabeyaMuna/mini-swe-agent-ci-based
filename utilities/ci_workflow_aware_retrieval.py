@@ -286,7 +286,62 @@ def _normalize_dependent_files(raw: Any) -> List[Dict[str, str]]:
     return out
 
 
-def _normalize_validation_sequence(raw_steps: Any) -> List[Dict[str, Any]]:
+def _generate_commands_from_action(evidence: str, validates: str, llm) -> tuple[str, str]:
+    """
+    Use LLM to infer appropriate installation and validation commands
+    from GitHub Action evidence.
+
+    Returns: (installation_cmd, validation_cmd)
+    """
+    if not evidence or not validates:
+        return ("", "")
+
+    prompt = f"""Given a GitHub Actions workflow step, infer the equivalent CLI commands.
+
+**Step Information:**
+- What it validates: {validates}
+- GitHub Action used: {evidence}
+
+**Task:** Generate the equivalent installation and validation commands that replicate what this GitHub Action does.
+
+**Output JSON:**
+{{
+  "installation_cmd": "command to install the tool (e.g., pip install ruff)",
+  "validation_cmd": "command to run the validation (e.g., ruff check .)"
+}}
+
+**Rules:**
+- installation_cmd: Package manager command to install the tool
+- validation_cmd: The actual validation/check command
+- Use the most common, standard commands for the tool
+- Keep commands simple and generic (no repo-specific paths unless in evidence)
+- If you cannot infer commands, return empty strings
+
+**Return only valid JSON, no markdown fences.**
+"""
+
+    try:
+        from utilities.llm_invoker import invoke_llm_with_retry
+
+        response = invoke_llm_with_retry(
+            llm=llm,
+            prompt=prompt,
+            max_tokens=500,
+            parse_json=True
+        )
+
+        if isinstance(response, dict):
+            install_cmd = str(response.get("installation_cmd", "")).strip()
+            valid_cmd = str(response.get("validation_cmd", "")).strip()
+            return (install_cmd, valid_cmd)
+
+        return ("", "")
+    except Exception:
+        # If LLM call fails, return empty
+        return ("", "")
+
+
+def _normalize_validation_sequence(raw_steps: Any, llm=None) -> List[Dict[str, Any]]:
     steps: List[Dict[str, Any]] = []
     for index, item in enumerate(
         raw_steps if isinstance(raw_steps, list) else [], start=1
@@ -302,6 +357,13 @@ def _normalize_validation_sequence(raw_steps: Any) -> List[Dict[str, Any]]:
         source = str(item.get("source") or item.get("source_file") or "").strip()
         evidence = str(item.get("evidence") or "").strip()
 
+        # If commands are missing, use LLM to infer them from the GitHub Action
+        if not installation_cmd and not validation_cmd and llm:
+            installation_cmd, validation_cmd = _generate_commands_from_action(
+                evidence, validates, llm
+            )
+
+        # Skip if still no commands
         if not installation_cmd and not validation_cmd:
             continue
 
@@ -467,7 +529,7 @@ def analyze_workflow_from_benchmark(
     print(f"{str(sequence_raw)[:1000]}")
     print(f"[DEBUG] Response length: {len(str(sequence_raw))} chars")
 
-    validation_sequence = _normalize_validation_sequence(_load_json(sequence_raw, []))
+    validation_sequence = _normalize_validation_sequence(_load_json(sequence_raw, []), llm=llm)
 
     if not validation_sequence:
         raise WorkflowValidationExtractionError(
