@@ -45,3 +45,4 @@ datasets>=2.0.0
 langchain-openai
 codex-cli
 litellm[proxy]
+"protobuf>=6.31.1"
