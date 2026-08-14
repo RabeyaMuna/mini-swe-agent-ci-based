@@ -393,6 +393,26 @@ For EACH problem, create structured query objects for L1/L2/L3 retrieval.
 - If CI has ONE main failure → Return 1 problem
 - If CI has MULTIPLE different failures → Return N problems (one per distinct issue)
 
+**CRITICAL - Handling Invalid/Non-Fixable Files:**
+
+If the files from CI logs are build artifacts or non-editable (e.g., .venv, node_modules, *.lock, dist/, build/, __pycache__):
+- Set `files: []` (empty array) in top-level and L1/L2 queries
+- **DO NOT** try to guess the actual source files
+- Memory retrieval will match based on problem/root_cause/failure_signals instead
+- The agent will search the repo for actual files AFTER retrieval using failure_signals
+
+Example invalid files to exclude:
+- Virtual environments: .venv, venv/, node_modules/
+- Lock files: uv.lock, package-lock.json, Cargo.lock, poetry.lock
+- Build outputs: dist/, build/, target/, __pycache__/
+- Compiled files: *.pyc, *.class, *.o
+
+For dependency errors specifically:
+- If error mentions "datacommons>=1.4.3" or package constraints
+- BUT files are just ".venv" or "uv.lock"
+- Set files=[] and put rich failure_signals like:
+  ["uv ERESOLVE", "datacommons>=1.4.3", "dependency resolution failed", "yanked package"]
+
 **Query Structure Rules:**
 
 **L1 Query** (Repo + Workflow Specific):
