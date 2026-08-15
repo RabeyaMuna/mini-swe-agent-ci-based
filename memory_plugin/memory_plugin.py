@@ -1,11 +1,19 @@
 """
 Memory Plugin - Agent-Agnostic Memory Retrieval
-Handles query building and memory retrieval for any CI repair agent.
+Handles decomposition caching and orchestrates memory retrieval.
 """
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
 from .stair_retrieval import STAIRRetrieval
+from .decomposition_cache import get_global_cache
+from utilities.llm_invoker import STRICT_JSON_RULES, invoke_llm_with_retry
+
+
+class DecompositionGenerationError(RuntimeError):
+    """Raised when valid CI analysis cannot be decomposed into valid problems."""
 
 
 class MemoryPlugin:
@@ -58,38 +66,6 @@ class MemoryPlugin:
             memory_levels=ablation
         )
 
-    def decompose_only(
-        self,
-        ci_failure: Dict[str, Any],
-        verification: Optional[Dict[str, Any]] = None,
-        issue_metadata: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Run Stage 0 only: Decompose CI failure into problems (no memory retrieval).
-
-        Used by baseline mode to get intelligent LLM-based problem decomposition
-        without accessing memory or repair strategies.
-
-        Returns:
-            List of decomposed problems with structure:
-            - problem: Description
-            - root_cause: Analysis
-            - files: List of affected files
-            - failure_type: Category
-            - failure_signals: Error messages
-            - verification_cmd: Validation command
-        """
-        if not self.llm:
-            raise ValueError("LLM client required for CI decomposition")
-
-        # Build query from raw CI data
-        query = self._build_query(ci_failure, verification, issue_metadata)
-
-        # Call STAIR retrieval's Stage 0 only
-        problems = self.retrieval.decompose_only(query)
-
-        return problems
-
     def retrieve(
         self,
         ci_failure: Dict[str, Any],
@@ -97,63 +73,192 @@ class MemoryPlugin:
         issue_metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Retrieve similar past fixes from memory.
+        Retrieve CI failure repair solutions.
+
+        Flow:
+        1. Check decomposition cache (by sha_fail)
+        2. If not cached: generate decomposition and save to cache
+        3. If baseline: return problems (without query)
+        4. If memory: pass to stair_retrieval for memory work
 
         Args:
-            ci_failure: Complete CI failure analysis dict containing:
-                - error_context: List[str]
-                - failure_signals: List[str]
-                - relevant_files: List[dict]
-                - error_types: List[dict]
-                - failed_jobs: List[dict]
-                - workflow_name: str
-                - workflow_path: str
-            verification: Workflow verification dict containing:
-                - validation_sequence: List[dict]
-            issue_metadata: Optional metadata for logging (NOT used in similarity):
-                - task_id: str
-                - sha_fail: str
-                - repo: str
+            ci_failure: Complete CI failure analysis dict
+            verification: Workflow verification dict
+            issue_metadata: Metadata (workflow_path, workflow_name, repo, sha_fail)
 
         Returns:
-            Dict containing:
-                - problems: List of organized problems from memory
-                - metadata: Retrieval statistics
-                - l1_matches: Raw L1 matches
-                - l2_matches: Raw L2 matches
-                - l3_matches: Raw L3 matches
-                - level_scores: Similarity scores per level
+            Dict with problems (and memory data if not baseline)
         """
-        # Baseline check: return empty if baseline mode
-        if not self.enabled or self.ablation.lower() == "baseline":
-            return {
-                'problems': [],
-                'metadata': {
-                    'mode': 'baseline',
-                    'enabled_levels': [],
-                    'retrieved': {'l1': 0, 'l2': 0, 'l3': 0},
-                    'common_detected': 0,
-                    'filtered': 0,
-                    'merged': 0,
-                    'final': 0
-                },
-                'l1_matches': [],
-                'l2_matches': [],
-                'l3_matches': [],
-                'common_problems': [],
-                'dependencies': []
-            }
+        issue_metadata = issue_metadata or {}
+        sha_fail = issue_metadata.get("sha_fail", "")
 
-        # Build query from raw CI data (Stage 0 will decompose internally)
-        query = self._build_query(ci_failure, verification, issue_metadata)
+        # 1. Check cache for decomposed problems
+        cache = get_global_cache()
+        if sha_fail and cache.has(sha_fail):
+            decomposed_problems = cache.get_problems(sha_fail)
+            print(f"[Memory] Using cached decomposition for {sha_fail[:12]}")
+        else:
+            # 2. Generate decomposition and save to cache
+            print(f"[Memory] Generating decomposition for {sha_fail[:12] if sha_fail else 'unknown'}")
+            decomposed_problems = self._decompose_and_save_to_cache(
+                ci_failure=ci_failure,
+                verification=verification,
+                workflow_path=issue_metadata.get("workflow_path", ""),
+                workflow_name=issue_metadata.get("workflow_name", ""),
+                repo=issue_metadata.get("repo", ""),
+                sha_fail=sha_fail
+            )
 
-        # Retrieve from memory (handles all 9 stages internally)
-        retrieval_result = self.retrieval.retrieve(query, top_k=self.top_k)
+        # 3. Baseline mode: return problems without query
+        if self.ablation.lower() == "baseline":
+            return {"problems": decomposed_problems}
 
-        # Add raw query to result for debugging
-        retrieval_result['query'] = query
+        # 4. Memory mode: pass to stair_retrieval for memory work
+        return self.retrieval.retrieve(
+            problems=decomposed_problems,
+            top_k=self.top_k
+        )
 
-        return retrieval_result
+    def _decompose_and_save_to_cache(
+        self,
+        ci_failure: Dict[str, Any],
+        verification: Optional[Dict[str, Any]],
+        workflow_path: str,
+        workflow_name: str,
+        repo: str,
+        sha_fail: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Decompose CI failure into problems and save to cache.
+
+        Args:
+            ci_failure: Complete CI failure analysis
+            verification: Workflow verification
+            workflow_path, workflow_name, repo: Metadata
+            sha_fail: Failing commit SHA (for caching)
+
+        Returns:
+            List of decomposed problems with L1/L2/L3 queries
+        """
+        if not self.llm:
+            raise ValueError("LLM client required for CI decomposition")
+
+        # Validate we have CI failure data
+        evidence_fields = ("error_context", "failure_signals", "relevant_files", "error_types")
+        if not isinstance(ci_failure, dict) or not any(
+            ci_failure.get(field) for field in evidence_fields
+        ):
+            raise DecompositionGenerationError(
+                "CI log analysis is empty or malformed: expected at least one of "
+                + ", ".join(evidence_fields)
+            )
+
+        # Extract workflow name if not provided
+        if not workflow_name and workflow_path:
+            workflow_name = Path(workflow_path).name
+
+        # Build data for LLM
+        compact_data = {
+            "repo": repo,
+            "workflow_name": workflow_name,
+            "workflow_path": workflow_path,
+            "ci_failure": ci_failure,
+            "verification": verification or {}
+        }
+
+        prompt = f"""Decompose CI failure into structured problems with level-specific queries.
+
+**Complete CI Failure Analysis:**
+```json
+{json.dumps(compact_data, indent=2)}
+```
+
+**Task:**
+Analyze the CI failure and decompose it into individual problems.
+For EACH problem, create structured query objects for L1/L2/L3 retrieval.
+
+- If CI has ONE main failure → Return 1 problem
+- If CI has MULTIPLE different failures → Return N problems (one per distinct issue)
+
+**Return JSON:**
+```json
+{{
+  "problems": [
+    {{
+      "problem": "Clear specific description",
+      "root_cause": "Why this failure happens",
+      "files": ["file1.py", "file2.py"],
+      "failure_type": "formatting",
+      "failure_signals": ["error message 1", "error message 2"],
+      "verification_cmd": "./test.sh",
+      "query": {{
+        "l1": {{
+          "problem": "SAME as top-level problem",
+          "root_cause": "SAME as top-level root_cause",
+          "files": ["SAME as top-level files"],
+          "failure_types": ["Category", "Sub-category"],
+          "repo": "{repo}",
+          "workflow_name": "{workflow_name}",
+          "failure_signals": ["signal1", "signal2"]
+        }},
+        "l2": {{
+          "problem": "SAME as l1",
+          "root_cause": "SAME as l1",
+          "files": ["SAME as l1"],
+          "failure_types": ["SAME as l1"],
+          "repo": "{repo}",
+          "failure_signals": ["SAME as l1"]
+        }},
+        "l3": {{
+          "problem": "Generic abstract version",
+          "root_cause": "Generic version",
+          "failure_types": ["SAME as l1"],
+          "failure_signals": ["abstract patterns"]
+        }}
+      }}
+    }}
+  ]
+}}
+```
+
+{STRICT_JSON_RULES}
+"""
+
+        response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
+
+        # Handle both formats
+        if isinstance(response, list):
+            raw_problems = response
+        elif isinstance(response, dict):
+            raw_problems = response.get("problems")
+        else:
+            raise DecompositionGenerationError(
+                f"LLM returned malformed output: expected JSON object or array, got {type(response).__name__}"
+            )
+
+        if not isinstance(raw_problems, list) or not raw_problems:
+            raise DecompositionGenerationError(
+                "LLM returned no problems; the response must contain a non-empty 'problems' array"
+            )
+
+        problems = []
+        for index, problem in enumerate(raw_problems, 1):
+            if not isinstance(problem, dict) or not str(problem.get("problem") or "").strip():
+                raise DecompositionGenerationError(
+                    f"LLM returned malformed problem {index}: each problem must be an object with a description"
+                )
+            problems.append(problem)
+
+        # Save to cache
+        if sha_fail and problems:
+            cache = get_global_cache()
+            model_name = getattr(self.llm, "model_name", "unknown")
+            # Build minimal query for cache
+            query = {"repo": repo, "workflow_name": workflow_name, "workflow_path": workflow_path}
+            cache.set(sha_fail, query, problems, model=model_name)
+            print(f"[Memory] Saved decomposition to cache for {sha_fail[:12]}")
+
+        return problems
 
     def _build_query(
         self,

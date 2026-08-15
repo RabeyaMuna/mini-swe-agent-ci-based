@@ -540,25 +540,20 @@ def _load_hf_index() -> Dict[str, Dict[str, Any]]:
         _hf_logger.setLevel(_logging.ERROR)
 
         # Try common split names - dataset uses 'train' as the only split
-        def _load_with_retries():
-            for split_name in ("test", "train", "validation", "all"):
-                try:
-                    ds = load_dataset(_HF_DATASET_NAME, split=split_name)
-                    return ds
-                except Exception:
-                    continue
+        # Try once - if it fails, use local data (no retries)
+        ds = None
+        for split_name in ("test", "train", "validation", "all"):
+            try:
+                ds = load_dataset(_HF_DATASET_NAME, split=split_name)
+                break
+            except Exception:
+                continue
+
+        _hf_logger.setLevel(_prev_level)
+
+        if ds is None:
             raise RuntimeError(f"No usable split found in {_HF_DATASET_NAME}")
 
-        try:
-            ds = _retry_with_backoff(
-                _load_with_retries,
-                max_retries=3,
-                initial_delay=2.0,
-                backoff_multiplier=2.0,
-                exceptions=(Exception,),
-            )
-        finally:
-            _hf_logger.setLevel(_prev_level)
         index: Dict[str, Dict[str, Any]] = {}
         for row in ds:
             row = dict(row)

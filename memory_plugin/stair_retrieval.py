@@ -17,7 +17,6 @@ from typing import Any
 
 import numpy as np
 
-from memory_plugin.decomposition_cache import get_global_cache
 from utilities.llm_invoker import (
     STRICT_JSON_RULES,
     invoke_llm_with_retry,
@@ -69,6 +68,9 @@ class STAIRRetrieval:
         self.baseline_mode = baseline_mode
         self.enabled_levels = self._parse_memory_levels(memory_levels)
         self.embedding_model = embedding_model
+
+        # Storage for consecutive problems (extracted in STAGE 4)
+        self._consecutive_problems = []
 
         # Baseline mode: skip all loading
         if baseline_mode:
@@ -134,158 +136,174 @@ class STAIRRetrieval:
             # Default: all levels
             return {"l1", "l2", "l3"}
 
-    def retrieve(self, query: dict, top_k: int = 5) -> dict[str, Any]:
+    def retrieve(
+        self,
+        problems: list[dict],
+        top_k: int = 5
+    ) -> dict[str, Any]:
         """
-        Memory-guided CI repair pipeline (9 stages).
+        STAGE 1-9: Memory retrieval and problem enrichment.
 
-        STAGE 0: Decompose CI failure into problems
-        STAGE 1: Per-problem retrieval (separate L1/L2/L3 for each CI problem)
-        STAGE 2: Per-problem filtering
-        STAGE 3: Enrich CI problems with repair strategies
-        STAGE 4: Extract dependency problems
-        STAGE 5: Extract consecutive problems
-        STAGE 6: Detect common patterns
-        STAGE 7: LLM organize ALL problems (standardize structure)
-        STAGE 8: Reorder (CI → dependencies → consecutive → common)
+        Args:
+            problems: Decomposed CI problems (from decompose_ci_failure)
+            top_k: Number of similar memory entries to retrieve per level
 
         Returns:
-            {"problems": [...]} - All problems with complete, standardized structure
+            Dict with enriched problems and memory data
         """
         if not self.llm:
             raise ValueError("LLM client required for all stages")
 
-        # Baseline mode: Run STAGE 0 only (decompose, no memory retrieval)
+        # Baseline mode check (should not reach here if memory_plugin handles it)
         if self.baseline_mode or len(self.enabled_levels) == 0:
-            print("[Memory] BASELINE MODE: Running STAGE 0 decomposition only (no memory retrieval)")
-            ci_problems = self._stage_0_decompose_ci_failure(query)
-            print(f"[Memory] STAGE 0: Decomposed into {len(ci_problems)} problems")
-            return {"problems": ci_problems}
+            print("[Memory] WARNING: baseline_mode in retrieve() - should be handled by memory_plugin")
+            return {"problems": problems}
+
+        # Extract query from first problem (all problems from same CI failure)
+        query = {}
+        if problems and len(problems) > 0:
+            first_problem = problems[0]
+            # Extract repo/workflow from problem's query
+            problem_query = first_problem.get("query", {})
+            if problem_query:
+                l1_query = problem_query.get("l1", {})
+                query = {
+                    "repo": l1_query.get("repo", ""),
+                    "workflow_name": l1_query.get("workflow_name", ""),
+                    "workflow_path": l1_query.get("workflow_path", ""),
+                }
+
+        # Use passed problems as CI problems
+        ci_problems = problems
+        print(f"[Memory] Starting memory retrieval for {len(ci_problems)} CI problems")
 
         # ============================================================
-        # STAGE 0: Decompose CI failure into structured problems
+        # STAGE 1-4: Process EACH CI problem individually (FULLY MERGED)
         # ============================================================
-        print("[Memory] STAGE 0: Decomposing CI failure...")
-        ci_problems = self._stage_0_decompose_ci_failure(query)
-        print(f"[Memory] STAGE 0: Decomposed into {len(ci_problems)} CI problems")
+        # For each CI problem:
+        #   1. Retrieve L1/L2/L3 matches
+        #   2. Filter relevant matches
+        #   3. Enrich with repair strategies
+        #   4. Extract dependencies/consecutive
+        #   5. Append all to flat problems list
+        # ============================================================
+        print(f"[Memory] STAGE 1-4: Processing each CI problem (retrieve → filter → enrich → dependencies)...")
 
-        # ============================================================
-        # STAGE 1: Per-problem retrieval (each CI problem gets own search)
-        # ============================================================
-        print("[Memory] STAGE 1: Retrieving matches for each CI problem...")
-        per_problem_matches = self._stage_1_per_problem_retrieval(ci_problems, query, top_k)
-        print(f"[Memory] STAGE 1: Retrieved matches for {len(per_problem_matches)} problems")
+        problems_list = []  # Flat list: [CI1, dep1, dep2, consec1, CI2, dep3, ...]
+        total_enriched = 0
+        total_dependencies = 0
+        total_consecutive = 0
 
-        # Check if no matches found - return CI problems as-is
-        total_matches = sum(
-            len(pm.get('l1_matches', [])) + len(pm.get('l2_matches', [])) + len(pm.get('l3_matches', []))
-            for pm in per_problem_matches
-        )
-        if total_matches == 0:
-            print("[Memory] STAGE 1: No matches found in memory - returning decomposed CI problems")
-            # Return CI problems without repair strategies
-            return {"problems": ci_problems}
+        # Process EACH CI problem individually
+        for idx, ci_prob in enumerate(ci_problems, 1):
+            ci_prob_desc = ci_prob.get("problem", "")
+            print(f"[Memory]   Processing CI problem {idx}/{len(ci_problems)}: {ci_prob_desc}...")
 
-        # ============================================================
-        # STAGE 2: Per-problem filtering
-        # ============================================================
-        print("[Memory] STAGE 2: Filtering relevant matches per problem...")
-        filtered_matches = self._stage_2_per_problem_filtering(per_problem_matches, query)
-        print(f"[Memory] STAGE 2: Filtered {len(filtered_matches)} problem match sets")
+            # STAGE 1: Retrieve L1/L2/L3 matches for THIS CI problem
+            matches = self._stage_1_per_problem_retrieval([ci_prob], query, top_k)
 
-        # Check if all matches filtered out
-        # FIXED: Use correct keys (l1_filtered, not l1_matches) after STAGE 2 filtering
-        total_filtered = sum(
-            len(fm.get('l1_filtered', [])) + len(fm.get('l2_filtered', [])) + len(fm.get('l3_filtered', []))
-            for fm in filtered_matches
-        )
-        if total_filtered == 0:
-            print("[Memory] STAGE 2: No relevant matches - will still check common patterns in STAGE 6")
-            # Don't return early - STAGE 6 can still find common problems
-            # even if no individual CI problem matched memory
-
-        # ============================================================
-        # STAGE 3: Enrich CI problems with repair strategies
-        # ============================================================
-        print("[Memory] STAGE 3: Enriching CI problems with repair strategies...")
-        enriched_ci = self._stage_3_enrich_ci_problems(filtered_matches, query)
-        print(f"[Memory] STAGE 3: Enriched {len(enriched_ci)} CI problems (from {len(ci_problems)} original)")
-
-        # CRITICAL FIX: Ensure ALL original CI problems are included
-        # Even if a CI problem had no matches in memory, it must still be in the final output
-        enriched_ci_ids = {p.get('problem', '') for p in enriched_ci}
-        for orig_ci_prob in ci_problems:
-            if orig_ci_prob.get('problem', '') not in enriched_ci_ids:
-                # This CI problem had no matches - add it without repair strategy
-                print(f"[Memory] STAGE 3: Adding unmatched CI problem: {orig_ci_prob.get('problem', '')[:50]}...")
-                enriched_ci.append({
-                    **orig_ci_prob,
+            if not matches or len(matches) == 0:
+                # No retrieval results - add CI problem without enrichment
+                print(f"[Memory]     ✗ No memory retrieval results")
+                problems_list.append({
+                    **ci_prob,
                     "problem_type": "ci_failure",
-                    "repair_strategy": None,  # No matches found
-                    "source": "ci_failure_no_matches"
+                    "repair_strategy": None,
+                    "source": "ci_failure_no_retrieval"
                 })
+                total_enriched += 1
+                continue
 
-        print(f"[Memory] STAGE 3: Total CI problems (including unmatched): {len(enriched_ci)}")
+            # STAGE 2: Filter matches for THIS CI problem
+            filtered = self._stage_2_per_problem_filtering(matches, query)
+
+            if not filtered or len(filtered) == 0:
+                # Filtering removed all matches
+                print(f"[Memory]     ✗ All matches filtered out - no relevant memory")
+                problems_list.append({
+                    **ci_prob,
+                    "problem_type": "ci_failure",
+                    "repair_strategy": None,
+                    "source": "ci_failure_no_relevant_matches"
+                })
+                total_enriched += 1
+                continue
+
+            # Get the filtered match set (contains ci_problem + filtered L1/L2/L3)
+            match_set = filtered[0]
+
+            # STAGE 3: Enrich THIS CI problem (with filtered matches)
+            enriched_list = self._stage_3_enrich_ci_problems([match_set], query)
+
+            if enriched_list:
+                enriched = enriched_list[0]
+                problems_list.append(enriched)
+                total_enriched += 1
+                print(f"[Memory]     ✓ Enriched with repair strategy")
+            else:
+                # Filtered matches didn't enrich - add without repair strategy
+                enriched = {
+                    **ci_prob,
+                    "problem_type": "ci_failure",
+                    "repair_strategy": None,
+                    "source": "ci_failure_no_enrichment"
+                }
+                problems_list.append(enriched)
+                total_enriched += 1
+                print(f"[Memory]     ✗ Enrichment failed - added without repair strategy")
+
+            # STAGE 4: Extract dependencies/consecutive for THIS CI problem
+            related = self._stage_4_extract_related_problems([match_set], [enriched])
+
+            # Append dependencies and consecutive (flat)
+            dep_count = sum(1 for p in related if p.get('problem_type') == 'dependency')
+            consec_count = sum(1 for p in related if p.get('problem_type') == 'consecutive')
+
+            if related:
+                problems_list.extend(related)
+                total_dependencies += dep_count
+                total_consecutive += consec_count
+                print(f"[Memory]     ✓ Found {dep_count} dependencies, {consec_count} consecutive")
+            else:
+                print(f"[Memory]     ✗ No dependencies or consecutive problems")
+
+        print(f"[Memory] STAGE 1-4: Completed {total_enriched} CI problems, {total_dependencies} dependencies, {total_consecutive} consecutive")
 
         # ============================================================
-        # STAGE 4: Extract dependency problems
+        # STAGE 5: Detect common patterns
         # ============================================================
-        print("[Memory] STAGE 4: Extracting dependency problems...")
-        dependency_problems = self._stage_4_extract_dependencies(filtered_matches, enriched_ci, query)
-        print(f"[Memory] STAGE 4: Found {len(dependency_problems)} dependency problems")
+        print("[Memory] STAGE 5: Detecting common patterns...")
+        common_problems = self._stage_5_detect_common_patterns(query)
+        print(f"[Memory] STAGE 5: Found {len(common_problems)} common patterns")
+
+        # Append common problems to the flat list
+        problems_list.extend(common_problems)
 
         # ============================================================
-        # STAGE 5: Extract consecutive problems
+        # STAGE 5.5: Deduplicate across all problem sources
         # ============================================================
-        print("[Memory] STAGE 5: Extracting consecutive problems...")
-        consecutive_problems = self._stage_5_extract_consecutive(filtered_matches, enriched_ci, query)
-        print(f"[Memory] STAGE 5: Found {len(consecutive_problems)} consecutive problems")
+        print("[Memory] STAGE 5.5: Deduplicating problems...")
 
-        # ============================================================
-        # STAGE 6: Detect common patterns
-        # ============================================================
-        print("[Memory] STAGE 6: Detecting common patterns...")
-        common_problems = self._stage_6_detect_common_patterns(query)
-        print(f"[Memory] STAGE 6: Found {len(common_problems)} common patterns")
-
-        # ============================================================
-        # STAGE 6.5: Deduplicate across all problem sources
-        # ============================================================
-        print("[Memory] STAGE 6.5: Deduplicating problems...")
-        
-        all_problems = enriched_ci + dependency_problems + consecutive_problems + common_problems
+        all_problems = problems_list  # Already combined: CI + dependencies + consecutive + common
         # Filter out any None values that might have been returned by LLM stages
         all_problems = [p for p in all_problems if p is not None and isinstance(p, dict)]
-        print(f"[Memory] STAGE 6.5: Before dedup: {len(all_problems)} problems")
+        print(f"[Memory] STAGE 5.5: Before dedup: {len(all_problems)} problems")
 
         # Cluster similar problems for deduplication
         clusters = self._cluster_for_deduplication(all_problems)
-        print(f"[Memory] STAGE 6.5: Created {len(clusters)} clusters")
+        print(f"[Memory] STAGE 5.5: Created {len(clusters)} clusters")
 
         # LLM processes ONE CLUSTER AT A TIME to merge or separate problems
         deduped_result = self._stage_6_llm_merge_duplicates(clusters, query, common_problems)
         deduped_problems = deduped_result.get("problems", all_problems)
-        print(f"[Memory] STAGE 6.5: After dedup: {len(deduped_problems)} problems")
+        print(f"[Memory] STAGE 5.5: After dedup: {len(deduped_problems)} problems")
 
         # ============================================================
-        # STAGE 7: LLM organize ALL problems (standardize structure)
+        # STAGE 6: Reorder by dependencies and priority
         # ============================================================
-        print("[Memory] STAGE 7: Organizing ALL problems (standardize structure)...")
-        organized_problems = self._stage_7_organize_all_problems(deduped_problems, query)
-        print(f"[Memory] STAGE 7: Organized {len(organized_problems)} problems")
-
-        # ============================================================
-        # STAGE 8: Analyze problem dependencies (LLM)
-        # ============================================================
-        print("[Memory] STAGE 8: Analyzing problem dependencies...")
-        dependency_ordered = self._stage_8_analyze_dependencies(organized_problems, query)
-        print(f"[Memory] STAGE 8: Dependency-ordered: {len(dependency_ordered)} problems")
-
-        # ============================================================
-        # STAGE 9: Final reordering by CI verification
-        # ============================================================
-        print("[Memory] STAGE 9: Final reordering...")
-        final_problems = self._stage_9_final_reorder(dependency_ordered)
-        print(f"[Memory] STAGE 9: Final ordered: {len(final_problems)} problems")
+        print("[Memory] STAGE 6: Reordering problems by dependencies and priority...")
+        final_problems = self._stage_6_final_reorder(deduped_problems)
+        print(f"[Memory] STAGE 6: Final ordered: {len(final_problems)} problems")
 
         # DEBUG: Show final list
         print("\n[Memory] FINAL PROBLEMS LIST:")
@@ -302,227 +320,9 @@ class STAIRRetrieval:
     # NEW PIPELINE STAGES (0-8)
     # ============================================================
 
-    def decompose_only(self, query: dict) -> list[dict]:
-        """
-        Run STAGE 0 only: Decompose CI failure into problems (no memory retrieval).
-
-        This is used by baseline mode to get intelligent problem decomposition
-        without accessing memory or repair strategies.
-
-        Returns:
-            List of decomposed problems (no repair strategies)
-        """
-        if not self.llm:
-            raise ValueError("LLM client required for CI decomposition")
-
-        print("[Memory] STAGE 0: Decomposing CI failure (baseline mode)...")
-        ci_problems = self._stage_0_decompose_ci_failure(query)
-        print(f"[Memory] STAGE 0: Decomposed into {len(ci_problems)} problems")
-        return ci_problems
-
-    def _stage_0_decompose_ci_failure(self, query: dict) -> list[dict]:
-        """
-        STAGE 0: Decompose CI failure into structured problems.
-
-        Uses LLM to analyze CI failure and extract:
-        - problem: Description
-        - root_cause: Why it happens
-        - files: Affected files
-        - failure_type: Category
-        - failure_signals: Error messages
-
-        Returns 1-N problems (1 if single failure, N if multiple different issues)
-
-        CACHE: Results are cached by sha_fail in data/decomposition_cache.json
-        """
-        # Check cache first
-        sha_fail = query.get("sha_fail", "")
-        cache = get_global_cache()
-
-        if sha_fail and cache.has(sha_fail):
-            cached_problems = cache.get_problems(sha_fail)
-            if cached_problems:
-                print(f"[Memory] STAGE 0: Using cached decomposition for {sha_fail[:12]} ({len(cached_problems)} problems)")
-                # Debug output
-                for i, p in enumerate(cached_problems, 1):
-                    print(f"[Memory]   Problem {i}: {p.get('problem', 'N/A')}")
-                    print(f"[Memory]     Files: {', '.join(p.get('files', [])[:3])}")
-                    print(f"[Memory]     Type: {p.get('failure_type', 'unknown')}")
-                return cached_problems
-
-        evidence_fields = (
-            "error_context",
-            "failure_signals",
-            "relevant_files",
-            "error_types",
-        )
-        if not isinstance(query, dict) or not any(
-            query.get(field) for field in evidence_fields
-        ):
-            raise DecompositionGenerationError(
-                "CI log analysis is empty or malformed: expected at least one of "
-                + ", ".join(evidence_fields)
-            )
-
-        # Not cached - generate with LLM
-        print(f"[Memory] STAGE 0: Decomposing CI failure with LLM...")
-
-        # ALWAYS generate full decomposition with L1/L2/L3 queries
-        # Ablation filtering happens during retrieval, not here
-        # This ensures all ablations (baseline, L1, L1+L2, L1+L2+L3) use same decomposition
-
-        # Extract workflow name for L1 query
-        workflow_name = query.get("workflow_name", "")
-        if not workflow_name:
-            workflow_path = query.get("workflow_path", "")
-            if workflow_path:
-                from pathlib import Path
-                workflow_name = Path(workflow_path).name
-
-        prompt = f"""Decompose CI failure into structured problems with level-specific queries.
-
-**CI Failure Data:**
-```json
-{json.dumps(self._compact_query(query), indent=2)}
-```
-
-**Task:**
-Analyze the CI failure and decompose it into individual problems.
-For EACH problem, create structured query objects for L1/L2/L3 retrieval.
-
-- If CI has ONE main failure → Return 1 problem
-- If CI has MULTIPLE different failures → Return N problems (one per distinct issue)
-
-**CRITICAL - Handling Invalid/Non-Fixable Files:**
-
-If the files from CI logs are build artifacts or non-editable (e.g., .venv, node_modules, *.lock, dist/, build/, __pycache__):
-- Set `files: []` (empty array) in top-level and L1/L2 queries
-- **DO NOT** try to guess the actual source files
-- Memory retrieval will match based on problem/root_cause/failure_signals instead
-- The agent will search the repo for actual files AFTER retrieval using failure_signals
-
-Example invalid files to exclude:
-- Virtual environments: .venv, venv/, node_modules/
-- Lock files: uv.lock, package-lock.json, Cargo.lock, poetry.lock
-- Build outputs: dist/, build/, target/, __pycache__/
-- Compiled files: *.pyc, *.class, *.o
-
-For dependency errors specifically:
-- If error mentions "datacommons>=1.4.3" or package constraints
-- BUT files are just ".venv" or "uv.lock"
-- Set files=[] and put rich failure_signals like:
-  ["uv ERESOLVE", "datacommons>=1.4.3", "dependency resolution failed", "yanked package"]
-
-**Query Structure Rules:**
-
-**L1 Query** (Repo + Workflow Specific):
-- problem: SAME as top-level problem
-- root_cause: SAME as top-level root_cause
-- files: SAME as top-level files
-- failure_types: Array with 2 strings ["Category", "Sub-category"]
-- repo: "{query.get('repo', '')}"
-- workflow_name: "{workflow_name}"
-- failure_signals: Array mixing evidence, error messages, tool names, patterns
-
-**L2 Query** (Repo-Level):
-- problem: SAME as L1
-- root_cause: SAME as L1
-- files: SAME as L1
-- failure_types: SAME as L1
-- repo: "{query.get('repo', '')}"
-- NO workflow_name (this is the ONLY difference from L1)
-- failure_signals: SAME as L1
-
-**L3 Query** (Universal):
-- problem: GENERIC abstract version (no specific file/repo names)
-- root_cause: GENERIC abstract version
-- NO files, NO repo, NO workflow_name
-- failure_types: SAME categories as L1/L2
-- failure_signals: Abstract patterns (file.py → file, black-jupyter → formatting-tool)
-
-**Return JSON:**
-```json
-{{
-  "problems": [
-    {{
-      "problem": "Clear specific description",
-      "root_cause": "Why this failure happens",
-      "files": ["file1.py", "file2.py"],
-      "failure_type": "formatting",
-      "failure_signals": ["error message 1", "error message 2"],
-      "verification_cmd": "./test.sh",
-
-      "query": {{
-        "l1": {{
-          "problem": "SAME as top-level problem",
-          "root_cause": "SAME as top-level root_cause",
-          "files": ["SAME as top-level files"],
-          "failure_types": ["Code Formatting", "Pre-commit hook auto-fix"],
-          "repo": "{query.get('repo', '')}",
-          "workflow_name": "{workflow_name}",
-          "failure_signals": ["black-jupyter reformatted file.py", "exit code 1", "black-jupyter", "ruff"]
-        }},
-        "l2": {{
-          "problem": "SAME as l1",
-          "root_cause": "SAME as l1",
-          "files": ["SAME as l1"],
-          "failure_types": ["SAME as l1"],
-          "repo": "{query.get('repo', '')}",
-          "failure_signals": ["SAME as l1"]
-        }},
-        "l3": {{
-          "problem": "Generic abstract version (e.g., 'Formatting tool auto-fixed code during CI')",
-          "root_cause": "Generic version (e.g., 'Code had pre-existing formatting violations')",
-          "failure_types": ["SAME as l1"],
-          "failure_signals": ["formatting tool reformatted file", "exit code 1", "formatting-tool", "linter"]
-        }}
-      }}
-    }}
-  ]
-}}
-```
-
-{STRICT_JSON_RULES}
-"""
-
-        response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
-        if not isinstance(response, dict):
-            raise DecompositionGenerationError(
-                "Stage-0 decomposition LLM returned malformed output: expected "
-                f"a JSON object with a 'problems' array, got {type(response).__name__}"
-            )
-
-        raw_problems = response.get("problems")
-        if not isinstance(raw_problems, list) or not raw_problems:
-            raise DecompositionGenerationError(
-                "Stage-0 decomposition LLM returned no problems; the response "
-                "must contain a non-empty 'problems' array"
-            )
-
-        problems = []
-        for index, problem in enumerate(raw_problems, 1):
-            if not isinstance(problem, dict) or not str(
-                problem.get("problem") or ""
-            ).strip():
-                raise DecompositionGenerationError(
-                    "Stage-0 decomposition LLM returned malformed problem "
-                    f"{index}: each problem must be an object with a description"
-                )
-            problems.append(problem)
-
-        # Save to cache
-        if sha_fail and problems:
-            model_name = getattr(self.llm, "model_name", "unknown")
-            cache.set(sha_fail, query, problems, model=model_name)
-            print(f"[Memory] STAGE 0: Cached decomposition for {sha_fail[:12]}")
-
-        # Debug output
-        for i, p in enumerate(problems, 1):
-            print(f"[Memory]   Problem {i}: {p.get('problem', 'N/A')}")
-            print(f"[Memory]     Files: {', '.join(p.get('files', [])[:3])}")
-            print(f"[Memory]     Type: {p.get('failure_type', 'unknown')}")
-
-        return problems
+    # STAGE 0 (Decomposition) has been moved to memory_plugin.py
+    # Memory plugin handles caching and decomposition
+    # This class only handles STAGE 1-9 (memory retrieval)
 
     def _stage_1_per_problem_retrieval(
         self, ci_problems: list[dict], query: dict, top_k: int
@@ -706,233 +506,170 @@ For dependency errors specifically:
 
         return enriched
 
-    def _stage_4_extract_dependencies(
-        self, filtered_matches: list[dict], enriched_ci: list[dict], query: dict
+    def _stage_4_extract_related_problems(
+        self, filtered_matches: list[dict], enriched_ci: list[dict]
     ) -> list[dict]:
         """
-        STAGE 4: Extract dependency problems.
+        STAGE 4: Extract dependency AND consecutive problems (MERGED - no STAGE 5 needed).
 
-        Find problems that must be fixed BEFORE CI problems.
-        Uses enabled[] chains and dependency relationships.
+        COMBINED extraction in ONE LLM call:
+        - Dependency problems: Must be fixed BEFORE CI problems (enabled[] backwards)
+        - Consecutive problems: Appear AFTER fixing CI problems (enabled[] forwards)
 
-        ONLY extracts dependencies for CI problems that had similarity matches.
-        If a CI problem has no matches, we skip dependency extraction for it.
+        IMPORTANT: Process EACH CI problem individually with ITS OWN L1/L2/L3 matches.
+        This preserves the connection between CI problems and their related problems.
+
+        Returns:
+            List of problems with problem_type field:
+            [
+                {"problem_type": "dependency", ...},
+                {"problem_type": "consecutive", ...}
+            ]
         """
-        # Collect L1/L2/L3 data ONLY from CI problems that had matches
-        all_l1 = []
-        all_l2 = []
-        all_l3 = []
+        all_related_problems = []
         skipped_count = 0
 
+        # Process EACH CI problem individually
         for match_set in filtered_matches:
             ci_prob = match_set.get("ci_problem", {})
+            ci_prob_desc = ci_prob.get("problem", "")[:50]
 
-            # Check if this CI problem had any matches (similarity found)
-            has_l1 = len(match_set.get("l1_filtered", [])) > 0
-            has_l2 = len(match_set.get("l2_filtered", [])) > 0
-            has_l3 = len(match_set.get("l3_filtered", [])) > 0
+            # Get THIS problem's L1/L2/L3 matches (not mixed with others!)
+            l1_matches = match_set.get("l1_filtered", [])
+            l2_matches = match_set.get("l2_filtered", [])
+            l3_matches = match_set.get("l3_filtered", [])
 
-            if has_l1 or has_l2 or has_l3:
-                # This CI problem has similarity - extract dependencies
-                all_l1.extend(match_set.get("l1_filtered", []))
-                all_l2.extend(match_set.get("l2_filtered", []))
-                all_l3.extend(match_set.get("l3_filtered", []))
-            else:
-                # No similarity - skip dependency extraction for this CI problem
+            # Skip if no matches for this CI problem
+            if not (l1_matches or l2_matches or l3_matches):
                 skipped_count += 1
-                print(f"[Memory] STAGE 4: Skipping dependencies for '{ci_prob.get('problem', '')[:50]}...' (no similarity)")
+                print(f"[Memory] STAGE 4: Skipping '{ci_prob_desc}...' (no similarity matches)")
+                continue
 
-        if skipped_count > 0:
-            print(f"[Memory] STAGE 4: Skipped dependency extraction for {skipped_count} CI problem(s) without matches")
+            # Compact THIS problem's matches
+            compact = {
+                "l1": [self._compact_retrieved_item(item, "L1", i, include_dependencies=True) for i, item in enumerate(l1_matches)],
+                "l2": [self._compact_retrieved_item(item, "L2", i, include_dependencies=True) for i, item in enumerate(l2_matches)],
+                "l3": [self._compact_retrieved_item(item, "L3", i, include_dependencies=True) for i, item in enumerate(l3_matches)],
+            }
 
-        if not (all_l1 or all_l2 or all_l3):
-            print("[Memory] STAGE 4: No dependencies (no CI problems had similarity matches)")
-            return []
+            # Extract BOTH dependency and consecutive problems in ONE prompt
+            prompt = f"""Extract related problems for this CI problem by analyzing enabled[] chains and relationships.
 
-        compact = {
-            "l1": [self._compact_retrieved_item(item, "L1", i, include_dependencies=True) for i, item in enumerate(all_l1)],
-            "l2": [self._compact_retrieved_item(item, "L2", i, include_dependencies=True) for i, item in enumerate(all_l2)],
-            "l3": [self._compact_retrieved_item(item, "L3", i, include_dependencies=True) for i, item in enumerate(all_l3)],
-        }
-
-        prompt = f"""Extract dependency problems that must be fixed BEFORE CI problems.
-
-**CI Problems:**
+**THIS CI Problem:**
 ```json
-{json.dumps([p.get("problem", "") for p in enriched_ci], indent=2)}
+{json.dumps(ci_prob, indent=2)}
 ```
 
-**Memory Data (L1/L2/L3):**
+**Memory Data for THIS Problem (L1/L2/L3 matches):**
 ```json
 {json.dumps(compact, indent=2)}
 ```
 
 **Task:**
-Find problems that must be fixed BEFORE the CI problems.
+Extract TWO types of related problems using **L1 and L2 data only** (L3 is for repair strategies, not dependencies):
 
-Look for:
-- enabled[] chains pointing backwards
-- Dependencies mentioned in memory
-- Problems that enable the current CI failures
+1. **Dependency Problems** (fix BEFORE this CI problem):
+   - **Primary source: L1 data** (repo+workflow specific)
+   - **Check repair_sequence_index**: Problems with LOWER index numbers are dependencies
+   - **Check problem_type**: If CI problem has repair_sequence_index=5, problems with index 1-4 are dependencies
+   - **Extract ALL problems from matched L1 entry**: If L1 entry has 7 problems and problem #3 matches CI, return problems #1-2 as dependencies
+   - **Secondary source: L2 data** (repo-level patterns)
+   - **Check step numbers**: Earlier steps (step 1, 2) are dependencies for later steps
+   - Example: L1 matched entry shows problems with repair_sequence_index [1, 2, 3] → extract 1, 2 as dependencies
+   - **IGNORE L3 for dependencies** (L3 is universal, lacks repo-specific chains)
+
+2. **Consecutive Problems** (appear AFTER fixing this CI problem):
+   - **Primary source: L1 data** (repo+workflow specific)
+   - **Check repair_sequence_index**: Problems with HIGHER index numbers are consecutive
+   - **Check is_cascading field**: If true, this problem appeared as a consequence of fixing earlier problems
+   - **Extract ALL problems from matched L1 entry**: If L1 entry has 7 problems and problem #3 matches CI, return problems #4-7 as consecutive
+   - **Secondary source: L2 data** (repo-level patterns)
+   - **Look for PATTERNS across L1/L2**: If 2+ past issues show the SAME problem appearing after similar CI fixes, extract it
+   - Example: L1 matched entry shows problems with repair_sequence_index [3, 4, 5] where match is #3 → extract 4, 5 as consecutive
+   - Only include problems with RECURRING patterns (not one-off cases)
+   - **IGNORE L3 for consecutive** (L3 is universal, use only for repair strategies)
+
+**How to Identify Dependency/Consecutive Relationships:**
+
+**For Dependencies (BEFORE) - Use sequence order:**
+- **L1**: Look at `repair_sequence_index` field
+  * If matched problem has index=3, problems with index=1,2 are dependencies
+  * **Extract ALL problems from the SAME L1 entry** with lower indices
+- **L2**: Look at `step` field in repair_strategies
+  * If matched strategy is step=3, strategies with step=1,2 are dependencies
+  * Extract earlier steps as dependency problems
+- **Example L1 entry has 5 problems with sequence indices [1,2,3,4,5]:**
+  * Index 1: "Install pip" (dependency - comes before matched problem)
+  * Index 2: "Activate venv" (dependency - comes before matched problem)
+  * Index 3: "Import error" (MATCHED!)
+  * Index 4: "Type checking" (consecutive - comes after matched problem)
+  * Index 5: "Linting" (consecutive - comes after matched problem)
+
+  → Extract problems at index 1,2 as dependencies
+
+**For Consecutive (AFTER) - Use sequence order:**
+- **L1**: Look at `repair_sequence_index` field
+  * If matched problem has index=3, problems with index=4,5,6... are consecutive
+  * **Extract ALL problems from the SAME L1 entry** with higher indices
+  * Check `is_cascading=true` to confirm consequence relationship
+- **L2**: Look at `step` field in repair_strategies
+  * If matched strategy is step=3, strategies with step=4,5,... might be consecutive
+  * Count frequency: Same consecutive problem in 2+ entries → strong pattern
+- **Example**: Same L1 entry as above → Extract problems 4,5 as consecutive
 
 **IMPORTANT - Building Repair Strategies (Adaptive):**
 
-Check what data is actually available and use the best source:
+After extracting dependency/consecutive problems from **L1/L2 data**, build repair strategies using **best available source**:
+
+Priority order for repair strategies:
 
 1. **If L2 data exists for this problem**:
    - Use L2.key_actions as actions (already detailed step-by-step)
    - Use L2.summary as summary
    - Use L2.pitfalls as pitfalls
 
-2. **Else if L3 data exists**:
-   - Use L3.universal_fix.steps as actions
-   - Use L3.approach as summary
-
-3. **Else if only L1 data exists**:
+2. **Else if L1 data exists for this problem**:
    - Parse L1.fix_strategy narrative into structured action steps
    - Extract concrete steps from the narrative text
    - Build summary from L1.fix_strategy
 
-**DO NOT default to generic actions!** Extract specific steps from whatever data is available.
+3. **Else use L3 data as fallback** (universal patterns):
+   - Use L3.universal_fix.steps as actions
+   - Use L3.approach as summary
+   - NOTE: L3 provides generic guidance when L1/L2 lack specific strategies
 
-For each dependency problem, extract complete structure with detailed repair strategy.
+**Remember**: L1/L2 are for finding problems (enabled chains), L3 is for repair strategies only.
+
+**DO NOT default to generic actions!** Extract specific steps from whatever data is available.
 
 **Return JSON:**
 ```json
 {{
   "problems": [
     {{
-      "problem": "Dependency problem description",
+      "problem": "Problem that must be fixed BEFORE",
       "root_cause": "Why needed first",
       "files": [...],
       "failure_type": "...",
       "failure_signals": [...],
       "verification_cmd": "...",
       "problem_type": "dependency",
+      "source_ci_problem": "{ci_prob_desc}",
       "repair_strategy": {{
         "summary": "...",
         "actions": [...],
         "pitfalls": [...]
       }}
-    }}
-  ]
-}}
-```
-
-Return empty list if no dependencies found.
-
-{STRICT_JSON_RULES}
-"""
-
-        response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
-        result = response if isinstance(response, dict) else {}
-        problems = result.get("problems", [])
-        # Filter out None values from LLM response
-        return [p for p in problems if p is not None and isinstance(p, dict)]
-
-    def _stage_5_extract_consecutive(
-        self, filtered_matches: list[dict], enriched_ci: list[dict], query: dict
-    ) -> list[dict]:
-        """
-        STAGE 5: Extract consecutive problems.
-
-        Find problems that appear AFTER fixing CI problems.
-        Uses enabled[] chains and causal relationships.
-
-        ONLY extracts consecutive problems for CI problems that had similarity matches.
-        If a CI problem has no matches, we skip consecutive extraction for it.
-        """
-        # Collect L1/L2/L3 data ONLY from CI problems that had matches
-        all_l1 = []
-        all_l2 = []
-        all_l3 = []
-        skipped_count = 0
-
-        for match_set in filtered_matches:
-            ci_prob = match_set.get("ci_problem", {})
-
-            # Check if this CI problem had any matches (similarity found)
-            has_l1 = len(match_set.get("l1_filtered", [])) > 0
-            has_l2 = len(match_set.get("l2_filtered", [])) > 0
-            has_l3 = len(match_set.get("l3_filtered", [])) > 0
-
-            if has_l1 or has_l2 or has_l3:
-                # This CI problem has similarity - extract consecutive problems
-                all_l1.extend(match_set.get("l1_filtered", []))
-                all_l2.extend(match_set.get("l2_filtered", []))
-                all_l3.extend(match_set.get("l3_filtered", []))
-            else:
-                # No similarity - skip consecutive extraction for this CI problem
-                skipped_count += 1
-                print(f"[Memory] STAGE 5: Skipping consecutive for '{ci_prob.get('problem', '')[:50]}...' (no similarity)")
-
-        if skipped_count > 0:
-            print(f"[Memory] STAGE 5: Skipped consecutive extraction for {skipped_count} CI problem(s) without matches")
-
-        if not (all_l1 or all_l2 or all_l3):
-            print("[Memory] STAGE 5: No consecutive problems (no CI problems had similarity matches)")
-            return []
-
-        compact = {
-            "l1": [self._compact_retrieved_item(item, "L1", i, include_dependencies=True) for i, item in enumerate(all_l1)],
-            "l2": [self._compact_retrieved_item(item, "L2", i, include_dependencies=True) for i, item in enumerate(all_l2)],
-            "l3": [self._compact_retrieved_item(item, "L3", i, include_dependencies=True) for i, item in enumerate(all_l3)],
-        }
-
-        prompt = f"""Extract consecutive problems that appear AFTER fixing CI problems.
-
-**CI Problems:**
-```json
-{json.dumps([p.get("problem", "") for p in enriched_ci], indent=2)}
-```
-
-**Memory Data (L1/L2/L3):**
-```json
-{json.dumps(compact, indent=2)}
-```
-
-**Task:**
-Find problems that typically appear AFTER fixing the CI problems.
-
-Look for:
-- enabled[] chains pointing forward (problems that have current CI in enabled[])
-- Causal relationships in memory
-- Problems triggered by CI fixes
-
-**IMPORTANT - Building Repair Strategies (Adaptive):**
-
-Check what data is actually available and use the best source:
-
-1. **If L2 data exists for this problem**:
-   - Use L2.key_actions as actions (already detailed step-by-step)
-   - Use L2.summary as summary
-   - Use L2.pitfalls as pitfalls
-
-2. **Else if L3 data exists**:
-   - Use L3.universal_fix.steps as actions
-   - Use L3.approach as summary
-
-3. **Else if only L1 data exists**:
-   - Parse L1.fix_strategy narrative into structured action steps
-   - Extract concrete steps from the narrative text
-   - Build summary from L1.fix_strategy
-
-**DO NOT default to generic actions!** Extract specific steps from whatever data is available.
-
-For each consecutive problem, extract complete structure with detailed repair strategy.
-
-**Return JSON:**
-```json
-{{
-  "problems": [
+    }},
     {{
-      "problem": "Consecutive problem description",
-      "root_cause": "Why it appears after",
+      "problem": "Problem that appears AFTER fixing CI problem",
+      "root_cause": "Why it follows",
       "files": [...],
       "failure_type": "...",
       "failure_signals": [...],
       "verification_cmd": "...",
       "problem_type": "consecutive",
+      "source_ci_problem": "{ci_prob_desc}",
       "repair_strategy": {{
         "summary": "...",
         "actions": [...],
@@ -943,18 +680,49 @@ For each consecutive problem, extract complete structure with detailed repair st
 }}
 ```
 
-Return empty list if no consecutive problems found.
+Return empty array if no dependency or consecutive problems found.
+Use `problem_type` field to distinguish: "dependency" or "consecutive".
 
 {STRICT_JSON_RULES}
 """
 
-        response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
-        result = response if isinstance(response, dict) else {}
-        problems = result.get("problems", [])
-        # Filter out None values from LLM response
-        return [p for p in problems if p is not None and isinstance(p, dict)]
+            try:
+                response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
+                result = response if isinstance(response, dict) else {"problems": response} if isinstance(response, list) else {}
 
-    def _stage_6_detect_common_patterns(self, query: dict) -> list[dict]:
+                # Extract all problems (both dependency and consecutive)
+                problems = result.get("problems", [])
+
+                # Add all valid problems (problem_type field distinguishes them)
+                valid_problems = [p for p in problems if p is not None and isinstance(p, dict)]
+                all_related_problems.extend(valid_problems)
+
+                # Log counts
+                dep_count = sum(1 for p in valid_problems if p.get("problem_type") == "dependency")
+                consec_count = sum(1 for p in valid_problems if p.get("problem_type") == "consecutive")
+
+                if dep_count > 0:
+                    print(f"[Memory] STAGE 4: Found {dep_count} dependencies for '{ci_prob_desc}...'")
+                if consec_count > 0:
+                    print(f"[Memory] STAGE 4: Found {consec_count} consecutive problems for '{ci_prob_desc}...'")
+
+            except Exception as e:
+                print(f"[Memory] STAGE 4: Error extracting related problems for '{ci_prob_desc}...': {e}")
+                continue
+
+        if skipped_count > 0:
+            print(f"[Memory] STAGE 4: Skipped {skipped_count} CI problem(s) without matches")
+
+        # Count by type for logging
+        dep_count = sum(1 for p in all_related_problems if p.get("problem_type") == "dependency")
+        consec_count = sum(1 for p in all_related_problems if p.get("problem_type") == "consecutive")
+        print(f"[Memory] STAGE 4: Total {len(all_related_problems)} related problems (dependencies: {dep_count}, consecutive: {consec_count})")
+
+        # Return all related problems (problem_type field distinguishes them)
+        return all_related_problems
+
+
+    def _stage_5_detect_common_patterns(self, query: dict) -> list[dict]:
         """
         STAGE 6: Detect common patterns.
 
@@ -962,7 +730,7 @@ Return empty list if no consecutive problems found.
         """
         return self._stage_4_detect_repo_common_patterns(query)
 
-    def _stage_7_organize_all_problems(
+    def _stage_6_organize_all_problems(
         self, all_problems: list[dict], query: dict
     ) -> list[dict]:
         """
@@ -1034,7 +802,7 @@ Keep ALL problems, just standardize their structure.
         # Filter out None values from LLM response
         return [p for p in problems if p is not None and isinstance(p, dict)]
 
-    def _stage_8_analyze_dependencies(
+    def _stage_7_analyze_dependencies(
         self, problems: list[dict], query: dict
     ) -> list[dict]:
         """
@@ -1150,7 +918,7 @@ Result: 1 → 2 → 3
 
         return reordered
 
-    def _stage_9_final_reorder(self, problems: list[dict]) -> list[dict]:
+    def _stage_6_final_reorder(self, problems: list[dict]) -> list[dict]:
         """
         STAGE 9: Final reordering with strict priority enforcement.
 
@@ -1409,7 +1177,7 @@ Use:
 - Similar error messages
 - Same or compatible files/components
 - Same failure type or validation tool
-- Similar root cause or repair strategy
+- Similar root cause or repair strategy that can be used to solve the current failure
 
 Return IDs from the summaries. Do not invent IDs.
 
@@ -1421,8 +1189,8 @@ Return JSON:
   "relevance_notes": "brief reason"
 }}
 
-{STRICT_JSON_RULES}
-"""
+    {STRICT_JSON_RULES}
+    """
 
         response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
 
@@ -2499,11 +2267,13 @@ Return JSON:
             "repo": query.get("repo"),
             "workflow_name": query.get("workflow_name"),
             "workflow_path": query.get("workflow_path"),
-            "error_context": query.get("error_context", [])[:8],
-            "failure_signals": query.get("failure_signals", [])[:12],
-            "error_types": query.get("error_types", [])[:8],
-            "relevant_files": query.get("relevant_files", [])[:12],
-            "failed_cmd": query.get("failed_cmd", [])[:5],
+            # Include ALL error context - don't truncate critical failure information
+            "error_context": query.get("error_context", []),
+            "failure_signals": query.get("failure_signals", []),
+            "error_types": query.get("error_types", []),
+            "relevant_files": query.get("relevant_files", []),
+            # Include ALL failed jobs - critical for understanding which jobs/steps/commands failed
+            "failed_job": query.get("failed_job", []),
         }
 
     def _compact_retrieved_item(
@@ -2526,21 +2296,27 @@ Return JSON:
         if level == "L1":
             problems = []
             for problem in data.get("problems", [])[:8]:
-                problems.append(
-                    {
-                        "problem_id": problem.get("problem_id"),
-                        "failure_type": problem.get("failure_type"),
-                        "problem": self._shorten(problem.get("problem")),
-                        "root_cause": self._shorten(problem.get("root_cause")),
-                        "validation_cmd": problem.get("verification_cmd")
-                        or problem.get("validation_cmd"),
-                        "files": problem.get("files", [])[:8],
-                        "fix_strategy": self._shorten(problem.get("fix_strategy")),
-                        "enabled": problem.get("enabled", [])
-                        if include_dependencies
-                        else [],
-                    }
-                )
+                prob_data = {
+                    "problem_id": problem.get("problem_id"),
+                    "failure_type": problem.get("failure_type"),
+                    "problem": self._shorten(problem.get("problem")),
+                    "root_cause": self._shorten(problem.get("root_cause")),
+                    "validation_cmd": problem.get("verification_cmd")
+                    or problem.get("validation_cmd"),
+                    "files": problem.get("affected_files", [])[:8] or problem.get("files", [])[:8],
+                    "fix_strategy": self._shorten(problem.get("how_fixed") or problem.get("fix_strategy")),
+                }
+
+                # Include dependency/sequence information when requested
+                if include_dependencies:
+                    prob_data.update({
+                        "problem_type": problem.get("problem_type"),  # "primary", "cascading"
+                        "is_cascading": problem.get("is_cascading", False),
+                        "repair_sequence_index": problem.get("repair_sequence_index"),  # Order of repair
+                        "dependency_type": problem.get("dependency_type", ""),
+                    })
+
+                problems.append(prob_data)
             compact["problems"] = problems
         elif level == "L2":
             strategies = []
