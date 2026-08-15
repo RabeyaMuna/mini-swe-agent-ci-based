@@ -1692,12 +1692,16 @@ If no consecutive problems found, return empty array: {{"consecutive_problems": 
                 )
 
         if "l2" in self.enabled_levels:
+            # L2 is repo-level: filter by repo + workflow if workflow available, else repo only
             l2_scope = [
                 item
                 for item in self.l2_memory
                 if self._same_repo(item.get("repo"), repo)
-                and self._same_workflow(
-                    item.get("workflow_name") or item.get("workflow"), workflow
+                and (
+                    not workflow  # No workflow in query → accept all workflows
+                    or self._same_workflow(
+                        item.get("workflow_name") or item.get("workflow"), workflow
+                    )
                 )
             ]
             total_l2_issues = len(self._unique_issue_keys(l2_scope))

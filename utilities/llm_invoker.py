@@ -91,6 +91,21 @@ def _load_json_flexible(content: str) -> Any:
             lines = lines[:-1]
         content = '\n'.join(lines).strip()
 
+    # Fix common LLM mistakes: Missing opening brace
+    # If content starts with "field_name": [...] wrap in {...}
+    if content.startswith('"') and '":' in content[:100]:
+        # Count braces to check if opening brace is missing
+        open_braces = content.count('{')
+        close_braces = content.count('}')
+
+        # If braces are balanced, likely missing opening brace
+        if open_braces == close_braces:
+            try:
+                wrapped = '{' + content + '}'
+                return json.loads(wrapped)
+            except json.JSONDecodeError:
+                pass  # Continue with normal parsing
+
     last_json_err = None
     last_demjson3_err = None
 
