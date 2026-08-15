@@ -585,9 +585,37 @@ Extract TWO types of related problems using **L1 and L2 data only** (L3 is for r
    - **Extract ALL problems from matched L1 entry**: If L1 entry has 7 problems and problem #3 matches CI, return problems #4-7 as consecutive
    - **Secondary source: L2 data** (repo-level patterns)
    - **Look for PATTERNS across L1/L2**: If 2+ past issues show the SAME problem appearing after similar CI fixes, extract it
+   - **Config change cascades**: If L1/L2 entry has config file changes (pyproject.toml, setup.py, .github/workflows/*.yml, requirements.txt, pytest.ini, mypy.ini), select problems that came AFTER the config change as consecutive (they arose due to config change)
    - Example: L1 matched entry shows problems with repair_sequence_index [3, 4, 5] where match is #3 → extract 4, 5 as consecutive
    - Only include problems with RECURRING patterns (not one-off cases)
    - **IGNORE L3 for consecutive** (L3 is universal, use only for repair strategies)
+
+**Special Case: Configuration Changes and Their Dependent Problems**
+
+If L1/L2 data shows config file changes, look for dependent problems that arose from those changes:
+
+**Config files to check:**
+`pyproject.toml`, `setup.py`, `.github/workflows/*.yml`, `requirements.txt`, `pytest.ini`, `mypy.ini`, `Makefile`
+
+**How to detect config-triggered dependencies:**
+1. Look at `files` field in L1/L2 entries
+2. If config file is present → this entry likely has config change
+3. Check problems AFTER the config change (higher `repair_sequence_index`)
+4. Select those as consecutive problems (they arose due to config change)
+
+**Example:**
+```
+L1 entry (same repo+workflow):
+  Problem 1 (index=1): Updated ruff config in pyproject.toml ← Config change
+  Problem 2 (index=2): F401 unused imports ← Arose from config change
+  Problem 3 (index=3): F541 f-string violations ← Arose from config change
+
+If current CI matches Problem 1 → select Problems 2,3 as consecutive
+```
+
+**Why:** Config changes in same repo+workflow create predictable cascades of dependent problems.
+
+---
 
 **How to Identify Dependency/Consecutive Relationships:**
 
@@ -1692,16 +1720,13 @@ If no consecutive problems found, return empty array: {{"consecutive_problems": 
                 )
 
         if "l2" in self.enabled_levels:
-            # L2 is repo-level: filter by repo + workflow if workflow available, else repo only
+            # L2 is repo+workflow specific (same as L1), but contains repair strategies instead of problems
             l2_scope = [
                 item
                 for item in self.l2_memory
                 if self._same_repo(item.get("repo"), repo)
-                and (
-                    not workflow  # No workflow in query → accept all workflows
-                    or self._same_workflow(
-                        item.get("workflow_name") or item.get("workflow"), workflow
-                    )
+                and self._same_workflow(
+                    item.get("workflow_name") or item.get("workflow"), workflow
                 )
             ]
             total_l2_issues = len(self._unique_issue_keys(l2_scope))
@@ -2743,69 +2768,83 @@ Return JSON:
         # Skip single-occurrence clusters entirely (they're not "common")
         # Only validate multi-occurrence clusters with LLM
         accepted = []
-        for chunk in self._chunk_list(multi_occurrence_clusters, max_items=10):
-            prompt = f"""Decide which recurring CI memory clusters are true repo common problem patterns.
+        for chunk_idx, chunk in enumerate(self._chunk_list(multi_occurrence_clusters, max_items=10), 1):
+            print(f"[Memory] Stage 5 DEBUG: Validating chunk {chunk_idx} with {len(chunk)} clusters")
+            for i, cluster in enumerate(chunk, 1):
+                print(f"[Memory] Stage 5 DEBUG:   Cluster {i}: {cluster.get('distinct_issue_count')} issues ({cluster.get('coverage', 0):.0%}), problem='{cluster.get('representative_problem', '')[:60]}...'")
 
-**Current CI Failure:**
+            prompt = f"""Extract the most repetitive problem and repair from each cluster.
+
+**Current CI Failure (for context only):**
 ```json
 {json.dumps(self._compact_query(query), indent=2)}
 ```
 
-**Recurring Clusters With Deterministic Counts:**
+**Common Pattern Clusters (already validated by ≥50% coverage):**
 ```json
 {json.dumps(self._compact_common_patterns(chunk), indent=2)}
 ```
 
-**Understanding the data:**
-- `distinct_issue_count`: How many different CI failures (issues) had this problem
-- `problem_occurrence_count`: Total problem instances (one issue may have same problem multiple times)
-- `coverage`: distinct_issue_count / total_issues in scope
-- `sample_repair_strategy`: An actual repair strategy from one of the clustered problems (use this!)
-- `examples`: List of issue_ids that had this problem
-
 **Your Task:**
-1. Validate if this is a REAL recurring pattern vs noise
-2. For valid patterns, extract the COMPLETE problem structure:
-   - Use `representative_problem` as the problem description
-   - Use `representative_root_cause` as the root cause
-   - Use `sample_repair_strategy` directly (it has summary, actions, validation_cmd, pitfalls)
-   - Use `files` from the cluster
-3. Keep ALL recurring patterns (frequency-based, not relevance-based)
-4. Do NOT filter by relevance to current CI failure
+For EACH cluster, analyze the `problems` field (list of all problem instances in that cluster):
 
-Return JSON with COMPLETE repair strategy for each pattern:
+1. **Count problem descriptions**: Which exact description appears most often?
+2. **Count root causes**: Which exact root_cause appears most often?
+3. **Count repair strategies**: Which exact repair approach appears most often?
+4. **Merge files**: Combine all files from all problems
+
+**Select the MOST REPETITIVE (highest count) as the representative for that cluster.**
+
+**Example - Cluster with 24 problem instances:**
+
+Problem descriptions:
+- "Missing type annotation for Optional[Any] variables" → 15 occurrences ✓ MOST COMMON
+- "Type error in Optional handling" → 8 occurrences
+- "mypy arg-type error" → 1 occurrence
+
+Repair strategies:
+- "Add None guard before accessing" → 12 occurrences ✓ MOST COMMON
+- "Add type annotation" → 10 occurrences
+- "Use isinstance check" → 2 occurrences
+
+**Return for this cluster:**
+- problem: "Missing type annotation for Optional[Any] variables" (appeared 15/24 times)
+- repair_strategy summary: "Add None guard before accessing" (appeared 12/24 times)
+
+**Output: Return ONE representative problem per cluster (the most repetitive within that cluster).**
+
+Return JSON with the MOST REPETITIVE problem/repair from each cluster:
 {{
   "common_problems": [
     {{
-      "cluster_id": "stable short id",
+      "cluster_id": "short descriptive id",
       "common": true,
-      "failure_type": "...",
-      "validation_tool": "...",
-      "distinct_issue_count": 3,
-      "problem_occurrence_count": 5,
-      "coverage": 0.3,
-      "problem": "Clear problem description",
-      "root_cause": "Why this problem happens",
-      "files": ["list of affected files"],
-      "failure_signals": ["error messages/patterns"],
+      "failure_type": "most common failure_type from cluster",
+      "validation_tool": "most common validation_tool from cluster",
+      "distinct_issue_count": <from input>,
+      "problem_occurrence_count": <from input>,
+      "coverage": <from input>,
+      "problem": "THE MOST REPETITIVE problem description from cluster",
+      "root_cause": "THE MOST REPETITIVE root_cause from cluster",
+      "files": ["merged files from all problems in cluster"],
+      "failure_signals": ["merged signals from all problems in cluster"],
       "repair_strategy": {{
-        "summary": "High-level repair approach",
-        "actions": [
-          "Step 1: Specific action to take",
-          "Step 2: Another action",
-          "Step 3: Verify the fix"
-        ],
-        "validation_cmd": "Command to verify fix",
-        "pitfalls": [
-          "Common mistake to avoid",
-          "Another pitfall"
-        ]
+        "summary": "THE MOST REPETITIVE repair summary from cluster",
+        "actions": ["THE MOST REPETITIVE repair actions from cluster"],
+        "validation_cmd": "THE MOST REPETITIVE validation_cmd from cluster",
+        "pitfalls": ["THE MOST REPETITIVE pitfalls from cluster"]
       }},
-      "examples": [{{"issue_id": "75", "problems": ["import error", "..."]}}],
-      "reasoning": "why this is a real recurring repo/workflow pattern"
+      "examples": <from input>,
+      "repetition_analysis": "Which problem/repair was most common in this cluster (e.g., 'Missing type annotation appeared 15/24 times, Add None guard appeared 12/24 times')"
     }}
   ]
 }}
+
+**IMPORTANT:**
+- Return ALL input clusters (if 2 clusters → return 2 problems)
+- Each output problem = the MOST REPETITIVE problem/repair from that cluster
+- Each cluster already has ≥50% coverage (validated), so include all
+- Do NOT reject clusters - just extract the most common problem/repair from each
 
 {STRICT_JSON_RULES}
 """
@@ -2814,7 +2853,16 @@ Return JSON with COMPLETE repair strategy for each pattern:
             )
         # Response is already parsed JSON (parse_json=True)
         result = response if isinstance(response, dict) else {}
-        accepted.extend(result.get("common_problems", []))
+
+        # DEBUG: Log what LLM returned
+        common_found = result.get("common_problems", [])
+        print(f"[Memory] Stage 5 DEBUG: LLM returned {len(common_found)} common patterns")
+        if not common_found:
+            print(f"[Memory] Stage 5 DEBUG: Response type={type(response)}, keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+            if isinstance(result, dict) and result:
+                print(f"[Memory] Stage 5 DEBUG: Response preview: {str(result)[:300]}")
+
+        accepted.extend(common_found)
 
         # Sort by FREQUENCY (coverage, issue count) - NOT relevance to current failure
         # Most common patterns first
