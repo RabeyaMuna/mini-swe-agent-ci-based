@@ -1,66 +1,65 @@
 # Installation Guide
 
-## Quick Fix for Package Conflicts
+## Quick Installation (Python 3.13)
 
-### On Your Server:
+### On Your Server - One Command:
 
 ```bash
 cd /home/ubuntu/Documents/rabeya/mini-swe-agent-ci-based
-bash ./reinstall.sh
+bash ./INSTALL.sh
 ```
 
-That's it! This script:
-1. Removes all conflicting packages
-2. Installs PyTorch 2.3.1 (stable, CPU version)
-3. Installs all other packages from `requirements-codex.txt`
-4. Verifies everything works
+This script:
+1. ✅ Creates fresh Python 3.13 environment
+2. ✅ Installs PyTorch (CPU version)
+3. ✅ Installs all packages from `requirements-codex.txt`
+4. ✅ Installs mini-swe-agent (`pip install -e .`)
+5. ✅ Verifies everything works
 
 ---
 
-## What Changed
+## Manual Installation
 
-**ONE file with stable versions:**
-- ✅ `requirements-codex.txt` - Updated with exact versions (==)
-- ❌ No more `requirements-stable.txt` or multiple fix scripts
-
-**Key package versions:**
-- PyTorch: `2.3.1` (stable, no conflicts)
-- Transformers: `4.40.2` (NO torchao dependency)
-- Sentence-transformers: `2.7.0` (compatible)
-
----
-
-## If Reinstall Fails
-
-Create a fresh virtual environment:
+If you prefer to install manually:
 
 ```bash
-# Remove old environment
+cd /home/ubuntu/Documents/rabeya/mini-swe-agent-ci-based
+
+# 1. Create fresh environment
 rm -rf .venv-codex
-
-# Create fresh one
-python3.12 -m venv .venv-codex
-
-# Run reinstall
-bash ./reinstall.sh
-```
-
----
-
-## Manual Installation (if script doesn't work)
-
-```bash
+python3.13 -m venv .venv-codex
 source .venv-codex/bin/activate
 
-# Step 1: Install PyTorch
-pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
+# 2. Install PyTorch
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
-# Step 2: Install everything else
+# 3. Install dependencies
 pip install -r requirements-codex.txt
 
-# Step 3: Verify
-python -c "from sentence_transformers import SentenceTransformer; print('OK')"
+# 4. Install mini-swe-agent
+cd miniswe-agent
+pip install -e .
+cd ..
+
+# 5. Verify
+python -c "from sentence_transformers import SentenceTransformer; print('✓ OK')"
 ```
+
+---
+
+## What's Installed
+
+**From `requirements-codex.txt`:**
+- PyTorch (latest CPU version)
+- Transformers 4.40.2 (NO torchao)
+- Sentence-transformers 2.7.0
+- LiteLLM >=1.75.0,<1.82.7
+- All other dependencies with exact versions
+
+**Why exact versions?**
+- Prevents version conflicts
+- Ensures reproducibility
+- All tested together
 
 ---
 
@@ -69,6 +68,7 @@ python -c "from sentence_transformers import SentenceTransformer; print('OK')"
 Run your evaluation:
 
 ```bash
+source .venv-codex/bin/activate
 bash ./run_miniswe_direct.sh "" L1+L2+L3 backward minimax2.5
 ```
 
@@ -78,25 +78,10 @@ You should see:
 ✓ Enriched with repair strategy
 ```
 
-Not:
-```
-ERROR: operator torchvision::nms does not exist
-```
-
 ---
 
-## Why Exact Versions?
+## Files
 
-**Before (Broken):**
-```
-torch>=2.0.0          # Could be 2.3, 2.5, 2.10 (incompatible!)
-transformers>=4.35.0  # Could install 4.55 (needs torchao!)
-```
-
-**After (Working):**
-```
-torch==2.3.1          # Exact, tested
-transformers==4.40.2  # Exact, tested
-```
-
-Exact versions (`==`) prevent conflicts and ensure reproducibility.
+- `requirements-codex.txt` - Stable package versions
+- `INSTALL.sh` - One-command installation
+- `README_INSTALL.md` - This file
