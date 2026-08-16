@@ -3998,14 +3998,37 @@ Return JSON:
     def _get_encoder(self):
         """Load the embedding model only when retrieval actually needs it."""
         if self.encoder is None:
-            from sentence_transformers import SentenceTransformer
+            try:
+                from sentence_transformers import SentenceTransformer
+                self.encoder = SentenceTransformer(self.embedding_model)
+            except (ImportError, ModuleNotFoundError) as e:
+                print(f"[Memory] WARNING: Could not load sentence-transformers: {e}")
+                print(f"[Memory] This usually means PyTorch/transformers version mismatch")
+                print(f"[Memory] Falling back to baseline mode (no memory retrieval)")
+                # Set encoder to a dummy value to prevent retrying
+                self.encoder = "unavailable"
+                # Switch to baseline mode
+                self.baseline_mode = True
+                self.l1_memory = []
+                self.l2_memory = []
+                self.l3_memory = []
+                return None
 
-            self.encoder = SentenceTransformer(self.embedding_model)
+        # If encoder loading failed, return None
+        if self.encoder == "unavailable":
+            return None
+
         return self.encoder
 
     def _compute_embeddings(self, items: list[dict], level: str) -> np.ndarray:
         """Compute embeddings for memory items."""
         if not items:
+            return np.array([])
+
+        # Get encoder - will return None if loading failed
+        encoder = self._get_encoder()
+        if encoder is None:
+            print(f"[Memory] Encoder unavailable, returning empty embeddings for {level}")
             return np.array([])
 
         texts = []
@@ -4023,7 +4046,7 @@ Return JSON:
 
             texts.append(text)
 
-        return self._get_encoder().encode(texts)
+        return encoder.encode(texts)
 
     def _build_query(self, query: dict, level: str) -> str:
         """
