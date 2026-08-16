@@ -243,10 +243,30 @@ For EACH problem, create structured query objects for L1/L2/L3 retrieval.
 
         problems = []
         for index, problem in enumerate(raw_problems, 1):
-            if not isinstance(problem, dict) or not str(problem.get("problem") or "").strip():
+            # Validate problem has required structure
+            if not isinstance(problem, dict):
                 raise DecompositionGenerationError(
-                    f"LLM returned malformed problem {index}: each problem must be an object with a description"
+                    f"LLM returned malformed problem {index}: each problem must be an object"
                 )
+
+            # Validate problem description (required)
+            problem_desc = str(problem.get("problem", "")).strip()
+            if not problem_desc or len(problem_desc) <= 1 or problem_desc in ["", "N/A", "Unknown", "|"]:
+                raise DecompositionGenerationError(
+                    f"LLM returned malformed problem {index}: problem description is empty or invalid ('{problem_desc}')"
+                )
+
+            # Validate root_cause OR failure_signals (at least one required)
+            root_cause = str(problem.get("root_cause", "")).strip()
+            failure_signals = problem.get("failure_signals", [])
+            has_root_cause = root_cause and root_cause not in ["", "N/A", "Unknown"]
+            has_failure_signals = isinstance(failure_signals, list) and len(failure_signals) > 0
+
+            if not (has_root_cause or has_failure_signals):
+                raise DecompositionGenerationError(
+                    f"LLM returned malformed problem {index}: must have either root_cause or failure_signals"
+                )
+
             problems.append(problem)
 
         # Save to cache

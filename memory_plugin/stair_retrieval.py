@@ -44,6 +44,51 @@ class STAIRRetrieval:
     - Ablation study (control which levels: l1, l1+l2, l1+l2+l3)
     """
 
+    @staticmethod
+    def _is_valid_problem(problem: dict) -> bool:
+        """
+        Validate that a problem has required content for agent to work with.
+
+        REQUIRED fields (MUST be present and non-empty):
+        - problem: Non-empty problem description
+        - root_cause OR failure_signals: At least one must be present
+
+        OPTIONAL fields (can be empty/null):
+        - repair_strategy: Can be null (agent can work without it)
+        - files: Can be empty (some problems are general)
+        - error_context: Can be empty
+
+        Args:
+            problem: Problem dictionary to validate
+
+        Returns:
+            True if problem has required content, False otherwise
+        """
+        if not isinstance(problem, dict):
+            return False
+
+        # 1. Check problem description (REQUIRED)
+        problem_desc = str(problem.get("problem", "")).strip()
+        # Filter out empty strings, placeholders, and single characters
+        if not problem_desc or len(problem_desc) <= 1 or problem_desc in ["", "N/A", "Unknown", "|"]:
+            return False
+
+        # 2. Check root cause OR failure signals (at least one REQUIRED)
+        root_cause = str(problem.get("root_cause", "")).strip()
+        failure_signals = problem.get("failure_signals", [])
+
+        has_root_cause = root_cause and root_cause not in ["", "N/A", "Unknown"]
+        has_failure_signals = isinstance(failure_signals, list) and len(failure_signals) > 0
+
+        if not (has_root_cause or has_failure_signals):
+            return False
+
+        # 3. Files and repair_strategy are OPTIONAL
+        # Agent can work without files (for general problems)
+        # Agent can work without repair_strategy (will create one)
+
+        return True
+
     def __init__(
         self,
         memory_dir: str,
@@ -199,6 +244,12 @@ class STAIRRetrieval:
             ci_prob_desc = ci_prob.get("problem", "")
             print(f"[Memory]   Processing CI problem {idx}/{len(ci_problems)}: {ci_prob_desc}...")
 
+            # Validate CI problem has required content
+            if not self._is_valid_problem(ci_prob):
+                print(f"[Memory]     ⚠️  SKIP: CI problem {idx} is empty or incomplete - missing required fields")
+                print(f"[Memory]          problem: {bool(ci_prob.get('problem'))}, root_cause: {bool(ci_prob.get('root_cause'))}, files: {len(ci_prob.get('files', []))}")
+                continue
+
             # STAGE 1: Retrieve L1/L2/L3 matches for THIS CI problem
             matches = self._stage_1_per_problem_retrieval([ci_prob], query, top_k)
 
@@ -305,16 +356,33 @@ class STAIRRetrieval:
         final_problems = self._stage_6_final_reorder(deduped_problems)
         print(f"[Memory] STAGE 6: Final ordered: {len(final_problems)} problems")
 
+        # ============================================================
+        # FINAL VALIDATION: Filter out empty/invalid problems
+        # ============================================================
+        print("[Memory] FINAL VALIDATION: Filtering invalid problems...")
+        valid_problems = []
+        invalid_count = 0
+        for i, p in enumerate(final_problems, 1):
+            if self._is_valid_problem(p):
+                valid_problems.append(p)
+            else:
+                invalid_count += 1
+                print(f"[Memory]   ⚠️  FILTERED OUT problem {i}: Empty or incomplete content")
+                print(f"[Memory]        problem: '{p.get('problem', '')}', root_cause: '{p.get('root_cause', '')[:50]}', files: {p.get('files', [])}")
+
+        if invalid_count > 0:
+            print(f"[Memory] FINAL VALIDATION: Filtered {invalid_count} invalid problem(s), kept {len(valid_problems)} valid")
+
         # DEBUG: Show final list
         print("\n[Memory] FINAL PROBLEMS LIST:")
-        for i, p in enumerate(final_problems, 1):
+        for i, p in enumerate(valid_problems, 1):
             ptype = p.get('problem_type', 'unknown')
             has_repair = "✓" if p.get("repair_strategy") else "✗"
             print(f"  {i}. [{ptype}] [repair:{has_repair}] {p.get('problem', 'N/A')[:70]}")
         print()
 
         print("[Memory] Retrieval complete!\n")
-        return {"problems": final_problems}
+        return {"problems": valid_problems}
 
     # ============================================================
     # NEW PIPELINE STAGES (0-8)
@@ -721,8 +789,18 @@ Use `problem_type` field to distinguish: "dependency" or "consecutive".
                 # Extract all problems (both dependency and consecutive)
                 problems = result.get("problems", [])
 
-                # Add all valid problems (problem_type field distinguishes them)
-                valid_problems = [p for p in problems if p is not None and isinstance(p, dict)]
+                # Validate and add only non-empty problems
+                valid_problems = []
+                invalid_count = 0
+                for p in problems:
+                    if p is not None and isinstance(p, dict) and self._is_valid_problem(p):
+                        valid_problems.append(p)
+                    else:
+                        invalid_count += 1
+
+                if invalid_count > 0:
+                    print(f"[Memory] STAGE 4: Filtered {invalid_count} invalid related problem(s) for '{ci_prob_desc}...'")
+
                 all_related_problems.extend(valid_problems)
 
                 # Log counts

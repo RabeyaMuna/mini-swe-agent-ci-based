@@ -668,6 +668,13 @@ def decompose_issue(
         candidate_files = validation_candidate_files(
             validated_changed_files, validation_sequence, structured_failure
         )
+
+        # Debug: Log candidate files
+        if len(llm_group_files) == 0:
+            print(f"      DEBUG: LLM selected 0 files, using fallback")
+            print(f"      DEBUG: Candidate files from validation: {candidate_files}")
+            print(f"      DEBUG: Structured failure files: {structured_failure_files(structured_failure)}")
+
         missed_candidate_files = [
             file_path
             for file_path in candidate_files
@@ -760,6 +767,9 @@ def decompose_issue(
             f"      Analyzing commit with {len(selected_group_context)} "
             "selected validation/failure group(s)"
         )
+        print(f"      Validation sequence: {len(validation_sequence)} step(s)")
+        print(f"      Structured failure files: {len(structured_failure.get('relevant_files', []))} file(s)")
+
         analysis_result = analyzer.analyze_commit_group(
             group={
                 "commits": [commit],
@@ -788,6 +798,14 @@ def decompose_issue(
             )
             problem["commit_number"] = i
             commit_problems.append(problem)
+
+        # Debug: Log problem detection
+        if len(commit_problems) == 0:
+            print(f"      ⚠️  No problems detected for commit {commit_sha[:8]}")
+            print(f"      Files analyzed: {len(selected_files)}")
+            print(f"      Analysis result keys: {list(analysis_result.keys())}")
+        else:
+            print(f"      ✓ Detected {len(commit_problems)} problem(s)")
 
         # Add all problems from this commit
         commit_analysis["problems"] = commit_problems
@@ -830,7 +848,7 @@ def decompose_issue(
         "sha_success": sha_success,
         "repo_owner": repo_owner,
         "changed_files": list(all_changed_files),
-        "diff": issue.get("diff", "") if issue.get("diff") else "",
+        # NOTE: No diff field - structured problems contain all necessary information
         "commit_link": issue.get("commit_link", ""),
         "decomposition_type": "commit_based",
         "total_commits": len(commits),

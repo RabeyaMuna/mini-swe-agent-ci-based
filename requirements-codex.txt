@@ -37,7 +37,7 @@ scipy>=1.13.0
 codecarbon>=2.0.0
 accelerate>=0.20.0
 safetensors>=0.4.0
-tokenizers>=0.13.0
+tokenizers>=0.21.0,<0.22.0  # Must match transformers requirement
 
 # System utilities (with compatibility constraints)
 psutil>=5.9.8,<6.1.0  # Compatible with camel-ai, agentops, airbyte-cdk

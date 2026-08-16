@@ -37,7 +37,31 @@ def build_commit_analysis_prompt(
 
     prompt = f"""You are analyzing commits SEQUENTIALLY to understand how CI behavior changed between a known passing commit and a known failing commit.
 
-Your output must describe CI problem events caused, fixed, or materially affected by the changed hunks in this commit. A problem event is any changed behavior, test contract, configuration, dependency, generated artifact, or support code path that a listed CI setup/install/validation command can directly or indirectly read, execute, inspect, or verify.
+Your job is NOT just to find "problems" or "failures".
+Your job is to find EVERY change that affects CI validation, whether it:
+- Fixes a CI failure (fixed=true)
+- Introduces a CI failure (introduced=true)
+- Fixed any CI validation
+- Or both (rare)
+- Or any changes that has affect on CI validation (formatting, linting, type checking, tests, config, dependencies, generated artifacts, etc.)
+
+Report formatting fixes, test updates, import changes, type annotations - ANYTHING validated by CI.
+
+Your output must describe ALL CI-RELEVANT CHANGES in this commit - any change that affects CI validation behavior, whether it fixes a problem, introduces a problem, or both.
+
+A CI-relevant change is any modification to:
+- Code validated by CI (formatting, linting, type checking, tests)
+- Test expectations, assertions, or test data
+- Configuration, dependencies, or tool settings used by CI
+- Documentation or generated artifacts checked by CI
+- Any code path executed during CI validation
+
+For EACH CI-relevant change, determine:
+- Does it FIX a CI problem? (fixed=true)
+- Does it INTRODUCE a CI problem? (introduced=true)
+- Or both?
+
+DO NOT only report problems - report ALL changes relevant to CI validation.
 
 CONTEXT:
 - Repository: Known to PASS CI at {sha_success} and FAIL CI at {sha_fail}
@@ -90,20 +114,27 @@ CI metadata is supporting evidence only; the diff and validation rules are the s
 RELEVANT CI VALIDATION STEPS:
 {validations_str}
 
-TASK - COMMIT-BASED CI TRANSITION ANALYSIS:
+TASK - ANALYZE ALL CI-RELEVANT CHANGES:
 
-Analyze ONLY this commit's changed hunks. Determine whether each selected
-CI-relevant change directly or indirectly:
-- introduces a new CI validation problem,
-- fixes or adapts code/config/tests/dependencies so a CI validation can pass,
-- updates a test/assertion/snapshot/fixture/helper to match validated behavior,
-- changes tool, project, package, dependency, generated-code, or docs inputs used by CI,
-- or supports another changed file that introduces/fixes a CI validation issue.
+For EVERY changed hunk in this commit, ask:
+1. Does this change affect ANY CI validation command listed below?
+2. If YES → Create a problem object describing the change
 
-Every direct or indirect CI-impacting change should appear in at least one
-problem object unless the diff is merely in the validation scope but cannot
-change pass/fail behavior, validated content, configuration, dependencies,
-generated output, runtime behavior, assertions, or tool execution.
+For each CI-relevant change, determine:
+- **introduced=true** if the change creates/adds a new issue that causes CI to fail
+- **fixed=true** if the change resolves/fixes an issue that was causing CI to fail
+- Both true if the change replaces one problem with another
+- Both false only in rare cases (refactoring that preserves CI behavior)
+
+CRITICAL: Do not limit output to "failures" or "bugs". Include:
+- ✅ Formatting/style fixes (blank lines, quotes, imports)
+- ✅ Test updates (assertions, test data, expected values)
+- ✅ Type annotation additions/fixes
+- ✅ Documentation formatting fixes
+- ✅ Dependency/configuration updates
+- ✅ Any code change validated by a listed CI command
+
+If a change affects CI validation → Report it as a problem object.
 
 1. Identify the CURRENT CI failure at sha_fail.
    CI stops at the first failing validation step. Use STRUCTURED CI FAILURE only as primary first-failure evidence: failed job, failed step, exact error, failed tool, validation command, and implicated file/line when available.
@@ -211,7 +242,9 @@ INTRODUCED VS FIXED:
 
 For each problem object, provide:
 
-1. "files": List of files affected.
+1. "files": **REQUIRED** - List of EXACT file paths from the diff that are affected by this problem.
+   NEVER leave this empty. If you detect a problem, you MUST list the file(s).
+   Example: ["path/to/file.py"] or ["file1.py", "file2.py"]
 2. "failure_type": Broad validation family, such as "format", "lint", "type_check", "test", "build", "install", "import", "docs", or "unknown".
 3. "issue_type": Specific issue family, such as "missing_return_annotation", "import_order", "dependency_version", or "assertion_update".
 4. "problem": The CI problem being described, with step/job and line numbers when available.
@@ -230,40 +263,65 @@ OUTPUT JSON FORMAT (valid JSON only, no markdown):
   "commit_sha": {commit_sha_json},
   "problems": [
     {{
-      "files": ["path/to/file.py", "path/to/other_file.py"],
-      "failure_type": "type_check",
-      "issue_type": "missing_return_annotation",
-      "problem": "Multiple files contain functions missing required return annotations checked by mypy.",
-      "root_cause": "The type-checking configuration requires explicit return annotations for these functions.",
-      "changes_made": "Added -> None return annotations across the listed files.",
+      "files": ["path/to/file.py"],
+      "failure_type": "format",  ← Use "format" for formatting tools (black/yapf/prettier/ruff)
+      "issue_type": "code_formatting",
+      "problem": "File had formatting issues detected by yapf",
+      "root_cause": "Code did not match yapf's formatting requirements",
+      "changes_made": "Added blank line after docstring to match yapf style",
       "introduced": false,
-      "fixed": true/false,
-      "fix_strategy": "Added explicit return annotations to satisfy the type-checking rule.",
-      "why_this_fix_works": "The listed validation command checks for explicit return annotations, and the changed signatures now provide them.",
+      "fixed": true,  ← Set to true when fixing a CI failure
+      "fix_strategy": "Modified whitespace/formatting to match tool requirements",
+      "why_this_fix_works": "The formatting now matches what yapf expects",
       "current_failed_jobs": [],
       "current_fixed_jobs": [],
-      "validation_cmd": "mypy ..."
+      "validation_cmd": "yapf --diff"
     }}
   ]
 }}
 
+EXAMPLES OF CI-RELEVANT CHANGES TO ALWAYS REPORT:
+
+**Fixes (fixed=true, introduced=false):**
+1. Added blank line → Fixed yapf/black formatting
+2. Changed 'png' to "png" → Fixed quote style
+3. Reordered imports → Fixed import-order linting
+4. Added type annotation → Fixed mypy type check
+5. Updated test assertion → Fixed failing test
+6. Fixed docstring format → Fixed sphinx build
+
+**Introductions (fixed=false, introduced=true):**
+1. Removed blank line → Broke formatting
+2. Added untyped parameter → Broke type checking
+3. Changed test without updating assertion → Broke test
+
+**Both (fixed=true, introduced=true):**
+1. Fixed one linter but broke another
+2. Updated code and test, but test is now wrong
+
+IF the diff changes ANYTHING that a listed CI command validates, report it.
+
 IMPORTANT RULES:
-1. STRUCTURED CI FAILURE shows only the known first failing step at sha_fail. Do not assume later validation steps passed or are irrelevant.
-2. Check every changed hunk against the structured CI failure and every relevant validation step, not only the logged failure.
-3. Emit a problem object for every changed hunk with direct or indirect impact on a listed CI validation, unless it cannot affect pass/fail behavior or validated content.
+1. **ALWAYS populate the "files" array** - If you detect a problem, you MUST list which file(s) it affects. Use exact paths from the diff.
+2. **ALWAYS detect formatting/linting fixes** - If the CI failure mentions formatting (black, yapf, ruff, prettier, etc.) and the diff shows ANY changes (blank lines, quotes, spacing, indentation), this is a FIX. Set fixed=true.
+3. **ALWAYS detect test fixes** - If the CI failure mentions test failures and the diff changes test code or test data, this is a FIX. Set fixed=true.
+4. STRUCTURED CI FAILURE shows only the known first failing step at sha_fail. Do not assume later validation steps passed or are irrelevant.
+5. Check every changed hunk against the structured CI failure and every relevant validation step, not only the logged failure.
+6. Emit a problem object for every changed hunk with direct or indirect impact on a listed CI validation, unless it cannot affect pass/fail behavior or validated content.
 4. Set fixed=true when the diff directly or indirectly explains why a listed validation would now pass. Put the repair in "fix_strategy" and the validation reasoning in "why_this_fix_works".
 5. Set introduced=true when the diff directly or indirectly violates a validation rule, changes behavior that can fail a listed validation, or explains the current CI failure.
-6. If the commit is unrelated to validated CI behavior, return the top-level commit fields with "problems": [].
-7. Same failure family must be one problem object, even if many files changed.
-8. Different validators, root causes, or repair strategies must be separate problem objects.
-9. Use plural field names exactly: "current_failed_jobs" and "current_fixed_jobs".
-10. Do not invent current_failed_jobs/current_fixed_jobs. They must come from CI METADATA for this commit. If metadata is missing, use [].
-11. Do not require CI metadata to identify a problem. Use changed hunks plus validation steps when metadata is unavailable.
-12. Do not omit selected test/config/support files merely because another
+6. **DEFAULT TO REPORTING**: If a change touches code/config/tests that ANY listed validation checks, report it. When uncertain, report it.
+7. If the commit is completely unrelated to CI (e.g., only user-facing content with no CI validation), return "problems": [].
+8. Same failure family must be one problem object, even if many files changed.
+9. Different validators, root causes, or repair strategies must be separate problem objects.
+10. Use plural field names exactly: "current_failed_jobs" and "current_fixed_jobs".
+11. Do not invent current_failed_jobs/current_fixed_jobs. They must come from CI METADATA for this commit. If metadata is missing, use [].
+12. Do not require CI metadata to identify a change. Use changed hunks plus validation steps.
+13. Do not omit selected test/config/support files merely because another
     selected group better matches the current failed job. If their hunks change
     how a listed validation passes or fails, emit a separate problem object for
     that validation family.
-13. Return ONLY valid JSON, no markdown, no comments, and no placeholder entries.
-14. If no changed hunk maps to the structured failure or any relevant validation step, return {{"commit_sha": {commit_sha_json}, "problems": []}}"""
+14. Return ONLY valid JSON, no markdown, no comments, and no placeholder entries.
+15. **LIBERAL REPORTING**: Report all CI-relevant changes. Better to over-report than miss changes that affect validation."""
 
     return prompt

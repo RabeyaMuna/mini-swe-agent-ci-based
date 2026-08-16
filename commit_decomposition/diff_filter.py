@@ -8,10 +8,18 @@ from typing import List
 
 
 # Files/directories to ignore before CI relevance analysis.
+# IMPORTANT: Only ignore files that are NEVER validated by CI.
+# Most files should be analyzed by LLM, not hard-filtered.
 IGNORED_PATTERNS = [
-    r"^\.github/",  # GitHub workflow/action files
-    r"(^|/)[^/]+\.json$",  # JSON files
-    r"(^|/)[^/]+\.md$",  # Markdown files
+    # DO NOT filter .github/ - workflow changes can break CI!
+    # DO NOT filter .json - package.json, tsconfig.json affect builds!
+    # DO NOT filter .md - README.md can affect docs validation!
+
+    # Only filter truly irrelevant files:
+    r"^\.git/",  # Git internal files (not .github!)
+    r"(^|/)\.DS_Store$",  # macOS metadata
+    r"(^|/)\.vscode/",  # Editor configs (unless CI validates them)
+    # Add more ONLY if you're certain they're never validated by CI
 ]
 
 

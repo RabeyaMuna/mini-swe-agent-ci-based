@@ -105,6 +105,17 @@ class CommitAnalyzer:
             selected_groups = self._resolve_and_organize_groups(
                 all_groups, changed_files, relevant_validations
             )
+
+            # Debug: Log file selection results
+            total_selected_files = sum(len(g.get("files", [])) for g in selected_groups)
+            if total_selected_files == 0 and changed_files:
+                print(f"      ⚠️  File selection returned 0 files (input: {len(changed_files)} files)")
+                print(f"      LLM response had {len(selected_groups)} groups")
+                if selected_groups:
+                    print(f"      Groups but no files: {[g.get('reason', 'no reason') for g in selected_groups]}")
+            elif total_selected_files > 0:
+                print(f"      ✓ File selection: {total_selected_files} file(s) in {len(selected_groups)} group(s)")
+
             return {
                 "selected_groups": selected_groups,
                 "reasoning": "",
@@ -174,6 +185,15 @@ class CommitAnalyzer:
                 )
                 chunk_result = self._call_json(prompt)
 
+                # Debug: Log LLM response
+                problems_count = len(chunk_result.get("problems", []))
+                if problems_count == 0:
+                    print(f"        ⚠️  LLM returned 0 problems for chunk {i}/{len(chunks)}")
+                    print(f"        Chunk files: {chunk.get('files', [])[:3]}")
+                    print(f"        Response keys: {list(chunk_result.keys())}")
+                else:
+                    print(f"        ✓ LLM found {problems_count} problem(s) in chunk {i}/{len(chunks)}")
+
                 # Check if parsing failed and should retry with smaller chunks
                 if "parse_error" in chunk_result and len(chunk.get("files", [])) > 10:
                     print(f"        JSON parse error, re-chunking {len(chunk['files'])} files...")
@@ -208,11 +228,17 @@ class CommitAnalyzer:
                 else:
                     all_problems.extend(chunk_result.get("problems", []))
 
+            consolidated_problems = self._consolidate_problem_events(
+                all_problems, relevant_validations
+            )
+
+            # Debug: Log consolidation results
+            if len(all_problems) != len(consolidated_problems):
+                print(f"        Problem consolidation: {len(all_problems)} → {len(consolidated_problems)}")
+
             result = {
                 "commit_sha": commit_sha,
-                "problems": self._consolidate_problem_events(
-                    all_problems, relevant_validations
-                ),
+                "problems": consolidated_problems,
             }
             return result
 

@@ -21,15 +21,19 @@ def build_file_selection_prompt(
     relationship_context_str = json.dumps(relationship_context or [], indent=2)
     changed_files_str = json.dumps(changed_files or [], indent=2)
 
-    prompt = f"""You are selecting changed files from one commit for downstream CI failure analysis.
+    prompt = f"""You are selecting changed files for CI failure analysis.
 
-Select EVERY changed file whose ACTUAL DIFF HUNKS have any direct or indirect relevance to CI setup, install, configuration, validation, generated outputs, or behavior executed/inspected by CI.
+TASK: Select ALL files whose changes are relevant to the CI validation that failed.
 
-Be inclusive when a changed file has a plausible CI validation relationship.
-Be selective when a changed file has no relationship to any listed CI step.
-Do not rely on memorized repository-specific or tool-specific rules. Derive
-relevance from the validation commands, command arguments, changed paths, diff
-hunks, and relationship context provided below.
+SELECTION RULES:
+1. If a file is mentioned in the CI failure → SELECT IT
+2. If a file's changes could affect the failing validation command  directly or indirectly→ SELECT IT
+3. If a file is imported/used by a file that affects CI → SELECT IT
+4. When in doubt → SELECT IT (be inclusive, not selective)
+5. Any configuration related changes that could affect the CI validation → SELECT IT
+
+DEFAULT: If any file looks remotely related to CI testing, linting, formatting,
+building, or documentation → SELECT IT.
 
 COMMIT METADATA:
 {json.dumps(commit_metadata, indent=2)}
@@ -186,13 +190,16 @@ OUTPUT JSON ONLY:
 {{
   "selected_groups": [
     {{
-      "files": ["path/to/file.py", "path/to/other_file.py"],
+      "files": ["path/to/file.py", "path/to/other_file.py"],  ← **REQUIRED** - MUST include actual file paths
       "failure_type": "type_check",
       "issue_type": "tool_configuration",
       "validation_cmd": "exact command if known, otherwise empty string",
       "reason": "brief reason these files are CI-relevant as one group"
     }}
   ]
-}}"""
+}}
+
+**CRITICAL**: Every group MUST have the "files" array populated with actual file paths from the diff.
+If you select a file, it MUST appear in the "files" array. Never return empty "files": []."""
 
     return prompt
