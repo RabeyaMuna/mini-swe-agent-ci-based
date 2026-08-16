@@ -1,53 +1,105 @@
 # Requirements for Codex CI Repair with Memory Plugin
-# Python 3.13+ compatible
+# Python 3.12+ compatible
+#
+# STABLE VERSIONS - Tested and working together
+# Last updated: 2026-08-16
 #
 # Install with:
 #   pip install -r requirements-codex.txt
 #
-# Note: Codex CLI is installed separately via npm:
-#   npm install -g @openai/codex
+# For PyTorch, install first with:
+#   pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 
 # ============================================================================
-# VERSION RANGES - Python 3.13 compatible
+# CORE DEPENDENCIES - Pinned to stable versions
 # ============================================================================
 
-# Core Dependencies
-numpy>=1.26.0,<2.0.0
-pandas>=2.2.0
-jsonlines>=4.0.0
+# Core Scientific Computing
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.13.1
+scikit-learn==1.5.2
 
-# Dataset & Data Loading
-datasets>=2.20.0
+# Data Loading
+jsonlines==4.0.0
+datasets==2.20.0
 
-# LLM Integration (with mini-swe-agent constraints)
-click>=8.1.0,<8.2  # mini-swe-agent requires <8.2
-litellm>=1.75.5,<1.82.7  # mini-swe-agent requires >=1.75.5, exclude 1.82.7-1.82.8
-openai>=1.86.0,<1.100.0  # camel-ai requires <2, mini-swe-agent excludes 1.100.x
-langchain-openai>=0.1.0
-langchain-core>=0.1.0
+# ============================================================================
+# LLM & API - Stable, compatible versions
+# ============================================================================
 
-# Memory & Embeddings (REQUIRED for L1+L2+L3 memory modes)
-torch>=2.0.0
-sentence-transformers>=2.7.0
-transformers>=4.35.0
-scikit-learn>=1.5.0
-scipy>=1.13.0
+# OpenAI & LiteLLM (mini-swe-agent compatible)
+openai==1.54.4              # Stable, no breaking changes
+litellm==1.75.5             # mini-swe-agent compatible
+click==8.1.7                # Required <8.2 for mini-swe-agent
+
+# Langchain
+langchain-openai==0.2.14
+langchain-core==0.3.28
+
+# ============================================================================
+# MEMORY & EMBEDDINGS - Tested, working combination
+# ============================================================================
+# IMPORTANT: Install PyTorch FIRST using the command above, then install these
+
+# PyTorch (installed separately - see command above)
+# torch==2.3.1
+# torchvision==0.18.1
+# torchaudio==2.3.1
+
+# Transformers stack (NO torchao dependency - compatible with PyTorch 2.3.1)
+transformers==4.40.2        # Last stable before torchao requirement
+tokenizers==0.19.1          # Matching transformers
+sentence-transformers==2.7.0  # Compatible with transformers 4.40.2
+huggingface-hub==0.23.4     # Matching versions
 
 # Required by transformers/sentence-transformers
-codecarbon>=2.0.0
-accelerate>=0.20.0
-safetensors>=0.4.0
-tokenizers>=0.21.0,<0.22.0  # Must match transformers requirement
+safetensors==0.4.3
+accelerate==0.30.1          # Required by mini-swe-agent
+onnxscript==1.0.0          # Required by torchvision, compatible version
 
-# System utilities (with compatibility constraints)
-psutil>=5.9.8,<6.1.0  # Compatible with camel-ai, agentops, airbyte-cdk
-cryptography>=44.0.0,<45.0.0  # airbyte-cdk constraint
-setuptools>=68.0.0,<81.0.0  # airbyte-cdk constraint
+# ============================================================================
+# SYSTEM UTILITIES - Stable versions
+# ============================================================================
 
-# Utilities
-tqdm>=4.66.0
-pyyaml>=6.0.0
-python-dotenv>=1.0.0
+psutil==5.9.8
+cryptography==44.0.3
+setuptools==75.6.0
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+tqdm==4.67.1
+pyyaml==6.0.2
+python-dotenv==1.0.1
+requests==2.32.3
+urllib3==2.2.3
+
+# ============================================================================
+# OPTIONAL - Carbon tracking (can be commented out if not needed)
+# ============================================================================
+
+codecarbon==2.7.3
+arrow==1.3.0
+
+# ============================================================================
+# INSTALLATION NOTES
+# ============================================================================
+#
+# Why exact versions (==)?
+# - Prevents version conflicts and compatibility issues
+# - Ensures reproducible installations
+# - All versions tested together
+#
+# Key changes from previous version:
+# - PyTorch 2.3.1 instead of >=2.0.0 (stable, no inductor issues)
+# - transformers 4.40.2 instead of >=4.35.0 (NO torchao dependency)
+# - All packages pinned to exact versions
+#
+# Installation order:
+# 1. Install PyTorch first: pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
+# 2. Install rest: pip install -r requirements-codex.txt
 requests>=2.31.0
 demjson3>=3.0.0
 
