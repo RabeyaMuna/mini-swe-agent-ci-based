@@ -12,12 +12,12 @@
 # ============================================================================
 # CORE DEPENDENCIES
 # ============================================================================
-numpy==1.26.4
-pandas==2.2.3
-scipy==1.13.1
-scikit-learn==1.5.2
-jsonlines==4.0.0
-datasets==2.20.0
+numpy>=1.26.0
+pandas>=2.2.0
+scipy>=1.11.0        # Use range to get version with wheels for Python 3.13
+scikit-learn>=1.5.0  # Will install compatible scipy
+jsonlines>=4.0.0
+datasets>=2.20.0
 
 # ============================================================================
 # LLM & API
