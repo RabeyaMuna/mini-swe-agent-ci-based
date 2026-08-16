@@ -1,0 +1,88 @@
+# Stable, Locked Requirements for CI Repair with Memory Plugin
+# These versions are tested and known to work together
+# Install with: pip install -r requirements-stable.txt
+#
+# Last tested: 2026-08-16
+# Python version: 3.12
+
+# ============================================================================
+# CORE DEPENDENCIES - Pinned to stable versions
+# ============================================================================
+
+# Core Scientific Computing
+numpy==1.26.4                    # Stable, compatible with all packages
+pandas==2.2.3                    # Latest stable
+scipy==1.13.1                    # Compatible with scikit-learn
+scikit-learn==1.5.2              # Stable ML library
+
+# Data Loading
+jsonlines==4.0.0
+datasets==2.20.0
+
+# ============================================================================
+# LLM & API - Compatible versions
+# ============================================================================
+
+# OpenAI & LiteLLM (compatible set)
+openai==1.54.4                   # Stable version before 1.86+ breaking changes
+litellm==1.75.5                  # mini-swe-agent compatible, stable
+click==8.1.7                     # Required by litellm, <8.2 for mini-swe-agent
+
+# Langchain
+langchain-openai==0.2.14
+langchain-core==0.3.28
+
+# ============================================================================
+# EMBEDDINGS & TRANSFORMERS - Tested, working combination
+# ============================================================================
+
+# PyTorch (CPU version - tested and working)
+# Install with: pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1                     # Stable, no torchao conflicts
+torchvision==0.18.1              # Matching torch 2.3.1
+torchaudio==2.3.1                # Matching torch 2.3.1
+
+# Transformers stack (NO torchao dependency)
+transformers==4.40.2             # Last stable before torchao requirement
+tokenizers==0.19.1               # Matching transformers 4.40.2
+sentence-transformers==2.7.0     # Stable, compatible with transformers 4.40.2
+huggingface-hub==0.23.4          # Matching versions
+
+# Required by transformers
+safetensors==0.4.3
+# NOTE: accelerate is optional, removed to avoid conflicts
+
+# ============================================================================
+# SYSTEM UTILITIES - Stable versions
+# ============================================================================
+
+psutil==5.9.8                    # Stable, widely compatible
+cryptography==44.0.3             # Stable, compatible
+setuptools==75.6.0               # Stable
+
+tqdm==4.67.1
+pyyaml==6.0.2
+python-dotenv==1.0.1
+requests==2.32.3
+urllib3==2.2.3
+
+# ============================================================================
+# CARBON TRACKING (optional, can be commented out if not needed)
+# ============================================================================
+
+codecarbon==2.7.3
+arrow==1.3.0
+
+# ============================================================================
+# COMPATIBILITY NOTES
+# ============================================================================
+#
+# Why these specific versions?
+#
+# 1. PyTorch 2.5.1: Stable, no inductor.kernel issues, CPU-compatible
+# 2. transformers 4.46.3: Last stable before torchao dependency
+# 3. sentence-transformers 3.3.1: Compatible with transformers 4.46.3
+# 4. openai 1.54.4: Stable API, no breaking changes
+# 5. litellm 1.75.5: mini-swe-agent compatible
+#
+# This combination is tested and works without conflicts.
