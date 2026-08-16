@@ -94,17 +94,23 @@ def _load_json_flexible(content: str) -> Any:
     # Fix common LLM mistakes: Missing opening brace
     # If content starts with "field_name": [...] wrap in {...}
     if content.startswith('"') and '":' in content[:100]:
-        # Count braces to check if opening brace is missing
-        open_braces = content.count('{')
-        close_braces = content.count('}')
+        try:
+            # Find the last valid closing bracket (] or })
+            # This handles cases where there's extra text after the JSON
+            last_bracket_idx = max(
+                content.rfind(']'),
+                content.rfind('}')
+            )
 
-        # If braces are balanced, likely missing opening brace
-        if open_braces == close_braces:
-            try:
-                wrapped = '{' + content + '}'
+            if last_bracket_idx > 0:
+                # Trim content to the last valid bracket
+                trimmed = content[:last_bracket_idx + 1].strip()
+
+                # Wrap with opening and closing braces
+                wrapped = '{' + trimmed + '}'
                 return json.loads(wrapped)
-            except json.JSONDecodeError:
-                pass  # Continue with normal parsing
+        except (json.JSONDecodeError, ValueError):
+            pass  # Continue with normal parsing
 
     last_json_err = None
     last_demjson3_err = None
