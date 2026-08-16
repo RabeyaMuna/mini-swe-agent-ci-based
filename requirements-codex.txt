@@ -1,5 +1,5 @@
 # Requirements for Codex CI Repair with Memory Plugin
-# Python 3.13+
+# Python 3.13+ compatible
 #
 # Install with:
 #   pip install -r requirements-codex.txt
@@ -7,24 +7,42 @@
 # Note: Codex CLI is installed separately via npm:
 #   npm install -g @openai/codex
 
+# ============================================================================
+# VERSION RANGES - Python 3.13 compatible
+# ============================================================================
+
 # Core Dependencies
-numpy>=1.26.0
+numpy>=1.26.0,<2.0.0
 pandas>=2.2.0
 jsonlines>=4.0.0
 
 # Dataset & Data Loading
-datasets>=2.0.0
+datasets>=2.20.0
 
-# LLM Integration
+# LLM Integration (with mini-swe-agent constraints)
+click>=8.1.0,<8.2  # mini-swe-agent requires <8.2
+litellm>=1.75.5,<1.82.7  # mini-swe-agent requires >=1.75.5, exclude 1.82.7-1.82.8
+openai>=1.86.0,<1.100.0  # camel-ai requires <2, mini-swe-agent excludes 1.100.x
 langchain-openai>=0.1.0
-litellm>=1.0.0
-openai>=1.0.0
+langchain-core>=0.1.0
 
 # Memory & Embeddings (REQUIRED for L1+L2+L3 memory modes)
-sentence-transformers>=2.7.0
 torch>=2.0.0
+sentence-transformers>=2.7.0
+transformers>=4.35.0
 scikit-learn>=1.5.0
 scipy>=1.13.0
+
+# Required by transformers/sentence-transformers
+codecarbon>=2.0.0
+accelerate>=0.20.0
+safetensors>=0.4.0
+tokenizers>=0.13.0
+
+# System utilities (with compatibility constraints)
+psutil>=5.9.8,<6.1.0  # Compatible with camel-ai, agentops, airbyte-cdk
+cryptography>=44.0.0,<45.0.0  # airbyte-cdk constraint
+setuptools>=68.0.0,<81.0.0  # airbyte-cdk constraint
 
 # Utilities
 tqdm>=4.66.0
