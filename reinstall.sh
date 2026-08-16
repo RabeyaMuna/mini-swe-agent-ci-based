@@ -23,10 +23,13 @@ pip uninstall -y torch torchvision torchaudio transformers tokenizers sentence-t
 echo ""
 
 echo "Step 2: Installing PyTorch (stable version)..."
+echo "NOTE: You'll see warnings about missing packages - this is normal!"
+echo "      Step 3 will install them."
 pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 echo ""
 
 echo "Step 3: Installing remaining packages from requirements-codex.txt..."
+echo "This will fix the warnings from Step 2..."
 pip install -r requirements-codex.txt
 echo ""
 
