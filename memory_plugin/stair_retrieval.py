@@ -1279,11 +1279,23 @@ Result: 1 → 2 → 3
 
 **Task: Select only memory items relevant to the current CI failure.**
 
-Use:
-- Similar error messages
-- Same or compatible files/components
-- Same failure type or validation tool
-- Similar root cause or repair strategy that can be used to solve the current failure
+IMPORTANT - Use DIFFERENT matching criteria for each level:
+
+**L1 (File-level problems)** - STRICT matching:
+- Exact or similar error messages
+- Same or compatible files/paths
+- Same validation tool
+
+**L2 (Repo-specific strategies)** - MODERATE matching:
+- Same failure type
+- Same repo or similar technology stack
+- Compatible validation approach
+
+**L3 (Universal patterns)** - BROAD matching:
+- Same failure TYPE (e.g., dependency_upgrade, type_checking, formatting)
+- Similar failure PATTERN (e.g., "config change requires code adaptation")
+- Apply L3 if the pattern/approach could work, even if files/repo differ
+- L3 patterns are UNIVERSAL - they apply across repos/files
 
 Return IDs from the summaries. Do not invent IDs.
 
@@ -1291,7 +1303,7 @@ Return JSON:
 {{
   "selected_l1_ids": ["L1:0"],
   "selected_l2_ids": ["L2:0"],
-  "selected_l3_ids": ["L3:0"],
+  "selected_l3_ids": ["L3:0", "L3:1"],
   "relevance_notes": "brief reason"
 }}
 
