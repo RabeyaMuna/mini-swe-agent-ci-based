@@ -61,6 +61,7 @@ def generate_l1_from_decomposed_problems(
     dependencies: Dict[str, Any],
     ground_truth_files: List[str],
     llm: Any = None,  # Kept for backward compatibility but not used
+    repo_name: str = None,  # Optional, will be extracted from repo if not provided
 ) -> Dict[str, Any]:
     """
     Generate L1 memory from decomposed problems.
@@ -84,14 +85,19 @@ def generate_l1_from_decomposed_problems(
         dependencies: Dependency graph with enabled relationships
         ground_truth_files: List of files changed in the fix
         llm: (Deprecated - kept for backward compatibility, not used)
+        repo_name: Repository name (just the repo part, not owner/repo)
 
     Returns:
         L1 memory dictionary with problems and enabled relationships
     """
+    # Extract repo_name from repo if not provided
+    if repo_name is None:
+        repo_name = repo.split("/")[1] if "/" in repo else repo
+
     if not decomposed_problems:
         logger.warning(f"[L1 Build] No decomposed problems for {issue_id}")
         return _empty_l1_entry(
-            issue_id, repo, repo_owner, workflow_path, ground_truth_files
+            issue_id, repo, repo_owner, repo_name, workflow_path, ground_truth_files
         )
 
     # L1 uses LLM to build REPAIR SEQUENCE with ordered problems + enabled relationships
@@ -135,6 +141,7 @@ def generate_l1_from_decomposed_problems(
         issue_id=issue_id,
         repo=repo,
         repo_owner=repo_owner,
+        repo_name=repo_name,
         workflow_path=workflow_path,
         problems=problems,
         ground_truth_files=ground_truth_files,
@@ -187,6 +194,7 @@ def build_l1_memory(
         issue_id=issue_id,
         repo=repo,
         repo_owner=repo_owner,
+        repo_name=repo_name,
         workflow_path=workflow_path,
         problems=problems,
         ground_truth_files=ground_truth_files,
@@ -329,6 +337,7 @@ def _empty_l1_entry(
     issue_id: str,
     repo: str,
     repo_owner: str,
+    repo_name: str,
     workflow_path: str,
     ground_truth_files: List[str],
 ) -> Dict[str, Any]:
@@ -338,6 +347,7 @@ def _empty_l1_entry(
         "issue_id": issue_id,
         "repo": repo,
         "repo_owner": repo_owner,
+        "repo_name": repo_name,
         "workflow": workflow_path,
         "workflow_name": workflow_name,
         "changed_files": ground_truth_files,
@@ -404,6 +414,7 @@ def _build_l1_entry_with_dependencies(
     issue_id: str,
     repo: str,
     repo_owner: str,
+    repo_name: str,
     workflow_path: str,
     problems: List[Dict[str, Any]],
     ground_truth_files: List[str],
@@ -424,6 +435,7 @@ def _build_l1_entry_with_dependencies(
         "issue_id": issue_id,
         "repo": repo,
         "repo_owner": repo_owner,
+        "repo_name": repo_name,
         "workflow": workflow_path,
         "workflow_name": workflow_name,
         "problems": [],

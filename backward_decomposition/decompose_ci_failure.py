@@ -3530,6 +3530,7 @@ def generate_l1_l2_l3_pipeline(
                 "issue_id": issue_id,
                 "repo": repo,
                 "repo_owner": repo.split("/")[0] if "/" in repo else "unknown",
+                "repo_name": repo.split("/")[1] if "/" in repo else repo,
                 "workflow": workflow_path,
                 "workflow_name": workflow_name,
                 "changed_files": decomposed_result.get("changed_files", []),
@@ -3539,6 +3540,7 @@ def generate_l1_l2_l3_pipeline(
             "l2_memory": {
                 "issue_id": issue_id,
                 "repo": repo,
+                "repo_name": repo.split("/")[1] if "/" in repo else repo,
                 "workflow": workflow_path,
                 "total_problems": 0,
                 "failure_identify": [],
@@ -3548,6 +3550,7 @@ def generate_l1_l2_l3_pipeline(
             "l3_memory": {
                 "issue_id": issue_id,
                 "repo": repo,
+                "repo_name": repo.split("/")[1] if "/" in repo else repo,
                 "workflow": workflow_path,
                 "universal_patterns": [
                     {
@@ -3650,14 +3653,16 @@ def generate_l1_l2_l3_pipeline(
     issue_id_for_l1 = decomposed_result.get("original_issue_id", issue_id)
     changed_files = decomposed_result.get("changed_files", [])
 
-    # Extract repo_owner from repo (format: "owner/repo_name")
+    # Extract repo_owner and repo_name from repo (format: "owner/repo_name")
     repo_owner = repo.split("/")[0] if "/" in repo else "unknown"
+    repo_name = repo.split("/")[1] if "/" in repo else repo
 
     # Use build_memory to generate L1 with dependencies
     l1_memory = generate_l1_from_decomposed_problems(
         issue_id=str(issue_id_for_l1),
         repo=repo,
         repo_owner=repo_owner,
+        repo_name=repo_name,
         workflow_path=workflow_path,
         decomposed_problems=deduplicated,
         dependencies=dependencies,

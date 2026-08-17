@@ -62,14 +62,59 @@ CRITICAL JSON FORMAT:
 """.strip()
 
 
+def _clean_json_control_characters(content: str) -> str:
+    """
+    Escape unescaped control characters inside JSON strings.
+
+    Fixes "Invalid control character" errors by escaping newlines, tabs, etc.
+    that appear inside JSON string values.
+    """
+    import re
+
+    # First, fix trailing commas before closing brackets
+    # This handles ", }" and ", ]" patterns
+    content = re.sub(r',(\s*[}\]])', r'\1', content)
+
+    # Now escape control characters inside strings
+    result = []
+    in_string = False
+    escape_next = False
+
+    for char in content:
+        if escape_next:
+            result.append(char)
+            escape_next = False
+        elif char == '\\':
+            result.append(char)
+            escape_next = True
+        elif char == '"' and not escape_next:
+            result.append(char)
+            in_string = not in_string
+        elif in_string and char in '\n\r\t\b\f':
+            # Escape control characters inside strings
+            escape_map = {
+                '\n': '\\n',
+                '\r': '\\r',
+                '\t': '\\t',
+                '\b': '\\b',
+                '\f': '\\f'
+            }
+            result.append(escape_map.get(char, char))
+        else:
+            result.append(char)
+
+    return ''.join(result)
+
+
 def _load_json_flexible(content: str) -> Any:
     """
     Flexibly parse JSON from LLM output.
 
     Tries multiple parsing strategies:
     1. Standard json.loads
-    2. Extract from markdown code blocks
-    3. demjson3 for lenient parsing
+    2. Clean control characters and retry
+    3. Extract from markdown code blocks
+    4. demjson3 for lenient parsing
 
     Returns:
         Parsed JSON object/array, or [] if all attempts fail
@@ -120,6 +165,31 @@ def _load_json_flexible(content: str) -> Any:
         return json.loads(content)
     except Exception as e:
         last_json_err = e
+
+    # Try cleaning control characters and parse again
+    try:
+        cleaned = _clean_json_control_characters(content)
+        return json.loads(cleaned)
+    except Exception:
+        pass  # Continue to next strategy
+
+    # Try closing truncated JSON structures
+    try:
+        cleaned = _clean_json_control_characters(content)
+        # If the error is about missing delimiters, try closing the structure
+        # Count open/close brackets and braces
+        open_braces = cleaned.count('{') - cleaned.count('}')
+        open_brackets = cleaned.count('[') - cleaned.count(']')
+
+        # Close any unclosed structures
+        if open_braces > 0 or open_brackets > 0:
+            closed = cleaned
+            # Close arrays first, then objects
+            closed += ']' * max(0, open_brackets)
+            closed += '}' * max(0, open_braces)
+            return json.loads(closed)
+    except Exception:
+        pass  # Continue to next strategy
 
     # Try extracting from markdown code blocks
     try:

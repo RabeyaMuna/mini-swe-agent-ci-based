@@ -167,13 +167,23 @@ class LitellmModel:
                     actual_model = actual_model.split("/")[-1]
                 model_for_litellm = f"openai/{actual_model}"
 
-            completion_kwargs = {
-                "model": model_for_litellm,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "timeout": int(os.getenv("LITELLM_TIMEOUT", "600")),
-            }
+            # GPT-5.x models use max_completion_tokens, older models use max_tokens
+            if "gpt-5" in model_lower:
+                completion_kwargs = {
+                    "model": model_for_litellm,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_completion_tokens": max_tokens,
+                    "timeout": int(os.getenv("LITELLM_TIMEOUT", "600")),
+                }
+            else:
+                completion_kwargs = {
+                    "model": model_for_litellm,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "timeout": int(os.getenv("LITELLM_TIMEOUT", "600")),
+                }
             if reasoning_effort:
                 completion_kwargs["reasoning_effort"] = reasoning_effort
             if response_format:
