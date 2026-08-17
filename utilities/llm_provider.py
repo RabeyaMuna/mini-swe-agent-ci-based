@@ -21,6 +21,10 @@ GLM_API_KEY = os.getenv("GLM_API_KEY")
 GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://api.z.ai/api/paas/v4")
 GLM_MODEL_NAME = os.getenv("GLM_MODEL_NAME", "glm-5.2")
 
+# OpenAI API configuration
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
 
 @dataclass
 class LLMInfo:
@@ -80,6 +84,14 @@ LLM_REGISTRY: Dict[str, LLMInfo] = {
         base_url=GLM_BASE_URL,
         api_key=GLM_API_KEY,
     ),
+    # GPT-5.4-mini via OpenAI
+    "gpt-5.4-mini": LLMInfo(
+        provider="openai",
+        model_name="gpt-5.4-mini",
+        temperature=0.0,
+        base_url=OPENAI_BASE_URL,
+        api_key=OPENAI_API_KEY,
+    ),
 }
 
 
@@ -96,6 +108,17 @@ MODEL_ALIASES: Dict[str, str] = {
     "gml-5.2": "glm-5.2",
     "GLM": "glm-5.2",
     "GLM-5.2": "glm-5.2",
+    # GPT-5.4 aliases (all map to gpt-5.4-mini)
+    "gpt-5.4": "gpt-5.4-mini",
+    "gpt5.4": "gpt-5.4-mini",
+    "gpt5.4-mini": "gpt-5.4-mini",
+    "gpt-5.4-mini-2026-03-17": "gpt-5.4-mini",
+    "gpt5.4-mini-2026-03-17": "gpt-5.4-mini",
+    "gpt54": "gpt-5.4-mini",
+    "gpt-5-mini": "gpt-5.4-mini",
+    "gpt5-mini": "gpt-5.4-mini",
+    "gpt5mini": "gpt-5.4-mini",
+    "gpt_5_mini": "gpt-5.4-mini",
 }
 
 
@@ -224,7 +247,7 @@ def get_llm(model_key: str) -> ChatOpenAI:
 
     info = LLM_REGISTRY[model_key]
 
-    # Decide API key (MiniMax or GLM)
+    # Decide API key (MiniMax, GLM, or OpenAI)
     api_key = None
     if info.api_key_env:
         api_key = os.getenv(info.api_key_env)
@@ -237,6 +260,8 @@ def get_llm(model_key: str) -> ChatOpenAI:
             api_key = os.getenv("OPENROUTER_API_KEY") or OPENROUTER_API_KEY
     elif info.provider == "zai":
         api_key = os.getenv("GLM_API_KEY") or GLM_API_KEY
+    elif info.provider == "openai":
+        api_key = os.getenv("OPENAI_API_KEY") or OPENAI_API_KEY
 
     kwargs = {
         "model": info.model_name,
@@ -259,6 +284,10 @@ def get_llm(model_key: str) -> ChatOpenAI:
     elif info.provider == "zai":
         base_url = (
             os.getenv("GLM_BASE_URL") or base_url or "https://api.z.ai/api/paas/v4"
+        )
+    elif info.provider == "openai":
+        base_url = (
+            os.getenv("OPENAI_BASE_URL") or base_url or "https://api.openai.com/v1"
         )
 
     if base_url:

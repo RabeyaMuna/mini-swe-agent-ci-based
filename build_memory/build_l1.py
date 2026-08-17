@@ -379,7 +379,10 @@ def _reorder_problems_by_ci_sequence(problems: List[Dict[str, Any]]) -> List[Dic
 
     def problem_sort_key(problem: dict) -> tuple:
         """Generate sort key for CI verification order."""
-        validation_order = problem.get("validation_order", 999)
+        # Handle None values explicitly - use default if None or missing
+        validation_order = problem.get("validation_order")
+        if validation_order is None:
+            validation_order = 999
 
         # Config file bonus (comes first)
         files = problem.get("files", []) or problem.get("affected_files", [])
@@ -394,8 +397,10 @@ def _reorder_problems_by_ci_sequence(problems: List[Dict[str, Any]]) -> List[Dic
         is_cascading = problem.get("is_cascading", False)
         cascading_rank = 1 if is_cascading else 0
 
-        # Original problem_id
-        problem_id = problem.get("problem_id", 0)
+        # Original problem_id (handle None)
+        problem_id = problem.get("problem_id")
+        if problem_id is None:
+            problem_id = 0
 
         return (validation_order, config_rank, dependency_rank, cascading_rank, problem_id)
 
