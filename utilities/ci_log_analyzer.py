@@ -66,33 +66,60 @@ def _repair_truncated_json(content: str) -> str:
     - Unclosed arrays
     - Unclosed objects
     - Mixed nesting
+    - Mid-sentence truncations in array values
+    - Incomplete key-value pairs
     """
     if not content.strip():
         return content
 
     content = content.strip()
 
-    # Count open/close brackets and braces
+    # Handle unclosed strings (odd number of quotes)
+    if content.count('"') % 2 != 0:
+        # Find the last unclosed quote
+        last_quote_idx = content.rfind('"')
+        if last_quote_idx >= 0:
+            # Count quotes before to determine if this is opening or closing
+            quotes_before = content[:last_quote_idx].count('"')
+            if quotes_before % 2 == 0:
+                # This is an opening quote - incomplete string
+                before_quote = content[:last_quote_idx].rstrip()
+
+                # Check if this is a key or value in a key-value pair
+                # Look for : before the quote
+                check_colon = before_quote.rstrip()
+                if check_colon and check_colon[-1] == ':':
+                    # This is a value - remove the entire key-value pair
+                    # Find the key by looking backwards
+                    # Pattern: "key": "truncated
+                    colon_idx = before_quote.rfind(':')
+                    if colon_idx > 0:
+                        # Find the key before the colon
+                        before_colon = before_quote[:colon_idx].rstrip()
+                        # Remove the key (last quoted string before colon)
+                        last_key_quote = before_colon.rfind('"')
+                        if last_key_quote > 0:
+                            # Find the opening quote of the key
+                            key_start = before_colon[:last_key_quote].rfind('"')
+                            if key_start >= 0:
+                                # Remove from key start
+                                content = before_colon[:key_start].rstrip()
+                                # Remove trailing comma if present
+                                if content and content[-1] == ',':
+                                    content = content[:-1].rstrip()
+                else:
+                    # This might be in an array or the key itself
+                    # Just remove the incomplete string
+                    if before_quote and before_quote[-1] in ',:':
+                        before_quote = before_quote[:-1].rstrip()
+                    content = before_quote
+
+    # Count open/close brackets and braces AFTER fixing strings
     open_braces = content.count('{') - content.count('}')
     open_brackets = content.count('[') - content.count(']')
 
-    # Remove incomplete trailing string (ends without closing quote)
-    # Match: "text but no closing quote at end
-    if content.count('"') % 2 != 0:
-        # Find last complete string
-        last_quote = content.rfind('"')
-        # If there's text after the last quote that doesn't close it
-        if last_quote > 0:
-            # Check if this is an opening quote
-            quotes_before = content[:last_quote].count('"')
-            if quotes_before % 2 == 0:
-                # This is an opening quote - remove everything after previous char
-                # Find the last complete element
-                content = content[:last_quote].rstrip(', ')
-
-    # Close open structures
-    # Remove any trailing incomplete value (e.g., "key": partial)
-    content = re.sub(r',?\s*"[^"]*":\s*[^,}\]]*$', '', content)
+    # Remove trailing comma
+    content = content.rstrip(' ,\n\t')
 
     # Add closing brackets/braces
     content += ']' * open_brackets
@@ -1086,34 +1113,76 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
    - Ensure every item is concise, evidence-based, and traceable to the logs and/or workflow.
 """
         try:
-            response = self.llm.invoke([HumanMessage(content=prompt)]).content
-            content = self.load_json_maybe_fenced(response)
+            # Use adaptive token strategy with truncation detection
+            max_tokens = 16000  # Higher initial limit for full summary
 
-            if not content or not content.strip():
-                raise ValueError(
-                    "LLM returned an empty response for full_content_summary"
+            for attempt in range(3):  # Max 3 attempts with decreasing tokens
+                response = invoke_llm_with_retry(
+                    llm=self.llm,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    parse_json=False  # We parse JSON ourselves below
                 )
+                content = self.load_json_maybe_fenced(response)
+
+                if not content or not content.strip():
+                    raise ValueError(
+                        "LLM returned an empty response for full_content_summary"
+                    )
+
+                # Check if response looks truncated
+                content_stripped = content.strip()
+                is_truncated = (
+                    content_stripped
+                    and not content_stripped.endswith('}')
+                    and not content_stripped.endswith(']')
+                    and len(content_stripped) > 100
+                )
+
+                if not is_truncated:
+                    break  # Success - not truncated
+
+                # Response was truncated - reduce tokens and retry
+                if attempt == 0:
+                    print(f"  ⚠ full_content_summary: Response truncated, retrying with 10K tokens...")
+                    max_tokens = 10000
+                elif attempt == 1:
+                    print(f"  ⚠ full_content_summary: Still truncated, retrying with 6K tokens...")
+                    max_tokens = 6000
+                else:
+                    print(f"  ⚠ full_content_summary: Still truncated after 3 attempts, applying repair...")
+                    # Continue with truncated response - repair will handle it
 
             try:
                 summary = json.loads(content)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as json_err:
                 # Try cleaning malformed JSON first
                 try:
                     cleaned = _clean_malformed_json(content)
                     summary = json.loads(cleaned)
+                    print(f"  ✓ Repaired malformed JSON in full_content_summary")
                 except json.JSONDecodeError:
                     # Fall back to demjson3
                     if demjson3 is not None:
                         try:
                             cleaned = _clean_malformed_json(content)
                             summary = demjson3.decode(cleaned)
+                            print(f"  ✓ Parsed with demjson3 in full_content_summary")
                         except Exception as dec_err:
+                            error_context = content[:500] if len(content) > 500 else content
                             raise ValueError(
-                                f"JSON parse failed: {dec_err} | raw: {content[:200]}"
+                                f"JSON parse failed after all attempts.\n"
+                                f"Original error: {json_err}\n"
+                                f"Demjson3 error: {dec_err}\n"
+                                f"Content preview: {error_context}"
                             )
                     else:
+                        error_context = content[:500] if len(content) > 500 else content
                         raise ValueError(
-                            f"JSON parse failed (demjson3 not installed) | raw: {content[:200]}"
+                            f"JSON parse failed (demjson3 not installed).\n"
+                            f"Error: {json_err}\n"
+                            f"Content preview: {error_context}\n"
+                            f"Hint: Install demjson3 for more lenient JSON parsing"
                         )
             print(" Completed: _generate_summary")
 

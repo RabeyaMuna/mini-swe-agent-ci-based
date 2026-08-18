@@ -357,21 +357,22 @@ class STAIRRetrieval:
         print(f"[Memory] STAGE 6: Final ordered: {len(final_problems)} problems")
 
         # ============================================================
-        # FINAL VALIDATION: Filter out empty/invalid problems
+        # NO FILTERING: Keep all problems after deduplication and reordering
         # ============================================================
-        print("[Memory] FINAL VALIDATION: Filtering invalid problems...")
-        valid_problems = []
-        invalid_count = 0
-        for i, p in enumerate(final_problems, 1):
-            if self._is_valid_problem(p):
-                valid_problems.append(p)
-            else:
-                invalid_count += 1
-                print(f"[Memory]   ⚠️  FILTERED OUT problem {i}: Empty or incomplete content")
-                print(f"[Memory]        problem: '{p.get('problem', '')}', root_cause: '{p.get('root_cause', '')[:50]}', files: {p.get('files', [])}")
+        print("[Memory] FINAL STAGE: Keeping all problems (no filtering)")
+        # Filter out None values that might have been returned by LLM stages
+        valid_problems = [p for p in final_problems if p is not None and isinstance(p, dict)]
+        print(f"[Memory] Kept {len(valid_problems)} problems (removed {len(final_problems) - len(valid_problems)} None/invalid types)")
 
-        if invalid_count > 0:
-            print(f"[Memory] FINAL VALIDATION: Filtered {invalid_count} invalid problem(s), kept {len(valid_problems)} valid")
+        # ============================================================
+        # SAFETY FALLBACK: Always return at least CI problems
+        # ============================================================
+        # If LLM stages returned nothing, fall back to original CI problems
+        if len(valid_problems) == 0 and len(ci_problems) > 0:
+            print("[Memory]  WARNING: No problems after LLM processing stages!")
+            print("[Memory] SAFETY FALLBACK: Returning original CI problems from decomposition")
+            valid_problems = ci_problems  # Return original CI problems as-is
+            print(f"[Memory] SAFETY FALLBACK: Restored {len(valid_problems)} CI problem(s)")
 
         # DEBUG: Show final list
         print("\n[Memory] FINAL PROBLEMS LIST:")
