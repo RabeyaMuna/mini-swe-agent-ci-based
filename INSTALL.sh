@@ -91,6 +91,23 @@ echo -e "${GREEN}✓${NC} Pip upgraded to $(pip --version | awk '{print $2}')"
 echo ""
 
 # ============================================================================
+# Step 6.5: Remove conflicting packages
+# ============================================================================
+echo -e "${YELLOW}[6.5/9]${NC} Removing packages that conflict with scipy..."
+
+# These packages require numpy>=2.0 which breaks scipy
+CONFLICT_PACKAGES="fastembed ml-dtypes opencv-python opencv-python-headless"
+for pkg in $CONFLICT_PACKAGES; do
+    if pip show $pkg &> /dev/null; then
+        echo "   Removing $pkg..."
+        pip uninstall -y $pkg --quiet 2>/dev/null || true
+    fi
+done
+
+echo -e "${GREEN}✓${NC} Conflicting packages removed"
+echo ""
+
+# ============================================================================
 # Step 7: Install PyTorch (CPU version)
 # ============================================================================
 echo -e "${YELLOW}[7/9]${NC} Installing PyTorch (CPU version)..."
@@ -227,6 +244,16 @@ try:
     print("✓ SciPy compatibility       OK")
 except Exception as e:
     print(f"✗ Compatibility test        FAILED: {e}")
+    sys.exit(1)
+
+# Memory retrieval test
+try:
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    embeddings = model.encode(["Test sentence for memory retrieval"])
+    print(f"✓ Memory retrieval          READY! (embeddings shape: {embeddings.shape})")
+except Exception as e:
+    print(f"✗ Memory retrieval          FAILED: {e}")
     sys.exit(1)
 
 VERIFY_EOF
