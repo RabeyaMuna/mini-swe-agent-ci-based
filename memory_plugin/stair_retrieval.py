@@ -1097,7 +1097,8 @@ Result: 1 → 2 → 3
                 top_k,
                 filters={
                     "repo": l1_query_obj.get("repo") or query.get("repo"),
-                    "workflow": l1_query_obj.get("workflow_name") or query.get("workflow_name"),
+                    "workflow": l1_query_obj.get("workflow_path") or query.get("workflow_path")
+                    or l1_query_obj.get("workflow_name") or query.get("workflow_name"),
                 },
             )
         else:
@@ -1199,8 +1200,8 @@ Result: 1 → 2 → 3
                 top_k,
                 filters={
                     "repo": query.get("repo"),
-                    "workflow": query.get("workflow_name")
-                    or query.get("workflow_path"),
+                    "workflow": query.get("workflow_path")
+                    or query.get("workflow_name"),
                 },
             )
         else:

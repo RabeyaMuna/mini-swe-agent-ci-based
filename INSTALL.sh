@@ -113,8 +113,11 @@ echo ""
 echo -e "${YELLOW}[7/9]${NC} Installing PyTorch (CPU version)..."
 echo "   This may take a few minutes..."
 
-# Install PyTorch components together with --upgrade to ensure version compatibility
-pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
+# Uninstall any existing PyTorch first to avoid version conflicts
+pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
+
+# Install PyTorch components together fresh to ensure version compatibility
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
 
 if [ $? -eq 0 ]; then
     TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null)
