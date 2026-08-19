@@ -51,14 +51,20 @@ HEALTH_CHECK_PROMPT = "Reply with exactly: OK"
 
 # JSON parsing instructions for repair prompts
 STRICT_JSON_RULES = """
-CRITICAL JSON FORMAT:
-- Return ONLY raw JSON starting with { or [
-- NO markdown code fences (```json or ```)
-- NO backticks of any kind
-- NO explanations or text outside the JSON
-- Your FIRST character must be { or [
-- Your LAST character must be } or ]
-- Must be parseable by json.loads() directly
+🚨 CRITICAL JSON FORMAT 🚨
+You MUST follow these rules EXACTLY:
+
+1. Return ONLY raw JSON - nothing else
+2. FIRST character MUST be { or [
+3. LAST character MUST be } or ]
+4. NO markdown code fences (```json or ```)
+5. NO backticks ` of any kind
+6. NO explanations before or after the JSON
+7. NO comments inside the JSON
+8. Must be parseable by json.loads() directly
+
+❌ WRONG: ```json {...}``` or "Here is the JSON: {...}"
+✅ CORRECT: {...}
 """.strip()
 
 
@@ -124,17 +130,60 @@ def _load_json_flexible(content: str) -> Any:
 
     content = content.strip()
 
-    # Strip markdown code fence if present (common LLM behavior)
-    # Handle: ```json {...} ``` or ``` {...} ```
+    # Strip markdown code fences and explanatory text (common LLM mistakes)
+    # Handle multiple formats:
+    # - ```json {...} ```
+    # - ``` {...} ```
+    # - "Here is the JSON: {...}"
+    # - {...} followed by explanatory text
+
+    # Remove leading text before JSON
+    # Find first { or [ that starts the actual JSON
+    json_start = -1
+    for i, char in enumerate(content):
+        if char in ('{', '['):
+            json_start = i
+            break
+
+    if json_start > 0:
+        # There's text before the JSON, remove it
+        content = content[json_start:]
+
+    # Strip markdown fences if present
     if content.startswith("```"):
         lines = content.split('\n')
-        if lines[0].startswith("```"):
-            # Remove first line (```json or ```)
+        # Remove first line (```json or ```)
+        if lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
+        # Remove last line (```)
         if lines and lines[-1].strip().startswith("```"):
-            # Remove last line (```)
             lines = lines[:-1]
         content = '\n'.join(lines).strip()
+
+    # Remove trailing text after JSON
+    # Find the last valid closing bracket
+    json_end = -1
+    brace_count = 0
+    bracket_count = 0
+    for i, char in enumerate(content):
+        if char == '{':
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+            if brace_count == 0 and bracket_count == 0:
+                json_end = i
+        elif char == '[':
+            bracket_count += 1
+        elif char == ']':
+            bracket_count -= 1
+            if brace_count == 0 and bracket_count == 0:
+                json_end = i
+
+    if json_end > 0 and json_end < len(content) - 1:
+        # There's text after the JSON, remove it
+        content = content[:json_end + 1]
+
+    content = content.strip()
 
     # Fix common LLM mistakes: Missing opening brace
     # If content starts with "field_name": [...] wrap in {...}

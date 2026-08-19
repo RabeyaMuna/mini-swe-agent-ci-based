@@ -2170,7 +2170,8 @@ Analysis:
             return {"problems": []}
 
         final_problems = []
-        for chunk in self._chunk_list(clusters, max_items=8):
+        # CRITICAL: Use size-aware chunking to handle variable-size issues
+        for chunk in self._chunk_by_size(clusters, max_tokens=30000):
             prompt = f"""Generate final CI repair problems from clustered memory evidence.
 
 **Current CI Failure:**
@@ -2380,20 +2381,26 @@ Return JSON:
         return ordered
 
     def _compact_query(self, query: dict | None) -> dict:
+        """
+        Compact query for LLM prompts - include only key metadata.
+
+        Full logs are NOT needed for cluster validation - just context to understand
+        what we're looking for. The clusters themselves contain the repair strategies.
+        """
         # Defensive: handle None query
         if query is None or not isinstance(query, dict):
             query = {}
+
         return {
             "repo": query.get("repo"),
             "workflow_name": query.get("workflow_name"),
             "workflow_path": query.get("workflow_path"),
-            # Include ALL error context - don't truncate critical failure information
-            "error_context": query.get("error_context", []),
-            "failure_signals": query.get("failure_signals", []),
-            "error_types": query.get("error_types", []),
-            "relevant_files": query.get("relevant_files", []),
-            # Include ALL failed jobs - critical for understanding which jobs/steps/commands failed
-            "failed_job": query.get("failed_job", []),
+            # Only include summaries, not full logs - use _shorten for consistency
+            "error_context": [self._shorten(str(e), 200) for e in query.get("error_context", [])[:5]],
+            "failure_signals": [self._shorten(str(s), 200) for s in query.get("failure_signals", [])[:5]],
+            "error_types": query.get("error_types", [])[:10],
+            "relevant_files": [str(f)[:100] for f in query.get("relevant_files", [])[:15]],
+            "failed_job": [self._shorten(str(j), 300) for j in query.get("failed_job", [])[:3]],
         }
 
     def _compact_retrieved_item(
@@ -2858,9 +2865,17 @@ Return JSON:
 
         # Skip single-occurrence clusters entirely (they're not "common")
         # Only validate multi-occurrence clusters with LLM
+        # CRITICAL: Use size-aware chunking instead of fixed item count
         accepted = []
-        for chunk_idx, chunk in enumerate(self._chunk_list(multi_occurrence_clusters, max_items=10), 1):
-            print(f"[Memory] Stage 5 DEBUG: Validating chunk {chunk_idx} with {len(chunk)} clusters")
+
+        # Smart chunking: fit as many clusters as possible within token limit
+        chunks = self._chunk_by_size(multi_occurrence_clusters, max_tokens=30000)
+
+        print(f"[Memory] Stage 5: Split {len(multi_occurrence_clusters)} clusters into {len(chunks)} size-aware chunks")
+
+        for chunk_idx, chunk in enumerate(chunks, 1):
+            chunk_size = sum(self._estimate_tokens(c) for c in chunk)
+            print(f"[Memory] Stage 5 DEBUG: Validating chunk {chunk_idx}/{len(chunks)} with {len(chunk)} clusters (~{chunk_size:,} tokens)")
             for i, cluster in enumerate(chunk, 1):
                 print(f"[Memory] Stage 5 DEBUG:   Cluster {i}: {cluster.get('distinct_issue_count')} issues ({cluster.get('coverage', 0):.0%}), problem='{cluster.get('representative_problem', '')[:60]}...'")
 
@@ -3519,10 +3534,67 @@ Return JSON with the MOST REPETITIVE problem/repair from each cluster:
         )
 
     def _chunk_list(self, items: list[dict], max_items: int) -> list[list[dict]]:
+        """Simple chunking by item count (legacy - use _chunk_by_size for better results)"""
         return [
             items[index : index + max_items]
             for index in range(0, len(items), max_items)
         ]
+
+    def _estimate_tokens(self, obj: any) -> int:
+        """Estimate token count for an object (rough: 1 token ≈ 4 chars)"""
+        if obj is None:
+            return 0
+        import json
+        try:
+            text = json.dumps(obj) if isinstance(obj, (dict, list)) else str(obj)
+            return len(text) // 4  # Rough estimate: 4 chars per token
+        except:
+            return len(str(obj)) // 4
+
+    def _chunk_by_size(self, items: list[dict], max_tokens: int = 30000) -> list[list[dict]]:
+        """
+        Smart chunking: group items until token limit reached.
+
+        Args:
+            items: List of items to chunk
+            max_tokens: Max tokens per chunk (default 30K, leaving room for prompt overhead)
+
+        Returns:
+            List of chunks, each under the token limit
+        """
+        if not items:
+            return []
+
+        chunks = []
+        current_chunk = []
+        current_size = 0
+
+        for item in items:
+            item_size = self._estimate_tokens(item)
+
+            # If single item exceeds limit, put it in its own chunk (will be handled separately)
+            if item_size > max_tokens:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = []
+                    current_size = 0
+                chunks.append([item])  # Single large item in its own chunk
+                continue
+
+            # If adding this item would exceed limit, start new chunk
+            if current_size + item_size > max_tokens and current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = [item]
+                current_size = item_size
+            else:
+                current_chunk.append(item)
+                current_size += item_size
+
+        # Add remaining items
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
 
     def _shorten(self, value: Any, limit: int = 240) -> Any:
         if isinstance(value, (list, dict)):

@@ -1194,6 +1194,77 @@ def _try_install_dependencies(testbed_path: Path, sha_fail: str = "") -> None:
     )
 
 
+def _create_isolated_venv_if_needed(
+    testbed_path: Path, venv_name: str, logger: Any
+) -> Tuple[str, str]:
+    """
+    Create an isolated virtual environment for the issue if not already present.
+
+    This ensures each issue has its own isolated Python environment,
+    preventing dependency conflicts between different issues even on the same repo.
+
+    The venv is created as .venv-<repo_name>-<issue_id> inside the testbed directory.
+    Agent will handle dependency installation when needed.
+
+    Args:
+        testbed_path: Path to the testbed directory
+        venv_name: Full venv name (e.g., ".venv-crewai-102")
+        logger: Logger instance
+
+    Returns:
+        Tuple of (path to venv's Python binary, venv_name) for activation
+    """
+    import sys
+    import subprocess
+
+    # Use provided venv name (already includes repo and issue ID)
+    # CRITICAL: Ensure venv_path is absolute to avoid creation in wrong location
+    venv_path = (testbed_path / venv_name).resolve()
+    venv_python = venv_path / "bin" / "python"
+
+    # DEBUG: Log the actual paths being used
+    logger.info(f"[CIBench] DEBUG: testbed_path = {testbed_path}")
+    logger.info(f"[CIBench] DEBUG: venv_name = {venv_name}")
+    logger.info(f"[CIBench] DEBUG: venv_path (absolute) = {venv_path}")
+
+    # Skip if venv already exists and is valid
+    if venv_path.exists() and venv_python.exists():
+        logger.info(f"[CIBench] Using existing virtual environment: {venv_name}")
+        return str(venv_python), venv_name
+
+    logger.info(f"[CIBench] Creating isolated virtual environment: {venv_name}")
+
+    try:
+        # Create virtual environment (fast, no dependencies)
+        subprocess.run(
+            [sys.executable, "-m", "venv", str(venv_path)],
+            cwd=str(testbed_path),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True
+        )
+
+        logger.info(f"[CIBench] ✓ Virtual environment ready: {venv_name}")
+        logger.info(f"[CIBench]   Agent can install dependencies as needed using:")
+        logger.info(f"[CIBench]   source {venv_name}/bin/activate && pip install <package>")
+
+        # DEBUG: Verify the venv actually exists at the expected location
+        if venv_path.exists():
+            logger.info(f"[CIBench] DEBUG: Venv verified at: {venv_path.resolve()}")
+        else:
+            logger.warning(f"[CIBench] DEBUG: WARNING - Venv NOT found at expected path: {venv_path.resolve()}")
+
+        return str(venv_python), venv_name
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"[CIBench] Virtual environment creation timed out (non-blocking)")
+        return "", ""
+    except Exception as e:
+        logger.warning(f"[CIBench] Could not create virtual environment (non-blocking): {e}")
+        return "", ""
+
+
 def setup_local_environment(
     config: Dict[str, Any],
     instance: Dict[str, Any],
@@ -1205,17 +1276,22 @@ def setup_local_environment(
     - Keeps a shared network clone cache at ``<project_root>/repo/``.
     - Creates ``<instance_dir>/testbed/`` from that cache when needed.
     - Checks out the failing commit (``sha_fail``).
+    - **Auto-creates an isolated .venv-<repo_name>-<issue_id> per issue.**
+    - Venv persists across reruns (preserved by git clean -e .venv*).
+    - Agent handles all dependency installation as needed.
     - Wraps the directory in a ``LocalEnvironment`` using settings from the
       ``environment`` section of the config (timeout, interpreter, env vars).
 
     If the testbed directory already contains a ``.git`` folder (re-run),
-    the local working copy is reused so previous work is preserved.
+    the local working copy is reused so previous work is preserved, including
+    the issue-specific virtual environment and any agent-installed packages.
     """
     repo_owner = instance.get("repo_owner", "")
     repo_name = instance.get("repo_name", "")
     sha_fail = str(instance.get("sha_fail") or "")
 
-    testbed_path = instance_dir / "testbed"
+    # CRITICAL: Always use absolute paths to avoid venv creation in wrong location
+    testbed_path = (instance_dir / "testbed").resolve()
     cache_dir_name = f"{repo_owner}__{repo_name}"
     repo_cache_path = REPO_CACHE_ROOT / cache_dir_name
     clone_url = f"https://github.com/{repo_owner}/{repo_name}.git"
@@ -1287,9 +1363,9 @@ def setup_local_environment(
             f"git reset --hard {commit} failed",
         )
         _must_run_git(
-            ["clean", "-fdx"],
+            ["clean", "-fdx", "-e", ".venv*"],
             repo_path,
-            "git clean -fdx failed",
+            "git clean -fdx (preserving .venv*)",
         )
 
     # ── Shared repo cache ─────────────────────────────────────────────────────
@@ -1424,19 +1500,23 @@ def setup_local_environment(
     _ensure_commit_available(testbed_path, sha_fail, remote="origin")
     _prepare_worktree(testbed_path, sha_fail)
 
-    # Broad dependency installation is intentionally opt-in. CI benchmark repos
-    # frequently require unavailable services, runtimes, compilers, or Docker,
-    # and eager installation can consume the repair budget before diagnosis.
-    # The default prompt instead permits a narrow per-repository environment
-    # (for example .ci-repair-venv) that is reused by sequential problem runs.
-    if bool(config.get("run", {}).get("auto_install_dependencies", False)):
-        sha_fail = instance.get("sha_fail", "")
-        _try_install_dependencies(testbed_path, sha_fail)
-    else:
-        logger.info(
-            "[CIBench] Skipping broad automatic dependency installation; "
-            "the agent may perform bounded targeted setup"
-        )
+    # ── Auto-create isolated virtual environment for this issue ────────────────
+    # Create a unique venv per issue to avoid dependency conflicts between issues
+    instance_id = str(instance.get("instance_id", "")).replace("/", "_").replace("@", "_")
+    issue_venv_name = f".venv-{repo_name}-{instance_id}"
+
+    # DEBUG: Log what we're passing to venv creation
+    logger.info(f"[CIBench] DEBUG: About to create venv with:")
+    logger.info(f"[CIBench] DEBUG:   testbed_path = {testbed_path}")
+    logger.info(f"[CIBench] DEBUG:   testbed_path (absolute) = {testbed_path.resolve()}")
+    logger.info(f"[CIBench] DEBUG:   issue_venv_name = {issue_venv_name}")
+
+    venv_python, venv_name = _create_isolated_venv_if_needed(testbed_path, issue_venv_name, logger)
+
+    # No pre-installation - agent handles dependencies as needed
+    logger.info(
+        "[CIBench] Agent will install dependencies as needed in the isolated venv"
+    )
 
     # ── Build LocalEnvironment ────────────────────────────────────────────────
     # Strip environment_class from the env config dict (LocalEnvironment doesn't accept it).
@@ -1447,6 +1527,24 @@ def setup_local_environment(
     }
     env_cfg["cwd"] = str(testbed_path)
     env_cfg.setdefault("timeout", 120)
+
+    # Activate isolated venv if it was created
+    if venv_python and venv_name:
+        import os
+        # CRITICAL: Use absolute path for venv activation
+        venv_path = (testbed_path / venv_name).resolve()
+        venv_bin = venv_path / "bin"
+
+        # Set up environment variables to activate venv
+        env_vars = env_cfg.get("env", {})
+        env_vars["VIRTUAL_ENV"] = str(venv_path)
+        env_vars["PATH"] = f"{venv_bin}:{os.environ.get('PATH', '')}"
+        # Unset PYTHONHOME to avoid conflicts
+        env_vars["PYTHONHOME"] = ""
+        env_cfg["env"] = env_vars
+
+        logger.info(f"[CIBench] Activated issue-specific virtual environment: {venv_name}")
+        logger.info(f"[CIBench] DEBUG: Activated venv at: {venv_path}")
 
     env = LocalEnvironment(**env_cfg)
 
@@ -1707,9 +1805,15 @@ def _build_single_problem_task(
     problem: Dict[str, Any],
     problem_num: int,
     total_problems: int,
+    repo_name: str,
+    issue_id: str = "",
     context_llm: Any = None,
 ) -> str:
     """Build focused repair task with automated tool detection or manual repair instructions."""
+
+    # Sanitize issue_id for filesystem-safe venv name (must match setup_local_environment)
+    if issue_id:
+        issue_id = issue_id.replace("/", "_").replace("@", "_")
 
     # Extract problem fields
     problem_statement = problem.get("problem_statement") or problem.get("problem", "")
@@ -1797,6 +1901,46 @@ Repair Plan:
 
 Validation Command:
 {verification_cmd or "Determine from the CI workflow and run the relevant check."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL: ISOLATED ENVIRONMENT - USE REPO-SPECIFIC VIRTUAL ENVIRONMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This issue has an ISOLATED virtual environment: .venv-{repo_name}{f"-{issue_id}" if issue_id else ""}/
+
+⚠️  MANDATORY: ALL installations and executions MUST use this venv!
+
+For INSTALLING packages (if repair plan says "install X"):
+  ✓ CORRECT:   .venv-{repo_name}{f"-{issue_id}" if issue_id else ""}/bin/pip install <package>
+  ✗ WRONG:     pip install <package>  # This affects other issues!
+
+For RUNNING Python scripts:
+  ✓ CORRECT:   .venv-{repo_name}{f"-{issue_id}" if issue_id else ""}/bin/python script.py
+  ✗ WRONG:     python script.py  # May use wrong environment!
+
+For RUNNING commands (pytest, mypy, flake8, etc.):
+  ✓ CORRECT:   source .venv-{repo_name}{f"-{issue_id}" if issue_id else ""}/bin/activate && pytest
+  ✗ WRONG:     pytest  # May use globally installed version!
+
+WHY THIS MATTERS:
+- Each issue has its own isolated environment
+- Installing in one venv does NOT affect other issues
+- What you install for THIS issue stays in THIS issue only
+- Prevents dependency conflicts between different issues/repos
+
+ALWAYS activate before running ANY command:
+  source .venv-{repo_name}{f"-{issue_id}" if issue_id else ""}/bin/activate && <your command>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+IMPORTANT: If this is an infrastructure problem that CANNOT be fixed by code changes, skip it immediately:
+- Rate limiting (HTTP 429, API limits)
+- Network timeouts or connection failures
+- External service outages (GitHub Actions, Docker Hub, npm registry)
+- Download failures for external dependencies/actions
+- Transient errors not caused by code
+
+For infrastructure problems: Respond with "This is an infrastructure issue, not fixable by code" and submit an empty patch.
 """
 
 
@@ -2033,6 +2177,7 @@ def _run_sequential_repair(
     testbed_path: Path,
     progress_manager: Any,
     instance_id: str,
+    repo_name: str = "",
     context_llm: Any = None,
 ) -> Tuple[Dict[str, Any], str]:
     """
@@ -2109,7 +2254,7 @@ def _run_sequential_repair(
 
         # Build focused task for THIS problem only
         single_task = _build_single_problem_task(
-            problem, i, total_problems, context_llm
+            problem, i, total_problems, repo_name, instance_id, context_llm
         )
 
         logger.info("[CIBench] Task preview (first 300 chars):")
@@ -2562,12 +2707,14 @@ def process_instance(
                 f"[CIBench] Sequential repair mode: {len(problems)} problems to fix"
             )
 
+            repo_name = instance.get("repo_name", "")
             info, diff = _run_sequential_repair(
                 agent=agent,
                 problems=problems,
                 testbed_path=testbed_path,
                 progress_manager=progress_manager,
                 instance_id=instance_id,
+                repo_name=repo_name,
                 context_llm=context_llm,
             )
             exit_status = info.get("exit_status")

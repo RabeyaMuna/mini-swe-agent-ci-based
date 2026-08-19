@@ -180,6 +180,19 @@ For EACH problem, create structured query objects for L1/L2/L3 retrieval.
 - If CI has ONE main failure → Return 1 problem
 - If CI has MULTIPLE different failures → Return N problems (one per distinct issue)
 
+**REQUIRED FIELDS:**
+1. **problem**: Clear specific description (REQUIRED, cannot be empty/N/A)
+2. **root_cause**: Explain WHY the failure happens (REQUIRED if failure_signals is empty)
+3. **failure_signals**: Actual error messages/patterns from CI logs (REQUIRED if root_cause is empty, MUST be non-empty array)
+   - Extract ACTUAL error messages from the CI log
+   - Include stack traces, exception messages, test failures
+   - DO NOT leave empty - use CI error_types evidence if needed
+4. **files**: List of files to fix
+5. **failure_type**: Category of failure
+
+**IMPORTANT:** Every problem MUST have either a non-empty root_cause OR non-empty failure_signals array.
+If CI log has error_types with evidence, use that evidence as failure_signals.
+
 **Return JSON:**
 ```json
 {{
@@ -263,8 +276,15 @@ For EACH problem, create structured query objects for L1/L2/L3 retrieval.
             has_failure_signals = isinstance(failure_signals, list) and len(failure_signals) > 0
 
             if not (has_root_cause or has_failure_signals):
+                # Provide detailed error message showing what the LLM actually returned
+                print(f"[Memory] ❌ Problem {index} validation failed:")
+                print(f"[Memory]    problem: {problem.get('problem', 'N/A')[:100]}...")
+                print(f"[Memory]    root_cause: '{root_cause}'")
+                print(f"[Memory]    failure_signals: {failure_signals}")
                 raise DecompositionGenerationError(
-                    f"LLM returned malformed problem {index}: must have either root_cause or failure_signals"
+                    f"LLM returned malformed problem {index}: must have either root_cause (non-empty) or failure_signals (non-empty array). "
+                    f"Got root_cause='{root_cause}' and failure_signals={failure_signals}. "
+                    f"The prompt explicitly requires these fields - this indicates the LLM is not following the schema."
                 )
 
             problems.append(problem)
