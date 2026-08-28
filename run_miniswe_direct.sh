@@ -3,7 +3,8 @@
 # Usage: ./run_miniswe_direct.sh <issue-ids> [ablation] [direction] [model] [repo_filters] [dataset] [workers]
 #   <issue-ids>: Comma-separated IDs, or empty string "" to use data/eval_issue_ids.json, or omit to RUN ALL
 #   [ablation]:  baseline|L1|L2|L3|L1+L2|L1+L2+L3|all   (default: all)
-#   [direction]: backward|forward|both                   (default: both)
+#   [direction]: none (baseline) | backward|forward|bidirectional|both|all
+#                "both" runs backward+forward; "all" runs all memory directions
 #   [model]:     gpt-5-mini | gpt-5.4-mini-2026-03-17 | minimax/minimax-m2.5 (default: gpt-5-mini)
 #   [repo_filters]: Optional comma-separated repo names or owner/repo slugs
 #                   (overrides <issue-ids>)
@@ -50,9 +51,9 @@ case "$MODEL" in
     PROVIDER="OpenAI"
     API_BASE="https://api.openai.com/v1"
     ;;
-  minimax|minimax2.5|minimax-2.5|minimaxm2.5|minimax-m2.5|minimax_m2.5|minimax/*|openrouter/minimax/*)
+  minimax|minimax2.5|minimax-2.5|minimaxm2.5|minimax-m2.5|minimax_m2.5|minimax/*|openrouter/minimax/*|deepseek-v4-flash|deepseek/*|openrouter/deepseek/*)
     if [ -z "$SAVED_OPENROUTER_KEY" ]; then
-      echo "ERROR: OPENROUTER_API_KEY not set in .env (required for MiniMax)" >&2
+      echo "ERROR: OPENROUTER_API_KEY not set in .env (required for this model)" >&2
       exit 1
     fi
     export OPENAI_API_KEY=""
@@ -63,7 +64,7 @@ case "$MODEL" in
     ;;
   *)
     echo "ERROR: Unsupported Mini-SWE model: $MODEL" >&2
-    echo "Use a GPT/OpenAI model or minimax2.5." >&2
+    echo "Use a GPT/OpenAI, MiniMax, or DeepSeek model." >&2
     exit 1
     ;;
 esac
@@ -185,7 +186,21 @@ PY
 
 # Translate ablation list
 if [ "$ABLATION" = "all" ]; then ABLATIONS=(baseline L1 L1+L2 L1+L2+L3); else ABLATIONS=($ABLATION); fi
-if [ "$DIRECTION" = "both" ]; then DIRECTIONS=(backward forward); else DIRECTIONS=($DIRECTION); fi
+case "${DIRECTION,,}" in
+  none) DIRECTIONS=() ;;
+  backward|forward|bidirectional) DIRECTIONS=("${DIRECTION,,}") ;;
+  both) DIRECTIONS=(backward forward) ;;
+  all) DIRECTIONS=(backward forward bidirectional) ;;
+  *)
+    echo "ERROR: Direction must be none, backward, forward, bidirectional, both, or all." >&2
+    exit 2
+    ;;
+esac
+
+if [ "${ABLATION,,}" != "baseline" ] && [ "${DIRECTION,,}" = "none" ]; then
+  echo "ERROR: Direction 'none' is valid only for baseline; memory ablations require a direction." >&2
+  exit 2
+fi
 
 run_one() {
   local ablation="$1"; local direction="$2"
@@ -210,7 +225,12 @@ run_one() {
 
 FAILS=0; TOTAL=0
 for abl in "${ABLATIONS[@]}"; do
-  for dir in "${DIRECTIONS[@]}"; do
+  if [ "${abl,,}" = "baseline" ]; then
+    run_directions=(none)
+  else
+    run_directions=("${DIRECTIONS[@]}")
+  fi
+  for dir in "${run_directions[@]}"; do
     TOTAL=$((TOTAL+1))
     if run_one "$abl" "$dir"; then
       echo "✓ Done: $abl | $dir"
@@ -229,6 +249,8 @@ if [ "$ABLATION_LOWER" = "baseline" ]; then
   echo "Results: $RESULTS_ROOT/baseline_<model>/"
 elif [ "$DIRECTION" = "both" ]; then
   echo "Results: $RESULTS_ROOT/{backward,forward}/<ablation>_<model>/"
+elif [ "$DIRECTION" = "all" ]; then
+  echo "Results: $RESULTS_ROOT/{backward,forward,bidirectional}/<ablation>_<model>/"
 else
   echo "Results: $RESULTS_ROOT/$DIRECTION/<ablation>_<model>/"
 fi

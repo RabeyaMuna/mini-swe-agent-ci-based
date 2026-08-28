@@ -10,11 +10,31 @@ Common agent models:
 - **deepseek-v4-flash** (routed through OpenRouter; 1M context, 384K output - most capable model)
 
 Ablations: BASELINE, L1, L1+L2, L1+L2+L3
-Directions: backward (data/back_trs) or forward (data/fwr_trs)
+
+Memory directions: backward (`data/back_trs`), forward (`data/fwr_trs`), or
+bidirectional (`data/bidirect_trs`). Direction never applies to BASELINE;
+baseline uses `none` because it does not retrieve memory.
 
 Notes
 - GLM 5.2 may be used only for decomposition/memory build, not as an agent model.
 - predictions.json is updated incrementally after each issue so crashes do not lose patches.
+
+## Recommended conflict-free setup
+
+From any directory, run the project installer by absolute or relative path:
+
+```bash
+bash /home/ubuntu/Documents/mini-swe-agent-ci-based/INSTALL.sh
+cd /home/ubuntu/Documents/mini-swe-agent-ci-based
+source .venv-codex/bin/activate
+python scripts/verify_installation.py
+```
+
+`INSTALL.sh` creates a clean `.venv-codex`, installs the pinned Python 3.13
+dependency set from `requirements-codex.txt`, preserves the verified CPU
+PyTorch pair, installs Mini-SWE in editable mode, and runs both import/version
+checks and `pip check`. Activation cannot persist after a Bash script exits,
+so run the displayed `source` command before using bare `python` or `python3`.
 
 ## 0A) Mini-SWE-Agent-only Setup (Codex Not Required)
 
@@ -96,7 +116,7 @@ PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
   --dataset data/eval_set.jsonl \
   --issue_regex '^(43)$' \
   --ablation baseline \
-  --direction backward \
+  --direction none \
   --model gpt-5.4-mini \
   --workers 1
 ```
@@ -120,7 +140,7 @@ set `MSWEA_REPO_CACHE_ROOT` to use a different cache directory.
 python3 -m venv .venv-codex
 source .venv-codex/bin/activate
 python -m pip install --upgrade pip wheel
-pip install -r requirements-shared.txt -r requirements-codex.txt python-dotenv litellm
+pip install -r requirements-codex.txt
 # Install Mini‑SWE‑Agent (for the Mini‑SWE runner)
 pip install -e miniswe-agent
 ```
@@ -194,7 +214,7 @@ source .venv/bin/activate
 
 # Upgrade pip and install dependencies
 python -m pip install --upgrade pip wheel
-pip install -r requirements-shared.txt -r requirements-codex.txt python-dotenv litellm
+pip install -r requirements-codex.txt
 
 # Install Mini-SWE-Agent
 pip install -e miniswe-agent
@@ -303,6 +323,7 @@ python3 scripts/decompose_backward.py --batch --dataset data/memory_set.jsonl --
 
 **Step 1: Split dataset into memory/eval**
 ```bash
+source .venv-codex/bin/activate
 python3 scripts/split_before_decomposition.py
 ```
 Creates `data/memory_set.jsonl` and `data/eval_set.jsonl` (plus ID lists).
@@ -494,7 +515,7 @@ PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
   --dataset data/eval_set.jsonl \
   --issue_regex '<regular expression over instance_id>' \
   --ablation <baseline|L1|L1+L2|L1+L2+L3> \
-  --direction backward \
+  --direction <none|backward|forward|bidirectional> \
   --model <gpt-5.4-mini|minimax2.5> \
   --workers <N>
 ```
@@ -508,7 +529,7 @@ PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
   --issue_regex '^(43)$' \
   --ablation baseline \
   --model minimax2.5 \
-  --direction backward \
+  --direction none \
   --workers 1
 
 # Several issues with full backward memory, GPT-5.4 Mini
@@ -534,7 +555,7 @@ results/miniswe-agent/<direction>/<ablation>_<model>/
 ### Convenience wrapper
 
 The wrapper accepts a comma-separated issue list and can run several ablations
-or both directions:
+or multiple memory directions:
 
 ```bash
 ./run_miniswe_direct.sh \
@@ -554,34 +575,36 @@ issue_ids  ablation  direction  model  optional_repo_slug  dataset  workers
 ```
 
 Pass an empty issue list (`""`) to use every ID in
-`data/eval_issue_ids.json`. Pass `all` for the ablation or `both` for the
-direction to run all supported combinations. The optional fifth argument also
-accepts comma-separated short repository names or exact `owner/repo` slugs.
+`data/eval_issue_ids.json`. Use direction `none` for baseline. For memory
+ablations, use `backward`, `forward`, or `bidirectional`; `both` runs backward
+and forward, while `all` runs all three memory directions. The optional fifth
+argument also accepts comma-separated short repository names or exact
+`owner/repo` slugs.
 
 ```bash
-bash ./run_miniswe_direct.sh "" BASELINE backward gpt-5.4-mini \
+bash ./run_miniswe_direct.sh "" BASELINE none gpt-5.4-mini \
   "agno,axolotl,camel,crewai,django-import-export" data/eval_set.jsonl 4
 ```
 
 > The wrapper automatically loads `.env` and prefers `.venv-miniswe`. It falls
 > back to `.venv-codex` only when the dedicated Mini-SWE environment is absent.
-> GPT models receive only the OpenAI credential; MiniMax receives only the
-> OpenRouter credential.
+> GPT models receive only the OpenAI credential; MiniMax and DeepSeek receive
+> only the OpenRouter credential.
 
 Verify Mini-SWE routing without making an API request:
 
 ```bash
-MINISWE_CONFIG_ONLY=1 bash ./run_miniswe_direct.sh 1 baseline backward gpt-5.4-mini
-MINISWE_CONFIG_ONLY=1 bash ./run_miniswe_direct.sh 1 baseline backward minimax2.5
+MINISWE_CONFIG_ONLY=1 bash ./run_miniswe_direct.sh 1 baseline none gpt-5.4-mini
+MINISWE_CONFIG_ONLY=1 bash ./run_miniswe_direct.sh 1 baseline none minimax2.5
 ```
 
 Notes:
 
 - Run Mini-SWE and Codex separately; concurrent jobs may contend for repository caches.
 - `--workers` controls parallel issues. Start with `1`, then increase it based on CPU, memory, and API rate limits.
-- Valid Mini-SWE model aliases are `gpt-5.4-mini` and `minimax2.5`.
-- `baseline` ignores memory and saves results directly to `results/miniswe-agent/baseline_<model>/` (no direction subdirectory).
-- Other ablations (L1, L1+L2, L1+L2+L3) load backward or forward memory according to `--direction` and save to `results/miniswe-agent/<direction>/<ablation>_<model>/`.
+- Valid Mini-SWE model aliases include `gpt-5.4-mini`, `minimax2.5`, and `deepseek-v4-flash`.
+- `baseline` has no direction, does not retrieve memory, and saves directly to `results/miniswe-agent/baseline_<model>/`.
+- Other ablations (L1, L1+L2, L1+L2+L3) load backward, forward, or bidirectional memory according to `--direction` and save to `results/miniswe-agent/<direction>/<ablation>_<model>/`.
 
 ## 3) Run Codex (OpenAI Codex CLI agent)
 
@@ -804,40 +827,45 @@ python3 scripts/decompose_bidirectional.py \
 
 ### Mini‑SWE – Quick Commands
 
-Run ALL eval_issues for each model, ablation, and direction (workers=4, dataset=data/eval_set.jsonl).
+Run all evaluation issues for each model and ablation (workers=4,
+dataset=`data/eval_set.jsonl`). Baseline runs once without a direction; memory
+ablations can run backward, forward, or bidirectional.
 The wrapper loads `.env` and selects OpenAI or OpenRouter automatically.
 
-**Note:** For baseline, the direction parameter is ignored since baseline doesn't use directional memory.
-Results are saved to `results/miniswe-agent/baseline_<model>/`
+**Note:** Baseline uses direction `none` and saves to
+`results/miniswe-agent/baseline_<model>/`.
 
 #### GPT-5.4-mini (Recommended)
 ```bash
-# Baseline (direction parameter is ignored, results saved to results/miniswe-agent/baseline_gpt-5.4-mini/)
-bash ./run_miniswe_direct.sh "" BASELINE backward gpt-5.4-mini "" data/eval_set.jsonl 4
+# Baseline (no direction or memory retrieval)
+bash ./run_miniswe_direct.sh "" BASELINE none gpt-5.4-mini "" data/eval_set.jsonl 4
 
 # Memory modes (results saved to results/miniswe-agent/<direction>/l1_l2_l3_gpt-5.4-mini/)
 bash ./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 bidirectional gpt-5.4-mini "" data/eval_set.jsonl 4
 ```
 
 #### MiniMax M2.5
 ```bash
-# Baseline (direction parameter is ignored, results saved to results/miniswe-agent/baseline_minimax-m2.5/)
-bash ./run_miniswe_direct.sh "" BASELINE backward minimax2.5 "" data/eval_set.jsonl 4
+# Baseline (no direction or memory retrieval)
+bash ./run_miniswe_direct.sh "" BASELINE none minimax2.5 "" data/eval_set.jsonl 4
 
 # Memory modes (results saved to results/miniswe-agent/<direction>/l1_l2_l3_minimax-m2.5/)
 bash ./run_miniswe_direct.sh "" L1+L2+L3 backward minimax2.5 "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  minimax2.5 "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 bidirectional minimax2.5 "" data/eval_set.jsonl 4
 ```
 
 #### DeepSeek-V4-Flash (1M Context, Best for Large-scale)
 ```bash
-# Baseline (results saved to results/miniswe-agent/baseline_deepseek-v4-flash/)
-bash ./run_miniswe_direct.sh "" BASELINE backward deepseek-v4-flash "" data/eval_set.jsonl 4
+# Baseline (no direction or memory retrieval)
+bash ./run_miniswe_direct.sh "" BASELINE none deepseek-v4-flash "" data/eval_set.jsonl 4
 
 # Memory modes (results saved to results/miniswe-agent/<direction>/l1_l2_l3_deepseek-v4-flash/)
 bash ./run_miniswe_direct.sh "" L1+L2+L3 backward deepseek-v4-flash "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  deepseek-v4-flash "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 bidirectional deepseek-v4-flash "" data/eval_set.jsonl 4
 ```
 ### Codex – Quick Commands
 
@@ -881,4 +909,45 @@ bash ./run_codex_direct.sh "" L1+L2+L3 forward  deepseek-v4-flash "" data/eval_s
 # Specific repositories with full memory
 bash ./run_codex_direct.sh "" L1+L2+L3 backward deepseek-v4-flash \
   "agno,axolotl,camel,crewai,django-import-export" data/eval_set.jsonl 4
+```
+
+## Cost and time reports
+
+Both benchmark runners continuously save cost and timing data in each
+model/direction/ablation output directory:
+
+- `run_metrics.json` keeps the durable per-instance attempt ledger and API-call
+  checkpoints.
+- `cost_time_report.json` contains per-instance totals and the overall run total.
+- `cost_time_report.csv` contains the same per-instance totals for analysis.
+
+Interrupted and failed attempts are retained. When the same issue is resumed,
+the new attempt is appended and its cost/time is added to earlier attempts;
+only an instance with a completed attempt and usable patch is skipped. Codex
+model-preflight usage is saved separately under the direction's
+`_run_overhead_<model>/` directory so it is not silently assigned to one issue.
+While an attempt is running, a heartbeat checkpoints its elapsed time every ten
+seconds, so even a forced process termination loses at most the time since the
+last heartbeat. Graceful interruptions record the exact elapsed time.
+
+`total_wall_time_seconds` is the sum of instance-attempt runtimes, including
+retries. With parallel workers it represents total consumed instance time, not
+the shorter batch makespan. For Codex, `total_api_time_seconds` measures the
+complete Codex turn because the CLI publishes aggregate token usage when the
+turn ends; Mini-SWE records individual model-request time.
+
+`cost_complete` is false when a provider returned token usage but no billed
+cost and the installed LiteLLM pricing registry could not price that model.
+This avoids reporting an unknown charge as `$0`.
+
+For a model missing from LiteLLM's registry, copy
+`model-pricing.example.json`, enter the provider's per-million-token rates,
+and set `RUN_METRICS_PRICING_FILE` to that file before launching the run.
+
+Create a combined report across output directories with:
+
+```bash
+python3 scripts/analyze_costs.py results/codex \
+  --group-by direction \
+  --output results/codex/overall_cost_time_report.json
 ```

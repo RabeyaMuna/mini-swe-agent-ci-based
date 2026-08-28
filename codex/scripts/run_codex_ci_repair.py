@@ -40,6 +40,13 @@ from codex.scripts.ci_repair_prompts import (
 )
 from utilities.ci_log_analyzer import _run_log_analysis
 from utilities.git_checkout import prepare_repo_checkout as prepare_git_checkout
+from utilities.run_metrics import (
+    RunMetricsRecorder,
+    completed_instance_ids,
+    estimate_cost_usd,
+    metric_instance_ids,
+    safe_metrics_call,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -84,7 +91,9 @@ def canonical_model(name: str | None) -> str | None:
     return ALIASES.get(n, n)
 
 
-def preflight_model(model: str) -> None:
+def preflight_model(
+    model: str, metrics_recorder: RunMetricsRecorder | None = None
+) -> None:
     """Verify model with minimal API call and print banner.
 
     Handles GPT-5.* (max_completion_tokens / max_output_tokens) and OpenRouter
@@ -151,16 +160,58 @@ def preflight_model(model: str) -> None:
         "(request timeout: 20s)",
         flush=True,
     )
+    safe_metrics_call(
+        metrics_recorder,
+        "begin_api_call",
+        phase="model_preflight",
+        model=model,
+    )
+    call_started = time.time()
     r = requests.post(url, headers=_headers(token), json=payload, timeout=20)
     if r.status_code == 200:
+        if metrics_recorder is not None:
+            safe_metrics_call(
+                metrics_recorder,
+                "record_response",
+                response=r.json(),
+                phase="model_preflight",
+                model=model,
+                duration_seconds=time.time() - call_started,
+            )
         print("\n✓ Model verified: chat/completions")
         return
+
+    safe_metrics_call(
+        metrics_recorder,
+        "record_api_call",
+        phase="model_preflight",
+        model=model,
+        duration_seconds=time.time() - call_started,
+        status="failed",
+        error=f"chat/completions returned HTTP {r.status_code}",
+    )
 
     if provider == "openai":
         url2 = endpoint.rstrip("/") + "/responses"
         payload2 = {"model": model, "input": "ok", "max_output_tokens": 16}
+        safe_metrics_call(
+            metrics_recorder,
+            "begin_api_call",
+            phase="model_preflight",
+            model=model,
+        )
+        call_started = time.time()
         r2 = requests.post(url2, headers=_headers(token), json=payload2, timeout=20)
         if r2.status_code == 200:
+            if metrics_recorder is not None:
+                safe_metrics_call(
+                    metrics_recorder,
+                    "record_response",
+                    response=r2.json(),
+                    phase="model_preflight",
+                    model=model,
+                    duration_seconds=time.time() - call_started,
+                )
             print("\n✓ Model verified: responses")
             return
         print("\n✗ FATAL: Model test failed!")
@@ -313,7 +364,7 @@ def prepare_repo_checkout(
     return prepare_git_checkout(issue, checkout, refresh, dry_run)
 
 
-def make_context_llm(model: str | None) -> Any:
+def make_context_llm(model: str | None, metrics_recorder: Any = None) -> Any:
     if not model:
         return None
 
@@ -327,7 +378,7 @@ def make_context_llm(model: str | None) -> Any:
     configure_model_environment(model_name)
 
     # Return proper LLM object with .invoke() method
-    return LitellmModel(model_name=model_name)
+    return LitellmModel(model_name=model_name, metrics_recorder=metrics_recorder)
 
 
 def is_placeholder_analysis(data: dict[str, Any]) -> bool:
@@ -1034,6 +1085,8 @@ def run_codex(
     command: str,
     timeout: int,
     dry_run: bool,
+    metrics_recorder: RunMetricsRecorder | None = None,
+    metrics_phase: str = "repair_agent",
 ) -> dict[str, Any]:
     """
     Run codex agent and stream output in real-time to both terminal and file.
@@ -1041,12 +1094,37 @@ def run_codex(
     This allows you to see what the agent is doing while it runs.
     """
     cmd = shlex.split(command)
+    json_mode = "--json" in cmd
+    if not json_mode:
+        cmd.append("--json")
+        json_mode = True
     prompt = prompt_path.read_text(encoding="utf-8")
     started = time.time()
+    usage_totals = {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+    total_cost_usd = 0.0
+    cost_sources: set[str] = set()
+    usage_event_recorded = False
+    expected_model = None
+    for i, arg in enumerate(cmd):
+        if arg == "--model" and i + 1 < len(cmd):
+            expected_model = cmd[i + 1]
+            break
 
     if dry_run:
         write_text(transcript_path, f"DRY RUN: would execute {cmd} in {checkout}\n")
-        return {"returncode": 0, "elapsed_seconds": 0.0, "dry_run": True}
+        return {
+            "returncode": 0,
+            "elapsed_seconds": 0.0,
+            "dry_run": True,
+            "usage": usage_totals,
+            "cost_usd": 0.0,
+        }
 
     print(f"\n{'='*80}")
     print(f"[AGENT] Starting: {' '.join(cmd)}")
@@ -1079,83 +1157,154 @@ def run_codex(
         env.pop('OPENAI_API_KEY', None)
         env.pop('OPENAI_BASE_URL', None)
 
-    with open(transcript_path, 'w', encoding='utf-8') as f:
-        
-        proc = subprocess.Popen(
-            cmd,
-            cwd=checkout,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=env,  # Pass environment to subprocess
-        )
-        
-        # Send prompt to stdin
-        if proc.stdin:
-            proc.stdin.write(prompt)
-            proc.stdin.close()
+    proc: subprocess.Popen[str] | None = None
+    safe_metrics_call(
+        metrics_recorder,
+        "begin_api_call",
+        phase=metrics_phase,
+        model=expected_model,
+    )
+    try:
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+            )
 
-        # Extract expected model from command
-        expected_model = None
-        for i, arg in enumerate(cmd):
-            if arg == '--model' and i + 1 < len(cmd):
-                expected_model = cmd[i + 1]
-                break
+            # Send prompt to stdin
+            if proc.stdin:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
 
-        # Stream output line by line and verify model
-        if proc.stdout:
-            model_verified = False
-            detected_model = None
-            line_count = 0
+            # Stream output line by line and checkpoint usage events.
+            if proc.stdout:
+                model_verified = json_mode
+                detected_model = None
+                line_count = 0
 
-            for line in proc.stdout:
-                # Check for model identification in first 20 lines
-                if line_count < 20:
-                    if line.startswith('model:'):
-                        detected_model = line.split('model:')[1].strip()
-                        if expected_model and detected_model != expected_model:
-                            print(f"\n{'='*80}")
-                            print(f"❌ MODEL MISMATCH ERROR!")
-                            print(f"{'='*80}")
-                            print(f"Expected model: {expected_model}")
-                            print(f"Detected model: {detected_model}")
-                            print(f"\nCodex is using a DIFFERENT model than requested!")
-                            print(f"Stopping execution to prevent incorrect results.")
-                            print(f"{'='*80}\n")
-                            proc.kill()
-                            raise RuntimeError(
-                                f"Model mismatch: expected '{expected_model}' but got '{detected_model}'. "
-                                f"Check your Codex configuration."
+                for line in proc.stdout:
+                    event = None
+                    if json_mode:
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            event = None
+                    if isinstance(event, dict) and event.get("type") == "turn.completed":
+                        usage_event_recorded = True
+                        event_usage = event.get("usage") or {}
+                        normalized_usage = {
+                            field: int(event_usage.get(field) or 0)
+                            for field in usage_totals
+                        }
+                        for field, value in normalized_usage.items():
+                            usage_totals[field] += value
+                        call_cost, cost_source = estimate_cost_usd(
+                            expected_model or "", normalized_usage
+                        )
+                        total_cost_usd += call_cost
+                        cost_sources.add(cost_source)
+                        if metrics_recorder is not None:
+                            safe_metrics_call(
+                                metrics_recorder,
+                                "record_api_call",
+                                phase=metrics_phase,
+                                model=expected_model,
+                                duration_seconds=time.time() - started,
+                                usage=normalized_usage,
+                                cost_usd=call_cost,
+                                cost_source=cost_source,
                             )
-                        elif expected_model and detected_model == expected_model:
-                            model_verified = True
-                            print(f"✓ Model verified: {detected_model}\n")
 
-                line_count += 1
+                    # Human output identifies the model near the beginning.
+                    if not json_mode and line_count < 20:
+                        if line.startswith("model:"):
+                            detected_model = line.split("model:")[1].strip()
+                            if expected_model and detected_model != expected_model:
+                                print(f"\n{'='*80}")
+                                print(f"❌ MODEL MISMATCH ERROR!")
+                                print(f"{'='*80}")
+                                print(f"Expected model: {expected_model}")
+                                print(f"Detected model: {detected_model}")
+                                print(f"\nCodex is using a DIFFERENT model than requested!")
+                                print(f"Stopping execution to prevent incorrect results.")
+                                print(f"{'='*80}\n")
+                                proc.kill()
+                                raise RuntimeError(
+                                    f"Model mismatch: expected '{expected_model}' but got '{detected_model}'. "
+                                    f"Check your Codex configuration."
+                                )
+                            elif expected_model and detected_model == expected_model:
+                                model_verified = True
+                                print(f"✓ Model verified: {detected_model}\n")
 
-                # Print to terminal (real-time visibility)
-                print(line, end='', flush=True)
-                # Save to file
-                f.write(line)
-                f.flush()
+                    line_count += 1
 
-            # If expected model was specified but never verified
-            if expected_model and not model_verified:
-                print(f"\n{'='*80}")
-                print(f"⚠️  WARNING: Could not verify model '{expected_model}'")
-                print(f"Codex output did not include model identification.")
-                print(f"{'='*80}\n")
+                    # Print to terminal and save the raw JSONL transcript.
+                    print(line, end="", flush=True)
+                    f.write(line)
+                    f.flush()
 
-        proc.wait(timeout=timeout)
+                # JSON mode relies on the explicit command and API preflight.
+                if expected_model and not model_verified:
+                    print(f"\n{'='*80}")
+                    print(f"⚠️  WARNING: Could not verify model '{expected_model}'")
+                    print(f"Codex output did not include model identification.")
+                    print(f"{'='*80}\n")
+
+            proc.wait(timeout=timeout)
+    except BaseException as exc:
+        if not usage_event_recorded and metrics_recorder is not None:
+            safe_metrics_call(
+                metrics_recorder,
+                "record_api_call",
+                phase=metrics_phase,
+                model=expected_model,
+                duration_seconds=time.time() - started,
+                status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        raise
 
     elapsed = time.time() - started
+    if not usage_event_recorded and metrics_recorder is not None:
+        safe_metrics_call(
+            metrics_recorder,
+            "record_api_call",
+            phase=metrics_phase,
+            model=expected_model,
+            duration_seconds=elapsed,
+            status="completed" if proc.returncode == 0 else "failed",
+            error=(
+                None
+                if proc.returncode == 0
+                else f"codex exec exited with status {proc.returncode}"
+            ),
+        )
 
     print(f"\n{'='*80}")
     print(f"[AGENT] Completed in {elapsed:.1f}s with exit code {proc.returncode}")
     print(f"{'='*80}\n")
 
-    return {"returncode": proc.returncode, "elapsed_seconds": elapsed, "dry_run": False}
+    return {
+        "returncode": proc.returncode,
+        "elapsed_seconds": elapsed,
+        "dry_run": False,
+        "usage": usage_totals,
+        "cost_usd": round(total_cost_usd, 10),
+        "cost_source": ",".join(sorted(cost_sources)) or "unavailable",
+    }
 
 
 def _run_git_diff(
@@ -1346,7 +1495,12 @@ def save_patch_and_result(
     )
 
 
-def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) -> None:
+def _run_issue(
+    args: argparse.Namespace,
+    ablation: str,
+    issue: dict[str, Any],
+    metrics: RunMetricsRecorder,
+) -> bool:
     safe_ablation = ablation.replace("+", "_").lower()
 
     # Include model name in output directory (e.g., baseline_minimax2.5)
@@ -1365,7 +1519,11 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
         refresh=args.refresh_checkout,
         dry_run=args.dry_run,
     )
-    context_llm = make_context_llm(args.context_model) if args.generate_missing_analysis else None
+    context_llm = (
+        make_context_llm(args.context_model, metrics_recorder=metrics)
+        if args.generate_missing_analysis
+        else None
+    )
     ci_failure = load_or_generate_ci_failure(
         issue,
         result_dir,
@@ -1483,11 +1641,7 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
             None,
             original_sha,
         )
-        if getattr(args, "incremental_predictions", True):
-            append_prediction_for_issue(
-                args.output_root, ablation, issue_id(issue), args.context_model
-            )
-        return
+        return False
 
     print(f"\n[DEBUG] Problems to fix (one by one):")
     for idx, p in enumerate(problems, 1):
@@ -1529,6 +1683,8 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
             codex_cmd,
             args.timeout,
             args.dry_run,
+            metrics_recorder=metrics,
+            metrics_phase=f"repair_agent.problem_{problem['number']}",
         )
         problem_results.append(
             {"problem": problem, "prompt_cache": cache_info, **run_result}
@@ -1578,9 +1734,58 @@ def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) ->
     )
 
     print(f"[DEBUG] ✓ Saved patch.diff and result.json")
-    if getattr(args, "incremental_predictions", True):
+    completed = bool(
+        len(problem_results) == len(problems)
+        and all(result.get("returncode") == 0 for result in problem_results)
+        and (result_dir / "patch.diff").exists()
+        and (result_dir / "patch.diff").read_text(encoding="utf-8").strip()
+    )
+    if completed and getattr(args, "incremental_predictions", True):
         append_prediction_for_issue(
             args.output_root, ablation, issue_id(issue), args.context_model
+        )
+    return completed
+
+
+def run_issue(args: argparse.Namespace, ablation: str, issue: dict[str, Any]) -> None:
+    """Run one issue while preserving every interrupted or retried attempt."""
+    result_dir = (
+        args.output_root
+        / _ablation_dir_name(ablation, args.context_model)
+        / issue_id(issue)
+    )
+    metrics = RunMetricsRecorder(
+        result_dir.parent,
+        issue_id(issue),
+        agent="codex",
+        model=prediction_model_name(args),
+        direction=args.direction,
+        ablation=ablation,
+    )
+    try:
+        completed = _run_issue(args, ablation, issue, metrics)
+    except KeyboardInterrupt as exc:
+        safe_metrics_call(
+            metrics,
+            "finish",
+            status="interrupted",
+            error=str(exc) or "KeyboardInterrupt",
+        )
+        raise
+    except BaseException as exc:
+        safe_metrics_call(
+            metrics,
+            "finish",
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    else:
+        safe_metrics_call(
+            metrics,
+            "finish",
+            status="completed" if completed else "failed",
+            metadata={"patch_generated": completed},
         )
 
 
@@ -1812,18 +2017,23 @@ def existing_prediction_ids(
     output_root: Path, ablation: str, context_model: str | None = None
 ) -> set[str]:
     """Return IDs with non-empty patches for one model/ablation run."""
-    predictions_file = (
-        output_root / _ablation_dir_name(ablation, context_model) / "predictions.json"
-    )
+    results_dir = output_root / _ablation_dir_name(ablation, context_model)
+    predictions_file = results_dir / "predictions.json"
     predictions = load_json(predictions_file, [])
     if not isinstance(predictions, list):
         return set()
+    metrics_completed = completed_instance_ids(results_dir)
+    metrics_known = metric_instance_ids(results_dir)
     return {
         str(prediction.get("id"))
         for prediction in predictions
         if isinstance(prediction, dict)
         and prediction.get("id") is not None
         and prediction_has_patch(prediction)
+        and (
+            str(prediction.get("id")) not in metrics_known
+            or str(prediction.get("id")) in metrics_completed
+        )
     }
 
 
@@ -1956,7 +2166,27 @@ def main() -> int:
 
     # Verify the model only when at least one selected issue still needs work.
     if args.context_model and needs_processing:
-        preflight_model(args.context_model)
+        model_slug = str(args.context_model).replace("/", "_").replace(".", "_")
+        preflight_metrics = RunMetricsRecorder(
+            args.output_root / f"_run_overhead_{model_slug}",
+            f"preflight-{time.time_ns()}",
+            agent="codex",
+            model=args.context_model,
+            direction=args.direction,
+            ablation="run_overhead",
+        )
+        try:
+            preflight_model(args.context_model, metrics_recorder=preflight_metrics)
+        except BaseException as exc:
+            safe_metrics_call(
+                preflight_metrics,
+                "finish",
+                status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        else:
+            safe_metrics_call(preflight_metrics, "finish", status="completed")
     elif args.context_model:
         print(
             "[codex-ci-repair] Resume: all selected issues already exist; "

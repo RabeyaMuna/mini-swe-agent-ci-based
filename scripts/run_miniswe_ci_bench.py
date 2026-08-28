@@ -55,7 +55,15 @@ def main() -> None:
     p.add_argument("--dataset", default=str(Path("data/eval_set.jsonl")), help="Path to JSONL dataset")
     p.add_argument("--issue_regex", default="", help="Regex over instance_id to filter (e.g., ^(129|130)$)")
     p.add_argument("--ablation", default="baseline")
-    p.add_argument("--direction", default="backward", choices=["backward", "forward"]) 
+    p.add_argument(
+        "--direction",
+        default="none",
+        choices=["none", "backward", "forward", "bidirectional"],
+        help=(
+            "Memory direction. Use 'none' for baseline; backward, forward, and "
+            "bidirectional are for memory ablations."
+        ),
+    )
     p.add_argument("--model", required=True)
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--output_root", default=str(Path("results/miniswe-agent")))
@@ -67,7 +75,17 @@ def main() -> None:
     model_slug = model_output_name(resolved_model)
 
     memory_enabled, memory_levels = _ablation_to_miniswe(args.ablation)
-    memory_root = Path("data/back_trs" if args.direction == "backward" else "data/fwr_trs").resolve()
+    is_baseline = args.ablation.strip().lower() == "baseline"
+    direction = "none" if is_baseline else args.direction
+    if not is_baseline and direction == "none":
+        p.error("memory ablations require backward, forward, or bidirectional direction")
+    memory_roots = {
+        "none": "data/back_trs",  # Unused by baseline's decompose-only mode.
+        "backward": "data/back_trs",
+        "forward": "data/fwr_trs",
+        "bidirectional": "data/bidirect_trs",
+    }
+    memory_root = Path(memory_roots[direction]).resolve()
 
     # Build output directory: <output_root>/<ablation>_<model>/
     # NOTE: For baseline, output_root should be "results/miniswe-agent" (no direction subdir)
@@ -101,6 +119,7 @@ def main() -> None:
         memory_plugin_path="memory_plugin.memory_plugin:MemoryPlugin",  # Use custom plugin!
         save_memory=True,
         context_model=resolved_model,
+        direction=direction,
         # NOTE: step_limit, cost_limit, wall_time_limit_seconds removed
         # These parameters are not supported in mini-swe-agent version 2.3.0
         # They were added for handling LimitsExceeded errors but require newer version
@@ -109,4 +128,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

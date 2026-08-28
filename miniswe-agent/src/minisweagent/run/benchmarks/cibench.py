@@ -62,6 +62,7 @@ import os
 import re
 import demjson3
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -95,6 +96,12 @@ from minisweagent.utils.log import add_file_handler, logger
 from minisweagent.utils.project_env import load_project_env
 from minisweagent.utils.serialize import UNSET, recursive_merge
 from utilities.model_registry import configure_model_environment, resolve_model_alias
+from utilities.run_metrics import (
+    RunMetricsRecorder,
+    completed_instance_ids,
+    metric_instance_ids,
+    safe_metrics_call,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG_FILE = builtin_config_dir / "benchmarks" / "cibench.yaml"
@@ -235,7 +242,9 @@ AUTOMATED_TOOLS = [
 
 
 def _make_context_llm(
-    config: Dict[str, Any], context_model: Optional[str] = None
+    config: Dict[str, Any],
+    context_model: Optional[str] = None,
+    metrics_recorder: Any = None,
 ) -> Any:
     """
     Build a plain callable (prompt: str) -> str for Phase A and Phase C
@@ -295,11 +304,44 @@ def _make_context_llm(
 
     def _call(prompt: str) -> str:
         def _make_llm_call():
-            response = litellm.completion(
+            call_started = time.time()
+            safe_metrics_call(
+                metrics_recorder,
+                "begin_api_call",
+                phase="context_llm",
                 model=str(model_name),
-                messages=[{"role": "user", "content": prompt}],
-                **model_kwargs,
             )
+            try:
+                response = litellm.completion(
+                    model=str(model_name),
+                    messages=[{"role": "user", "content": prompt}],
+                    **model_kwargs,
+                )
+            except BaseException as exc:
+                if metrics_recorder is not None:
+                    safe_metrics_call(
+                        metrics_recorder,
+                        "record_api_call",
+                        phase="context_llm",
+                        model=str(model_name),
+                        duration_seconds=time.time() - call_started,
+                        status=(
+                            "interrupted"
+                            if isinstance(exc, KeyboardInterrupt)
+                            else "failed"
+                        ),
+                        error=str(exc),
+                    )
+                raise
+            if metrics_recorder is not None:
+                safe_metrics_call(
+                    metrics_recorder,
+                    "record_response",
+                    response=response,
+                    phase="context_llm",
+                    model=str(model_name),
+                    duration_seconds=time.time() - call_started,
+                )
             content = str(response.choices[0].message.content or "").strip()
             if not content:
                 raise RuntimeError("LLM returned empty content")
@@ -2499,6 +2541,7 @@ def process_instance(
     memory_plugin_path: Optional[str],
     context_model: str,
     save_memory: bool,
+    direction: str = "unknown",
 ) -> None:
     """
     Full pipeline for one CI instance:
@@ -2509,6 +2552,15 @@ def process_instance(
     dir_name = sha_fail or instance_id  # prefer sha_fail as the directory key
     instance_dir = output_dir / dir_name
     instance_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics = RunMetricsRecorder(
+        output_dir,
+        instance_id,
+        agent="miniswe-agent",
+        model=context_model,
+        direction=direction,
+        ablation=memory_ablation_levels or "baseline",
+    )
 
     remove_from_preds_file(output_dir / "preds.json", instance_id)
     (instance_dir / f"{dir_name}.traj.json").unlink(missing_ok=True)
@@ -2529,7 +2581,10 @@ def process_instance(
     start_time = time.time()
     cost_tracking = {
         "model": context_model,
-        "ablation": memory_ablation_levels if memory_enabled else "baseline",
+        "direction": direction,
+        "ablation": (
+            memory_ablation_levels if memory_enabled and memory_ablation_levels else "baseline"
+        ),
         "start_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "api_calls": [],
         "total_input_tokens": 0,
@@ -2539,7 +2594,11 @@ def process_instance(
 
     # ── Phase 1: build enriched CI problem statement using shared cache ──────
     try:
-        context_llm = _make_context_llm(config, context_model=context_model)
+        context_llm = _make_context_llm(
+            config,
+            context_model=context_model,
+            metrics_recorder=metrics,
+        )
 
         # Load CI failure analysis from shared cache
         sha_fail = str(instance.get("sha_fail", ""))
@@ -2694,6 +2753,7 @@ def process_instance(
             env,
             progress_manager=progress_manager,
             instance_id=instance_id,
+            metrics_recorder=metrics,
             **config.get("agent", {}),
         )
         # Inject the real checkout path so {{testbed_path}} resolves in templates
@@ -2802,11 +2862,17 @@ def process_instance(
         )
         exit_status = type(exc).__name__
         diff = ""
+        prediction_ready = False
         extra_info.update(
             {"traceback": traceback.format_exc(), "exception_str": str(exc)}
         )
 
     finally:
+        active_exception = sys.exc_info()[1]
+        if isinstance(active_exception, KeyboardInterrupt):
+            prediction_ready = False
+            exit_status = "interrupted"
+
         # ── Finalize Cost Tracking ────────────────────────────────────────────
         end_time = time.time()
         cost_tracking["end_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2814,8 +2880,48 @@ def process_instance(
 
         # Get agent cost if available
         if agent is not None and hasattr(agent, "cost"):
-            cost_tracking["agent_cost_usd"] = round(float(agent.cost), 4)
-            cost_tracking["total_cost_usd"] += cost_tracking["agent_cost_usd"]
+            cost_tracking["agent_cost_usd"] = round(float(agent.cost), 8)
+
+        completed = bool(
+            prediction_ready
+            and str(exit_status or "").lower() == "submitted"
+            and str(diff or "").strip()
+        )
+        if not completed:
+            prediction_ready = False
+        metrics_status = (
+            "interrupted"
+            if isinstance(active_exception, KeyboardInterrupt)
+            else ("completed" if completed else "failed")
+        )
+        attempt_metrics = safe_metrics_call(
+            metrics,
+            "finish",
+            status=metrics_status,
+            error=(str(active_exception) if active_exception is not None else None),
+            metadata={"exit_status": exit_status, "patch_generated": bool(str(diff).strip())},
+        )
+        attempt_totals = attempt_metrics.get("totals", {})
+        cost_tracking.update(
+            {
+                "api_calls": attempt_metrics.get("api_calls", []),
+                "total_input_tokens": attempt_totals.get("input_tokens", 0),
+                "total_cached_input_tokens": attempt_totals.get("cached_input_tokens", 0),
+                "total_cache_write_input_tokens": attempt_totals.get(
+                    "cache_write_input_tokens", 0
+                ),
+                "total_output_tokens": attempt_totals.get("output_tokens", 0),
+                "total_reasoning_output_tokens": attempt_totals.get(
+                    "reasoning_output_tokens", 0
+                ),
+                "total_api_time_seconds": attempt_totals.get("api_time_seconds", 0),
+                "total_cost_usd": attempt_totals.get("cost_usd", 0.0),
+                "unpriced_api_calls": attempt_totals.get("unpriced_api_calls", 0),
+                "cost_complete": attempt_totals.get("unpriced_api_calls", 0) == 0,
+                "attempt_id": attempt_metrics.get("attempt_id"),
+                "attempt_status": metrics_status,
+            }
+        )
 
         # Add to extra_info for saving
         extra_info["cost_tracking"] = cost_tracking
@@ -3240,6 +3346,11 @@ def main(
         help="Model name for log-analysis tokenization (defaults to --model)",
         rich_help_panel="Advanced",
     ),
+    direction: str = typer.Option(
+        "unknown", "--direction",
+        help="Experiment direction recorded in cost/time metrics",
+        rich_help_panel="Advanced",
+    ),
 ) -> None:
     # fmt: on
     """Run mini-SWE-agent on CI failure instances (batch mode, local environment)."""
@@ -3281,7 +3392,18 @@ def main(
     )
 
     if not redo_existing and (output_path / "preds.json").exists():
-        existing = set(_read_preds(output_path / "preds.json").keys())
+        predictions = _read_preds(output_path / "preds.json")
+        metrics_completed = completed_instance_ids(output_path)
+        metrics_known = metric_instance_ids(output_path)
+        existing = {
+            str(instance_id)
+            for instance_id, prediction in predictions.items()
+            if str((prediction or {}).get("diff") or "").strip()
+            and (
+                str(instance_id) not in metrics_known
+                or str(instance_id) in metrics_completed
+            )
+        }
         before   = len(instances)
         instances = [i for i in instances if str(i.get("instance_id", "")) not in existing]
         logger.info("[CIBench] Skipping %d already-completed instances", before - len(instances))
@@ -3327,6 +3449,7 @@ def main(
             memory_plugin_path=memory_plugin_path,
             context_model=resolved_context_model,
             save_memory=save_memory and memory_enabled,
+            direction=direction,
         )
 
     def _process_futures(futures: "dict[concurrent.futures.Future, str]") -> None:

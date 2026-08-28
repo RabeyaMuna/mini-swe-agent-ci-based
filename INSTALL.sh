@@ -2,9 +2,14 @@
 # Installation script for CI Repair with Memory Plugin
 # Creates a clean virtual environment with NO dependency conflicts
 #
-# Usage: bash install.sh
+# Usage: bash INSTALL.sh
 
 set -e  # Exit on error
+
+# Always operate on the checkout containing this script, even when INSTALL.sh
+# is invoked through an absolute path from another working directory.
+PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cd "$PROJECT_ROOT"
 
 # Colors for output
 RED='\033[0;31m'
@@ -50,8 +55,13 @@ echo ""
 # ============================================================================
 echo -e "${YELLOW}[3/9]${NC} Setting virtual environment name..."
 
-# Always use .venv-codex as the environment name
-VENV_NAME=".venv-codex"
+# Use .venv-codex normally. A different project-local name is useful for
+# isolated installation checks without replacing the working environment.
+VENV_NAME=${CI_REPAIR_VENV_NAME:-.venv-codex}
+if [[ ! "$VENV_NAME" =~ ^\.venv-[A-Za-z0-9._-]+$ ]]; then
+    echo -e "${RED}ERROR: CI_REPAIR_VENV_NAME must be a project-local .venv-* name.${NC}"
+    exit 2
+fi
 
 echo -e "${GREEN}✓${NC} Virtual environment name: ${VENV_NAME}"
 echo ""
@@ -61,20 +71,18 @@ echo ""
 # ============================================================================
 echo -e "${YELLOW}[4/9]${NC} Cleaning up old environments..."
 
-# Remove existing .venv-codex and other common venv names
-for old_venv in ".venv-codex" ".venv"; do
-    if [ -d "$old_venv" ]; then
-        echo -e "   Removing old ${old_venv}..."
-        rm -rf "$old_venv"
-    fi
-done
+# Remove only the selected environment. Do not delete unrelated environments.
+if [ -d "$VENV_NAME" ]; then
+    echo -e "   Removing old ${VENV_NAME}..."
+    rm -rf -- "$VENV_NAME"
+fi
 echo -e "${GREEN}✓${NC} Clean slate ready"
 echo ""
 
 # ============================================================================
 # Step 5: Create virtual environment
 # ============================================================================
-echo -e "${YELLOW}[5/9]${NC} Creating .venv-codex virtual environment..."
+echo -e "${YELLOW}[5/9]${NC} Creating ${VENV_NAME} virtual environment..."
 
 python3.13 -m venv "$VENV_NAME"
 echo -e "${GREEN}✓${NC} Virtual environment created: ${VENV_NAME}"
@@ -86,25 +94,8 @@ echo ""
 echo -e "${YELLOW}[6/9]${NC} Activating environment and upgrading pip..."
 
 source "${VENV_NAME}/bin/activate"
-pip install --upgrade pip setuptools wheel --quiet
+pip install pip==26.2.1 setuptools==84.0.0 wheel==0.48.0 --quiet
 echo -e "${GREEN}✓${NC} Pip upgraded to $(pip --version | awk '{print $2}')"
-echo ""
-
-# ============================================================================
-# Step 6.5: Remove conflicting packages
-# ============================================================================
-echo -e "${YELLOW}[6.5/9]${NC} Removing packages that conflict with scipy..."
-
-# These packages require numpy>=2.0 which breaks scipy
-CONFLICT_PACKAGES="fastembed ml-dtypes opencv-python opencv-python-headless"
-for pkg in $CONFLICT_PACKAGES; do
-    if pip show $pkg &> /dev/null; then
-        echo "   Removing $pkg..."
-        pip uninstall -y $pkg --quiet 2>/dev/null || true
-    fi
-done
-
-echo -e "${GREEN}✓${NC} Conflicting packages removed"
 echo ""
 
 # ============================================================================
@@ -117,7 +108,8 @@ echo "   This may take a few minutes..."
 pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 
 # Install PyTorch components together fresh to ensure version compatibility
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
+pip install 'torch==2.13.0' 'torchvision==0.28.0' \
+    --index-url https://download.pytorch.org/whl/cpu --quiet
 
 if [ $? -eq 0 ]; then
     TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null)
@@ -131,19 +123,29 @@ fi
 echo ""
 
 # ============================================================================
-# Step 7.5: CRITICAL - Force NumPy <2.0 (PyTorch pulls in 2.x)
+# Step 7.5: Pin the Python 3.13 NumPy/SciPy-compatible range
 # ============================================================================
-echo -e "${YELLOW}[7.5/9]${NC} Forcing NumPy <2.0 (required for scipy)..."
+echo -e "${YELLOW}[7.5/9]${NC} Pinning NumPy for Python 3.13 and SciPy..."
 
-pip install 'numpy>=1.26.0,<2.0.0' --force-reinstall --quiet
+pip install 'numpy==2.2.6' --quiet
 
 NUMPY_VERSION=$(python3 -c "import numpy; print(numpy.__version__)" 2>/dev/null)
-if [[ "$NUMPY_VERSION" == 2.* ]]; then
-    echo -e "${RED}✗ NumPy still 2.x after force reinstall!${NC}"
-    exit 1
-else
-    echo -e "${GREEN}✓${NC} NumPy ${NUMPY_VERSION} (compatible with scipy)"
-fi
+echo -e "${GREEN}✓${NC} NumPy ${NUMPY_VERSION} (compatible with Python 3.13 and SciPy)"
+
+# Keep the CPU PyTorch family and NumPy versions selected above stable while
+# pip resolves the remaining project and editable-package dependencies.
+CONSTRAINT_FILE="${VENV_NAME}/install-constraints.txt"
+python3 - "$CONSTRAINT_FILE" << 'CONSTRAINTS_EOF'
+from importlib.metadata import version
+from pathlib import Path
+import sys
+
+packages = ("numpy", "torch", "torchvision")
+Path(sys.argv[1]).write_text(
+    "".join(f"{package}=={version(package)}\n" for package in packages),
+    encoding="utf-8",
+)
+CONSTRAINTS_EOF
 echo ""
 
 # ============================================================================
@@ -152,7 +154,7 @@ echo ""
 echo -e "${YELLOW}[8/9]${NC} Installing project dependencies..."
 echo "   This may take a few minutes..."
 
-pip install -r requirements-codex.txt --quiet
+pip install -r requirements-codex.txt -c "$CONSTRAINT_FILE" --quiet
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓${NC} All dependencies installed"
@@ -168,9 +170,7 @@ echo ""
 echo -e "${YELLOW}[9/9]${NC} Installing mini-swe-agent..."
 
 if [ -d "miniswe-agent" ]; then
-    cd miniswe-agent
-    pip install -e . --quiet
-    cd ..
+    pip install -e ./miniswe-agent -c "$CONSTRAINT_FILE" --quiet
     echo -e "${GREEN}✓${NC} mini-swe-agent installed"
 else
     echo -e "${YELLOW}⚠️  miniswe-agent directory not found, skipping...${NC}"
@@ -185,81 +185,8 @@ echo -e "${BLUE}   Verifying Installation${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
-python3 << 'VERIFY_EOF'
-import sys
-
-def check_package(name, import_name=None):
-    """Check if a package is installed and get its version."""
-    if import_name is None:
-        import_name = name.replace("-", "_")
-
-    try:
-        mod = __import__(import_name)
-        version = getattr(mod, "__version__", "unknown")
-        print(f"✓ {name:25s} {version}")
-        return True
-    except Exception as e:
-        print(f"✗ {name:25s} FAILED: {e}")
-        return False
-
-print("Core Dependencies:")
-check_package("numpy")
-check_package("scipy")
-check_package("pandas")
-check_package("scikit-learn", "sklearn")
-print()
-
-print("LLM & API:")
-check_package("openai")
-check_package("litellm")
-check_package("langchain-openai", "langchain_openai")
-print()
-
-print("Embeddings & Transformers:")
-check_package("torch")
-check_package("transformers")
-check_package("sentence-transformers", "sentence_transformers")
-print()
-
-print("Memory Plugin:")
-try:
-    from memory_plugin.memory_plugin import MemoryPlugin
-    print("✓ memory_plugin            OK")
-except Exception as e:
-    print(f"✗ memory_plugin            FAILED: {e}")
-print()
-
-# Critical compatibility test
-print("Critical Tests:")
-try:
-    import numpy as np
-    import scipy.stats
-
-    # Check numpy version
-    if np.__version__.startswith("2."):
-        print("✗ NumPy version             WRONG (2.x detected, need <2.0)")
-        sys.exit(1)
-    else:
-        print(f"✓ NumPy version             OK ({np.__version__})")
-
-    # Test scipy works with numpy
-    scipy.stats.norm.pdf(0)
-    print("✓ SciPy compatibility       OK")
-except Exception as e:
-    print(f"✗ Compatibility test        FAILED: {e}")
-    sys.exit(1)
-
-# Memory retrieval test
-try:
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    embeddings = model.encode(["Test sentence for memory retrieval"])
-    print(f"✓ Memory retrieval          READY! (embeddings shape: {embeddings.shape})")
-except Exception as e:
-    print(f"✗ Memory retrieval          FAILED: {e}")
-    sys.exit(1)
-
-VERIFY_EOF
+"${VENV_NAME}/bin/python" scripts/verify_installation.py
+"${VENV_NAME}/bin/python" -m pip check
 
 if [ $? -eq 0 ]; then
     echo ""
@@ -271,6 +198,10 @@ if [ $? -eq 0 ]; then
     echo ""
     echo -e "${YELLOW}To activate this environment:${NC}"
     echo -e "  ${GREEN}source ${VENV_NAME}/bin/activate${NC}"
+    echo "  (INSTALL.sh runs in a child shell, so activation does not persist.)"
+    echo ""
+    echo -e "${YELLOW}Or run a repository script without activating:${NC}"
+    echo -e "  ${GREEN}${VENV_NAME}/bin/python scripts/split_before_decomposition.py${NC}"
     echo ""
     echo -e "${YELLOW}To run experiments:${NC}"
     echo -e "  ${GREEN}bash ./run_miniswe_direct.sh \"\" L1+L2+L3 backward minimax2.5 \"\" data/eval_set.jsonl 1${NC}"

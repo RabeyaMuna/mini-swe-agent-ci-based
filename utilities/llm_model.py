@@ -21,6 +21,7 @@ import litellm
 
 from utilities.model_registry import resolve_model_alias
 from utilities.model_token_config import get_output_safe_tokens
+from utilities.run_metrics import safe_metrics_call
 
 # Suppress Pydantic serialization warnings from LiteLLM responses
 warnings.filterwarnings(
@@ -44,9 +45,10 @@ class LitellmModel:
     - Compatible with CILogAnalyzer and other utilities
     """
 
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str, metrics_recorder: Any = None):
         self.model_name = self._normalize_model_name(model_name)
         self.api_key, self.api_base = self._model_credentials(self.model_name)
+        self.metrics_recorder = metrics_recorder
 
     @staticmethod
     def _normalize_model_name(model_name: str) -> str:
@@ -194,8 +196,24 @@ class LitellmModel:
                 completion_kwargs["api_base"] = self.api_base
 
             # Make API call
+            safe_metrics_call(
+                self.metrics_recorder,
+                "begin_api_call",
+                phase="context_llm",
+                model=self.model_name,
+            )
             response = litellm.completion(**completion_kwargs)
             elapsed = time.time() - start_time
+
+            if self.metrics_recorder is not None:
+                safe_metrics_call(
+                    self.metrics_recorder,
+                    "record_response",
+                    response=response,
+                    phase="context_llm",
+                    model=self.model_name,
+                    duration_seconds=elapsed,
+                )
 
             # Check finish_reason
             finish_reason = getattr(response.choices[0], "finish_reason", None)
@@ -272,6 +290,17 @@ class LitellmModel:
             return Result()
 
         except Exception as e:
+            elapsed = time.time() - start_time if "start_time" in locals() else 0.0
+            if self.metrics_recorder is not None:
+                safe_metrics_call(
+                    self.metrics_recorder,
+                    "record_api_call",
+                    phase="context_llm",
+                    model=self.model_name,
+                    duration_seconds=elapsed,
+                    status="failed",
+                    error=str(e),
+                )
             LOGGER.error(f"LiteLLM API call failed: {type(e).__name__}: {e}")
             print(f"    FAIL API Error: {type(e).__name__}: {str(e)[:200]}")
 

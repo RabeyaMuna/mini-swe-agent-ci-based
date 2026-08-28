@@ -6,6 +6,7 @@ Usage:
     python scripts/analyze_costs.py results/minimax/L1+L2+L3/
     python scripts/analyze_costs.py results/ --group-by model
     python scripts/analyze_costs.py results/ --group-by ablation
+    python scripts/analyze_costs.py results/ --group-by direction --output report.json
 """
 
 import argparse
@@ -28,10 +29,16 @@ def extract_cost_info(traj: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "instance_id": traj.get("instance_id", "unknown"),
+        "agent": "miniswe-agent",
         "model": cost_tracking.get("model", "unknown"),
+        "direction": cost_tracking.get("direction", "unknown"),
         "ablation": cost_tracking.get("ablation", "unknown"),
+        "status": cost_tracking.get("attempt_status", info.get("exit_status", "unknown")),
+        "attempts": 1,
         "duration_seconds": cost_tracking.get("total_duration_seconds", 0),
+        "api_duration_seconds": cost_tracking.get("total_api_time_seconds", 0),
         "total_cost_usd": cost_tracking.get("total_cost_usd", 0),
+        "unpriced_api_calls": cost_tracking.get("unpriced_api_calls", 0),
         "agent_cost_usd": cost_tracking.get("agent_cost_usd", 0),
         "input_tokens": cost_tracking.get("total_input_tokens", 0),
         "output_tokens": cost_tracking.get("total_output_tokens", 0),
@@ -39,11 +46,49 @@ def extract_cost_info(traj: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def collect_costs(results_dir: Path) -> List[Dict[str, Any]]:
-    """Collect cost data from all trajectories."""
+    """Collect new durable reports and legacy trajectories without double counting."""
     costs = []
 
-    # Find all .traj.json files
+    report_dirs = set()
+    for report_file in results_dir.rglob("cost_time_report.json"):
+        try:
+            report = load_trajectory(report_file)
+            if not isinstance(report.get("instances"), list) or not isinstance(
+                report.get("run"), dict
+            ):
+                continue
+            run = report.get("run", {})
+            report_dirs.add(report_file.parent)
+            for item in report.get("instances", []):
+                costs.append(
+                    {
+                        "instance_id": item.get("instance_id", "unknown"),
+                        "agent": run.get("agent", "unknown"),
+                        "model": run.get("model", "unknown"),
+                        "direction": run.get("direction", "unknown"),
+                        "ablation": run.get("ablation", "unknown"),
+                        "status": item.get("last_status", "unknown"),
+                        "attempts": item.get("attempts", 0),
+                        "duration_seconds": item.get("total_wall_time_seconds", 0),
+                        "api_duration_seconds": item.get("total_api_time_seconds", 0),
+                        "total_cost_usd": item.get("total_cost_usd", 0),
+                        "unpriced_api_calls": item.get("unpriced_api_calls", 0),
+                        "agent_cost_usd": item.get("total_cost_usd", 0),
+                        "input_tokens": item.get("total_input_tokens", 0),
+                        "output_tokens": item.get("total_output_tokens", 0),
+                        "cached_input_tokens": item.get("total_cached_input_tokens", 0),
+                        "reasoning_output_tokens": item.get(
+                            "total_reasoning_output_tokens", 0
+                        ),
+                    }
+                )
+        except Exception as e:
+            print(f"Warning: Failed to load {report_file}: {e}")
+
+    # Read old trajectories only when their output directory has no new report.
     for traj_file in results_dir.rglob("*.traj.json"):
+        if any(report_dir in traj_file.parents for report_dir in report_dirs):
+            continue
         try:
             traj = load_trajectory(traj_file)
             cost_info = extract_cost_info(traj)
@@ -65,10 +110,14 @@ def calculate_stats(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
             "max_cost": 0,
             "total_duration": 0,
             "avg_duration": 0,
+            "total_api_duration_seconds": 0,
+            "avg_api_duration_seconds": 0,
         }
 
     total_cost = sum(c["total_cost_usd"] for c in costs)
     total_duration = sum(c["duration_seconds"] for c in costs)
+    total_api_duration = sum(c.get("api_duration_seconds", 0) for c in costs)
+    unpriced_api_calls = sum(c.get("unpriced_api_calls", 0) for c in costs)
 
     return {
         "count": len(costs),
@@ -79,6 +128,10 @@ def calculate_stats(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
         "total_duration_seconds": round(total_duration, 2),
         "avg_duration_seconds": round(total_duration / len(costs), 2),
         "total_duration_hours": round(total_duration / 3600, 2),
+        "total_api_duration_seconds": round(total_api_duration, 2),
+        "avg_api_duration_seconds": round(total_api_duration / len(costs), 2),
+        "unpriced_api_calls": unpriced_api_calls,
+        "cost_complete": unpriced_api_calls == 0,
     }
 
 
@@ -95,21 +148,29 @@ def print_summary(stats: Dict[str, Any], title: str = "Summary"):
     print(f"\n{'=' * 80}")
     print(f"{title:^80}")
     print('=' * 80)
-    print(f"{'Total Issues:':<30} {stats['count']:>15,}")
+    print(f"{'Total Records:':<30} {stats['count']:>15,}")
     print(f"{'Total Cost (USD):':<30} ${stats['total_cost_usd']:>14,.4f}")
     print(f"{'Average Cost per Issue (USD):':<30} ${stats['avg_cost_usd']:>14,.4f}")
     print(f"{'Min Cost (USD):':<30} ${stats['min_cost_usd']:>14,.4f}")
     print(f"{'Max Cost (USD):':<30} ${stats['max_cost_usd']:>14,.4f}")
     print(f"{'Total Duration:':<30} {stats['total_duration_hours']:>12,.2f} hours")
     print(f"{'Average Duration per Issue:':<30} {stats['avg_duration_seconds']:>12,.2f} seconds")
+    print(f"{'Total API Time:':<30} {stats['total_api_duration_seconds']:>12,.2f} seconds")
+    print(f"{'Average API Time:':<30} {stats['avg_api_duration_seconds']:>12,.2f} seconds")
+    print(f"{'Unpriced API Calls:':<30} {stats['unpriced_api_calls']:>15,}")
+    print(f"{'Cost Total Complete:':<30} {str(stats['cost_complete']):>15}")
     print('=' * 80)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze benchmark costs and timing")
     parser.add_argument("results_dir", help="Path to results directory")
-    parser.add_argument("--group-by", choices=["model", "ablation", "none"], default="none",
-                        help="Group results by model or ablation")
+    parser.add_argument(
+        "--group-by",
+        choices=["agent", "model", "direction", "ablation", "status", "none"],
+        default="none",
+        help="Group results by an experiment or completion field",
+    )
     parser.add_argument("--output", help="Save detailed results to JSON file")
 
     args = parser.parse_args()
@@ -123,10 +184,10 @@ def main():
     costs = collect_costs(results_dir)
 
     if not costs:
-        print("No trajectory files found!")
+        print("No cost/time reports or legacy trajectory files found!")
         return 1
 
-    print(f"Found {len(costs)} trajectories\n")
+    print(f"Found {len(costs)} instance/run records\n")
 
     # Overall summary
     overall_stats = calculate_stats(costs)
