@@ -285,7 +285,7 @@ tmux new -s decompose
 
 # Run your command
 source .venv/bin/activate
-python3 scripts/decompose_backward.py --batch --use-huggingface --dataset data/memory_set.jsonl --model gpt-5.4-mini --output-dir data/back_trs
+python3 scripts/decompose_backward.py --batch --dataset data/memory_set.jsonl --model minimax2.5 --output-dir data/back_trs
 
 # Detach from session: Press Ctrl+B, then D
 # Reattach later: tmux attach -t decompose
@@ -307,204 +307,166 @@ python3 scripts/split_before_decomposition.py
 ```
 Creates `data/memory_set.jsonl` and `data/eval_set.jsonl` (plus ID lists).
 
-**Step 2: Backward decomposition + memory build (automatic)**
-```bash
-# Using DeepSeek-V4-Flash (recommended for large-scale processing)
-python3 scripts/decompose_backward.py \
-  --batch \
-  --use-huggingface \
-  --dataset data/memory_set.jsonl \
-  --model deepseek-v4-flash \
-  --output-dir data/back_trs
+**Step 2: Decompose Issues (Choose One Approach)**
 
-# Or using MiniMax M2.5 (cost-effective)
+Each decomposition method automatically builds L1/L2/L3 memory. Choose based on your needs:
+
+### **2a. Backward Decomposition (CI Failure → Problem)**
+```bash
 python3 scripts/decompose_backward.py \
   --batch \
-  --use-huggingface \
   --dataset data/memory_set.jsonl \
   --model minimax2.5 \
   --output-dir data/back_trs
 ```
-This automatically:
-- Decomposes CI failures into problems
-- Builds L1/L2/L3 memory files
-- Saves to **`data/back_trs/`**:
-  - `decomposed_issues.json` (decomposed problems)
-  - `failure_memory.json` (L1 - concrete failures)
-  - `repo_memory.json` (L2 - repair strategies)
-  - `cross_memory.json` (L3 - universal patterns)
+- Analyzes CI failures and traces backward to identify problems
+- Saves to **`data/back_trs/`**
 
-**Step 3: Forward decomposition + memory build (optional)**
+### **2b. Forward Decomposition (Commit → Problem)**
 ```bash
 python3 scripts/decompose_commits.py \
   --batch \
-  --use-huggingface \
-  --dataset data/memory_set.jsonl \
-  --model minimax2.5 \
-  --output-dir data/fwr_trs
-```
-Similarly, this automatically builds forward memory and saves to **`data/fwr_trs/`**.
-
-**Step 4: Bidirectional decomposition + memory build (recommended for comprehensive analysis)**
-```bash
-# Using DeepSeek-V4-Flash (recommended - 1M context handles largest datasets)
-python3 scripts/decompose_bidirectional.py \
-  --batch \
-  --use-huggingface \
   --dataset data/memory_set.jsonl \
   --model deepseek-v4-flash \
-  --output-dir data/bidirect_trs
+  --output-dir data/fwr_trs
+```
+- Analyzes commit changes and traces forward to identify problems
+- Saves to **`data/fwr_trs/`**
 
-# Or using MiniMax M2.5
+### **2c. Bidirectional Decomposition (Unified View - Recommended)**
+```bash
 python3 scripts/decompose_bidirectional.py \
   --batch \
-  --use-huggingface \
   --dataset data/memory_set.jsonl \
-  --model minimax2.5 \
+  --model gpt-4o-mini \
   --output-dir data/bidirect_trs
 ```
+- Combines forward (commit-based) + backward (CI failure-based) analysis
+- Reconciles both views using intelligent LLM-based synthesis
+- Provides most comprehensive decomposition
+- Saves to **`data/bidirect_trs/`**
 
-This bidirectional approach combines both forward (commit-based) and backward (CI failure-based) traces to reconcile both views, providing the most comprehensive decomposition. It automatically:
-- Reconciles forward and backward decompositions
-- Builds L1/L2/L3 memory files from the unified view
-- Saves to **`data/bidirect_trs/`**:
-  - `decomposed_issues.json` (unified decomposed problems)
-  - `failure_memory.json` (L1 - failure sequences)
-  - `repo_memory.json` (L2 - repair strategies)
-  - `cross_memory.json` (L3 - universal patterns)
+**All methods automatically generate:**
+- `decomposed_issues.json` (decomposed problems)
+- `failure_memory.json` (L1 - failure sequences)
+- `repo_memory.json` (L2 - repair strategies)
+- `cross_memory.json` (L3 - universal patterns)
 
-**Additional options:**
+**Model Recommendations:**
+- `minimax2.5` - Cost-effective, good for backward/simple analysis
+- `deepseek-v4-flash` - Best for large-scale (1M context), forward decomposition
+- `gpt-4o-mini` - Balanced quality/cost for bidirectional synthesis
+
+**Additional Options (works with all three methods):**
 ```bash
 # Process specific issues only
 python3 scripts/decompose_bidirectional.py \
   --batch \
-  --use-huggingface \
-  --model minimax2.5 \
+  --dataset data/memory_set.jsonl \
+  --model gpt-4o-mini \
   --issue-ids "43,111,121" \
   --output-dir data/bidirect_trs
 
 # Limit number of issues to process
 python3 scripts/decompose_bidirectional.py \
   --batch \
-  --use-huggingface \
-  --model minimax2.5 \
+  --dataset data/memory_set.jsonl \
+  --model gpt-4o-mini \
   --limit 10 \
   --output-dir data/bidirect_trs
 
-# Single issue mode
+# Single issue mode (no --batch flag)
 python3 scripts/decompose_bidirectional.py \
+  --dataset data/memory_set.jsonl \
   --issue-ids "43" \
-  --model minimax2.5 \
+  --model gpt-4o-mini \
   --output-dir data/bidirect_trs
 ```
 
-**Note:** 
-- You do NOT need to run `build_memory_l1_l2_l3.py` separately
-- Decomposition scripts handle everything in one command
-- `data/back_trs/` = backward traces (CI failure → problem)
-- `data/fwr_trs/` = forward traces (commit → problem)
-- `data/bidirect_trs/` = bidirectional traces (forward + backward reconciled)
+**Important Notes:**
+- ✅ Memory building (L1/L2/L3) is **automatic** - no need to run separate scripts
+- ✅ Remove `--use-huggingface` flag when using local `data/memory_set.jsonl`
+- 📁 Output directories:
+  - `data/back_trs/` = Backward (CI failure → problem)
+  - `data/fwr_trs/` = Forward (commit → problem)  
+  - `data/bidirect_trs/` = Bidirectional (forward + backward unified)
 
 ### Running Decomposition on Ubuntu Server
 
-**For specific repositories (e.g., CAMEL issues only):**
-
+**SSH and Setup:**
 ```bash
-# SSH into server
 ssh ubuntu@your-server-ip
 cd /home/ubuntu/Documents/mini-swe-agent-ci-based
 source .venv/bin/activate
+```
 
-# Create filtered dataset for specific repo
-python3 -c "
-import json
-camel_issues = []
-with open('data/memory_set.jsonl') as f:
-    for line in f:
-        data = json.loads(line)
-        repo_name = data.get('repo_name', '').lower()
-        repo_owner = data.get('repo_owner', '').lower()
-        if 'camel' in repo_name or 'camel' in repo_owner:
-            camel_issues.append(data)
-with open('data/camel_memory_set.jsonl', 'w') as f:
-    for issue in camel_issues:
-        f.write(json.dumps(issue) + '\n')
-print(f'Created data/camel_memory_set.jsonl with {len(camel_issues)} issues')
-"
+**Three Decomposition Methods (using tmux for background execution):**
 
-# Run decomposition in background using tmux
-tmux new -s decompose
+```bash
+# 1. BACKWARD (minimax2.5) - CI failure → problem
+tmux new -s backward
 python3 scripts/decompose_backward.py \
   --batch \
-  --use-huggingface \
   --dataset data/memory_set.jsonl \
-  --model glm5.2 \
+  --model minimax2.5 \
   --output-dir data/back_trs
 # Detach: Ctrl+B then D
 
-# Or using nohup
-nohup python3 scripts/decompose_backward.py \
+# 2. FORWARD (deepseek-v4-flash) - Commit → problem
+tmux new -s forward
+python3 scripts/decompose_commits.py \
   --batch \
-  --use-huggingface \
-  --dataset data/camel_memory_set.jsonl \
-  --model gpt-5.4-mini \
-  --output-dir data/back_trs > decompose.log 2>&1 &
+  --dataset data/memory_set.jsonl \
+  --model deepseek-v4-flash \
+  --output-dir data/fwr_trs
+# Detach: Ctrl+B then D
 
-# Monitor progress
-tail -f decompose.log
-```
-
-**Supported models for decomposition:**
-- `deepseek-v4-flash` (1M context, 384K output - best for large-scale analysis)
-- `gpt-5.4-mini` (recommended - OpenAI GPT-5.4 latest)
-- `minimax2.5` (cost-effective alternative)
-- `glm5.2` (requires GLM_API_KEY in .env)
-
-### Running Bidirectional Decomposition on Ubuntu Server
-
-**For comprehensive forward + backward analysis:**
-
-```bash
-# SSH into server
-ssh ubuntu@your-server-ip
-cd /home/ubuntu/Documents/mini-swe-agent-ci-based
-source .venv/bin/activate
-
-# Run bidirectional decomposition in background using tmux
+# 3. BIDIRECTIONAL (gpt-4o-mini) - Unified forward + backward
 tmux new -s bidirect
 python3 scripts/decompose_bidirectional.py \
   --batch \
-  --use-huggingface \
   --dataset data/memory_set.jsonl \
-  --model gpt-5.4-mini \
+  --model gpt-4o-mini \
   --output-dir data/bidirect_trs
 # Detach: Ctrl+B then D
-
-# Or using nohup with specific issue limit
-nohup python3 scripts/decompose_bidirectional.py \
-  --batch \
-  --use-huggingface \
-  --dataset data/memory_set.jsonl \
-  --model minimax2.5 \
-  --limit 50 \
-  --output-dir data/bidirect_trs > decompose_bidirect.log 2>&1 &
-
-# Monitor progress
-tail -f decompose_bidirect.log
-
-# Process specific issues
-python3 scripts/decompose_bidirectional.py \
-  --batch \
-  --use-huggingface \
-  --model gpt-5.4-mini \
-  --issue-ids "43,111,121,416" \
-  --output-dir data/bidirect_trs
 ```
 
-**Memory Build Order:**
-1. **Backward decomposition** (`data/back_trs/`) - CI failure → problem
-2. **Forward decomposition** (`data/fwr_trs/`) - Commit → problem  
-3. **Bidirectional decomposition** (`data/bidirect_trs/`) - Forward + Backward reconciled (most comprehensive)
+**Or using nohup for detached execution:**
+```bash
+# Backward with minimax2.5
+nohup python3 scripts/decompose_backward.py \
+  --batch \
+  --dataset data/memory_set.jsonl \
+  --model minimax2.5 \
+  --output-dir data/back_trs > backward.log 2>&1 &
+
+# Forward with deepseek-v4-flash
+nohup python3 scripts/decompose_commits.py \
+  --batch \
+  --dataset data/memory_set.jsonl \
+  --model deepseek-v4-flash \
+  --output-dir data/fwr_trs > forward.log 2>&1 &
+
+# Bidirectional with gpt-4o-mini (limit 50 issues)
+nohup python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --dataset data/memory_set.jsonl \
+  --model gpt-4o-mini \
+  --limit 50 \
+  --output-dir data/bidirect_trs > bidirect.log 2>&1 &
+
+# Monitor progress
+tail -f backward.log
+tail -f forward.log
+tail -f bidirect.log
+```
+
+**Supported Models:**
+- `minimax2.5` - Cost-effective, good for backward/simple analysis
+- `deepseek-v4-flash` - Best for large-scale (1M context), forward decomposition
+- `gpt-4o-mini` - Balanced quality/cost for bidirectional synthesis
+- `gpt-5.4-mini` - Premium option (requires OpenAI API)
+- `glm5.2` - Alternative (requires GLM_API_KEY in .env)
 
 Choose based on your needs:
 - **Quick setup**: Use backward only
@@ -756,70 +718,81 @@ but are not treated as completed by new direction-aware runs.
 
 See codex/docs/reademe.md for how MiniMax M2.5 is wired via OpenRouter (OpenAI‑compatible) into Codex.
 
-## 5) Bidirectional Decomposition – Quick Commands
+## 5) Decomposition – Quick Commands
 
-Run bidirectional decomposition to combine forward (commit-based) and backward (CI failure-based) traces for the most comprehensive analysis.
+Three decomposition approaches with different model recommendations:
 
-#### All issues from memory set
+#### **Backward Decomposition** (CI failure → problem) - minimax2.5
 ```bash
-# DeepSeek-V4-Flash (best for large datasets - 1M context)
-python3 scripts/decompose_bidirectional.py \
+# All issues
+python3 scripts/decompose_backward.py \
   --batch \
-  --use-huggingface \
+  --dataset data/memory_set.jsonl \
+  --model minimax2.5 \
+  --output-dir data/back_trs
+
+# Specific issues
+python3 scripts/decompose_backward.py \
+  --batch \
+  --dataset data/memory_set.jsonl \
+  --model minimax2.5 \
+  --issue-ids “43,111,121” \
+  --output-dir data/back_trs
+```
+
+#### **Forward Decomposition** (commit → problem) - deepseek-v4-flash
+```bash
+# All issues (1M context - handles large datasets)
+python3 scripts/decompose_commits.py \
+  --batch \
   --dataset data/memory_set.jsonl \
   --model deepseek-v4-flash \
-  --output-dir data/bidirect_trs
+  --output-dir data/fwr_trs
 
-# GPT-5.4-mini (recommended)
-python3 scripts/decompose_bidirectional.py \
+# Limited batch (50 issues)
+python3 scripts/decompose_commits.py \
   --batch \
-  --use-huggingface \
   --dataset data/memory_set.jsonl \
-  --model gpt-5.4-mini \
-  --output-dir data/bidirect_trs
-
-# MiniMax M2.5 (cost-effective)
-python3 scripts/decompose_bidirectional.py \
-  --batch \
-  --use-huggingface \
-  --dataset data/memory_set.jsonl \
-  --model minimax2.5 \
-  --output-dir data/bidirect_trs
+  --model deepseek-v4-flash \
+  --limit 50 \
+  --output-dir data/fwr_trs
 ```
 
-#### Specific issues only
+#### **Bidirectional Decomposition** (unified forward + backward) - gpt-4o-mini
 ```bash
+# All issues (recommended - most comprehensive)
 python3 scripts/decompose_bidirectional.py \
   --batch \
-  --use-huggingface \
-  --model gpt-5.4-mini \
+  --dataset data/memory_set.jsonl \
+  --model gpt-4o-mini \
+  --output-dir data/bidirect_trs
+
+# Specific issues
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --dataset data/memory_set.jsonl \
+  --model gpt-4o-mini \
   --issue-ids “43,111,121,416” \
   --output-dir data/bidirect_trs
-```
 
-#### Limited batch processing
-```bash
+# Single issue (no --batch)
 python3 scripts/decompose_bidirectional.py \
-  --batch \
-  --use-huggingface \
-  --model minimax2.5 \
-  --limit 50 \
-  --output-dir data/bidirect_trs
-```
-
-#### Single issue mode
-```bash
-python3 scripts/decompose_bidirectional.py \
+  --dataset data/memory_set.jsonl \
   --issue-ids “43” \
-  --model gpt-5.4-mini \
+  --model gpt-4o-mini \
   --output-dir data/bidirect_trs
 ```
 
-**Output files** (saved to `data/bidirect_trs/`):
-- `decomposed_issues.json` - Unified decomposed problems
+**Output Structure** (each method creates):
+- `decomposed_issues.json` - Decomposed problems
 - `failure_memory.json` - L1 memory (failure sequences)
 - `repo_memory.json` - L2 memory (repair strategies)
 - `cross_memory.json` - L3 memory (universal patterns)
+
+**Output Directories:**
+- `data/back_trs/` - Backward traces
+- `data/fwr_trs/` - Forward traces
+- `data/bidirect_trs/` - Bidirectional traces (unified)
 
 ## 6) Troubleshooting
 
@@ -873,7 +846,6 @@ The launcher automatically loads `.env` and creates the correct provider configu
 #### Manual Commands with GPT-5.4-mini
 ```bash
 bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" baseline forward  gpt-5.4-mini "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini "" data/eval_set.jsonl 4
 
