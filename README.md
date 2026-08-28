@@ -951,3 +951,66 @@ python3 scripts/analyze_costs.py results/codex \
   --group-by direction \
   --output results/codex/overall_cost_time_report.json
 ```
+
+## Viewing API Costs
+
+The system tracks **actual API costs** for all LLM calls across:
+- Memory plugin (L1/L2/L3 decomposition, retrieval)
+- Agent runs (Mini-SWE, Codex)
+- Reuse checks and all other LLM utilities
+
+Costs are persisted in `costs.json` files that survive interruptions and support reruns.
+
+### View costs for a single run:
+
+```bash
+python scripts/view_costs.py results/miniswe-agent/backward/l1+l2+l3_deepseek-v4-flash/costs.json
+```
+
+### View aggregated costs across all runs:
+
+```bash
+python scripts/view_costs.py results/miniswe-agent/
+```
+
+**Example output:**
+
+```
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  Aggregated Costs from results/miniswe-agent/
+════════════════════════════════════════════════════════════════════════════════════════════════════
+
+L1+L2+L3:
+  Model                          Direction       Instances  Total Cost      Avg/Instance   
+  ------------------------------ --------------- ---------- --------------- ---------------
+  deepseek-v4-flash              backward        408        $12.345678      $0.030259
+  deepseek-v4-flash              forward         408        $11.234567      $0.027536
+  minimax-m2.5                   bidirectional   408        $15.678901      $0.038428
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  GRAND TOTAL: $39.259146
+════════════════════════════════════════════════════════════════════════════════════════════════════
+```
+
+### Cost tracking features:
+
+- **Per-instance costs**: Each instance's cost is tracked individually in `costs.json`
+- **Interrupt-safe**: Costs persist across interruptions and resumes
+- **Rerun support**: When an instance is rerun, its cost is replaced with the new value
+- **Comprehensive**: Captures ALL API calls (memory, agent, retrieval, utilities)
+- **Per-configuration**: Costs organized by model/ablation/direction
+
+The final summary at the end of each run displays:
+
+```
+[CIBench] ═══════════════════════════════════════════════════════════════
+[CIBench] COST SUMMARY (Actual API Cost):
+[CIBench]   Total Cost:       $12.345678
+[CIBench]   Instances Billed: 408
+[CIBench]   Avg Cost/Instance: $0.030259
+[CIBench]   Model:      deepseek-v4-flash
+[CIBench]   Ablation:   L1+L2+L3
+[CIBench]   Direction:  backward
+[CIBench]   Cost File:  results/miniswe-agent/backward/l1+l2+l3_deepseek-v4-flash/costs.json
+[CIBench] ═══════════════════════════════════════════════════════════════
+```

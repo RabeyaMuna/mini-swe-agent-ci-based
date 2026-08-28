@@ -187,23 +187,72 @@ class LitellmModel:
         return Response(response.get("content", ""))
 
     def _calculate_cost(self, response) -> dict[str, float]:
+        """
+        Calculate cost with priority:
+        1. Actual cost from API response (OpenRouter provides this)
+        2. litellm's calculator (for models in its database)
+        3. Manual calculation using custom pricing
+        4. 0.0 if ignore_errors is set
+        """
+        cost = 0.0
+
+        # Try to get actual cost from OpenRouter API response
+        try:
+            if hasattr(response, '_hidden_params') and response._hidden_params:
+                actual_cost = response._hidden_params.get('response_cost')
+                if actual_cost and float(actual_cost) > 0:
+                    return {"cost": float(actual_cost)}
+        except (AttributeError, KeyError, ValueError, TypeError):
+            pass
+
+        # Try litellm's built-in calculator
         try:
             cost = litellm.cost_calculator.completion_cost(response, model=self.config.model_name)
-            if cost <= 0.0:
-                raise ValueError(f"Cost must be > 0.0, got {cost}")
-        except Exception as e:
-            cost = 0.0
-            if self.config.cost_tracking != "ignore_errors":
-                msg = (
-                    f"Error calculating cost for model {self.config.model_name}: {e}, perhaps it's not registered? "
-                    "You can ignore this issue from your config file with cost_tracking: 'ignore_errors' or "
-                    "globally with export MSWEA_COST_TRACKING='ignore_errors'. "
-                    "Alternatively check the 'Cost tracking' section in the documentation at "
-                    "https://klieret.short.gy/mini-local-models. "
-                    " Still stuck? Please open a github issue at https://github.com/SWE-agent/mini-swe-agent/issues/new/choose!"
-                )
-                logger.critical(msg)
-                raise RuntimeError(msg) from e
+            if cost > 0.0:
+                return {"cost": cost}
+        except Exception:
+            pass
+
+        # Try manual calculation with custom pricing
+        try:
+            # Get token usage
+            usage = getattr(response, 'usage', None)
+            if usage:
+                prompt_tokens = getattr(usage, 'prompt_tokens', 0)
+                completion_tokens = getattr(usage, 'completion_tokens', 0)
+
+                # Custom pricing for unmapped models
+                model_pricing = {
+                    "deepseek/deepseek-v4-flash": (0.000000165, 0.0000006),
+                    "openrouter/deepseek/deepseek-v4-flash": (0.000000165, 0.0000006),
+                    "minimax/minimax-m2.5": (0.0000002, 0.0000006),
+                    "openrouter/minimax/minimax-m2.5": (0.0000002, 0.0000006),
+                    "z-ai/glm-5.2": (0.0000004186, 0.000001316),
+                    "openrouter/z-ai/glm-5.2": (0.0000004186, 0.000001316),
+                    "glm-5.2": (0.0000004186, 0.000001316),
+                }
+
+                if self.config.model_name in model_pricing:
+                    input_cost, output_cost = model_pricing[self.config.model_name]
+                    cost = (prompt_tokens * input_cost) + (completion_tokens * output_cost)
+                    if cost > 0:
+                        return {"cost": cost}
+        except Exception:
+            pass
+
+        # If all methods failed and ignore_errors is NOT set, raise error
+        if cost <= 0.0 and self.config.cost_tracking != "ignore_errors":
+            msg = (
+                f"Error calculating cost for model {self.config.model_name}: Model not in pricing database. "
+                "You can ignore this issue from your config file with cost_tracking: 'ignore_errors' or "
+                "globally with export MSWEA_COST_TRACKING='ignore_errors'. "
+                "Alternatively check the 'Cost tracking' section in the documentation at "
+                "https://klieret.short.gy/mini-local-models. "
+                " Still stuck? Please open a github issue at https://github.com/SWE-agent/mini-swe-agent/issues/new/choose!"
+            )
+            logger.critical(msg)
+            raise RuntimeError(msg)
+
         return {"cost": cost}
 
     def _parse_actions(self, response) -> list[dict]:

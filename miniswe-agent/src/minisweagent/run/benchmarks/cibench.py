@@ -75,6 +75,7 @@ from jinja2 import StrictUndefined, Template
 from rich.live import Live
 
 from minisweagent.config import builtin_config_dir, get_config_from_spec
+from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
@@ -792,12 +793,20 @@ def update_preds_file(
     instance_id: str,
     sha_fail: str,
     diff: str,
+    cost: float = 0.0,
 ) -> None:
     """
     Write / update the prediction for one instance (thread-safe).
 
     Automatically merges duplicate file patches in the diff to prevent
     merge conflicts during application.
+
+    Args:
+        output_path: Path to predictions file
+        instance_id: Instance identifier
+        sha_fail: Failing commit SHA
+        diff: Patch diff
+        cost: API cost for this instance (in dollars)
     """
     # Detect and merge duplicate patches
     if diff:
@@ -836,10 +845,103 @@ def update_preds_file(
             "id": instance_id,
             "sha_fail": sha_fail,
             "diff": diff or "",
+            "cost": round(cost, 6),  # Round to 6 decimal places ($0.000001 precision)
         }
         output_path.write_text(
             json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+
+
+def update_cost_tracking(
+    output_dir: Path,
+    instance_id: str,
+    cost: float,
+    model_name: str,
+    ablation: str,
+    direction: str,
+) -> None:
+    """
+    Update cost tracking file with instance cost.
+
+    Structure persists across interruptions and supports reruns.
+    When instance is rerun, its cost is replaced with new value.
+
+    Args:
+        output_dir: Output directory containing costs.json
+        instance_id: Instance identifier
+        cost: API cost for this instance (dollars)
+        model_name: Model used (e.g., "deepseek-v4-flash")
+        ablation: Ablation level (e.g., "L1+L2+L3", "BASELINE")
+        direction: Memory direction (e.g., "backward", "forward", "none")
+    """
+    costs_path = output_dir / "costs.json"
+
+    # Create configuration key
+    config_key = f"{ablation}_{direction}_{model_name}".replace("/", "_")
+
+    with _OUTPUT_FILE_LOCK:
+        # Load existing costs
+        if costs_path.exists():
+            try:
+                costs_data = json.loads(costs_path.read_text(encoding="utf-8"))
+            except Exception:
+                costs_data = {}
+        else:
+            costs_data = {}
+
+        # Initialize configuration if not exists
+        if config_key not in costs_data:
+            costs_data[config_key] = {
+                "model": model_name,
+                "ablation": ablation,
+                "direction": direction,
+                "instances": {},
+            }
+
+        # Update instance cost (replace if rerun)
+        costs_data[config_key]["instances"][instance_id] = round(cost, 6)
+
+        # Save
+        costs_path.write_text(
+            json.dumps(costs_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+
+def get_total_cost(output_dir: Path, model_name: str, ablation: str, direction: str) -> dict:
+    """
+    Calculate total cost for a configuration from costs.json.
+
+    Returns:
+        {
+            "total_cost": float,
+            "n_instances": int,
+            "avg_cost": float,
+            "instances": dict
+        }
+    """
+    costs_path = output_dir / "costs.json"
+    config_key = f"{ablation}_{direction}_{model_name}".replace("/", "_")
+
+    if not costs_path.exists():
+        return {"total_cost": 0.0, "n_instances": 0, "avg_cost": 0.0, "instances": {}}
+
+    try:
+        costs_data = json.loads(costs_path.read_text(encoding="utf-8"))
+        config = costs_data.get(config_key, {})
+        instances = config.get("instances", {})
+
+        total_cost = sum(instances.values())
+        n_instances = len(instances)
+        avg_cost = total_cost / n_instances if n_instances > 0 else 0.0
+
+        return {
+            "total_cost": total_cost,
+            "n_instances": n_instances,
+            "avg_cost": avg_cost,
+            "instances": instances,
+        }
+    except Exception:
+        return {"total_cost": 0.0, "n_instances": 0, "avg_cost": 0.0, "instances": {}}
 
 
 def remove_from_preds_file(output_path: Path, instance_id: str) -> None:
@@ -2568,6 +2670,9 @@ def process_instance(
     progress_manager.on_instance_start(instance_id)
     progress_manager.update_instance_status(instance_id, "Pre-processing CI logs")
 
+    # Capture starting cost for this instance
+    instance_start_cost = GLOBAL_MODEL_STATS.cost
+
     agent = None
     exit_status: Optional[str] = None
     diff = ""
@@ -2958,7 +3063,21 @@ def process_instance(
             logger.info("[CIBench] Saved trajectory to '%s'", traj_path)
 
         if prediction_ready:
-            update_preds_file(output_dir / "preds.json", instance_id, sha_fail, diff)
+            # Calculate cost for this instance
+            instance_cost = GLOBAL_MODEL_STATS.cost - instance_start_cost
+
+            update_preds_file(output_dir / "preds.json", instance_id, sha_fail, diff, cost=instance_cost)
+
+            # Update persistent cost tracking (survives interruptions, handles reruns)
+            update_cost_tracking(
+                output_dir=output_dir,
+                instance_id=instance_id,
+                cost=instance_cost,
+                model_name=context_model,
+                ablation=memory_ablation_levels,
+                direction=direction if memory_enabled else "none",
+            )
+
             # Also save the problems that were provided to the agent
             problems_list = ci_memory.get("problems", [])
             update_problems_file(output_dir / "problems.json", instance_id, problems_list)
@@ -3492,9 +3611,32 @@ def main(
     # ── Final summary ─────────────────────────────────────────────────────────
     preds = _read_preds(output_path / "preds.json")
     n_patched = sum(1 for v in preds.values() if v.get("diff", "").strip())
+
+    # Get cost data from persistent tracking (survives interruptions)
+    cost_data = get_total_cost(
+        output_dir=output_path,
+        model_name=model_name,
+        ablation=memory_ablation_levels,
+        direction=direction if memory_enabled else "none",
+    )
+
     logger.info(
         "[CIBench] Done. %d/%d instances produced a non-empty patch. See %s",
         n_patched, len(preds), output_path / "preds.json",
+    )
+    logger.info(
+        "[CIBench] ═══════════════════════════════════════════════════════════════"
+    )
+    logger.info("[CIBench] COST SUMMARY (Actual API Cost):")
+    logger.info("[CIBench]   Total Cost:       $%.6f", cost_data["total_cost"])
+    logger.info("[CIBench]   Instances Billed: %d", cost_data["n_instances"])
+    logger.info("[CIBench]   Avg Cost/Instance: $%.6f", cost_data["avg_cost"])
+    logger.info("[CIBench]   Model:      %s", model_name)
+    logger.info("[CIBench]   Ablation:   %s", memory_ablation_levels)
+    logger.info("[CIBench]   Direction:  %s", direction if memory_enabled else "none")
+    logger.info("[CIBench]   Cost File:  %s", output_path / "costs.json")
+    logger.info(
+        "[CIBench] ═══════════════════════════════════════════════════════════════"
     )
 
 
