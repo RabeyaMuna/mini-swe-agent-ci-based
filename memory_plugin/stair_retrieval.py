@@ -114,8 +114,8 @@ class STAIRRetrieval:
         self.enabled_levels = self._parse_memory_levels(memory_levels)
         self.embedding_model = embedding_model
 
-        # Storage for consecutive problems (extracted in STAGE 4)
-        self._consecutive_problems = []
+        # Storage for dependency problems (extracted in STAGE 4)
+        self._dependency_problems = []
 
         # Baseline mode: skip all loading
         if baseline_mode:
@@ -233,15 +233,14 @@ class STAIRRetrieval:
         #   1. Retrieve L1/L2/L3 matches
         #   2. Filter relevant matches
         #   3. Enrich with repair strategies
-        #   4. Extract dependencies/consecutive
+        #   4. Extract dependencies
         #   5. Append all to flat problems list
         # ============================================================
         print(f"[Memory] STAGE 1-4: Processing each CI problem (retrieve → filter → enrich → dependencies)...")
 
-        problems_list = []  # Flat list: [CI1, dep1, dep2, consec1, CI2, dep3, ...]
+        problems_list = []  # Flat list: [CI1, dep1, dep2, CI2, dep3, ...]
         total_enriched = 0
         total_dependencies = 0
-        total_consecutive = 0
 
         # Process EACH CI problem individually
         for idx, ci_prob in enumerate(ci_problems, 1):
@@ -307,22 +306,20 @@ class STAIRRetrieval:
                 total_enriched += 1
                 print(f"[Memory]     ✗ Enrichment failed - added without repair strategy")
 
-            # STAGE 4: Extract dependencies/consecutive for THIS CI problem
+            # STAGE 4: Extract dependencies for THIS CI problem
             related = self._stage_4_extract_related_problems([match_set], [enriched])
 
-            # Append dependencies and consecutive (flat)
-            dep_count = sum(1 for p in related if p.get('problem_type') == 'dependency')
-            consec_count = sum(1 for p in related if p.get('problem_type') == 'consecutive')
+            # Append dependencies (flat)
+            dep_count = len(related)
 
             if related:
                 problems_list.extend(related)
                 total_dependencies += dep_count
-                total_consecutive += consec_count
-                print(f"[Memory]     ✓ Found {dep_count} dependencies, {consec_count} consecutive")
+                print(f"[Memory]     ✓ Found {dep_count} dependency problem(s)")
             else:
-                print(f"[Memory]     ✗ No dependencies or consecutive problems")
+                print(f"[Memory]     ✗ No dependency problems")
 
-        print(f"[Memory] STAGE 1-4: Completed {total_enriched} CI problems, {total_dependencies} dependencies, {total_consecutive} consecutive")
+        print(f"[Memory] STAGE 1-4: Completed {total_enriched} CI problems, {total_dependencies} dependencies")
 
         # ============================================================
         # STAGE 5: Detect common patterns
@@ -339,7 +336,7 @@ class STAIRRetrieval:
         # ============================================================
         print("[Memory] STAGE 5.5: Deduplicating problems...")
 
-        all_problems = problems_list  # Already combined: CI + dependencies + consecutive + common
+        all_problems = problems_list  # Already combined: CI + dependencies + common
         # Filter out any None values that might have been returned by LLM stages
         all_problems = [p for p in all_problems if p is not None and isinstance(p, dict)]
         print(f"[Memory] STAGE 5.5: Before dedup: {len(all_problems)} problems")
@@ -583,20 +580,18 @@ class STAIRRetrieval:
         self, filtered_matches: list[dict], enriched_ci: list[dict]
     ) -> list[dict]:
         """
-        STAGE 4: Extract dependency AND consecutive problems (MERGED - no STAGE 5 needed).
+        STAGE 4: Extract dependent or related problems from the repair sequence.
 
-        COMBINED extraction in ONE LLM call:
-        - Dependency problems: Must be fixed BEFORE CI problems (enabled[] backwards)
-        - Consecutive problems: Appear AFTER fixing CI problems (enabled[] forwards)
+        Extract problems that are dependent on or related to the CI problem - typically
+        problems that must be fixed together or came BEFORE in the same repair sequence.
 
         IMPORTANT: Process EACH CI problem individually with ITS OWN L1/L2/L3 matches.
-        This preserves the connection between CI problems and their related problems.
+        This preserves the connection between CI problems and their dependent/related problems.
 
         Returns:
-            List of problems with problem_type field:
+            List of dependent or related problems:
             [
-                {"problem_type": "dependency", ...},
-                {"problem_type": "consecutive", ...}
+                {"problem_type": "related", ...}
             ]
         """
         all_related_problems = []
@@ -639,60 +634,28 @@ class STAIRRetrieval:
 ```
 
 **Task:**
-Extract TWO types of related problems using **L1 and L2 data only** (L3 is for repair strategies, not dependencies):
+Extract **dependency problems** using **L1 and L2 data only** (L3 is for repair strategies, not dependencies):
 
-1. **Dependency Problems** (fix BEFORE this CI problem):
+**Dependency Problems** (fix BEFORE this CI problem):
    - **Primary source: L1 data** (repo+workflow specific)
    - **Check repair_sequence_index**: Problems with LOWER index numbers are dependencies
    - **Check problem_type**: If CI problem has repair_sequence_index=5, problems with index 1-4 are dependencies
    - **Extract ALL problems from matched L1 entry**: If L1 entry has 7 problems and problem #3 matches CI, return problems #1-2 as dependencies
+
+   - **SPECIAL: Configuration problems** (same repo, CI/setup related):
+   - **Config files**: `pyproject.toml`, `setup.py`, `requirements.txt`, `pytest.ini`, `mypy.ini`, `tox.ini`, `setup.cfg`
+   - **If L1/L2 from SAME repo** mentions config problems related to **CI verification, installation, or setup** → **include them**
+   - **Why**: These config problems are repo-specific and cause repeated CI failures
+   - **Example**: "Updated pytest config in pyproject.toml" (CI verification) → include
+   - **Example**: "Fixed package version in requirements.txt" (installation) → include
+   - **Skip**: Non-CI configs like editor settings, formatting configs unrelated to CI
+
    - **Secondary source: L2 data** (repo-level patterns)
    - **Check step numbers**: Earlier steps (step 1, 2) are dependencies for later steps
    - Example: L1 matched entry shows problems with repair_sequence_index [1, 2, 3] → extract 1, 2 as dependencies
    - **IGNORE L3 for dependencies** (L3 is universal, lacks repo-specific chains)
 
-2. **Consecutive Problems** (appear AFTER fixing this CI problem):
-   - **Primary source: L1 data** (repo+workflow specific)
-   - **Check repair_sequence_index**: Problems with HIGHER index numbers are consecutive
-   - **Check is_cascading field**: If true, this problem appeared as a consequence of fixing earlier problems
-   - **Extract ALL problems from matched L1 entry**: If L1 entry has 7 problems and problem #3 matches CI, return problems #4-7 as consecutive
-   - **Secondary source: L2 data** (repo-level patterns)
-   - **Look for PATTERNS across L1/L2**: If 2+ past issues show the SAME problem appearing after similar CI fixes, extract it
-   - **Config change cascades**: If L1/L2 entry has config file changes (pyproject.toml, setup.py, .github/workflows/*.yml, requirements.txt, pytest.ini, mypy.ini), select problems that came AFTER the config change as consecutive (they arose due to config change)
-   - Example: L1 matched entry shows problems with repair_sequence_index [3, 4, 5] where match is #3 → extract 4, 5 as consecutive
-   - Only include problems with RECURRING patterns (not one-off cases)
-   - **IGNORE L3 for consecutive** (L3 is universal, use only for repair strategies)
-
-**Special Case: Configuration Changes and Their Dependent Problems**
-
-If L1/L2 data shows config file changes, look for dependent problems that arose from those changes:
-
-**Config files to check:**
-`pyproject.toml`, `setup.py`, `.github/workflows/*.yml`, `requirements.txt`, `pytest.ini`, `mypy.ini`, `Makefile`
-
-**How to detect config-triggered dependencies:**
-1. Look at `files` field in L1/L2 entries
-2. If config file is present → this entry likely has config change
-3. Check problems AFTER the config change (higher `repair_sequence_index`)
-4. Select those as consecutive problems (they arose due to config change)
-
-**Example:**
-```
-L1 entry (same repo+workflow):
-  Problem 1 (index=1): Updated ruff config in pyproject.toml ← Config change
-  Problem 2 (index=2): F401 unused imports ← Arose from config change
-  Problem 3 (index=3): F541 f-string violations ← Arose from config change
-
-If current CI matches Problem 1 → select Problems 2,3 as consecutive
-```
-
-**Why:** Config changes in same repo+workflow create predictable cascades of dependent problems.
-
----
-
-**How to Identify Dependency/Consecutive Relationships:**
-
-**For Dependencies (BEFORE) - Use sequence order:**
+**How to Identify Dependency Relationships:**
 - **L1**: Look at `repair_sequence_index` field
   * If matched problem has index=3, problems with index=1,2 are dependencies
   * **Extract ALL problems from the SAME L1 entry** with lower indices
@@ -703,24 +666,14 @@ If current CI matches Problem 1 → select Problems 2,3 as consecutive
   * Index 1: "Install pip" (dependency - comes before matched problem)
   * Index 2: "Activate venv" (dependency - comes before matched problem)
   * Index 3: "Import error" (MATCHED!)
-  * Index 4: "Type checking" (consecutive - comes after matched problem)
-  * Index 5: "Linting" (consecutive - comes after matched problem)
+  * Index 4: "Type checking" (skip - not a dependency)
+  * Index 5: "Linting" (skip - not a dependency)
 
   → Extract problems at index 1,2 as dependencies
 
-**For Consecutive (AFTER) - Use sequence order:**
-- **L1**: Look at `repair_sequence_index` field
-  * If matched problem has index=3, problems with index=4,5,6... are consecutive
-  * **Extract ALL problems from the SAME L1 entry** with higher indices
-  * Check `is_cascading=true` to confirm consequence relationship
-- **L2**: Look at `step` field in repair_strategies
-  * If matched strategy is step=3, strategies with step=4,5,... might be consecutive
-  * Count frequency: Same consecutive problem in 2+ entries → strong pattern
-- **Example**: Same L1 entry as above → Extract problems 4,5 as consecutive
-
 **IMPORTANT - Building Repair Strategies (Adaptive):**
 
-After extracting dependency/consecutive problems from **L1/L2 data**, build repair strategies using **best available source**:
+After extracting dependency problems from **L1/L2 data**, build repair strategies using **best available source**:
 
 Priority order for repair strategies:
 
@@ -761,28 +714,13 @@ Priority order for repair strategies:
         "actions": [...],
         "pitfalls": [...]
       }}
-    }},
-    {{
-      "problem": "Problem that appears AFTER fixing CI problem",
-      "root_cause": "Why it follows",
-      "files": [...],
-      "failure_type": "...",
-      "failure_signals": [...],
-      "verification_cmd": "...",
-      "problem_type": "consecutive",
-      "source_ci_problem": "{ci_prob_desc}",
-      "repair_strategy": {{
-        "summary": "...",
-        "actions": [...],
-        "pitfalls": [...]
-      }}
     }}
   ]
 }}
 ```
 
-Return empty array if no dependency or consecutive problems found.
-Use `problem_type` field to distinguish: "dependency" or "consecutive".
+Return empty array if no dependency problems found.
+Use `problem_type: "dependency"` for all returned problems.
 
 {STRICT_JSON_RULES}
 """
@@ -808,26 +746,20 @@ Use `problem_type` field to distinguish: "dependency" or "consecutive".
 
                 all_related_problems.extend(valid_problems)
 
-                # Log counts
-                dep_count = sum(1 for p in valid_problems if p.get("problem_type") == "dependency")
-                consec_count = sum(1 for p in valid_problems if p.get("problem_type") == "consecutive")
-
+                # Log count
+                dep_count = len(valid_problems)
                 if dep_count > 0:
-                    print(f"[Memory] STAGE 4: Found {dep_count} dependencies for '{ci_prob_desc}...'")
-                if consec_count > 0:
-                    print(f"[Memory] STAGE 4: Found {consec_count} consecutive problems for '{ci_prob_desc}...'")
+                    print(f"[Memory] STAGE 4: Found {dep_count} dependency problem(s) for '{ci_prob_desc}...'")
 
             except Exception as e:
-                print(f"[Memory] STAGE 4: Error extracting related problems for '{ci_prob_desc}...': {e}")
+                print(f"[Memory] STAGE 4: Error extracting dependency problems for '{ci_prob_desc}...': {e}")
                 continue
 
         if skipped_count > 0:
             print(f"[Memory] STAGE 4: Skipped {skipped_count} CI problem(s) without matches")
 
-        # Count by type for logging
-        dep_count = sum(1 for p in all_related_problems if p.get("problem_type") == "dependency")
-        consec_count = sum(1 for p in all_related_problems if p.get("problem_type") == "consecutive")
-        print(f"[Memory] STAGE 4: Total {len(all_related_problems)} related problems (dependencies: {dep_count}, consecutive: {consec_count})")
+        # Total count
+        print(f"[Memory] STAGE 4: Total {len(all_related_problems)} dependency problem(s) extracted")
 
         # Return all related problems (problem_type field distinguishes them)
         return all_related_problems
