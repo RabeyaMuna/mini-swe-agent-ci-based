@@ -302,7 +302,7 @@ def main():
 
     # Initialize LLM
     print(f"\nInitializing LLM: {args.model}")
-    llm = LitellmModel(model=args.model)
+    llm = LitellmModel(model_name=args.model)
 
     # STEP 1: Group similar problems
     print("\n" + "="*80)

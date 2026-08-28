@@ -29,7 +29,7 @@ import numpy as np
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 
-from utilities.llm_invoker import invoke_llm_with_retry
+from utilities.llm_invoker import invoke_llm_with_retry, get_model_max_output_tokens
 
 
 def flatten_and_label_problems(
@@ -321,10 +321,15 @@ OUTPUT JSON:
 }}
 """
 
+    # Get model-specific max_tokens
+    model_name = getattr(llm, 'model_name', None) or getattr(llm, 'model', 'unknown')
+    max_tokens = get_model_max_output_tokens(model_name)
+
     result = invoke_llm_with_retry(
         llm=llm,
         prompt=prompt,
         parse_json=True,
+        max_tokens=max_tokens,
     )
 
     return {
@@ -603,10 +608,15 @@ OUTPUT JSON:
 }}
 """
 
+    # Get model-specific max_tokens
+    model_name = getattr(llm, 'model_name', None) or getattr(llm, 'model', 'unknown')
+    max_tokens = get_model_max_output_tokens(model_name)
+
     result = invoke_llm_with_retry(
         llm=llm,
         prompt=prompt,
         parse_json=True,
+        max_tokens=max_tokens,
     )
 
     # Extract CI-relevant problems only

@@ -186,9 +186,19 @@ PY
 
 # Translate ablation list
 if [ "$ABLATION" = "all" ]; then ABLATIONS=(baseline L1 L1+L2 L1+L2+L3); else ABLATIONS=($ABLATION); fi
-case "${DIRECTION,,}" in
+
+# Convert to lowercase (Bash 3.2 compatible)
+DIRECTION_LOWER=$(echo "$DIRECTION" | tr '[:upper:]' '[:lower:]')
+ABLATION_LOWER=$(echo "$ABLATION" | tr '[:upper:]' '[:lower:]')
+
+# For BASELINE, direction is always "none" (no memory used)
+if [ "$ABLATION_LOWER" = "baseline" ]; then
+  DIRECTION_LOWER="none"
+fi
+
+case "$DIRECTION_LOWER" in
   none) DIRECTIONS=() ;;
-  backward|forward|bidirectional) DIRECTIONS=("${DIRECTION,,}") ;;
+  backward|forward|bidirectional) DIRECTIONS=("$DIRECTION_LOWER") ;;
   both) DIRECTIONS=(backward forward) ;;
   all) DIRECTIONS=(backward forward bidirectional) ;;
   *)
@@ -197,7 +207,8 @@ case "${DIRECTION,,}" in
     ;;
 esac
 
-if [ "${ABLATION,,}" != "baseline" ] && [ "${DIRECTION,,}" = "none" ]; then
+# Validate: memory ablations require a direction
+if [ "$ABLATION_LOWER" != "baseline" ] && [ "$DIRECTION_LOWER" = "none" ]; then
   echo "ERROR: Direction 'none' is valid only for baseline; memory ablations require a direction." >&2
   exit 2
 fi
@@ -225,7 +236,9 @@ run_one() {
 
 FAILS=0; TOTAL=0
 for abl in "${ABLATIONS[@]}"; do
-  if [ "${abl,,}" = "baseline" ]; then
+  # Convert to lowercase (Bash 3.2 compatible)
+  abl_lower=$(echo "$abl" | tr '[:upper:]' '[:lower:]')
+  if [ "$abl_lower" = "baseline" ]; then
     run_directions=(none)
   else
     run_directions=("${DIRECTIONS[@]}")

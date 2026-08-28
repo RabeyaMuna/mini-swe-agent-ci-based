@@ -14,7 +14,7 @@ import json
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List
 
-from utilities.llm_invoker import STRICT_JSON_RULES, invoke_llm_with_retry
+from utilities.llm_invoker import STRICT_JSON_RULES, invoke_llm_with_retry, get_model_max_output_tokens
 
 
 # Candidate generation is intentionally high-recall. The LLM adjudicator may
@@ -337,7 +337,11 @@ IMPORTANT:
 {STRICT_JSON_RULES}
 """
     try:
-        response = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True)
+        # Get model-specific max_tokens
+        model_name = getattr(llm, 'model_name', None) or getattr(llm, 'model', 'unknown')
+        max_tokens = get_model_max_output_tokens(model_name)
+
+        response = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True, max_tokens=max_tokens)
         groups = response.get("groups", []) if isinstance(response, dict) else []
         normalized = _validate_cluster_groups(groups, cluster)
         return normalized or [_copy_singleton(problem) for problem in cluster]
@@ -557,7 +561,11 @@ An empty dependency list is valid and preferred over speculative edges.
 {STRICT_JSON_RULES}
 """
     try:
-        response = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True)
+        # Get model-specific max_tokens
+        model_name = getattr(llm, 'model_name', None) or getattr(llm, 'model', 'unknown')
+        max_tokens = get_model_max_output_tokens(model_name)
+
+        response = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True, max_tokens=max_tokens)
         decision = response if isinstance(response, dict) else {}
         return _enforce_primary_and_dependency_rules(
             _enforce_workflow_exclusion(decision, problems), problems
@@ -772,7 +780,11 @@ only supplied problem IDs and evidence from this instance.
 {STRICT_JSON_RULES}
 """
     try:
-        response = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True)
+        # Get model-specific max_tokens
+        model_name = getattr(llm, 'model_name', None) or getattr(llm, 'model', 'unknown')
+        max_tokens = get_model_max_output_tokens(model_name)
+
+        response = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True, max_tokens=max_tokens)
         decision = response if isinstance(response, dict) else {}
 
         print(f"  → LLM dependency inference response received")

@@ -9,7 +9,7 @@ import json
 
 # Import L2 prompt from centralized location
 from prompt_template.memory_build import build_l2_prompt
-from utilities.llm_invoker import invoke_llm_with_retry
+from utilities.llm_invoker import invoke_llm_with_retry, get_model_max_output_tokens
 
 
 # ========================================
@@ -290,13 +290,19 @@ def generate_l2_with_llm(l1_memory: Dict, llm: Any) -> Dict[str, Any]:
     # Build prompt with sampled data
     prompt = build_l2_prompt(l1_for_prompt, AUTOMATED_TOOLS, sampling_info)
 
+    # Determine optimal max_tokens based on model capability
+    # Extended thinking models need room for reasoning + output
+    model_name = getattr(llm, 'model_name', None) or getattr(llm, 'model', 'unknown')
+    max_tokens = get_model_max_output_tokens(model_name, default=16000)
+
     # Call LLM with retry, lenient parsing, and repair-prompt fallback
-    # Set sufficient max_tokens to avoid truncation (L2 responses can be verbose)
+    # max_tokens is set per model capability:
+    # - DeepSeek-V4: 384K, GPT-5: 64K, GPT-4o-mini: 16K, MiniMax: 8K
     l2_data = invoke_llm_with_retry(
         llm=llm,
         prompt=prompt,
         parse_json=True,
-        max_tokens=8000  # Increased to prevent truncation
+        max_tokens=max_tokens
     )
 
     if not isinstance(l2_data, dict):
