@@ -107,6 +107,24 @@ Use these CI metadata fields when present:
 - current_jobs_fixed: jobs that passed in this commit
 - current_failed_jobs: jobs that failed in this commit
 
+**DATASET FAILED JOBS (ground truth from benchmark):**
+When present, these fields provide AUTHORITATIVE EVIDENCE of which jobs/steps failed at sha_fail:
+- dataset_failed_jobs: Array of job objects, each with job_name and steps list - specific jobs and steps that failed
+- dataset_error_types: Array of error categories (e.g., "Code Formatting", "Test Failure", "Type Check")
+- dataset_total_failed_jobs: Total number of failed jobs
+- dataset_total_failed_steps: Total number of failed steps
+
+**How to use dataset_failed_jobs:**
+1. PRIORITIZE analyzing changes related to the failed jobs and error types
+2. If error_type includes "Code Formatting" → look for formatting changes (whitespace, imports, quotes)
+3. If error_type includes "Test Failure" → look for test changes, assertions, test data
+4. Match changed files against the failed job names and steps
+5. Use this as GROUND TRUTH - these jobs/steps DID fail at sha_fail
+
+Example: If dataset_failed_jobs contains job_name "pre-commit" with steps "Run pre-commit"
+and dataset_error_types includes "Code Formatting", then changes to formatting (blank lines, quotes, imports)
+are HIGHLY RELEVANT and should be reported as fixing the pre-commit formatting failure.
+
 If CI METADATA is missing or empty, do not stop and do not assume the commit is irrelevant.
 Analyze the actual diff against STRUCTURED CI FAILURE and RELEVANT CI VALIDATION STEPS.
 CI metadata is supporting evidence only; the diff and validation rules are the source of truth for whether this commit affects CI.
@@ -240,6 +258,16 @@ INTRODUCED VS FIXED:
   CI-relevant support/context for a validation problem but does not itself
   introduce or fix the problem.
 
+CRITICAL - PACKAGE/DEPENDENCY VERSION SPECIFICITY:
+
+For dependency/config file changes (pyproject.toml, requirements.txt, etc.), root_cause and fix_strategy MUST include:
+1. Exact package name + old version → new version (EXACT constraints)
+2. Config file changed
+3. Technical reason WHY old version failed and WHY new version fixes
+4. List EVERY package operation (added, removed, upgraded, downgraded)
+
+Example: "click 8.2.0 broke TyperOption causing TypeError in py/flwr/cli/app.py. Changed click from >=8.0.0 to <8.2.0 in framework/pyproject.toml to maintain API compatibility."
+
 For each problem object, provide:
 
 1. "files": **REQUIRED** - List of EXACT file paths from the diff that are affected by this problem.
@@ -248,12 +276,12 @@ For each problem object, provide:
 2. "failure_type": Broad validation family, such as "format", "lint", "type_check", "test", "build", "install", "import", "docs", or "unknown".
 3. "issue_type": Specific issue family, such as "missing_return_annotation", "import_order", "dependency_version", or "assertion_update".
 4. "problem": The CI problem being described, with step/job and line numbers when available.
-5. "root_cause": The underlying technical cause.
-6. "changes_made": What this commit changed in the code.
+5. "root_cause": The underlying technical cause. **FOR DEPENDENCY CHANGES: Include exact package names, old version, new version, WHY old version failed, technical incompatibility details.**
+6. "changes_made": What this commit changed in the code. **FOR DEPENDENCY CHANGES: List EVERY package operation with exact versions.**
 7. "introduced": true if this commit introduced the problem or validation challenge; otherwise false.
 8. "fixed": true if this commit fixed this problem; otherwise false.
-9. "fix_strategy": When fixed is true, describe the concrete repair. When fixed is false, use "".
-10. "why_this_fix_works": When fixed is true, explain why the repair satisfies the validation. When fixed is false, use "".
+9. "fix_strategy": When fixed is true, describe the concrete repair. **FOR DEPENDENCY CHANGES: Explain exact version change (old → new), which config file, WHY new version fixes the issue technically.**
+10. "why_this_fix_works": When fixed is true, explain why the repair satisfies the validation. **FOR DEPENDENCY CHANGES: Explain technical compatibility restored, APIs/symbols now available, behavior aligned.**
 11. "current_failed_jobs": Failed job/step records from CI METADATA for this commit, including validation_cmd when available. Use [] when CI metadata is missing or has no failed jobs.
 12. "current_fixed_jobs": Jobs from CI METADATA that passed in this commit. Use [] when CI metadata is missing or has no passed jobs.
 13. "validation_cmd": The exact CI command that verifies the problem or repair.

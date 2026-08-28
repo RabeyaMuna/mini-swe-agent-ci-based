@@ -16,9 +16,12 @@ def build_l2_prompt(
     """
     Build L2 prompt to generate repair strategies from L1 problems.
 
+    LEAN VERSION: Trust the LLM to analyze problems and match to automation tools.
+    No hardcoded templates, no repetitive examples, fully dynamic.
+
     Args:
         l1_memory: L1 memory with problems (may be sampled)
-        automated_tools: List of available automation tools
+        automated_tools: List of available automation tools (self-documenting)
         sampling_info: Optional sampling metadata (if L1 was sampled)
 
     Returns:
@@ -34,16 +37,12 @@ def build_l2_prompt(
     sampling_note = ""
     if sampling_info and sampling_info.get("was_sampled"):
         sampling_note = f"""
-  NOTE: L1 data sampled for efficiency (~{sampling_info.get("total_size", 0):,} tokens)
-- Problems with >10 files show first 5 + metadata
-- Check 'files_metadata' for total count and pattern
+NOTE: L1 sampled (~{sampling_info.get("total_size", 0):,} tokens). Problems with >10 files show first 5 + files_metadata with total count.
 """
 
-    prompt = f"""You are analyzing a CI failure to identify REPAIR STRATEGIES (L2).
+    prompt = f"""Analyze CI failure and generate repair strategies (L2).
 
-ISSUE: {issue_id}
-REPO: {repo}
-WORKFLOW: {workflow}
+ISSUE: {issue_id} | REPO: {repo} | WORKFLOW: {workflow}
 {sampling_note}
 
 === CHANGED FILES ===
@@ -52,308 +51,69 @@ WORKFLOW: {workflow}
 === L1 PROBLEMS ({len(problems)} total) ===
 {json.dumps(problems, indent=2)}
 
-Each L1 problem has:
-- problem_id: Unique identifier
-- verification_cmd: Which validator failed (e.g., "python -m mypy py")
-- failure_type: Type of failure (e.g., "type checking", "formatting")
-- problem: Error description
-- root_cause: Why it occurred
-- fix_strategy: How it was fixed
-- files: Affected file paths (may be sampled)
-- files_metadata: (if present) total_count, pattern, note
-- enabled: Problems revealed after fixing this (sequential dependencies)
+L1 Problem Schema:
+- problem_id, verification_cmd, failure_type, problem, root_cause, fix_strategy
+- files: affected paths (or files_metadata if >10 files: total_count, pattern, note)
+- enabled: [problem_ids] revealed after fixing this (sequential dependencies)
 
-UNDERSTANDING SAMPLED DATA:
-If files_metadata exists for a problem:
-- files: Shows first 5 sample files
-- files_metadata.total_count: ACTUAL total number of files (use this for counts)
-- files_metadata.pattern: Common directory/file pattern
-- Use total_count (not sample length) when deciding manual vs automation
-
-=== DECISION TREE: HOW TO ANALYZE YOUR SPECIFIC ISSUE ===
-
-FOR EACH L1 PROBLEM, FOLLOW THIS PROCESS:
-
-Step 1: EXTRACT CORE INFO
--> failure_type = problem.failure_type
--> validator = extract tool name from problem.verification_cmd
--> error_detail = key phrase from problem.problem
--> location = problem.files[0] if single file, else files_metadata.pattern if exists, else "N files"
-
-Step 2: DETERMINE FIX APPROACH
--> Check problem.failure_type:
-  - "type checking" / "type error" / "mypy" -> MANUAL (semantic)
-  - "test failure" / "assertion" -> MANUAL (logic)
-  - "formatting" / "style" / "lint" -> CHECK AUTOMATION
-  - "import error" / "dependency" -> MANUAL (code change)
-  - "configuration" -> MANUAL (config file)
-
--> If CHECK AUTOMATION:
-  a. Analyze the PROBLEM FIRST (not just file extension):
-     - Look at L1 failure_type and issue_type
-     - Look at the validator/tool that detected it (from verification_cmd)
-     - Look at the actual error message in L1 problem field
-
-  b. Match PROBLEM to auto-fixable tools:
-     - "format" or "lint" errors -> Check if tool has auto-fix
-       * ruff detected error -> ruff check --fix (auto-fixes)
-       * black detected error -> black (auto-fixes)
-       * isort detected error -> isort (auto-fixes)
-       * mdformat detected error -> mdformat (auto-fixes)
-       * docstrfmt detected error -> docstrfmt (auto-fixes)
-
-     - "type" errors (mypy, pyright) -> MANUAL (no auto-fix)
-     - "test" failures (pytest) -> MANUAL (semantic issues)
-     - "import" errors -> MANUAL (need code understanding)
-     - "dependency" conflicts -> CONFIG change (not automation)
-
-  c. Count files: use files_metadata.total_count if exists, else len(files)
-
-  d. Final decision:
-     - Tool CAN auto-fix + Files ≥ 10 + uniform error -> USE AUTOMATION
-     - Tool CANNOT auto-fix (mypy, pytest, etc.) -> MANUAL
-     - Files < 10 even if auto-fixable -> Consider MANUAL (small enough)
-
-  EXAMPLES:
-  - L1 says "ruff: E501 line too long" in 50 files -> USE ruff check --fix (automation)
-  - L1 says "mypy: error: Incompatible types" in 3 files -> MANUAL (no auto-fix)
-  - L1 says "pytest: AssertionError" -> MANUAL (semantic test failure)
-  - L1 says "black would reformat" in 20 files -> USE black (automation)
-
-Step 3: BUILD PROBLEM REFERENCE
--> Pattern: "{{failure_type}} in {{location}} ({{error_detail}})"
--> Example construction:
-  - failure_type = "type error"
-  - location = "helpers.py" (from files[0])
-  - error_detail = "Optional[Any] vs str" (extract from problem.problem)
-  - Result: "Type error in helpers.py (Optional[Any] vs str)"
-
-Step 4: GROUP PROBLEMS
--> Check problem.enabled field:
-  - If problem A has "enabled": [problem_B] -> GROUP A+B in ONE strategy
-  - Explain: "Fixing A reveals B because..."
--> Check root_cause similarity:
-  - Same root cause -> GROUP in ONE strategy
-  - Different root causes -> SEPARATE strategies
-
-=== AVAILABLE AUTOMATION TOOLS ===
+=== AUTOMATION TOOLS ===
 {json.dumps(automated_tools, indent=2)}
 
-HOW TO CHOOSE THE RIGHT AUTOMATION TOOL:
+Each tool specifies:
+- purpose: what it fixes
+- fixes: list of problem types it addresses
+- file_pattern: what files it works on
+- install_command: how to install
+- fix_command: how to run ({{{{file_or_dir}}}} = placeholder for target path)
 
-1. **Match file pattern AND error type**:
-   - *.rst files + RST formatting errors (heading style, syntax) -> docstrfmt
-   - *.py files + docstring errors (PEP 257) -> docformatter
-   - *.py files + import errors -> isort
-   - *.py files + code formatting -> black or ruff
-   - *.md files + markdown formatting -> mdformat
-   - *.toml files + TOML formatting -> taplo
+=== YOUR TASK ===
 
-2. **Check error type**:
-   - Formatting/style/linting errors -> likely has automation tool
-   - Type checking/logic/semantic errors -> NO automation, must be manual
+1. **Analyze Problems**: For each L1 problem:
+   - Check if problem.failure_type matches any tool.fixes array
+   - Check if problem.files match any tool.file_pattern
+   - Count files: use files_metadata.total_count if exists, else len(files)
+   - Decision: IF (match exists AND files ≥ 10) → automation; ELSE → manual
 
-3. **Check validator name**:
-   - If validator = docstrfmt -> use docstrfmt tool
-   - If validator = black -> use black tool
-   - If validator = mypy/pylint/pytest -> likely NO automation
+2. **Group Problems**: Create strategies by grouping:
+   - Problems with same root_cause → ONE strategy
+   - Problems where A.enabled contains [B, C] → ONE strategy (A enables B and C)
+   - Independent problems → SEPARATE strategies
 
-4. **Consider file count and uniformity**:
-   - 1-5 files -> prefer manual fix (even if tool exists)
-   - 10+ files with IDENTICAL error -> automation strongly recommended
-   - Error differs between files -> manual fix required
+3. **Generate Strategies**: For each strategy, build key_actions:
+   - IF automation: Use tool.install_command, then tool.fix_command
+     * Replace {{{{file_or_dir}}}} with: common parent directory if multiple files share one, else individual file
+     * EFFICIENT: 20 files in src/utils/ → run on src/utils/ (NOT file-by-file)
+   - IF manual: Use steps from L1.fix_strategy
+   - ALWAYS end with: L1.verification_cmd to verify
 
-CRITICAL DISTINCTIONS:
-- **docstrfmt** = for *.rst documentation files (RST syntax)
-- **docformatter** = for *.py docstrings (PEP 257 inside Python files)
-- Example: "heading adornment style" in *.rst files -> docstrfmt
-- Example: "docstring not PEP 257" in *.py files -> docformatter
+4. **Output**: Return JSON with:
+   - failure_identify: ["failure_type (validator) - N problems"] (use files_metadata.total_count when present)
+   - repair_strategies: Array of strategy objects (see schema below)
 
-CONFIG SPECIFICATION RULES:
-When a fix requires config changes (dependencies, versions, settings), be SPECIFIC:
+=== ANALYSIS GUIDELINES ===
 
-BAD (vague):
-- "Add click version constraint"
-- "Update dependency"
-- "Fix version conflict"
+**Grouping Logic**:
+- problem.enabled = [X, Y] means fixing this problem reveals problems X and Y
+- Group enabled problems in ONE strategy, explain causal chain
+- Share root_cause → group together; different causes → separate
 
-GOOD (specific):
-- "In pyproject.toml [tool.poetry.dependencies] section: add click = '<8.2.0'"
-- "In requirements.txt: change numpy==1.24.0 to numpy>=2.0.0"
-- "In .pre-commit-config.yaml: update mdformat-beautysh from rev: v0.3.0 to rev: v1.0.0"
+**Automation Matching**:
+- Match problem.failure_type to tool.fixes array (each tool lists what it fixes)
+- Match problem.files extensions to tool.file_pattern
+- Use tool.install_command and tool.fix_command from matched tool
 
-INCLUDE in signals:
-- Exact version constraints (e.g., "typer requires click<8.2.0")
-- Config file names (e.g., "pyproject.toml missing constraint")
-- Section names if applicable (e.g., "[tool.poetry.dependencies]")
+**Signals** (observable error patterns):
+- Extract actual error messages from L1.problem field
+- Include file paths/patterns, command failures, tool versions
+- Be specific: "mypy: error [arg-type] at helpers.py:42" not "type error"
 
-INCLUDE in key_actions:
-- Exact config file path
-- Exact section/location
-- Exact key and value to set
-- Then code changes (if any)
-
-=== TASK ===
-Analyze these L1 problems and generate:
-
-1. **failure_identify**: Summary of failure types found
-   - Analyze L1 problems to identify distinct failure types
-   - Extract validator name from verification_cmd (e.g., "mypy" from "python -m mypy py")
-   - Group by failure_type and count problems OR files
-   - IMPORTANT: If files_metadata exists, use total_count not sample size
-   - Format: ["failure_type (validator) - N problems" or "- M files", ...]
-   - Examples:
-     * ["type_checking (mypy) - 3 problems"]
-     * ["formatting (docstrfmt) - 67 files"] (use files_metadata.total_count)
-
-2. **repair_strategies**: Actionable repair strategies (1-5 strategies)
-   Each strategy must follow the schema with these REQUIRED fields:
-   - step: Sequential step number (1, 2, 3...)
-   - failure_type: Specific failure type being addressed (e.g., "type_checking", "formatting")
-   - validation_cmd: The validator command (e.g., "mypy .", "ruff check .")
-   - applies_to_failures: Which failure types from failure_identify this strategy addresses
-   - causal_chain: Explain dependencies between problems and why they're related
-   - summary: One-line description of the strategy
-   - intent: What this strategy aims to achieve
-   - reasoning: Why these L1 problems are grouped together
-   - rationale: Why this approach works (technical explanation)
-   - when_to_apply: Specific conditions when this strategy should be used
-   - signals: Observable indicators that this strategy is needed (error messages, file patterns)
-   - key_actions: Detailed step-by-step instructions (see AUTOMATION TOOL GUIDANCE below)
-   - pitfalls: Common mistakes to avoid
-   - example_phrasing: Natural language description for user
-
-STRATEGY ORGANIZATION RULES:
-
-1. **How to reference problems** (in causal_chain, reasoning, rationale):
-   USE THIS PATTERN - adapt to YOUR specific issue:
-
-   Pattern: "<failure_type> in <location> (<specific_error>)"
-
-   WHERE to extract each part:
-   - <failure_type>: From L1 problem.failure_type field
-   - <location>:
-     * Single file: Use actual filename from L1 problem.files[0]
-     * Multiple files (<10): List filenames from L1 problem.files
-     * Many files (10+): Use L1 problem.files_metadata.pattern if available, else first file + "and N others"
-   - <specific_error>: Extract key error detail from L1 problem.problem field (the unique identifier)
-
-   HOW to construct:
-   1. Read L1 problem.failure_type -> that's your failure_type
-   2. Check L1 problem.files_metadata:
-      - If exists and total_count > 10: Use files_metadata.pattern for location
-      - Else: Use actual file path(s) from problem.files
-   3. Extract the KEY error detail from problem.problem:
-      - For type errors: the type mismatch (e.g., "Optional[Any] vs str")
-      - For format errors: the format issue (e.g., "heading adornment style")
-      - For import errors: what's missing (e.g., "module X not found")
-      - For test errors: what assertion failed (e.g., "expected X got Y")
-
-   ADAPT to your issue - these are just templates:
-   - Type errors: "{{failure_type}} in {{file}} ({{type_A}} vs {{type_B}})"
-   - Format errors: "{{failure_type}} in {{N}} {{pattern}} files ({{format_issue}})"
-   - Import errors: "{{failure_type}} in {{file}} (missing {{module}})"
-   - Test errors: "{{failure_type}} in {{test_file}} ({{assertion_detail}})"
-   - Config errors: "{{failure_type}} in {{config_file}} ({{config_issue}})"
-
-2. **Group by causal relationship**, not just validation:
-   - If problems share root cause (e.g., config change triggered multiple validators) -> ONE strategy
-   - If problems are independent (different root causes) -> SEPARATE strategies
-   - If fixing one problem enables others (from "enabled" field) -> SAME strategy
-
-3. **Automation vs Manual**:
-   - For mechanical/formatting errors with automation tool:
-     * Specify exact automation tool and command
-     * Include tool from available automation tools list
-   - For semantic/logic errors:
-     * Specify "manual" and explain the code change needed
-
-3. **Sequential dependencies** (use "enabled" field):
-   - If problem A enables problem B (B is in A's "enabled" list):
-     * Create ONE strategy covering both
-     * Explain in causal_chain why B appears after fixing A
-   - Example: Config fix -> validation now runs -> reveals formatting errors
-
-4. **Signals are OBSERVABLE PATTERNS that detect this failure**:
-
-   WHAT SIGNALS ARE:
-   - Actual error messages as they appear in CI logs
-   - File patterns that indicate the problem
-   - Tool names and versions
-   - Error codes
-   - Exit codes and command failures
-
-   WHAT SIGNALS ARE NOT:
-   FAIL "Error from L1: ..." (meta-reference)
-   FAIL "File pattern: ..." (generic label)
-   FAIL "Failed command: ..." (generic label)
-
-   HOW TO EXTRACT SIGNALS:
-
-   1. ERROR MESSAGE - Extract actual error as it appears:
-      OK "mypy error [arg-type]: Argument 1 to joinpath has incompatible type Optional[Any]"
-      FAIL "Error from L1: type mismatch"
-
-   2. FILE INDICATOR - Actual file paths or patterns:
-      OK "libs/agno/agno/workspace/helpers.py at line 42"
-      OK "67 files matching docs/source/**/*.rst"
-      FAIL "File pattern: helpers.py"
-
-   3. COMMAND FAILURE - Exact command that fails:
-      OK "Command 'python -m mypy .' exits with code 1"
-      OK "pytest tests/ -> 3 tests FAILED"
-      FAIL "Failed command: mypy ."
-
-   4. TOOL/VERSION - If relevant to detection:
-      OK "mypy 1.8.0 reports incompatible types"
-      OK "ruff 0.1.9 F401 unused import"
-      FAIL "Validator: mypy"
-
-   EXAMPLES of good signals:
-   - "mypy: error: Incompatible return value type (got RunResponse, expected str) [return-value] at chain.py:84"
-   - "pytest: AssertionError: assert 200 == 401 in tests/test_auth.py::test_login"
-   - "ruff check: F401 'numpy.typing.DTypeLike' imported but unused in 5 *.py files"
-   - "docstrfmt --check docs/source/ -> 67 files with heading adornment errors"
-
-5. **Key actions must be EXECUTABLE and INCLUDE AUTOMATION COMMANDS**:
-   - Start with prerequisite checks
-   - **For automation tools**: Include EXACT install and run commands from available tools
-   - **For automation-capable fixes**: Include setup/install, the exact command to run, and the exact file or directory target
-   - **For manual fixes**: Specify exact code changes
-   - **For any Python file edits**: Add a final Ruff cleanup step for the changed Python files or their parent directory
-   - Include verification steps
-
-   AUTOMATION TOOL GUIDANCE:
-   - When using an automation tool, key_actions MUST include:
-     1. Install command: "pip install <tool>" (from automation tools list)
-     2. Run command: "python -m <tool> <args> <target>" (use actual file paths/patterns)
-     3. Verification: Re-run the validator to confirm fix
-   - If an automation tool can fix the problem, prefer a command step over manual edits.
-   - If the tool requires project setup first, include the setup command before the fix command.
-
-   PYTHON POST-EDIT RUFF RULE:
-   - If key_actions modify any *.py file, include these steps before final validation:
-     1. "Step N: Install Ruff if missing: pip install ruff"
-     2. "Step N+1: Run Ruff autofix: ruff check --fix <changed_python_file_or_dir>"
-     3. "Step N+2: Run Ruff formatter: ruff format <changed_python_file_or_dir>"
-   - Target the narrowest useful scope:
-     * One or a few files: use the exact changed file paths from L1
-     * Many Python files in one package: use the common parent directory
-   - This applies even when the main fix is semantic/manual, because Python edits can introduce import ordering, whitespace, or formatting issues.
-
-   Examples:
-   - AUTOMATION:
-     * "Step 1: Install docformatter: pip install docformatter"
-     * "Step 2: Run docformatter: python -m docformatter --in-place --recursive docs/source/"
-     * "Step 3: Verify: python -m pytest tests/"
-
-   - MANUAL:
-     * "Step 1: Open libs/agno/agno/agent.py"
-     * "Step 2: Add null check: if self.knowledge is not None:"
-     * "Step 3: Install Ruff if missing: pip install ruff"
-     * "Step 4: Run Ruff autofix: ruff check --fix libs/agno/agno/agent.py"
-     * "Step 5: Run Ruff formatter: ruff format libs/agno/agno/agent.py"
-     * "Step 6: Verify: mypy libs/agno/agno/agent.py"
+**Key Actions**:
+- Automation: tool.install_command → tool.fix_command with target → L1.verification_cmd
+  * If multiple files in SAME directory: target = common parent directory (more efficient)
+  * If files scattered across directories: target = repository root or common ancestor
+  * Example: 20 files in src/utils/ → run tool on src/utils/ NOT file-by-file
+- Manual: steps from L1.fix_strategy → L1.verification_cmd
+- Config changes: specify exact file, section, key=value
 
 CRITICAL OUTPUT FORMAT:
 

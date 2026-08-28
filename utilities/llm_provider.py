@@ -92,6 +92,28 @@ LLM_REGISTRY: Dict[str, LLMInfo] = {
         base_url=OPENAI_BASE_URL,
         api_key=OPENAI_API_KEY,
     ),
+    # DeepSeek-V4-Flash via OpenRouter
+    "deepseek-v4-flash": LLMInfo(
+        provider="openrouter",
+        model_name="deepseek/deepseek-v4-flash",
+        temperature=0.0,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=OPENROUTER_API_KEY,
+    ),
+    "deepseek/deepseek-v4-flash": LLMInfo(
+        provider="openrouter",
+        model_name="deepseek/deepseek-v4-flash",
+        temperature=0.0,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=OPENROUTER_API_KEY,
+    ),
+    "openrouter/deepseek/deepseek-v4-flash": LLMInfo(
+        provider="openrouter",
+        model_name="deepseek/deepseek-v4-flash",
+        temperature=0.0,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=OPENROUTER_API_KEY,
+    ),
 }
 
 
@@ -119,6 +141,8 @@ MODEL_ALIASES: Dict[str, str] = {
     "gpt5-mini": "gpt-5.4-mini",
     "gpt5mini": "gpt-5.4-mini",
     "gpt_5_mini": "gpt-5.4-mini",
+    # DeepSeek aliases
+    "deepseek-v4-flash": "deepseek-v4-flash",
 }
 
 

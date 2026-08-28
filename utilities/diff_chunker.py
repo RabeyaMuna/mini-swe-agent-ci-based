@@ -30,14 +30,96 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+def _split_large_file_by_hunks(
+    file_path: str, file_diff_lines: List[str], max_tokens: int
+) -> List[Dict[str, any]]:
+    """
+    Split a single large file diff into multiple chunks by hunks.
+
+    When a single file's diff exceeds max_tokens, split it by @@ hunks
+    to keep within token limits while preserving file context.
+    """
+    chunks = []
+    header_lines = []
+    current_hunk_lines = []
+
+    # Extract header (everything before first @@)
+    for i, line in enumerate(file_diff_lines):
+        if line.startswith("@@"):
+            header_lines = file_diff_lines[:i]
+            remaining_lines = file_diff_lines[i:]
+            break
+    else:
+        # No hunks found, return as single chunk
+        file_diff_text = "\n".join(file_diff_lines)
+        return [{
+            "diff": file_diff_text,
+            "files": [file_path],
+            "tokens": estimate_tokens(file_diff_text)
+        }]
+
+    # Split by hunks
+    header_text = "\n".join(header_lines)
+    header_tokens = estimate_tokens(header_text)
+
+    current_chunk_hunks = []
+    current_chunk_tokens = header_tokens
+
+    i = 0
+    while i < len(remaining_lines):
+        line = remaining_lines[i]
+
+        if line.startswith("@@"):
+            # Start of new hunk - collect until next @@ or end
+            hunk_lines = [line]
+            i += 1
+            while i < len(remaining_lines) and not remaining_lines[i].startswith("@@"):
+                hunk_lines.append(remaining_lines[i])
+                i += 1
+
+            hunk_text = "\n".join(hunk_lines)
+            hunk_tokens = estimate_tokens(hunk_text)
+
+            # Check if adding this hunk would exceed limit
+            if current_chunk_hunks and current_chunk_tokens + hunk_tokens > max_tokens:
+                # Flush current chunk
+                chunk_text = header_text + "\n" + "\n".join(current_chunk_hunks)
+                chunks.append({
+                    "diff": chunk_text,
+                    "files": [file_path],
+                    "tokens": current_chunk_tokens
+                })
+                current_chunk_hunks = []
+                current_chunk_tokens = header_tokens
+
+            current_chunk_hunks.append(hunk_text)
+            current_chunk_tokens += hunk_tokens
+        else:
+            i += 1
+
+    # Flush final chunk
+    if current_chunk_hunks:
+        chunk_text = header_text + "\n" + "\n".join(current_chunk_hunks)
+        chunks.append({
+            "diff": chunk_text,
+            "files": [file_path],
+            "tokens": current_chunk_tokens
+        })
+
+    return chunks if chunks else [{
+        "diff": "\n".join(file_diff_lines),
+        "files": [file_path],
+        "tokens": estimate_tokens("\n".join(file_diff_lines))
+    }]
+
+
 def chunk_diff_by_files(
     commit_diff: str, max_tokens_per_chunk: int = 12000
 ) -> List[Dict[str, any]]:
     """
     Split a large git diff into chunks, keeping file diffs together.
 
-    This ensures each file's complete diff stays in one chunk,
-    making it easier for LLMs to analyze files in context.
+    If a single file exceeds max_tokens, splits it by hunks.
 
     Args:
         commit_diff: Full git diff output
@@ -73,19 +155,32 @@ def chunk_diff_by_files(
                 file_diff_text = "\n".join(current_file_diff)
                 file_tokens = estimate_tokens(file_diff_text)
 
-                # Check if adding this file would exceed chunk limit
-                if (
-                    current_chunk["tokens"] + file_tokens > max_tokens_per_chunk
-                    and current_chunk["files"]
-                ):
-                    # Start new chunk
-                    chunks.append(current_chunk)
-                    current_chunk = {"diff": "", "files": [], "tokens": 0}
+                # CRITICAL: If single file exceeds limit, split by hunks
+                if file_tokens > max_tokens_per_chunk:
+                    print(f"      WARNING: Large file {current_file} ({file_tokens} tokens), splitting by hunks")
+                    file_chunks = _split_large_file_by_hunks(
+                        current_file, current_file_diff, max_tokens_per_chunk
+                    )
+                    # Flush current chunk if it has content
+                    if current_chunk["files"]:
+                        chunks.append(current_chunk)
+                        current_chunk = {"diff": "", "files": [], "tokens": 0}
+                    # Add all file chunks
+                    chunks.extend(file_chunks)
+                else:
+                    # Check if adding this file would exceed chunk limit
+                    if (
+                        current_chunk["tokens"] + file_tokens > max_tokens_per_chunk
+                        and current_chunk["files"]
+                    ):
+                        # Start new chunk
+                        chunks.append(current_chunk)
+                        current_chunk = {"diff": "", "files": [], "tokens": 0}
 
-                # Add file to current chunk
-                current_chunk["diff"] += file_diff_text + "\n"
-                current_chunk["files"].append(current_file)
-                current_chunk["tokens"] += file_tokens
+                    # Add file to current chunk
+                    current_chunk["diff"] += file_diff_text + "\n"
+                    current_chunk["files"].append(current_file)
+                    current_chunk["tokens"] += file_tokens
 
             # Parse new file path from diff header
             parts = line.split()
@@ -103,16 +198,29 @@ def chunk_diff_by_files(
         file_diff_text = "\n".join(current_file_diff)
         file_tokens = estimate_tokens(file_diff_text)
 
-        if (
-            current_chunk["tokens"] + file_tokens > max_tokens_per_chunk
-            and current_chunk["files"]
-        ):
-            chunks.append(current_chunk)
-            current_chunk = {"diff": "", "files": [], "tokens": 0}
+        # CRITICAL: If single file exceeds limit, split by hunks
+        if file_tokens > max_tokens_per_chunk:
+            print(f"      WARNING: Large file {current_file} ({file_tokens} tokens), splitting by hunks")
+            file_chunks = _split_large_file_by_hunks(
+                current_file, current_file_diff, max_tokens_per_chunk
+            )
+            # Flush current chunk if it has content
+            if current_chunk["files"]:
+                chunks.append(current_chunk)
+                current_chunk = {"diff": "", "files": [], "tokens": 0}
+            # Add all file chunks
+            chunks.extend(file_chunks)
+        else:
+            if (
+                current_chunk["tokens"] + file_tokens > max_tokens_per_chunk
+                and current_chunk["files"]
+            ):
+                chunks.append(current_chunk)
+                current_chunk = {"diff": "", "files": [], "tokens": 0}
 
-        current_chunk["diff"] += file_diff_text + "\n"
-        current_chunk["files"].append(current_file)
-        current_chunk["tokens"] += file_tokens
+            current_chunk["diff"] += file_diff_text + "\n"
+            current_chunk["files"].append(current_file)
+            current_chunk["tokens"] += file_tokens
 
     # Add last chunk if it has content
     if current_chunk["files"]:

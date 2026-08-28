@@ -212,6 +212,18 @@ def _load_json_flexible(content: str) -> Any:
     # Try standard JSON parse
     try:
         return json.loads(content)
+    except json.JSONDecodeError as e:
+        last_json_err = e
+        # If error is "Extra data", try to extract just the JSON part
+        if "Extra data" in str(e):
+            try:
+                # Find the position where valid JSON ends
+                # JSONDecodeError.pos gives us where the error occurred
+                if hasattr(e, 'pos'):
+                    valid_json = content[:e.pos].strip()
+                    return json.loads(valid_json)
+            except Exception:
+                pass  # Continue to other strategies
     except Exception as e:
         last_json_err = e
 
@@ -219,24 +231,106 @@ def _load_json_flexible(content: str) -> Any:
     try:
         cleaned = _clean_json_control_characters(content)
         return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        # Handle "Extra data" error after cleaning
+        if "Extra data" in str(e) and hasattr(e, 'pos'):
+            try:
+                valid_json = cleaned[:e.pos].strip()
+                return json.loads(valid_json)
+            except Exception:
+                pass
     except Exception:
         pass  # Continue to next strategy
 
-    # Try closing truncated JSON structures
+    # Try closing truncated JSON structures (improved for nested structures)
     try:
         cleaned = _clean_json_control_characters(content)
-        # If the error is about missing delimiters, try closing the structure
-        # Count open/close brackets and braces
+
+        # Remove any incomplete trailing strings/values
+        # Find the last complete comma, closing brace, or closing bracket
+        last_valid_pos = max(
+            cleaned.rfind(','),
+            cleaned.rfind('}'),
+            cleaned.rfind(']'),
+            cleaned.rfind('"')
+        )
+
+        # If we found a potentially truncated part, try removing it
+        if last_valid_pos > 0 and last_valid_pos < len(cleaned) - 1:
+            # Check if there's incomplete text after the last valid delimiter
+            trailing = cleaned[last_valid_pos + 1:].strip()
+            if trailing and not trailing.startswith((']', '}')):
+                # Likely truncated - remove incomplete trailing part
+                cleaned = cleaned[:last_valid_pos + 1].rstrip(',').strip()
+
+        # Count open/close brackets and braces with proper nesting
         open_braces = cleaned.count('{') - cleaned.count('}')
         open_brackets = cleaned.count('[') - cleaned.count(']')
 
-        # Close any unclosed structures
+        # Close any unclosed structures in proper order (innermost first)
         if open_braces > 0 or open_brackets > 0:
             closed = cleaned
-            # Close arrays first, then objects
-            closed += ']' * max(0, open_brackets)
-            closed += '}' * max(0, open_braces)
+
+            # Smart closing: track what needs to be closed based on last seen opener
+            stack = []
+            in_string = False
+            escape = False
+
+            for char in cleaned:
+                if escape:
+                    escape = False
+                    continue
+                if char == '\\':
+                    escape = True
+                    continue
+                if char == '"' and not escape:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+
+                if char == '{':
+                    stack.append('}')
+                elif char == '[':
+                    stack.append(']')
+                elif char == '}' and stack and stack[-1] == '}':
+                    stack.pop()
+                elif char == ']' and stack and stack[-1] == ']':
+                    stack.pop()
+
+            # Close in reverse order of what was opened
+            while stack:
+                closed += stack.pop()
+
             return json.loads(closed)
+    except Exception:
+        pass  # Continue to next strategy
+
+    # Try extracting first complete JSON object/array (handles text before/after)
+    try:
+        # Find first { or [
+        for start_char in ['{', '[']:
+            start_idx = content.find(start_char)
+            if start_idx == -1:
+                continue
+
+            # Track brace/bracket balance to find matching close
+            balance = 0
+            end_char = '}' if start_char == '{' else ']'
+
+            for i in range(start_idx, len(content)):
+                if content[i] == start_char:
+                    balance += 1
+                elif content[i] == end_char:
+                    balance -= 1
+                    if balance == 0:
+                        # Found complete JSON object/array
+                        json_str = content[start_idx:i+1]
+                        try:
+                            return json.loads(json_str)
+                        except json.JSONDecodeError:
+                            break  # Try other strategies
+            break
     except Exception:
         pass  # Continue to next strategy
 
@@ -314,7 +408,7 @@ def _check_api_health(llm: Any, verbose: bool = False) -> bool:
             if _requires_max_completion_tokens(model_name):
                 response = llm.invoke(HEALTH_CHECK_PROMPT, max_completion_tokens=8)
             else:
-                response = llm.invoke(HEALTH_CHECK_PROMPT, max_tokens=8)
+                response = llm.invoke(HEALTH_CHECK_PROMPT, max_tokens=100)
         except TypeError:
             response = llm.invoke(HEALTH_CHECK_PROMPT)
         content = str(getattr(response, "content", response) or "").strip()

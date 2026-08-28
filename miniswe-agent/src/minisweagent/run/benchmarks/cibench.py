@@ -1969,10 +1969,30 @@ def _collect_final_workspace_diff(testbed_path: Path) -> str:
     Partial per-problem submissions are not composable when multiple problems
     touch the same file. The checkout is the source of truth because each agent
     run mutates the same working tree.
+
+    CRITICAL FIX: Handle new files properly by adding them as intent-to-add
+    so they appear in the diff with proper 'new file mode' headers.
     """
     try:
+        # CRITICAL: Add untracked files as "intent to add" so they appear in diff
+        # This ensures new files created by the agent get proper "new file mode" headers
+        # Without this, patches fail with "does not exist in index" errors
+        add_result = subprocess.run(
+            ["git", "add", "-N", "."],
+            cwd=testbed_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if add_result.returncode != 0:
+            logger.warning(
+                "[CIBench] git add -N failed (non-critical): %s",
+                add_result.stderr or add_result.stdout,
+            )
+
+        # Generate diff with full index info to properly handle new files
         result = subprocess.run(
-            ["git", "diff", "--binary", "--no-ext-diff"],
+            ["git", "diff", "--binary", "--no-ext-diff", "--full-index"],
             cwd=testbed_path,
             capture_output=True,
             text=True,
@@ -1990,6 +2010,25 @@ def _collect_final_workspace_diff(testbed_path: Path) -> str:
         return ""
 
     diff = result.stdout or ""
+
+    # Validate the generated patch can actually apply
+    if diff:
+        validation_result = subprocess.run(
+            ["git", "apply", "--check", "--3way"],
+            input=diff,
+            text=True,
+            cwd=testbed_path,
+            capture_output=True,
+            timeout=30,
+        )
+        if validation_result.returncode != 0:
+            logger.warning(
+                "[CIBench] Generated patch may not apply cleanly:\n%s",
+                validation_result.stderr[:500],
+            )
+            # Log but don't fail - the patch might still work with different apply flags
+            # or the validation might be overly strict
+
     parts = diff.split("\n")
     while parts and parts[-1] == "":
         parts.pop()
@@ -2485,6 +2524,19 @@ def process_instance(
     extra_info: Dict[str, Any] = {}
     prediction_ready = True
 
+    # ── Cost and Time Tracking ────────────────────────────────────────────────
+    import time
+    start_time = time.time()
+    cost_tracking = {
+        "model": context_model,
+        "ablation": memory_ablation_levels if memory_enabled else "baseline",
+        "start_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "api_calls": [],
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_cost_usd": 0.0,
+    }
+
     # ── Phase 1: build enriched CI problem statement using shared cache ──────
     try:
         context_llm = _make_context_llm(config, context_model=context_model)
@@ -2755,6 +2807,19 @@ def process_instance(
         )
 
     finally:
+        # ── Finalize Cost Tracking ────────────────────────────────────────────
+        end_time = time.time()
+        cost_tracking["end_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        cost_tracking["total_duration_seconds"] = round(end_time - start_time, 2)
+
+        # Get agent cost if available
+        if agent is not None and hasattr(agent, "cost"):
+            cost_tracking["agent_cost_usd"] = round(float(agent.cost), 4)
+            cost_tracking["total_cost_usd"] += cost_tracking["agent_cost_usd"]
+
+        # Add to extra_info for saving
+        extra_info["cost_tracking"] = cost_tracking
+
         if agent is not None:
             traj_path = instance_dir / f"{dir_name}.traj.json"
             llm_sel = ci_memory.get("llm_selection") or {}

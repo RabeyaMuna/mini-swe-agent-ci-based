@@ -507,6 +507,71 @@ def _split_files_by_change_tokens(
 
     for file_info in files:
         file_tokens = _estimate_file_tokens(file_info)
+
+        # If single file exceeds target, split it into smaller chunks by hunks
+        if file_tokens > target_tokens:
+            print(f"[DEBUG] Large file detected: {file_info.get('path', 'unknown')} ({file_tokens} tokens > {target_tokens} target)")
+            # Flush current batch first
+            if current_files:
+                flush_current()
+                current_files = []
+                current_tokens = 0
+
+            # Split large file into multiple chunks by hunks
+            print(f"[DEBUG] Splitting large file by hunks...")
+            hunks = file_info.get("changes", [])
+            if hunks:
+                chunk_hunks = []
+                chunk_tokens = 0
+
+                for hunk in hunks:
+                    hunk_tokens = len(str(hunk)) // 4  # Rough estimate
+
+                    if chunk_hunks and chunk_tokens + hunk_tokens > target_tokens:
+                        # Flush current hunk batch
+                        file_chunk = dict(file_info)
+                        file_chunk["changes"] = chunk_hunks
+                        file_chunk["total_changes"] = len(chunk_hunks)
+                        chunks.append({
+                            "files": [file_chunk],
+                            "total_files": 1,
+                            "total_changes": len(chunk_hunks),
+                            "dependency_cluster": [file_info.get("path", "")],
+                            "dependency_contexts": [],
+                            "is_partial_cluster": True,
+                            "chunk_info": f"Large file split (part {len(chunks)+1})",
+                            "estimated_tokens": chunk_tokens,
+                        })
+                        chunk_hunks = []
+                        chunk_tokens = 0
+
+                    chunk_hunks.append(hunk)
+                    chunk_tokens += hunk_tokens
+
+                # Flush last batch
+                if chunk_hunks:
+                    file_chunk = dict(file_info)
+                    file_chunk["changes"] = chunk_hunks
+                    file_chunk["total_changes"] = len(chunk_hunks)
+                    chunks.append({
+                        "files": [file_chunk],
+                        "total_files": 1,
+                        "total_changes": len(chunk_hunks),
+                        "dependency_cluster": [file_info.get("path", "")],
+                        "dependency_contexts": [],
+                        "is_partial_cluster": True,
+                        "chunk_info": f"Large file split (part {len(chunks)})",
+                        "estimated_tokens": chunk_tokens,
+                    })
+            else:
+                # No hunks to split, add as-is with warning
+                print(f"  WARNING: File {file_info.get('path', 'unknown')} exceeds token limit ({file_tokens} > {target_tokens}) but has no hunks to split")
+                current_files.append(file_info)
+                current_tokens += file_tokens
+
+            continue
+
+        # Normal case: file fits in target
         if current_files and current_tokens + file_tokens > target_tokens:
             flush_current()
             current_files = []
@@ -764,10 +829,74 @@ def _split_cluster_by_tokens(
         if not caller_file_info:
             continue
 
+        caller_tokens = _estimate_file_tokens(caller_file_info)
+
+        # If caller itself exceeds limit, we MUST split it to preserve all data
+        # Split caller file into smaller chunks by hunks
+        if caller_tokens > target_tokens:
+            print(f"[DEBUG] Caller file {caller_file} too large ({caller_tokens} > {target_tokens}), splitting by hunks")
+            caller_hunks = caller_file_info.get("changes", [])
+
+            if caller_hunks:
+                # Split caller into multiple chunks by hunks
+                chunk_hunks = []
+                chunk_tokens = 5000  # Base overhead
+
+                for hunk in caller_hunks:
+                    hunk_tokens = len(str(hunk)) // 4  # Rough estimate
+
+                    if chunk_hunks and chunk_tokens + hunk_tokens > target_tokens:
+                        # Flush current chunk
+                        caller_chunk = dict(caller_file_info)
+                        caller_chunk["changes"] = chunk_hunks
+                        caller_chunk["total_changes"] = len(chunk_hunks)
+                        chunks.append({
+                            "files": [caller_chunk],
+                            "total_files": 1,
+                            "total_changes": len(chunk_hunks),
+                            "dependency_contexts": [{
+                                "dependency_type": dep_type,
+                                "caller": {"file": caller_file, "is_partial": True},
+                                "callees": [],
+                            }],
+                            "estimated_tokens": chunk_tokens,
+                            "is_partial_cluster": True,
+                            "chunk_info": f"Large caller split (part {len(chunks)+1})",
+                        })
+                        chunk_hunks = []
+                        chunk_tokens = 5000
+
+                    chunk_hunks.append(hunk)
+                    chunk_tokens += hunk_tokens
+
+                # Flush last chunk
+                if chunk_hunks:
+                    caller_chunk = dict(caller_file_info)
+                    caller_chunk["changes"] = chunk_hunks
+                    caller_chunk["total_changes"] = len(chunk_hunks)
+                    chunks.append({
+                        "files": [caller_chunk],
+                        "total_files": 1,
+                        "total_changes": len(chunk_hunks),
+                        "dependency_contexts": [{
+                            "dependency_type": dep_type,
+                            "caller": {"file": caller_file, "is_partial": True},
+                            "callees": [],
+                        }],
+                        "estimated_tokens": chunk_tokens,
+                        "is_partial_cluster": True,
+                        "chunk_info": f"Large caller split (final part)",
+                    })
+                print(f"[DEBUG] Split large caller into {len([c for c in chunks if c.get('chunk_info', '').startswith('Large caller')])} chunks")
+
+            # Skip to next dependency context (this one is fully processed)
+            continue
+
+        # Normal case: caller fits in limit
         # Start new chunk with caller
         current_chunk_files = [caller_file_info]
         current_chunk_callees = []
-        current_tokens = _estimate_file_tokens(caller_file_info) + 5000  # Base overhead
+        current_tokens = caller_tokens + 5000  # Base overhead
 
         # Add callees until we hit token limit
         for callee in callees:
@@ -836,17 +965,15 @@ def _split_cluster_by_tokens(
                 }
             )
 
-    return (
-        chunks
-        if chunks
-        else [
-            {
-                "files": cluster_files,
-                "total_files": len(cluster_files),
-                "total_changes": 0,
-            }
-        ]
-    )
+    # If no dependency-aware chunks were created, split by token limit
+    if not chunks:
+        print(f"[DEBUG] No dependency chunks created, falling back to file split (target: {target_tokens} tokens, {len(cluster_files)} files)")
+        result = _split_files_by_change_tokens(cluster_files, target_tokens)
+        print(f"[DEBUG] File split created {len(result)} chunks")
+        return result
+
+    print(f"[DEBUG] Dependency-aware split created {len(chunks)} chunks")
+    return chunks
 
 
 def _build_caller_callee_contexts_for_chunk(

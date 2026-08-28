@@ -110,6 +110,23 @@ MODEL_CONFIGS: dict[str, ModelConfig] = {
         "requires_multi_stage": False,  # Single-stage for most cases
         "supports_large_output": True,  # Supports large outputs (128k)
     },
+    "deepseek-v4-flash": {
+        "input_context_window": 1_000_000,  # DeepSeek-V4-Flash: 1M context window
+        "input_chunk_tokens": 600_000,  # Use model capacity: 600k input + 384k output + overhead fits 1M
+        "input_chunk_chars": 2_400_000,  # ~4 chars per token (600k * 4)
+        "output_max_tokens": 384_000,  # DeepSeek-V4-Flash: 384K max output
+        "output_safe_tokens": 350_000,  # Safe limit with buffer (~91% of max)
+        # L1/L2 settings scale with model capacity - processing logic dynamically chunks
+        "l1_chunk_size": 500,  # Proportional to context window
+        "l1_max_total": 2000,  # Proportional to context window
+        "l2_batch_size": 500,  # Proportional to context window
+        "l2_common_candidates": 6000,  # Proportional to context window
+        "l2_consecutive_candidates": 8000,  # Proportional to context window
+        "decompose_max_files_per_chunk": 3000,  # Proportional to context window
+        "decompose_max_changes_per_chunk": 15000,  # Proportional to context window
+        "requires_multi_stage": False,  # Single-stage processing
+        "supports_large_output": True,  # Supports massive outputs (384k)
+    },
     # Fallback/default configuration
     "default": {
         "input_context_window": 128_000,
@@ -178,6 +195,10 @@ def get_model_config(model_name: str | None) -> ModelConfig:
     # GPT-5-mini models
     if "gpt-5" in normalized or "gpt5" in normalized:
         return MODEL_CONFIGS["gpt-5-mini"]
+
+    # DeepSeek-V4-Flash models
+    if "deepseek" in normalized or "v4-flash" in normalized or "ds-v4" in normalized:
+        return MODEL_CONFIGS["deepseek-v4-flash"]
 
     # Fallback to default
     return MODEL_CONFIGS["default"]
@@ -345,7 +366,7 @@ def print_model_comparison():
     print("-" * 80)
 
     # Print each model
-    for model_key in ["minimax-m2.5", "glm-5.2", "gpt-5-mini", "gpt-5.4"]:
+    for model_key in ["minimax-m2.5", "glm-5.2", "gpt-5-mini", "gpt-5.4", "deepseek-v4-flash"]:
         config = MODEL_CONFIGS[model_key]
         row = [
             model_key,
@@ -373,6 +394,7 @@ if __name__ == "__main__":
         "gpt-5-mini",
         "gpt-5.4",
         "gpt5.4",
+        "openrouter/deepseek/deepseek-v4-flash",
         "unknown-model",
     ]
 

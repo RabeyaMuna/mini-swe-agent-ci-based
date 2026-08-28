@@ -592,11 +592,25 @@ def decompose_issue(
         failed_jobs = compact_metadata.get("current_failed_jobs", [])
         fixed_jobs = compact_metadata.get("current_jobs_fixed", [])
 
+        # Add failed jobs info from dataset (if not already in CI metadata)
+        dataset_failed_jobs = issue.get("failed_jobs", [])
+        dataset_error_types = issue.get("error_type", [])
+        if dataset_failed_jobs:
+            compact_metadata["dataset_failed_jobs"] = dataset_failed_jobs
+            compact_metadata["dataset_error_types"] = dataset_error_types
+            compact_metadata["dataset_total_failed_jobs"] = issue.get("total_failed_jobs", 0)
+            compact_metadata["dataset_total_failed_steps"] = issue.get("total_failed_steps", 0)
+
         if ci_metadata.get("workflow_runs"):
             print(
                 f"      CI Metadata: {len(failed_jobs)} failed jobs, "
                 f"{len(fixed_jobs)} successful jobs "
                 f"({len(ci_metadata.get('workflow_runs', []))} workflow runs)"
+            )
+        if dataset_failed_jobs:
+            print(
+                f"      Dataset Failed Jobs: {len(dataset_failed_jobs)} jobs, "
+                f"error types: {', '.join(dataset_error_types) if dataset_error_types else 'unknown'}"
             )
 
         commit_analysis = {

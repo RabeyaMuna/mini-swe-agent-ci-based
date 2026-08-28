@@ -172,6 +172,15 @@ def _read_repo_file(
     if not repo_path or not rel_path:
         return None
 
+    # Normalize path - handle ./ and / prefixes
+    rel_path = str(rel_path).strip()
+    if rel_path.startswith("./"):
+        rel_path = rel_path[2:]
+    rel_path = rel_path.lstrip("/")
+
+    if not rel_path:
+        return None
+
     root = Path(repo_path).resolve()
     path = (root / rel_path).resolve()
     try:
@@ -201,7 +210,7 @@ def _read_repo_file_at_commit(
 
     Args:
         repo_path: Path to git repository
-        rel_path: Relative path to file within repo
+        rel_path: Relative path to file within repo (handles ./, ../, / prefixes)
         sha: Git commit SHA (if None, reads from working tree)
         max_chars: Maximum characters to read
 
@@ -211,8 +220,21 @@ def _read_repo_file_at_commit(
     if not repo_path or not rel_path:
         return None
 
-    # Normalize path (remove leading /)
-    rel_path = str(rel_path).lstrip("/")
+    # Normalize path - handle all common prefixes
+    # Input examples: "./.github/workflows/test.yml", ".github/workflows/test.yml",
+    #                 "/.github/workflows/test.yml", "./scripts/validate.sh"
+    rel_path = str(rel_path).strip()
+
+    # Remove leading ./ (common in workflow uses: clauses)
+    if rel_path.startswith("./"):
+        rel_path = rel_path[2:]
+
+    # Remove leading / (absolute-style but still relative to repo)
+    rel_path = rel_path.lstrip("/")
+
+    # Ensure path is not empty after normalization
+    if not rel_path:
+        return None
 
     # If no SHA specified, use current working tree
     if not sha:
@@ -232,14 +254,20 @@ def _read_repo_file_at_commit(
         )
         content = result.stdout[:max_chars]
         return content
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
         # File doesn't exist at that commit or git command failed
+        # Log details for debugging
+        stderr = e.stderr if hasattr(e, 'stderr') else ''
+        if 'does not exist' in str(stderr).lower() or 'Path not in' in str(stderr):
+            LOGGER.debug(f"File not found: {rel_path} at {sha[:8]}")
+        else:
+            LOGGER.warning(f"Git show failed for {rel_path} at {sha[:8]}: {stderr}")
         return None
     except subprocess.TimeoutExpired:
-        LOGGER.warning(f"Timeout reading {rel_path} at {sha}")
+        LOGGER.warning(f"Timeout reading {rel_path} at {sha[:8]}")
         return None
     except Exception as e:
-        LOGGER.warning(f"Failed to read {rel_path} at {sha}: {e}")
+        LOGGER.warning(f"Failed to read {rel_path} at {sha[:8] if sha else 'working-tree'}: {e}")
         return None
 
 
@@ -390,28 +418,35 @@ def build_dependent_file_prompt(workflow_path: str, workflow_content: str) -> st
 Your task is to identify ALL repo files that are required to understand the workflow's
 actual validation commands.
 
-Include a file when the workflow references or depends on it. Scan for:
+CRITICAL: Scan for these patterns and ALWAYS include matching files:
 
-1. **Config files** that define validation tools/hooks:
+1. **Reusable workflows** (HIGHEST PRIORITY - ALWAYS include):
+   - Any "uses:" line with a local path → Include that file
+   - Pattern: "uses: ./.github/workflows/quality.yml" → Include ".github/workflows/quality.yml"
+   - Pattern: "uses: ./.github/workflows/test.yml" → Include ".github/workflows/test.yml"
+   - Reusable workflows contain the ACTUAL validation commands
+
+2. **Local composite actions**:
+   - Pattern: "uses: ./.github/actions/*/action.yml" → Include that action.yml
+
+3. **Config files** that define validation tools/hooks:
    - ".pre-commit-config.yaml" (pre-commit hooks)
    - "pyproject.toml" (tool configurations)
    - "tox.ini", "setup.cfg", ".flake8", etc.
 
-2. **Reusable workflows and actions**:
-   - ".github/workflows/*.yml" (reusable workflows)
-   - ".github/actions/*/action.yml" (local composite actions)
-
-3. **Scripts referenced in run: commands**:
+4. **Scripts referenced in run: commands**:
    - Shell scripts: "./scripts/validate.sh", "./bin/check.sh"
    - Python scripts: "python scripts/lint.py"
-   - Any custom executable referenced with explicit path
    - Look for: "run: ./", "run: scripts/", "run: bin/", "run: python "
 
-4. **Validation config files explicitly referenced**:
+5. **Validation config files explicitly referenced**:
    - Files passed as arguments: "--config myconfig.yml"
    - Files in working-directory paths
 
-IMPORTANT: Include the FULL PATH as it appears in the workflow (e.g., "scripts/validate.sh" not just "validate.sh")
+RULE: If you see "uses: ./path/to/file.yml", you MUST include "path/to/file.yml" in dependent_files.
+The actual validation commands are inside those reusable workflows, not in the main workflow.
+
+IMPORTANT: Include the FULL PATH as it appears in the workflow (e.g., ".github/workflows/quality.yml")
 
 WORKFLOW PATH
 {workflow_path}
@@ -425,14 +460,18 @@ Return this JSON object:
 {{
   "dependent_files": [
     {{
+      "path": ".github/workflows/quality.yml",
+      "reason": "reusable workflow called with uses:, contains actual validation commands"
+    }},
+    {{
       "path": ".pre-commit-config.yaml",
       "reason": "workflow runs pre-commit, hooks define the validations"
     }}
   ]
 }}
 
-If no dependent files are needed, return:
-{{"dependent_files": []}}
+IMPORTANT: If the workflow has ANY "uses:" references to local files, you MUST include them.
+Only return empty array if there are truly NO dependent files (rare).
 """
 
 
@@ -515,12 +554,40 @@ def analyze_workflow_from_benchmark(
     if not workflow_content.strip():
         raise WorkflowValidationExtractionError("workflow_content is required.")
 
+    # STEP 1: Identify dependent files (reusable workflows, config files, scripts)
+    print("       [1/2] Identifying dependent files...")
+    dependent_prompt = build_dependent_file_prompt(workflow_path, workflow_content)
+    dependent_raw = _call_llm(llm, dependent_prompt)
+    dependent_files = _normalize_dependent_files(_load_json(dependent_raw, {}))
+    print(f"       Found {len(dependent_files)} dependent files: {[d['path'] for d in dependent_files]}")
+
+    # STEP 2: Load dependent file contents from repo
+    dependent_file_contents = []
+    for dep in dependent_files:
+        dep_path = dep["path"]
+        # Path will be normalized inside _read_repo_file_at_commit:
+        # - Removes leading ./ (e.g., "./.github/workflows/test.yml" → ".github/workflows/test.yml")
+        # - Removes leading / (e.g., "/.github/workflows/test.yml" → ".github/workflows/test.yml")
+        content = _read_repo_file_at_commit(repo_path, dep_path, sha_fail)
+        if content:
+            dependent_file_contents.append({
+                "path": dep_path,
+                "reason": dep["reason"],
+                "content": content[:40_000]  # Limit to 40K chars per file
+            })
+            print(f"       Loaded {dep_path} ({len(content)} chars)")
+        else:
+            print(f"       WARNING: Could not load '{dep_path}' from repo at {sha_fail[:8] if sha_fail else 'working-tree'}")
+            print(f"                Reason: {dep['reason']}")
+
+    # STEP 3: Extract validation sequence with dependent files
+    print("       [2/2] Extracting validation sequence...")
     sequence_raw = _call_llm(
         llm,
         build_validation_sequence_prompt(
             workflow_path,
             workflow_content,
-            [],
+            dependent_file_contents,
         ),
     )
 
@@ -541,6 +608,6 @@ def analyze_workflow_from_benchmark(
         "sha_fail": sha_fail,
         "workflow_path": workflow_path,
         "validation_sequence": validation_sequence,
-        "dependent_files": [],
+        "dependent_files": [{"path": d["path"], "reason": d["reason"]} for d in dependent_file_contents],
     }
     return result

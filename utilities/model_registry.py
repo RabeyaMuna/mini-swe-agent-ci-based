@@ -17,6 +17,8 @@ LEGACY_GLM_MODEL = "glm-4-plus"
 # All aliases map to gpt-5.4-mini (latest version)
 CANONICAL_GPT5_MINI_MODEL = "gpt-5.4-mini"
 CANONICAL_GPT54_MODEL = "gpt-5.4-mini"
+# DeepSeek-V4-Flash via OpenRouter
+CANONICAL_DEEPSEEK_V4_FLASH_MODEL = "openrouter/deepseek/deepseek-v4-flash"
 
 MINIMAX_ALIASES = {
     "minimax",
@@ -56,6 +58,10 @@ GPT54_ALIASES = {
     "gpt54",
 }
 
+DEEPSEEK_V4_FLASH_ALIASES = {
+    "deepseek-v4-flash",
+}
+
 
 _ALIASES = {
     **{alias: CANONICAL_MINIMAX_MODEL for alias in MINIMAX_ALIASES},
@@ -70,6 +76,10 @@ _ALIASES = {
     # GPT-5 models
     **{alias: CANONICAL_GPT5_MINI_MODEL for alias in GPT5_MINI_ALIASES},
     **{alias: CANONICAL_GPT54_MODEL for alias in GPT54_ALIASES},
+    # DeepSeek-V4-Flash models
+    **{alias: CANONICAL_DEEPSEEK_V4_FLASH_MODEL for alias in DEEPSEEK_V4_FLASH_ALIASES},
+    "deepseek/deepseek-v4-flash": CANONICAL_DEEPSEEK_V4_FLASH_MODEL,
+    "openrouter/deepseek/deepseek-v4-flash": CANONICAL_DEEPSEEK_V4_FLASH_MODEL,
 }
 
 
@@ -101,6 +111,9 @@ def resolve_model_alias(model_name: str | None) -> str | None:
     if lowered.startswith(("z-ai/", "zai/")):
         return raw
 
+    if lowered.startswith("deepseek/"):
+        return f"openrouter/{raw}"
+
     return raw
 
 
@@ -115,6 +128,8 @@ def model_output_name(model_name: str | None) -> str:
         return "glm-5.2"
     if resolved == LEGACY_GLM_MODEL:
         return LEGACY_GLM_MODEL
+    if resolved == CANONICAL_DEEPSEEK_V4_FLASH_MODEL:
+        return "deepseek-v4-flash"
 
     # For GPT-5 models: preserve the original input to distinguish gpt-5.4-mini vs gpt-5-mini
     # Even though they resolve to the same underlying model, use different output names

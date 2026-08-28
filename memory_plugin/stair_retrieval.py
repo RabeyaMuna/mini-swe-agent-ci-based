@@ -184,7 +184,8 @@ class STAIRRetrieval:
     def retrieve(
         self,
         problems: list[dict],
-        top_k: int = 5
+        top_k: int = 5,
+        query: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """
         STAGE 1-9: Memory retrieval and problem enrichment.
@@ -192,6 +193,8 @@ class STAIRRetrieval:
         Args:
             problems: Decomposed CI problems (from decompose_ci_failure)
             top_k: Number of similar memory entries to retrieve per level
+            query: Optional metadata dict with repo, workflow_path, workflow_name
+                   If not provided, will extract from first problem's query
 
         Returns:
             Dict with enriched problems and memory data
@@ -204,19 +207,20 @@ class STAIRRetrieval:
             print("[Memory] WARNING: baseline_mode in retrieve() - should be handled by memory_plugin")
             return {"problems": problems}
 
-        # Extract query from first problem (all problems from same CI failure)
-        query = {}
-        if problems and len(problems) > 0:
-            first_problem = problems[0]
-            # Extract repo/workflow from problem's query
-            problem_query = first_problem.get("query", {})
-            if problem_query:
-                l1_query = problem_query.get("l1", {})
-                query = {
-                    "repo": l1_query.get("repo", ""),
-                    "workflow_name": l1_query.get("workflow_name", ""),
-                    "workflow_path": l1_query.get("workflow_path", ""),
-                }
+        # Use provided query metadata OR extract from first problem
+        if query is None:
+            query = {}
+            if problems and len(problems) > 0:
+                first_problem = problems[0]
+                # Extract repo/workflow from problem's query
+                problem_query = first_problem.get("query", {})
+                if problem_query:
+                    l1_query = problem_query.get("l1", {})
+                    query = {
+                        "repo": l1_query.get("repo", ""),
+                        "workflow_name": l1_query.get("workflow_name", ""),
+                        "workflow_path": l1_query.get("workflow_path", ""),
+                    }
 
         # Use passed problems as CI problems
         ci_problems = problems
@@ -323,7 +327,7 @@ class STAIRRetrieval:
         # ============================================================
         # STAGE 5: Detect common patterns
         # ============================================================
-        print("[Memory] STAGE 5: Detecting common patterns...")
+        print("[Memory] STAGE 4: Detecting common patterns...")
         common_problems = self._stage_5_detect_common_patterns(query)
         print(f"[Memory] STAGE 5: Found {len(common_problems)} common patterns")
 
@@ -1090,6 +1094,10 @@ Result: 1 → 2 → 3
             l1_query_obj = structured_queries.get("l1", {})
             l1_query_str = self._build_search_string_from_structured_query(l1_query_obj, "l1")
 
+            # Build filters: use workflow_path only (not workflow_name from YAML)
+            # If workflow_path is missing, skip workflow filter to be more lenient
+            workflow_filter = l1_query_obj.get("workflow_path") or query.get("workflow_path")
+
             l1_results = self._retrieve_topk(
                 l1_query_str,
                 self.l1_memory,
@@ -1097,8 +1105,7 @@ Result: 1 → 2 → 3
                 top_k,
                 filters={
                     "repo": l1_query_obj.get("repo") or query.get("repo"),
-                    "workflow": l1_query_obj.get("workflow_path") or query.get("workflow_path")
-                    or l1_query_obj.get("workflow_name") or query.get("workflow_name"),
+                    "workflow": workflow_filter or "",  # Empty string = skip filter
                 },
             )
         else:
@@ -1161,7 +1168,14 @@ Result: 1 → 2 → 3
         # Add level-specific fields
         if level == "l1":
             parts.append(query_obj.get("repo", ""))
-            parts.append(query_obj.get("workflow_name", ""))
+            # Use workflow_path filename for semantic matching (more reliable than YAML name)
+            workflow_path = query_obj.get("workflow_path", "")
+            if workflow_path:
+                from pathlib import Path
+                parts.append(Path(workflow_path).name)  # e.g., "run-tests.yml"
+            else:
+                # Fallback to workflow_name if path not available
+                parts.append(query_obj.get("workflow_name", ""))
         elif level == "l2":
             parts.append(query_obj.get("repo", ""))
 
@@ -1193,6 +1207,9 @@ Result: 1 → 2 → 3
             if self.l1_embeddings is None:
                 self.l1_embeddings = self._compute_embeddings(self.l1_memory, "l1")
             l1_query = self._build_query(query, level="l1")
+            # Use workflow_path only (not workflow_name from YAML)
+            # If workflow_path is missing, skip workflow filter
+            workflow_filter = query.get("workflow_path") or ""
             l1_results = self._retrieve_topk(
                 l1_query,
                 self.l1_memory,
@@ -1200,8 +1217,7 @@ Result: 1 → 2 → 3
                 top_k,
                 filters={
                     "repo": query.get("repo"),
-                    "workflow": query.get("workflow_path")
-                    or query.get("workflow_name"),
+                    "workflow": workflow_filter,  # Empty string = skip filter
                 },
             )
         else:
@@ -1786,9 +1802,10 @@ If no consecutive problems found, return empty array: {{"consecutive_problems": 
         total_l2_issues = 0
 
         repo = query.get("repo")
-        workflow = query.get("workflow_name") or query.get("workflow_path")
+        # Use workflow_path (reliable) instead of workflow_name (YAML name)
+        workflow = query.get("workflow_path") or query.get("workflow_name") or ""
         print(
-            f"[Memory] Stage 4: Searching for common patterns in repo={repo}, workflow={workflow}"
+            f"[Memory] Stage 4: Searching for common patterns in repo={repo}, workflow_path={workflow}"
         )
 
         if "l1" in self.enabled_levels:
@@ -1797,7 +1814,7 @@ If no consecutive problems found, return empty array: {{"consecutive_problems": 
                 for item in self.l1_memory
                 if self._same_repo(item.get("repo"), repo)
                 and self._same_workflow(
-                    item.get("workflow_name") or item.get("workflow"), workflow
+                    item.get("workflow_path") or item.get("workflow_name"), workflow
                 )
             ]
             total_l1_issues = len(self._unique_issue_keys(l1_scope))
@@ -1818,7 +1835,7 @@ If no consecutive problems found, return empty array: {{"consecutive_problems": 
                 for item in self.l2_memory
                 if self._same_repo(item.get("repo"), repo)
                 and self._same_workflow(
-                    item.get("workflow_name") or item.get("workflow"), workflow
+                    item.get("workflow_path") or item.get("workflow_name"), workflow
                 )
             ]
             total_l2_issues = len(self._unique_issue_keys(l2_scope))
@@ -2508,7 +2525,7 @@ Return JSON:
         candidates = []
         issue_id = str(item.get("issue_id") or item.get("source_issue_id") or "")
         repo = item.get("repo") or item.get("source_repo") or ""
-        workflow = item.get("workflow_name") or item.get("workflow") or ""
+        workflow = item.get("workflow_path") or item.get("workflow_name") or ""
 
         if level == "L1":
             # Get issue-level signals from CI context
@@ -2603,7 +2620,7 @@ Return JSON:
             "source_kind": source_kind,
             "issue_id": str(item.get("issue_id") or item.get("source_issue_id") or ""),
             "repo": item.get("repo") or item.get("source_repo") or "",
-            "workflow": item.get("workflow_name") or item.get("workflow") or "",
+            "workflow": item.get("workflow_path") or item.get("workflow_name") or "",
             "failure_type": problem.get("failure_type")
             or item.get("failure_type")
             or "",
@@ -3530,7 +3547,7 @@ Return JSON with the MOST REPETITIVE problem/repair from each cluster:
     def _issue_key(self, item: dict) -> tuple[str, str, str]:
         return (
             str(item.get("repo") or item.get("source_repo") or ""),
-            str(item.get("workflow_name") or item.get("workflow") or ""),
+            str(item.get("workflow_path") or item.get("workflow_name") or ""),
             str(item.get("issue_id") or item.get("source_issue_id") or ""),
         )
 
@@ -4221,7 +4238,7 @@ Return JSON:
                         break
                     continue
                 if key == "workflow":
-                    item_workflow = item.get("workflow_name") or item.get("workflow")
+                    item_workflow = item.get("workflow_path") or item.get("workflow_name")
                     if not self._same_workflow(item_workflow, value):
                         passes = False
                         break

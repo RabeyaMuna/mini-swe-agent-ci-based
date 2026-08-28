@@ -7,6 +7,7 @@ This project runs two agents over a CI‑repair benchmark, with or without memor
 Common agent models:
 - **gpt-5.4-mini** (routed directly to OpenAI)
 - `minimax2.5` (routed through OpenRouter; canonical Codex slug `minimax/minimax-m2.5`)
+- **deepseek-v4-flash** (routed through OpenRouter; 1M context, 384K output - most capable model)
 
 Ablations: BASELINE, L1, L1+L2, L1+L2+L3
 Directions: backward (data/back_trs) or forward (data/fwr_trs)
@@ -308,6 +309,15 @@ Creates `data/memory_set.jsonl` and `data/eval_set.jsonl` (plus ID lists).
 
 **Step 2: Backward decomposition + memory build (automatic)**
 ```bash
+# Using DeepSeek-V4-Flash (recommended for large-scale processing)
+python3 scripts/decompose_backward.py \
+  --batch \
+  --use-huggingface \
+  --dataset data/memory_set.jsonl \
+  --model deepseek-v4-flash \
+  --output-dir data/back_trs
+
+# Or using MiniMax M2.5 (cost-effective)
 python3 scripts/decompose_backward.py \
   --batch \
   --use-huggingface \
@@ -335,11 +345,65 @@ python3 scripts/decompose_commits.py \
 ```
 Similarly, this automatically builds forward memory and saves to **`data/fwr_trs/`**.
 
+**Step 4: Bidirectional decomposition + memory build (recommended for comprehensive analysis)**
+```bash
+# Using DeepSeek-V4-Flash (recommended - 1M context handles largest datasets)
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --dataset data/memory_set.jsonl \
+  --model deepseek-v4-flash \
+  --output-dir data/bidirect_trs
+
+# Or using MiniMax M2.5
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --dataset data/memory_set.jsonl \
+  --model minimax2.5 \
+  --output-dir data/bidirect_trs
+```
+
+This bidirectional approach combines both forward (commit-based) and backward (CI failure-based) traces to reconcile both views, providing the most comprehensive decomposition. It automatically:
+- Reconciles forward and backward decompositions
+- Builds L1/L2/L3 memory files from the unified view
+- Saves to **`data/bidirect_trs/`**:
+  - `decomposed_issues.json` (unified decomposed problems)
+  - `failure_memory.json` (L1 - failure sequences)
+  - `repo_memory.json` (L2 - repair strategies)
+  - `cross_memory.json` (L3 - universal patterns)
+
+**Additional options:**
+```bash
+# Process specific issues only
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --model minimax2.5 \
+  --issue-ids "43,111,121" \
+  --output-dir data/bidirect_trs
+
+# Limit number of issues to process
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --model minimax2.5 \
+  --limit 10 \
+  --output-dir data/bidirect_trs
+
+# Single issue mode
+python3 scripts/decompose_bidirectional.py \
+  --issue-ids "43" \
+  --model minimax2.5 \
+  --output-dir data/bidirect_trs
+```
+
 **Note:** 
 - You do NOT need to run `build_memory_l1_l2_l3.py` separately
 - Decomposition scripts handle everything in one command
 - `data/back_trs/` = backward traces (CI failure → problem)
 - `data/fwr_trs/` = forward traces (commit → problem)
+- `data/bidirect_trs/` = bidirectional traces (forward + backward reconciled)
 
 ### Running Decomposition on Ubuntu Server
 
@@ -391,9 +455,61 @@ tail -f decompose.log
 ```
 
 **Supported models for decomposition:**
+- `deepseek-v4-flash` (1M context, 384K output - best for large-scale analysis)
 - `gpt-5.4-mini` (recommended - OpenAI GPT-5.4 latest)
 - `minimax2.5` (cost-effective alternative)
 - `glm5.2` (requires GLM_API_KEY in .env)
+
+### Running Bidirectional Decomposition on Ubuntu Server
+
+**For comprehensive forward + backward analysis:**
+
+```bash
+# SSH into server
+ssh ubuntu@your-server-ip
+cd /home/ubuntu/Documents/mini-swe-agent-ci-based
+source .venv/bin/activate
+
+# Run bidirectional decomposition in background using tmux
+tmux new -s bidirect
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --dataset data/memory_set.jsonl \
+  --model gpt-5.4-mini \
+  --output-dir data/bidirect_trs
+# Detach: Ctrl+B then D
+
+# Or using nohup with specific issue limit
+nohup python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --dataset data/memory_set.jsonl \
+  --model minimax2.5 \
+  --limit 50 \
+  --output-dir data/bidirect_trs > decompose_bidirect.log 2>&1 &
+
+# Monitor progress
+tail -f decompose_bidirect.log
+
+# Process specific issues
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --model gpt-5.4-mini \
+  --issue-ids "43,111,121,416" \
+  --output-dir data/bidirect_trs
+```
+
+**Memory Build Order:**
+1. **Backward decomposition** (`data/back_trs/`) - CI failure → problem
+2. **Forward decomposition** (`data/fwr_trs/`) - Commit → problem  
+3. **Bidirectional decomposition** (`data/bidirect_trs/`) - Forward + Backward reconciled (most comprehensive)
+
+Choose based on your needs:
+- **Quick setup**: Use backward only
+- **Comprehensive**: Use bidirectional (combines both views)
+- **Experimental**: Compare all three approaches
 
 ## 2) Run Mini‑SWE‑Agent (evaluation runner)
 
@@ -640,7 +756,72 @@ but are not treated as completed by new direction-aware runs.
 
 See codex/docs/reademe.md for how MiniMax M2.5 is wired via OpenRouter (OpenAI‑compatible) into Codex.
 
-## 5) Troubleshooting
+## 5) Bidirectional Decomposition – Quick Commands
+
+Run bidirectional decomposition to combine forward (commit-based) and backward (CI failure-based) traces for the most comprehensive analysis.
+
+#### All issues from memory set
+```bash
+# DeepSeek-V4-Flash (best for large datasets - 1M context)
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --dataset data/memory_set.jsonl \
+  --model deepseek-v4-flash \
+  --output-dir data/bidirect_trs
+
+# GPT-5.4-mini (recommended)
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --dataset data/memory_set.jsonl \
+  --model gpt-5.4-mini \
+  --output-dir data/bidirect_trs
+
+# MiniMax M2.5 (cost-effective)
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --dataset data/memory_set.jsonl \
+  --model minimax2.5 \
+  --output-dir data/bidirect_trs
+```
+
+#### Specific issues only
+```bash
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --model gpt-5.4-mini \
+  --issue-ids “43,111,121,416” \
+  --output-dir data/bidirect_trs
+```
+
+#### Limited batch processing
+```bash
+python3 scripts/decompose_bidirectional.py \
+  --batch \
+  --use-huggingface \
+  --model minimax2.5 \
+  --limit 50 \
+  --output-dir data/bidirect_trs
+```
+
+#### Single issue mode
+```bash
+python3 scripts/decompose_bidirectional.py \
+  --issue-ids “43” \
+  --model gpt-5.4-mini \
+  --output-dir data/bidirect_trs
+```
+
+**Output files** (saved to `data/bidirect_trs/`):
+- `decomposed_issues.json` - Unified decomposed problems
+- `failure_memory.json` - L1 memory (failure sequences)
+- `repo_memory.json` - L2 memory (repair strategies)
+- `cross_memory.json` - L3 memory (universal patterns)
+
+## 6) Troubleshooting
 
 - GPT‑5 “max_tokens not supported” → Fixed: preflight uses Responses (max_output_tokens / max_completion_tokens) or Chat as needed.
 - “Model metadata … fallback metadata” → Local client warning only; calls still hit minimax/minimax‑m2.5.
@@ -675,6 +856,16 @@ bash ./run_miniswe_direct.sh "" BASELINE backward minimax2.5 "" data/eval_set.js
 bash ./run_miniswe_direct.sh "" L1+L2+L3 backward minimax2.5 "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  minimax2.5 "" data/eval_set.jsonl 4
 ```
+
+#### DeepSeek-V4-Flash (1M Context, Best for Large-scale)
+```bash
+# Baseline (results saved to results/miniswe-agent/baseline_deepseek-v4-flash/)
+bash ./run_miniswe_direct.sh "" BASELINE backward deepseek-v4-flash "" data/eval_set.jsonl 4
+
+# Memory modes (results saved to results/miniswe-agent/<direction>/l1_l2_l3_deepseek-v4-flash/)
+bash ./run_miniswe_direct.sh "" L1+L2+L3 backward deepseek-v4-flash "" data/eval_set.jsonl 4
+bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  deepseek-v4-flash "" data/eval_set.jsonl 4
+```
 ### Codex – Quick Commands
 
 The launcher automatically loads `.env` and creates the correct provider configuration.
@@ -703,4 +894,19 @@ bash ./run_codex_direct.sh "" baseline backward minimax/minimax-m2.5 "" data/eva
 bash ./run_codex_direct.sh "" baseline forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
+```
+
+#### DeepSeek-V4-Flash (via OpenRouter - 1M context, 384K output)
+```bash
+# Baseline
+bash ./run_codex_direct.sh "" baseline backward deepseek-v4-flash "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline forward  deepseek-v4-flash "" data/eval_set.jsonl 4
+
+# Full memory (L1+L2+L3) - leverages massive 1M context window
+bash ./run_codex_direct.sh "" L1+L2+L3 backward deepseek-v4-flash "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 forward  deepseek-v4-flash "" data/eval_set.jsonl 4
+
+# Specific repositories with full memory
+bash ./run_codex_direct.sh "" L1+L2+L3 backward deepseek-v4-flash \
+  "agno,axolotl,camel,crewai,django-import-export" data/eval_set.jsonl 4
 ```

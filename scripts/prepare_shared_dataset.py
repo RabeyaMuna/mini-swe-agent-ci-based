@@ -87,8 +87,8 @@ def _build_record(split_row: Dict, pq_row: Dict, role: str) -> Dict:
     else:
         logs_raw = _jsonable(logs_raw)
 
-    # workflow YAML
-    workflow = str(pq_row.get("workflow") or "")
+    # workflow YAML content
+    workflow_yaml = str(pq_row.get("workflow") or "")
 
     # ground-truth diff (only for memory set; empty string for eval)
     diff = str(pq_row.get("diff") or "") if role == "memory" else ""
@@ -110,7 +110,7 @@ def _build_record(split_row: Dict, pq_row: Dict, role: str) -> Dict:
         "workflow_path": str(
             pq_row.get("workflow_path") or split_row.get("workflow_path") or ""
         ),
-        "workflow": workflow,
+        "workflow": workflow_yaml,  # YAML content for context
         # ── Logs ──────────────────────────────────────────────────────────
         "logs": logs_raw,
         # ── Ground truth diff (memory only) ───────────────────────────────

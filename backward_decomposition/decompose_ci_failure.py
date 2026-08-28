@@ -2186,20 +2186,27 @@ def _split_chunk_for_capacity(
 
     num_splits = _split_count_for_atomic_chunk(prompt_size, len(changes), model_name)
 
+    # CRITICAL: Check size first! If chunk is too large, skip dependency-aware chunking
+    # and go straight to normal even-split to avoid repeating huge caller files in every chunk
+    model_limits = _get_model_aware_limits(model_name)
+    target_prompt_size = model_limits["diff_chunk_chars"] // 2  # 50% threshold
+    is_too_large = prompt_size > target_prompt_size
+
     dependency_contexts = chunk.get("dependency_contexts") or []
-    if dependency_contexts:
+    if dependency_contexts and not is_too_large:
+        # Only try dependency-aware split for manageable-sized chunks
         max_changes_per_chunk = max(1, len(changes) // num_splits)
         sub_chunks = _chunk_by_dependencies(
             chunk, dependency_contexts, max_changes_per_chunk
         )
         if len(sub_chunks) > 1:
             return sub_chunks
-        if sub_chunks and sub_chunks[0].get("dependency_contexts"):
-            # No safe dependency-preserving split exists. Requeue once as a
-            # terminal chunk so the caller sends it intact instead of falling
-            # through to type/even splitting.
-            sub_chunks[0]["_dependency_preserved_terminal"] = True
-            return sub_chunks
+        # If dependency split created only 1 chunk, fall through to even-split
+
+    if is_too_large:
+        # For large chunks, skip type-based split and go straight to even-split
+        print(f"      Chunk too large ({prompt_size:,} > {target_prompt_size:,}), using even-split for {len(changes)} changes")
+        return _split_change_chunk_evenly(chunk, num_splits)
 
     change_type_groups = _group_changes_by_type(changes)
     non_empty_types = [
@@ -2308,15 +2315,23 @@ def _build_atomic_problems(
             current, val_info, ci_context, failed_validation_order
         )
         fits, reason = _fits_model_capacity(prompt, current, model_limits)
-        can_split = (
-            len(changes) > 1
-            and depth < MAX_SPLIT_DEPTH
-            and not current.get("_dependency_preserved_terminal")
-        )
+
+        # CRITICAL: For huge chunks that don't fit, we MUST split even if terminal
+        # Otherwise we lose ground truth data. Preserve dependencies when possible,
+        # but not at the cost of being unable to process the data at all.
+        is_terminal = current.get("_dependency_preserved_terminal")
+        can_split_normal = len(changes) > 1 and depth < MAX_SPLIT_DEPTH and not is_terminal
+        can_force_split = len(changes) > 1 and depth < MAX_SPLIT_DEPTH and not fits
 
         if not fits:
-            if can_split:
-                print(f"      FAIL {reason} - splitting ({len(changes)} changes)")
+            if can_split_normal or can_force_split:
+                if is_terminal and can_force_split:
+                    print(f"      FAIL {reason} - FORCE splitting terminal chunk to preserve data ({len(changes)} changes)")
+                    # Clear terminal flag so it can be split
+                    current["_dependency_preserved_terminal"] = False
+                else:
+                    print(f"      FAIL {reason} - splitting ({len(changes)} changes)")
+
                 _split_chunk_and_requeue(
                     current, len(prompt), depth, model_limits, model_name, queue
                 )
@@ -3686,6 +3701,21 @@ def generate_l1_l2_l3_pipeline(
     num_patterns = len(l3_memory.get("universal_patterns", []))
     print(f"  L3 universal patterns: {num_patterns}")
 
+    # Build enhanced decomposed result with dependencies for decomposed_issues.json
+    enhanced_decomposed_result = {
+        "original_issue_id": str(issue_id),
+        "issue_id": str(issue_id),
+        "repo": decomposed_result.get("repo", "unknown"),
+        "sha_fail": decomposed_result.get("sha_fail", ""),
+        "workflow_path": workflow_path,
+        "problems": deduplicated,  # Problems with enabled fields populated
+        "dependencies": dep_result.get("dependencies", []),  # Full dependency list
+        "repair_sequence": dep_result.get("repair_sequence", []),  # Repair order
+        "total_problems": len(deduplicated),
+        "benchmark_ci_context": decomposed_result.get("benchmark_ci_context"),
+        "diff_analysis_context": decomposed_result.get("diff_analysis_context"),
+    }
+
     # Build final result (NEW format)
     result = {
         "issue_id": str(issue_id),
@@ -3694,6 +3724,7 @@ def generate_l1_l2_l3_pipeline(
         "l1_memory": l1_memory,  # NEW: Complete L1 structure
         "l2_memory": l2_memory,  # NEW: Repair strategies
         "l3_memory": l3_memory,  # NEW: Universal patterns
+        "enhanced_decomposed_result": enhanced_decomposed_result,  # NEW: For decomposed_issues.json
         "metadata": {
             "original_problems_count": len(decomposed_result.get("problems", [])),
             "deduplicated_count": len(deduplicated),
@@ -3860,7 +3891,17 @@ def _populate_dependency_fields(problems: list[dict], dep_result: dict) -> list[
 def _fallback_dependencies_and_sequence(problems: list[dict]) -> dict:
     """Fallback when LLM fails - use validation_order."""
     # No dependencies, just order by validation_order
-    sorted_problems = sorted(problems, key=lambda p: p.get("validation_order", 999))
+    def _safe_validation_order(p: dict) -> int:
+        """Get validation_order as int, handling None/non-numeric values."""
+        val_order = p.get("validation_order", 999)
+        if val_order is None:
+            return 999
+        try:
+            return int(val_order)
+        except (TypeError, ValueError):
+            return 999
+
+    sorted_problems = sorted(problems, key=_safe_validation_order)
     repair_sequence = [p.get("problem_id", i) for i, p in enumerate(sorted_problems, 1)]
 
     return {
@@ -4262,8 +4303,13 @@ def _topological_sort_with_validation(
         if in_degree[idx] == 0:
             queue.append(idx)
 
+    # Helper to safely get validation_order (handles None values)
+    def _safe_order(idx):
+        val = problems[idx - 1].get("validation_order")
+        return 999 if val is None else val
+
     # Sort queue by validation_order
-    queue.sort(key=lambda idx: problems[idx - 1].get("validation_order", 999))
+    queue.sort(key=_safe_order)
 
     while queue:
         # Take node with smallest validation_order
@@ -4277,12 +4323,12 @@ def _topological_sort_with_validation(
                 queue.append(neighbor)
 
         # Keep queue sorted by validation_order
-        queue.sort(key=lambda idx: problems[idx - 1].get("validation_order", 999))
+        queue.sort(key=_safe_order)
 
     # If there are remaining nodes (cycle detected), add them sorted by validation_order
     if len(result) < len(indices):
         remaining = [idx for idx in indices if idx not in result]
-        remaining.sort(key=lambda idx: problems[idx - 1].get("validation_order", 999))
+        remaining.sort(key=_safe_order)
         result.extend(remaining)
 
     return result
@@ -4321,6 +4367,13 @@ def _append_to_memory_files(result: dict, output_dir: str = "data/back_trs"):
             l3_patterns.append(pattern_with_meta)
 
     # APPEND to each file (using atomic writes to prevent corruption)
+    # CRITICAL: Skip empty decompositions (0 problems) - don't save to memory files
+    num_problems = len(l1_memory.get("problems", [])) if l1_memory else 0
+
+    if num_problems == 0:
+        print(f"  SKIP Issue {issue_id} has 0 problems - not saving to memory files")
+        return  # Don't save any memory (L1/L2/L3) for empty decompositions
+
     if l1_memory:
         failure_memory_path = back_trs_dir / "failure_memory.json"
         existing = []
@@ -4343,7 +4396,6 @@ def _append_to_memory_files(result: dict, output_dir: str = "data/back_trs"):
                 os.unlink(temp_path)
             raise
 
-        num_problems = len(l1_memory.get("problems", []))
         print(
             f"  OK Appended issue {issue_id} with {num_problems} problems to failure_memory.json"
         )
@@ -4761,12 +4813,13 @@ def _load_existing_l2_results(
                     if "source_issue_id" in result
                 }
 
-        processed_ids = l1_ids & l2_ids & l3_ids
-        partial_ids = (l1_ids | l2_ids | l3_ids) - processed_ids
-        print(f"Loaded {len(processed_ids)} complete L1/L2/L3 results (will skip)")
+        # Skip if L1 AND L2 are present (L3 is optional - universal patterns may not exist for all issues)
+        processed_ids = l1_ids & l2_ids
+        partial_ids = (l1_ids | l2_ids) - processed_ids
+        print(f"Loaded {len(processed_ids)} complete L1/L2 results (will skip)")
         if partial_ids:
             print(
-                f"Found {len(partial_ids)} partial memory issues (will rebuild missing/replace existing)"
+                f"Found {len(partial_ids)} partial memory issues (missing L1 or L2, will rebuild)"
             )
         return existing, processed_ids
     except Exception as e:
@@ -4878,6 +4931,11 @@ def main():
     )
     parser.add_argument("--limit", type=int, help="Limit number of issues to process")
     parser.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="Recompute the selected --issue-id even if cached output or memory exists",
+    )
+    parser.add_argument(
         "--skip-memory",
         action="store_true",
         help="Skip building memory files (L1/L2/L3) - only save decomposed_issues.json. Use this when you plan to do similarity-based split later.",
@@ -4971,6 +5029,11 @@ def main():
 
     decomposed_cache = _load_decomposed_cache(decomposed_issues_path)
     results, processed_ids = _load_existing_l2_results(output_dir)
+    if args.force_recompute and args.issue_id:
+        forced_issue_id = str(args.issue_id)
+        decomposed_cache.pop(forced_issue_id, None)
+        processed_ids.discard(forced_issue_id)
+        print(f"Force recompute enabled for issue {forced_issue_id}")
 
     # AUTO-SPLIT MODE: Three-phase workflow
     if args.auto_split:
@@ -5178,20 +5241,27 @@ def main():
                 )
             # Do not add errors to decomposed_cache or successful results.
         else:
-            # Success - save to decomposed_issues.json
-            decomposed_cache[issue_id] = decomposed_result
-            _save_decomposed_cache(decomposed_cache, decomposed_issues_path)
-
-            # Run full L1/L2/L3 pipeline (unless --skip-memory)
+            # Run full L1/L2/L3 pipeline first (unless --skip-memory)
             if not args.skip_memory:
                 decomposed_copy = copy.deepcopy(decomposed_result)
                 result = generate_l1_l2_l3_pipeline(
                     decomposed_copy, llm, output_dir=args.output_dir
                 )
                 results.append(result)
+
+                # Use enhanced result with dependencies for decomposed_issues.json
+                if "enhanced_decomposed_result" in result:
+                    decomposed_cache[issue_id] = result["enhanced_decomposed_result"]
+                else:
+                    # Fallback if pipeline didn't generate enhanced result
+                    decomposed_cache[issue_id] = decomposed_result
             else:
                 # Just save decomposed result without L1/L2/L3
                 results.append(decomposed_result)
+                decomposed_cache[issue_id] = decomposed_result
+
+            # Save to decomposed_issues.json (now with dependencies!)
+            _save_decomposed_cache(decomposed_cache, decomposed_issues_path)
 
         # Incremental save after each issue - save to 3 memory files (unless --skip-memory)
         if not args.skip_memory:

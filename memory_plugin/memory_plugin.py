@@ -114,9 +114,16 @@ class MemoryPlugin:
             return {"problems": decomposed_problems}
 
         # 4. Memory mode: pass to stair_retrieval for memory work
+        # Pass metadata explicitly so retrieval doesn't have to extract from problems
+        query_metadata = {
+            "repo": issue_metadata.get("repo", ""),
+            "workflow_path": issue_metadata.get("workflow_path", ""),
+            "workflow_name": issue_metadata.get("workflow_name", ""),
+        }
         return self.retrieval.retrieve(
             problems=decomposed_problems,
-            top_k=self.top_k
+            top_k=self.top_k,
+            query=query_metadata
         )
 
     def _decompose_and_save_to_cache(
@@ -211,6 +218,7 @@ If CI log has error_types with evidence, use that evidence as failure_signals.
           "files": ["SAME as top-level files"],
           "failure_types": ["Category", "Sub-category"],
           "repo": "{repo}",
+          "workflow_path": "{workflow_path}",
           "workflow_name": "{workflow_name}",
           "failure_signals": ["signal1", "signal2"]
         }},

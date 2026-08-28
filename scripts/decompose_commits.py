@@ -74,16 +74,16 @@ def _load_json_list(path: Path) -> list:
 
 
 def _complete_memory_issue_ids(output_dir: Path) -> set[str]:
+    """Return IDs that have both L1 and L2 (L3 is optional)."""
     l1 = _load_json_list(output_dir / "failure_memory.json")
     l2 = _load_json_list(output_dir / "repo_memory.json")
-    l3 = _load_json_list(output_dir / "cross_memory.json")
+    # L3 not used for skip logic - universal patterns may not exist for all issues
 
     l1_ids = {str(item["issue_id"]) for item in l1 if item.get("issue_id")}
     l2_ids = {str(item["issue_id"]) for item in l2 if item.get("issue_id")}
-    l3_ids = {
-        str(item["source_issue_id"]) for item in l3 if item.get("source_issue_id")
-    }
-    return l1_ids & l2_ids & l3_ids
+
+    # Skip if L1 AND L2 are present (L3 is optional)
+    return l1_ids & l2_ids
 
 
 def _save_decomposed_results(results: list[dict], output_path: Path) -> None:
@@ -176,6 +176,44 @@ def build_l1_l2_l3_for_commit_decomposition(
 
     print(f"\n[Memory Building] Issue {issue_id}")
 
+    # Stage 0: Analyze dependencies using LLM (if multiple problems exist)
+    dep_result = {"dependencies": [], "repair_sequence": []}
+    if len(problems) > 1:
+        print("  [0/3] Analyzing problem dependencies with LLM...")
+        try:
+            # Import dependency analysis from backward decomposition
+            import sys
+            from pathlib import Path
+            PROJECT_ROOT = Path(__file__).resolve().parents[1]
+            sys.path.insert(0, str(PROJECT_ROOT / "backward_decomposition"))
+
+            from backward_decomposition.decompose_ci_failure import (
+                _stage2_analyze_dependencies_and_sequence,
+                _reorder_by_repair_trajectory,
+            )
+
+            # Analyze dependencies
+            dep_result = _stage2_analyze_dependencies_and_sequence(problems, llm)
+            print(f"  Dependencies found: {len(dep_result.get('dependencies', []))}")
+            print(f"  Repair sequence: {dep_result.get('repair_sequence', [])}")
+
+            # Populate dependency fields and apply repair sequence
+            problems = _reorder_by_repair_trajectory(problems, dependency_result=dep_result)
+
+        except Exception as e:
+            print(f"  WARNING: Dependency analysis failed: {e}")
+            print(f"  Continuing without dependency analysis...")
+    else:
+        print("  [0/3] Skipping dependency analysis (only 1 problem)")
+
+    # Convert dependency result to format expected by L1 build
+    dependencies = {
+        "dependency_edges": [
+            {"from": d["from"], "to": d["to"]} for d in dep_result.get("dependencies", [])
+        ],
+        "repair_order": dep_result.get("repair_sequence", [])
+    }
+
     # Build L1 memory (using unified structure - same as backward decomposition)
     print("  [1/3] Building L1 (failure sequences)...")
     l1_memory = generate_l1_from_decomposed_problems(
@@ -183,8 +221,8 @@ def build_l1_l2_l3_for_commit_decomposition(
         repo=decomposed_result.get("repo", ""),
         repo_owner=decomposed_result.get("repo_owner", ""),
         workflow_path=decomposed_result.get("workflow", ""),
-        decomposed_problems=problems,  # Use the problems we already extracted
-        dependencies=decomposed_result.get("_dependencies", {}),
+        decomposed_problems=problems,  # Use the problems we already extracted (now with enabled fields!)
+        dependencies=dependencies,  # Now has LLM-analyzed dependencies!
         ground_truth_files=decomposed_result.get("_changed_files", []),
         llm=llm,
     )
@@ -212,7 +250,14 @@ def build_l1_l2_l3_for_commit_decomposition(
         output_dir=output_dir,
     )
 
-    # Return clean decomposed result (no L1/L2/L3 embedded)
+    # Update decomposed_result with dependencies and reordered problems
+    decomposed_result["problems"] = problems  # Problems now have enabled fields
+    decomposed_result["dependencies"] = dep_result.get("dependencies", [])
+    decomposed_result["repair_sequence"] = dep_result.get("repair_sequence", [])
+    decomposed_result["issue_id"] = issue_id  # Ensure issue_id is set
+    decomposed_result["original_issue_id"] = issue_id
+
+    # Return enhanced decomposed result (with dependencies!)
     return decomposed_result
 
 
@@ -311,6 +356,11 @@ def main():
     parser.add_argument("--model", type=str, default="minimax2.5", help="LLM model")
     parser.add_argument("--limit", type=int, help="Limit number of issues")
     parser.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="Recompute the selected --issue-id even if cached output or memory exists",
+    )
+    parser.add_argument(
         "--output-dir", type=str, default="data", help="Output directory"
     )
 
@@ -379,6 +429,11 @@ def main():
         )
     processed_ids = _complete_memory_issue_ids(output_dir_path)
     processed_ids -= stale_error_ids
+    if args.force_recompute and args.issue_id:
+        forced_issue_id = str(args.issue_id)
+        decomposed_cache.pop(forced_issue_id, None)
+        processed_ids.discard(forced_issue_id)
+        print(f"Force recompute enabled for issue {forced_issue_id}")
     partial_ids = (
         {
             str(item.get("issue_id"))
@@ -393,9 +448,9 @@ def main():
         }
     ) - processed_ids
     print(f"Loaded {len(decomposed_cache)} decomposed issues (can reuse)")
-    print(f"Loaded {len(processed_ids)} complete L1/L2/L3 results (will skip)")
+    print(f"Loaded {len(processed_ids)} complete L1/L2 results (will skip)")
     if partial_ids:
-        print(f"Found {len(partial_ids)} partial memory issues (will rebuild/replace)")
+        print(f"Found {len(partial_ids)} partial memory issues (missing L1 or L2, will rebuild)")
 
     # Initialize analyzers
     analyzer = CommitAnalyzer(llm)  # Pass LLM object (now uses utilities pattern)

@@ -153,12 +153,14 @@ AUTOMATED_TOOLS = [
 
 def analyze_l1_size(l1_memory: Dict) -> Dict[str, Any]:
     """
-    Analyze L1 size and determine if sampling is needed.
+    Analyze L1 size and determine if sampling/chunking is needed.
 
     Returns:
         {
             "total_size": <estimated tokens>,
             "needs_sampling": <bool>,
+            "needs_chunking": <bool>,
+            "chunk_size": <problems per chunk>,
             "large_problems": [...]
         }
     """
@@ -166,6 +168,8 @@ def analyze_l1_size(l1_memory: Dict) -> Dict[str, Any]:
     l1_json = json.dumps(l1_memory)
     estimated_chars = len(l1_json)
     estimated_tokens = estimated_chars // 4
+
+    num_problems = len(l1_memory.get("problems", []))
 
     # Check for problems with many files
     large_problems = []
@@ -179,9 +183,29 @@ def analyze_l1_size(l1_memory: Dict) -> Dict[str, Any]:
                 }
             )
 
+    # PROACTIVE CHUNKING: Detect if prompt will exceed model limits
+    # Model context limits (conservative estimates):
+    # - MiniMax 2.5: 204K tokens
+    # - GPT-5.4-mini: 800K+ tokens
+    # - Use 150K as safe threshold (leaves room for prompt template + output)
+    MAX_SAFE_TOKENS = 150_000
+
+    # Determine if we need to chunk BEFORE sending to API
+    needs_chunking = estimated_tokens > MAX_SAFE_TOKENS and num_problems > 1
+
+    # Calculate optimal chunk size based on estimated tokens per problem
+    chunk_size = 5  # default
+    if needs_chunking:
+        tokens_per_problem = estimated_tokens // num_problems
+        # Aim for ~80K tokens per chunk (safe margin)
+        optimal_chunk_size = max(1, 80_000 // tokens_per_problem)
+        chunk_size = min(optimal_chunk_size, 10)  # cap at 10 problems per chunk
+
     return {
         "total_size": estimated_tokens,
-        "needs_sampling": estimated_tokens > 12000 or len(large_problems) > 0,
+        "needs_sampling": estimated_tokens > 30000 or len(large_problems) > 0,
+        "needs_chunking": needs_chunking,
+        "chunk_size": chunk_size,
         "large_problems": large_problems,
     }
 
@@ -267,12 +291,58 @@ def generate_l2_with_llm(l1_memory: Dict, llm: Any) -> Dict[str, Any]:
     prompt = build_l2_prompt(l1_for_prompt, AUTOMATED_TOOLS, sampling_info)
 
     # Call LLM with retry, lenient parsing, and repair-prompt fallback
-    l2_data = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True)
+    # Set sufficient max_tokens to avoid truncation (L2 responses can be verbose)
+    l2_data = invoke_llm_with_retry(
+        llm=llm,
+        prompt=prompt,
+        parse_json=True,
+        max_tokens=8000  # Increased to prevent truncation
+    )
 
     if not isinstance(l2_data, dict):
         raise ValueError("LLM failed to produce valid L2 JSON after retries")
 
     return l2_data
+
+
+def _chunk_l1_for_l2(l1_memory: Dict, chunk_size: int = 5) -> list[Dict]:
+    """Split L1 problems into chunks for fallback generation."""
+    problems = l1_memory.get("problems", [])
+    chunks = []
+
+    for i in range(0, len(problems), chunk_size):
+        chunk_l1 = dict(l1_memory)
+        chunk_l1["problems"] = problems[i:i + chunk_size]
+        chunks.append(chunk_l1)
+
+    return chunks
+
+
+def _merge_l2_results(chunk_results: list[Dict]) -> Dict[str, Any]:
+    """Merge L2 results from chunked generation."""
+    merged = {
+        "failure_identify": [],
+        "repair_strategies": []
+    }
+
+    # Merge failure_identify (deduplicate)
+    seen = set()
+    for result in chunk_results:
+        for item in result.get("failure_identify", []):
+            if item not in seen:
+                merged["failure_identify"].append(item)
+                seen.add(item)
+
+    # Merge repair_strategies (renumber steps sequentially)
+    step = 1
+    for result in chunk_results:
+        for strategy in result.get("repair_strategies", []):
+            strategy_copy = dict(strategy)
+            strategy_copy["step"] = step
+            merged["repair_strategies"].append(strategy_copy)
+            step += 1
+
+    return merged
 
 
 def build_l2_memory(
@@ -319,15 +389,80 @@ def build_l2_memory(
     if llm is None:
         raise ValueError("LLM is required for L2 generation")
 
-    # LLM analyzes L1 and generates complete L2 data.
-    # Falls back to empty strategies on failure (same pattern as L1/L3) so a
-    # bad LLM response degrades gracefully instead of crashing the pipeline.
-    try:
-        l2_data = generate_l2_with_llm(l1_memory, llm)
-    except Exception as e:
-        print(f"  WARNING: L2 generation failed: {e}")
-        print("  Falling back to empty L2 structure")
-        l2_data = {}
+    # PROACTIVE SIZE CHECK: Analyze L1 size and chunk BEFORE API call if needed
+    analysis = analyze_l1_size(l1_memory)
+    problems = l1_memory.get("problems", [])
+
+    # PROACTIVE CHUNKING: If input is too large, chunk BEFORE sending (avoids wasted retries)
+    if analysis.get("needs_chunking", False) and len(problems) > 1:
+        print(f"  PROACTIVE CHUNKING: {analysis['total_size']:,} tokens detected (> 150K safe limit)")
+        print(f"  Splitting {len(problems)} problems into chunks of {analysis['chunk_size']}...")
+
+        # Split into chunks proactively
+        chunks = _chunk_l1_for_l2(l1_memory, analysis['chunk_size'])
+        print(f"  Created {len(chunks)} chunks")
+
+        # Generate L2 for each chunk
+        chunk_results = []
+        for i, chunk_l1 in enumerate(chunks, 1):
+            try:
+                print(f"  Chunk {i}/{len(chunks)}: {len(chunk_l1['problems'])} problems...")
+                chunk_l2 = generate_l2_with_llm(chunk_l1, llm)
+                if chunk_l2 and isinstance(chunk_l2, dict):
+                    chunk_results.append(chunk_l2)
+            except Exception as chunk_err:
+                print(f"  WARNING: Chunk {i} failed: {chunk_err}")
+
+        # Merge results
+        if chunk_results:
+            l2_data = _merge_l2_results(chunk_results)
+            print(f"  SUCCESS: Merged {len(chunk_results)} chunks -> {len(l2_data.get('repair_strategies', []))} strategies")
+        else:
+            print("  WARNING: All chunks failed, falling back to empty L2")
+            l2_data = {}
+
+    else:
+        # Input size is manageable - try single API call
+        try:
+            l2_data = generate_l2_with_llm(l1_memory, llm)
+
+            # Check if result is incomplete (empty or truncated)
+            if not l2_data or (not l2_data.get("failure_identify") and not l2_data.get("repair_strategies")):
+                raise ValueError("L2 generation returned empty result")
+
+        except Exception as e:
+            # REACTIVE FALLBACK: Only if single call fails (should be rare now)
+            if len(problems) > 1:
+                print(f"  WARNING: L2 generation failed: {e}")
+                print(f"  FALLBACK: Chunking {len(problems)} problems for incremental generation...")
+
+                # Split into chunks (5 problems per chunk)
+                chunk_size = 5
+                chunks = _chunk_l1_for_l2(l1_memory, chunk_size)
+                print(f"  Created {len(chunks)} chunks")
+
+                # Generate L2 for each chunk
+                chunk_results = []
+                for i, chunk_l1 in enumerate(chunks, 1):
+                    try:
+                        print(f"  Chunk {i}/{len(chunks)}: {len(chunk_l1['problems'])} problems...")
+                        chunk_l2 = generate_l2_with_llm(chunk_l1, llm)
+                        if chunk_l2 and isinstance(chunk_l2, dict):
+                            chunk_results.append(chunk_l2)
+                    except Exception as chunk_err:
+                        print(f"  WARNING: Chunk {i} failed: {chunk_err}")
+
+                # Merge results
+                if chunk_results:
+                    l2_data = _merge_l2_results(chunk_results)
+                    print(f"  SUCCESS: Merged {len(chunk_results)} chunks -> {len(l2_data.get('repair_strategies', []))} strategies")
+                else:
+                    print("  WARNING: All chunks failed, falling back to empty L2")
+                    l2_data = {}
+            else:
+                print(f"  WARNING: L2 generation failed: {e}")
+                print("  Falling back to empty L2 structure")
+                l2_data = {}
 
     # Build final L2 structure
     l2_memory = {
