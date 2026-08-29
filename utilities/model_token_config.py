@@ -259,6 +259,33 @@ def get_model_context_limit(model_name: str | None) -> int:
     return get_model_config(model_name)["input_context_window"]
 
 
+def calculate_adaptive_output_limit(
+    model_name: str | None,
+    input_tokens: int,
+    safety_ratio: float = 0.10,
+    minimum_safety_tokens: int = 16_000,
+) -> int:
+    """Return the largest safe output ceiling for a measured prompt.
+
+    The returned value is bounded by both the model's configured safe output
+    limit and the context remaining after the complete input prompt plus a
+    safety reserve.  It is a ceiling, not a generation target.
+    """
+    if not 0 <= safety_ratio < 1:
+        raise ValueError("safety_ratio must be in the range [0, 1)")
+    if input_tokens < 0:
+        raise ValueError("input_tokens must be non-negative")
+
+    config = get_model_config(model_name)
+    context_window = config["input_context_window"]
+    safety_tokens = max(
+        minimum_safety_tokens,
+        int(context_window * safety_ratio),
+    )
+    available_output = max(0, context_window - input_tokens - safety_tokens)
+    return min(config["output_safe_tokens"], available_output)
+
+
 def requires_multi_stage(model_name: str | None) -> bool:
     """Check if model requires multi-stage processing for large outputs."""
     return get_model_config(model_name)["requires_multi_stage"]

@@ -7,9 +7,12 @@ import tempfile
 import time
 import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from utilities.model_token_config import get_input_chunk_tokens
+from utilities.model_token_config import (
+    calculate_adaptive_output_limit,
+    get_input_chunk_tokens,
+)
 from utilities.llm_invoker import invoke_llm_with_retry
 from utilities.text_normalizer import normalize_log_text
 
@@ -244,31 +247,96 @@ def chunk_log_by_tokens(
     max_tokens: int | None = None,
     overlap: int = 200,
     model: str = "",
+    token_counter: Callable[[str], int] | None = None,
 ) -> list[str]:
     """
-    Fallback for utilities.chunking_logic.chunk_log_by_tokens().
+    Split a log chronologically using measured token counts.
 
-    Now model-aware: uses model-specific token limits if model is specified.
+    ``token_counter`` lets callers use the same tokenizer used to decide that
+    chunking is necessary.  The optional argument preserves compatibility with
+    existing callers.  Without a tokenizer, use a conservative estimate for
+    log-like text instead of the unsafe four-characters-per-token assumption.
     """
-    # Auto-detect max_tokens from model if not specified
     if max_tokens is None:
         try:
             max_tokens = get_input_chunk_tokens(model)
         except Exception:
             max_tokens = 70_000  # Fallback
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+    if overlap < 0:
+        raise ValueError("overlap must be non-negative")
 
-    chars_per_chunk = max_tokens * 4  # ~1 token ≈ 4 chars
-    overlap_chars = overlap * 4
-    if len(text) <= chars_per_chunk:
+    def count_tokens(value: str) -> int:
+        if not value:
+            return 0
+        if token_counter is not None:
+            return max(1, token_counter(value))
+        # CI logs contain punctuation, paths, and identifiers that tokenize
+        # more densely than prose. Two chars/token is intentionally cautious.
+        return max(1, (len(value) + 1) // 2)
+
+    if count_tokens(text) <= max_tokens:
         return [text]
+
+    def split_oversized_text(value: str) -> list[str]:
+        """Split a single oversized line using token-counted binary search."""
+        pieces: list[str] = []
+        start = 0
+        while start < len(value):
+            low = start + 1
+            high = len(value)
+            best = start + 1
+            while low <= high:
+                middle = (low + high) // 2
+                if count_tokens(value[start:middle]) <= max_tokens:
+                    best = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            pieces.append(value[start:best])
+            start = best
+        return pieces
+
+    units: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if count_tokens(line) > max_tokens:
+            units.extend(split_oversized_text(line))
+        else:
+            units.append(line)
+
     chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + chars_per_chunk, len(text))
-        chunks.append(text[start:end])
-        if end >= len(text):
-            break
-        start = end - overlap_chars
+    current: list[str] = []
+    current_tokens = 0
+
+    for unit in units:
+        unit_tokens = count_tokens(unit)
+        if current and current_tokens + unit_tokens > max_tokens:
+            chunks.append("".join(current))
+
+            overlap_units: list[str] = []
+            overlap_tokens = 0
+            for previous in reversed(current):
+                previous_tokens = count_tokens(previous)
+                if overlap_tokens + previous_tokens > overlap:
+                    break
+                overlap_units.append(previous)
+                overlap_tokens += previous_tokens
+            overlap_units.reverse()
+
+            if overlap_tokens + unit_tokens <= max_tokens:
+                current = overlap_units
+                current_tokens = overlap_tokens
+            else:
+                current = []
+                current_tokens = 0
+
+        current.append(unit)
+        current_tokens += unit_tokens
+
+    if current:
+        chunks.append("".join(current))
+
     return chunks or [text]
 
 
@@ -353,7 +421,11 @@ class CILogAnalyzerLLM:
 
                 if total_tokens > THRESHOLD:
                     raw_chunks = chunk_log_by_tokens(
-                        log_text, max_tokens=None, overlap=200, model=self.model_name
+                        log_text,
+                        max_tokens=THRESHOLD,
+                        overlap=200,
+                        model=self.model_name,
+                        token_counter=self._estimate_tokens,
                     )
                     print(
                         f"Chunking activated: {len(raw_chunks)} chunks created for step '{step_name}'"
@@ -516,7 +588,11 @@ CI LOG CHUNK
 {chunk}
 """
 
-                    response = self.llm.invoke([HumanMessage(content=prompt)]).content
+                    max_output_tokens = self._adaptive_output_limit(prompt)
+                    response = self.llm.invoke(
+                        [HumanMessage(content=prompt)],
+                        max_tokens=max_output_tokens,
+                    ).content
                     content = self.load_json_maybe_fenced(response)
                     if not content or not content.strip():
                         continue
@@ -852,39 +928,17 @@ of the CI failure for this step using the following STRICT JSON schema
 """
 
             try:
-                # Use invoke_llm_with_retry with max_tokens as CEILING (not target)
-                # LLM outputs only what's needed, up to this limit
-                max_tokens = 8000  # Initial limit
-
-                # Adaptive retry: if response is truncated, reduce chunk size
-                for attempt in range(2):  # Max 2 attempts
-                    response = invoke_llm_with_retry(
-                        llm=self.llm,
-                        prompt=prompt,
-                        max_tokens=max_tokens,
-                        parse_json=False  # We parse JSON ourselves below
-                    )
-                    content = self.load_json_maybe_fenced(response)
-
-                    # Check if response looks truncated (doesn't end with } or ])
-                    content_stripped = content.strip()
-                    is_truncated = (
-                        content_stripped
-                        and not content_stripped.endswith('}')
-                        and not content_stripped.endswith(']')
-                        and len(content_stripped) > 100
-                    )
-
-                    if not is_truncated:
-                        break  # Success!
-
-                    # Response was truncated - reduce max_tokens and retry
-                    if attempt == 0:
-                        print(f"  ⚠ Response truncated, retrying with reduced max_tokens...")
-                        max_tokens = 4000  # Reduce to 4K
-                    else:
-                        print(f"  ⚠ Response still truncated after retry")
-                        # Continue with truncated response - repair will handle it
+                # Use all output capacity that safely remains after the
+                # measured prompt and context reserve. This is a ceiling, not
+                # a generation target.
+                max_tokens = self._adaptive_output_limit(prompt)
+                response = invoke_llm_with_retry(
+                    llm=self.llm,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    parse_json=False,
+                )
+                content = self.load_json_maybe_fenced(response)
 
                 if not content or not content.strip():
                     raise ValueError(
@@ -1113,45 +1167,19 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
    - Ensure every item is concise, evidence-based, and traceable to the logs and/or workflow.
 """
         try:
-            # Use adaptive token strategy with truncation detection
-            max_tokens = 16000  # Higher initial limit for full summary
+            max_tokens = self._adaptive_output_limit(prompt)
+            response = invoke_llm_with_retry(
+                llm=self.llm,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                parse_json=False,
+            )
+            content = self.load_json_maybe_fenced(response)
 
-            for attempt in range(3):  # Max 3 attempts with decreasing tokens
-                response = invoke_llm_with_retry(
-                    llm=self.llm,
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    parse_json=False  # We parse JSON ourselves below
+            if not content or not content.strip():
+                raise ValueError(
+                    "LLM returned an empty response for full_content_summary"
                 )
-                content = self.load_json_maybe_fenced(response)
-
-                if not content or not content.strip():
-                    raise ValueError(
-                        "LLM returned an empty response for full_content_summary"
-                    )
-
-                # Check if response looks truncated
-                content_stripped = content.strip()
-                is_truncated = (
-                    content_stripped
-                    and not content_stripped.endswith('}')
-                    and not content_stripped.endswith(']')
-                    and len(content_stripped) > 100
-                )
-
-                if not is_truncated:
-                    break  # Success - not truncated
-
-                # Response was truncated - reduce tokens and retry
-                if attempt == 0:
-                    print(f"  ⚠ full_content_summary: Response truncated, retrying with 10K tokens...")
-                    max_tokens = 10000
-                elif attempt == 1:
-                    print(f"  ⚠ full_content_summary: Still truncated, retrying with 6K tokens...")
-                    max_tokens = 6000
-                else:
-                    print(f"  ⚠ full_content_summary: Still truncated after 3 attempts, applying repair...")
-                    # Continue with truncated response - repair will handle it
 
             try:
                 summary = json.loads(content)
@@ -1265,8 +1293,25 @@ Return a SINGLE aggregated summary for the entire failed run using this exact st
         if text is None:
             return 0
         if self._encoder is None:
-            return len(text) // 4  # rough estimate: ~1 token per 4 chars
+            # CI logs tokenize more densely than ordinary prose. Keep the
+            # fallback conservative when the tokenizer is unavailable.
+            return (len(text) + 1) // 2
         return len(self._encoder.encode(text))
+
+    def _adaptive_output_limit(self, prompt: str) -> int:
+        """Calculate a capability-aware output ceiling for a complete prompt."""
+        prompt_tokens = self._estimate_tokens(prompt)
+        output_tokens = calculate_adaptive_output_limit(
+            self.model_name,
+            prompt_tokens,
+            safety_ratio=0.10,
+        )
+        if output_tokens <= 0:
+            raise ValueError(
+                f"Prompt does not fit {self.model_name!r} after its context safety reserve "
+                f"({prompt_tokens:,} measured input tokens)"
+            )
+        return output_tokens
 
     def _log_error(self, method: str, error: Exception, step: str = ""):
         base_dir = os.path.join(self.config["exception_dir"], "interrupted_error_log")
@@ -1653,17 +1698,18 @@ def _make_langchain_llm(llm: Any) -> Any:
         def __init__(self, fn: Any) -> None:
             self._fn = fn
 
-        def invoke(self, messages: Any, **_kwargs: Any) -> Any:
-            # Generation controls such as ``max_tokens`` are optional hints.
-            # Plain callables do not expose a standard way to receive them, so
-            # accept and ignore those controls instead of failing the summary
-            # stage with an unexpected-keyword TypeError.
+        def invoke(self, messages: Any, **kwargs: Any) -> Any:
             # Extract text from a list of messages or pass through a plain string
             if isinstance(messages, list):
                 content = " ".join(getattr(m, "content", str(m)) for m in messages)
             else:
                 content = str(messages)
-            result = self._fn(content)
+            try:
+                # Context callables created by CIBench accept generation
+                # ceilings. Older/plain callables remain supported below.
+                result = self._fn(content, **kwargs)
+            except TypeError:
+                result = self._fn(content)
 
             # Return an object with a .content attribute
             class _Resp:

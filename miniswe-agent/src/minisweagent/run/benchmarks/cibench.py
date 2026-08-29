@@ -258,6 +258,12 @@ def _make_context_llm(
     model_config = config.get("model", {})
     model_name = resolve_model_alias(context_model or model_config.get("model_name"))
     model_kwargs = dict(model_config.get("model_kwargs") or {})
+    # A stalled response body must not block one benchmark instance for the
+    # provider's much longer default. This does not shorten input or output;
+    # it only bounds an unresponsive network request.
+    model_kwargs.setdefault(
+        "timeout", int(os.getenv("CIBENCH_CONTEXT_LLM_TIMEOUT", "120"))
+    )
 
     # These options belong to the repair agent, which is given a Bash tool.
     # Phase A/C context extraction is a plain text completion, so forwarding
@@ -303,7 +309,16 @@ def _make_context_llm(
         logger.warning("[CIBench] Could not build context LLM: no model configured")
         return None
 
-    def _call(prompt: str) -> str:
+    def _call(prompt: str, **generation_kwargs: Any) -> str:
+        call_kwargs = dict(model_kwargs)
+        for key in ("max_tokens", "max_completion_tokens", "reasoning_effort"):
+            value = generation_kwargs.get(key)
+            if value is not None:
+                call_kwargs[key] = value
+
+        if is_gpt4o_or_newer and "max_tokens" in call_kwargs:
+            call_kwargs["max_completion_tokens"] = call_kwargs.pop("max_tokens")
+
         def _make_llm_call():
             call_started = time.time()
             safe_metrics_call(
@@ -316,7 +331,7 @@ def _make_context_llm(
                 response = litellm.completion(
                     model=str(model_name),
                     messages=[{"role": "user", "content": prompt}],
-                    **model_kwargs,
+                    **call_kwargs,
                 )
             except BaseException as exc:
                 if metrics_recorder is not None:
@@ -351,7 +366,7 @@ def _make_context_llm(
         try:
             return _retry_with_backoff(
                 _make_llm_call,
-                max_retries=3,
+                max_retries=int(os.getenv("CIBENCH_CONTEXT_LLM_RETRIES", "1")),
                 initial_delay=2.0,
                 backoff_multiplier=2.0,
                 exceptions=(Exception,),

@@ -105,6 +105,23 @@ def get_model_max_output_tokens(model_name: str, default: int = 16000) -> int:
 # Minimal health check prompt to test API connectivity
 HEALTH_CHECK_PROMPT = "Reply with exactly: OK"
 
+
+def _invoke_llm(llm: Any, prompt: str, **kwargs: Any) -> Any:
+    """Invoke either an ``.invoke()`` model wrapper or a plain callable.
+
+    Context extraction deliberately uses ``callable(prompt) -> str`` while
+    other pipeline stages use LangChain-style objects.  Keeping that adapter
+    distinction here prevents callers from having to wrap the same model each
+    time they use the shared retry logic.
+    """
+    invoke = getattr(llm, "invoke", None)
+    if callable(invoke):
+        return invoke(prompt, **kwargs)
+    if callable(llm):
+        return llm(prompt)
+    raise TypeError("LLM must be callable or expose an invoke() method")
+
+
 # JSON parsing instructions for repair prompts
 STRICT_JSON_RULES = """
 🚨 CRITICAL JSON FORMAT 🚨
@@ -462,11 +479,13 @@ def _check_api_health(llm: Any, verbose: bool = False) -> bool:
         try:
             model_name = getattr(llm, 'model_name', '') or getattr(llm, 'model', '')
             if _requires_max_completion_tokens(model_name):
-                response = llm.invoke(HEALTH_CHECK_PROMPT, max_completion_tokens=8)
+                response = _invoke_llm(
+                    llm, HEALTH_CHECK_PROMPT, max_completion_tokens=8
+                )
             else:
-                response = llm.invoke(HEALTH_CHECK_PROMPT, max_tokens=100)
+                response = _invoke_llm(llm, HEALTH_CHECK_PROMPT, max_tokens=100)
         except TypeError:
-            response = llm.invoke(HEALTH_CHECK_PROMPT)
+            response = _invoke_llm(llm, HEALTH_CHECK_PROMPT)
         content = str(getattr(response, "content", response) or "").strip()
 
         # Any response means API is back
@@ -565,12 +584,12 @@ def invoke_llm_with_retry(
                 invoke_kwargs["reasoning_effort"] = reasoning_effort
             if response_format:
                 invoke_kwargs["response_format"] = response_format
-            response = llm.invoke(prompt, **invoke_kwargs)
+            response = _invoke_llm(llm, prompt, **invoke_kwargs)
         except TypeError:
             # Compatibility fallback for wrappers whose ``invoke`` method only
             # accepts the prompt. Retrying with the same token keyword would
             # reproduce the TypeError and get converted into empty content.
-            response = llm.invoke(prompt)
+            response = _invoke_llm(llm, prompt)
 
         # Some wrappers return an empty Result with an embedded error instead
         # of raising. Promote that error so transient transport failures enter
@@ -903,16 +922,15 @@ If the output is truncated, close the current JSON structure conservatively and 
     try:
         repair_max_tokens = min(max_tokens or 8_000, 8_000)
         try:
-            repaired_response = llm.invoke(
+            repaired_response = _invoke_llm(
+                llm,
                 repair_prompt,
                 max_tokens=repair_max_tokens,
                 reasoning_effort="low" if reasoning_effort else None,
                 response_format=response_format,
             )
         except TypeError:
-            repaired_response = llm.invoke(
-                repair_prompt, max_tokens=repair_max_tokens
-            )
+            repaired_response = _invoke_llm(llm, repair_prompt)
         repaired_content = str(
             getattr(repaired_response, "content", repaired_response) or ""
         ).strip()
