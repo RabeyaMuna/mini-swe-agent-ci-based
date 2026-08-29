@@ -890,10 +890,10 @@ bash ./run_codex_direct.sh \
 
 #### MiniMax M2.5 (via OpenRouter)
 ```bash
-bash ./run_codex_direct.sh "" baseline backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline none minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" baseline forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" L1+L2+L3 forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 bidirectional  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 ```
 
 #### DeepSeek-V4-Flash (via OpenRouter - 1M context, 384K output)
