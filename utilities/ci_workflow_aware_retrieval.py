@@ -94,12 +94,26 @@ def _call_llm(llm: Any, prompt: str) -> str:
         raise WorkflowValidationExtractionError(
             "LLM is required for workflow validation extraction."
         )
+    # Safety check: ensure llm is an LLM instance, not a function
+    if not hasattr(llm, 'invoke'):
+        raise WorkflowValidationExtractionError(
+            f"Invalid llm parameter: got {type(llm).__name__}, expected LLM instance with .invoke() method. "
+            f"This usually means llm is a function instead of an instance. "
+            f"Check that you're calling LitellmModel(model_name=...) not passing the class itself."
+        )
+
     try:
         result = llm.invoke(prompt)
         return str(getattr(result, "content", result) or "").strip()
-    except AttributeError:
-        result = llm(prompt)
-        return str(getattr(result, "content", result) or "").strip()
+    except AttributeError as e:
+        # Fallback: try calling as function (for legacy ChatOpenAI)
+        try:
+            result = llm(prompt)
+            return str(getattr(result, "content", result) or "").strip()
+        except Exception:
+            raise WorkflowValidationExtractionError(
+                f"LLM invocation failed: {e}. LLM type: {type(llm)}"
+            )
 
 
 def _load_json(content: str, default: Any) -> Any:
