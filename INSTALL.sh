@@ -114,8 +114,9 @@ if pip install 'torch==2.5.0' 'torchvision==0.20.0' \
     echo -e "${GREEN}✓${NC} Installed from PyTorch index"
 else
     echo -e "${YELLOW}⚠️  PyTorch index unreachable, trying PyPI...${NC}"
-    # Fallback to PyPI (may not have CPU-only wheels, but works on most systems)
-    pip install 'torch==2.5.0' 'torchvision==0.20.0' --quiet
+    # Fallback to PyPI - use versions that exist on PyPI
+    # PyPI has torchvision 0.21.0+ (not 0.20.0), so use latest compatible
+    pip install torch torchvision --quiet
 fi
 
 if [ $? -eq 0 ]; then
