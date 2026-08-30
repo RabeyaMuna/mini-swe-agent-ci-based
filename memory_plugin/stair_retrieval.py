@@ -4035,7 +4035,10 @@ Return JSON:
         if self.encoder is None:
             try:
                 from sentence_transformers import SentenceTransformer
-                self.encoder = SentenceTransformer(self.embedding_model)
+                import torch
+                # Force CPU device to avoid CUDA multiprocessing issues
+                device = "cpu"
+                self.encoder = SentenceTransformer(self.embedding_model, device=device)
             except (ImportError, ModuleNotFoundError) as e:
                 print(f"[Memory] WARNING: Could not load sentence-transformers: {e}")
                 print(f"[Memory] This usually means PyTorch/transformers version mismatch")

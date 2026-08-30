@@ -13,6 +13,10 @@
 
 set -euo pipefail
 
+# Force PyTorch to use CPU to avoid multiprocessing issues with CUDA
+export CUDA_VISIBLE_DEVICES=""
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+
 if [ $# -eq 0 ]; then
   ISSUE_IDS=""
 else
