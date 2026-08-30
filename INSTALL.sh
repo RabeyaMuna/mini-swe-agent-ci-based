@@ -107,9 +107,16 @@ echo "   This may take a few minutes..."
 # Uninstall any existing PyTorch first to avoid version conflicts
 pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 
-# Install PyTorch components together fresh to ensure version compatibility
-pip install 'torch==2.13.0' 'torchvision==0.28.0' \
-    --index-url https://download.pytorch.org/whl/cpu --quiet
+# Try PyTorch index first, fallback to PyPI if network issue
+# PyTorch 2.5.0 is the latest stable version (not 2.13.0)
+if pip install 'torch==2.5.0' 'torchvision==0.20.0' \
+    --index-url https://download.pytorch.org/whl/cpu --quiet 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} Installed from PyTorch index"
+else
+    echo -e "${YELLOW}⚠️  PyTorch index unreachable, trying PyPI...${NC}"
+    # Fallback to PyPI (may not have CPU-only wheels, but works on most systems)
+    pip install 'torch==2.5.0' 'torchvision==0.20.0' --quiet
+fi
 
 if [ $? -eq 0 ]; then
     TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null)
@@ -118,6 +125,7 @@ if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓${NC} torchvision ${TORCHVISION_VERSION} installed"
 else
     echo -e "${RED}✗ Failed to install PyTorch${NC}"
+    echo -e "${YELLOW}Tip: Check your internet connection or use a proxy${NC}"
     exit 1
 fi
 echo ""
