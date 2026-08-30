@@ -2399,7 +2399,7 @@ def _run_sequential_repair(
     """
     partial_fixes = []
     total_problems_initial = len(problems)
-    per_problem_timeout = 600  # 10 minutes per problem
+    per_problem_timeout = 900  # 15 minutes per problem (increased from 600s due to API latency)
 
     logger.info(
         f"[CIBench] Starting sequential repair: {total_problems_initial} problems"
