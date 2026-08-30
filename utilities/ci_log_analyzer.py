@@ -597,22 +597,37 @@ CI LOG CHUNK
                     if not content or not content.strip():
                         continue
 
+                    cleaned_json = None
+
+                    # Try standard JSON first
                     try:
                         cleaned_json = json.loads(content)
                     except json.JSONDecodeError:
+                        # Try demjson3 (lenient parser)
                         if demjson3 is not None:
                             try:
                                 cleaned_json = demjson3.decode(content)
                             except Exception as dec_err:
-                                print(
-                                    f"[WARN] demjson3 failed for chunk {i + 1}: {dec_err}"
-                                )
-                                continue
+                                # Last resort: extract JSON with regex
+                                import re
+                                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
+                                if json_match:
+                                    try:
+                                        cleaned_json = json.loads(json_match.group(0))
+                                        print(f"[INFO] Recovered chunk {i + 1} using regex extraction")
+                                    except json.JSONDecodeError:
+                                        print(f"[WARN] All JSON parsing failed for chunk {i + 1}: {dec_err}")
+                                        continue
+                                else:
+                                    print(f"[WARN] demjson3 failed for chunk {i + 1}: {dec_err}")
+                                    continue
                         else:
-                            print(
-                                f"[WARN] json.loads failed for chunk {i + 1} and demjson3 not installed; skipping."
-                            )
+                            print(f"[WARN] json.loads failed for chunk {i + 1} and demjson3 not installed; skipping.")
                             continue
+
+                    if cleaned_json is None:
+                        print(f"[WARN] Could not parse JSON for chunk {i + 1}; skipping.")
+                        continue
 
                     # Decide whether to skip this chunk
                     no_failures = not cleaned_json.get(

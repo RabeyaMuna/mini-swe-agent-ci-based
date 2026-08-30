@@ -72,21 +72,57 @@ class WorkflowValidationExtractionError(RuntimeError):
     """Raised when CI workflow validation sequence extraction fails."""
 
 
-STRICT_JSON_OBJECT_RULES = """### Output Rules (STRICT)
-- Output MUST be a single raw JSON object.
-- Do NOT wrap the JSON in triple backticks.
-- Do NOT include ```json or any other marker/fence.
-- Use double quotes for every JSON key and string value.
-- Do not emit trailing commas.
-- Do NOT add any text before or after the JSON."""
+STRICT_JSON_OBJECT_RULES = """### CRITICAL: JSON-ONLY OUTPUT REQUIRED
 
-STRICT_JSON_ARRAY_RULES = """### Output Rules (STRICT)
-- Output MUST be a single raw JSON array.
-- Do NOT wrap the JSON in triple backticks.
-- Do NOT include ```json or any other marker/fence.
-- Use double quotes for every JSON key and string value.
-- Do not emit trailing commas.
-- Do NOT add any text before or after the JSON."""
+Your response must be PURE JSON with absolutely NO additional text.
+
+REQUIRED:
+- First character of your response: `{`
+- Last character of your response: `}`
+- Everything between: valid JSON object with double quotes for all keys and strings
+- No trailing commas
+
+FORBIDDEN - These will cause system failure:
+- Explanatory text before the JSON
+- Explanatory text after the JSON
+- Markdown code fences (```)
+- Code block markers (```json)
+- Comments (// or /* */)
+- Any characters before the opening `{`
+- Any characters after the closing `}`
+
+Your response must start with `{` and end with `}`. Do not include ANY other text."""
+
+STRICT_JSON_ARRAY_RULES = """### CRITICAL: JSON-ONLY OUTPUT REQUIRED
+
+Your response must be PURE JSON with absolutely NO additional text.
+
+REQUIRED:
+- First character of your response: `[`
+- Last character of your response: `]`
+- Everything between: valid JSON array with double quotes for all keys and strings
+- No trailing commas
+
+FORBIDDEN - These will cause system failure:
+- Explanatory text before the JSON (e.g., "Looking at the workflow..." or "Let me analyze...")
+- Explanatory text after the JSON
+- Markdown code fences (```)
+- Code block markers (```json)
+- Comments (// or /* */)
+- Any characters before the opening `[`
+- Any characters after the closing `]`
+
+CORRECT:
+[{"order": 1, "validates": "Code style", "installation_cmd": "", "validation_cmd": "ruff check"}]
+
+INCORRECT:
+"Looking at the workflow, I need to extract: [...]"  <-- Has text before JSON
+[...] // This validates the code  <-- Has comment after
+```json
+[...]
+```  <-- Has markdown fences
+
+Your response must start with `[` and end with `]`. Do not include ANY other text."""
 
 
 def _call_llm(llm: Any, prompt: str) -> str:
@@ -94,26 +130,41 @@ def _call_llm(llm: Any, prompt: str) -> str:
         raise WorkflowValidationExtractionError(
             "LLM is required for workflow validation extraction."
         )
-    # Safety check: ensure llm is an LLM instance, not a function
-    if not hasattr(llm, 'invoke'):
-        raise WorkflowValidationExtractionError(
-            f"Invalid llm parameter: got {type(llm).__name__}, expected LLM instance with .invoke() method. "
-            f"This usually means llm is a function instead of an instance. "
-            f"Check that you're calling LitellmModel(model_name=...) not passing the class itself."
-        )
 
-    try:
-        result = llm.invoke(prompt)
-        return str(getattr(result, "content", result) or "").strip()
-    except AttributeError as e:
-        # Fallback: try calling as function (for legacy ChatOpenAI)
+    # Try different calling conventions:
+    # 1. LLM instance with .invoke() method
+    # 2. Plain callable function (from _make_context_llm)
+    # 3. Legacy ChatOpenAI style
+
+    # Check if it's a plain callable (function)
+    if callable(llm) and not hasattr(llm, 'invoke'):
         try:
             result = llm(prompt)
-            return str(getattr(result, "content", result) or "").strip()
-        except Exception:
+            return str(result or "").strip()
+        except Exception as e:
             raise WorkflowValidationExtractionError(
-                f"LLM invocation failed: {e}. LLM type: {type(llm)}"
+                f"LLM function call failed: {e}. LLM type: {type(llm)}"
             )
+
+    # Try LLM instance with .invoke() method
+    if hasattr(llm, 'invoke'):
+        try:
+            result = llm.invoke(prompt)
+            return str(getattr(result, "content", result) or "").strip()
+        except AttributeError as e:
+            # Fallback: try calling as function
+            try:
+                result = llm(prompt)
+                return str(getattr(result, "content", result) or "").strip()
+            except Exception:
+                raise WorkflowValidationExtractionError(
+                    f"LLM invocation failed: {e}. LLM type: {type(llm)}"
+                )
+
+    # If we get here, it's neither a function nor an instance with .invoke()
+    raise WorkflowValidationExtractionError(
+        f"Invalid llm parameter: got {type(llm).__name__}, expected LLM instance with .invoke() method or callable function."
+    )
 
 
 def _load_json(content: str, default: Any) -> Any:
