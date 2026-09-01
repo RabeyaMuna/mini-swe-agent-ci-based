@@ -12,7 +12,7 @@ from os.path import join as pjoin
 from pathlib import Path
 from subprocess import CalledProcessError
 
-from log import log_and_print, log_exception
+from .log import log_and_print, log_exception
 
 
 @contextlib.contextmanager

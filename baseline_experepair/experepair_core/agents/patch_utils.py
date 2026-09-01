@@ -28,6 +28,35 @@ class Edit:
         return str(self)
 
 
+def strip_line_numbers_from_code(code: str) -> str:
+    """
+    Remove leading line numbers from code.
+
+    The LLM may incorrectly include line numbers from the code context
+    (e.g., "   1  import foo") in the <original> block. This function
+    removes them to match the actual file content.
+
+    Args:
+        code (str): Code that may contain line numbers
+
+    Returns:
+        str: Code with line numbers removed
+    """
+    lines = code.split('\n')
+    cleaned = []
+    for line in lines:
+        # Remove pattern: "   123  actual code" or "123  actual code"
+        # But preserve lines that are JUST numbers (like "123")
+        if re.match(r'^\s*\d+\s{2,}', line):  # At least 2 spaces after number
+            # This looks like a line number prefix, remove it
+            cleaned_line = re.sub(r'^\s*\d+\s+', '', line, count=1)
+            cleaned.append(cleaned_line)
+        else:
+            # Keep as-is
+            cleaned.append(line)
+    return '\n'.join(cleaned)
+
+
 def parse_edits(chat_string: str) -> list[Edit]:
     """
     Parse edits from a chat string.
@@ -81,6 +110,12 @@ def parse_edits(chat_string: str) -> list[Edit]:
             # the actual code, this can result in non-match
             original = original.strip("\n")
             patched = patched.strip("\n")
+
+            # FIX: Remove line numbers if present (common LLM mistake)
+            # The LLM may copy line numbers from the code context
+            original = strip_line_numbers_from_code(original)
+            patched = strip_line_numbers_from_code(patched)
+
             all_edits.append(Edit(file, original, patched))
 
         return all_edits

@@ -59,6 +59,20 @@ cryptography==45.0.7
 protobuf==6.33.6
 
 # ============================================================================
+# EXPEREPAIR DEPENDENCIES - Required for baseline_experepair (from official repo)
+# ============================================================================
+rank-bm25==0.2.2              # BM25 ranking for code retrieval
+tiktoken==0.8.0               # OpenAI tokenization
+gitpython==3.1.43             # Git operations
+pygments==2.19.2              # Syntax highlighting (>=2.19.2 for textual compatibility)
+libcst==1.5.1                 # Concrete syntax tree for Python
+loguru==0.7.2                 # Logging
+pylint==3.1.0                 # Python linter
+rich>=14.2.0                  # Rich text formatting (textual compatibility)
+tenacity==8.2.3               # Retry library
+timeout-decorator==0.5.0      # Timeout decorators
+
+# ============================================================================
 # ANALYSIS TOOLING (installed by default)
 # ============================================================================
 # Plotting is lightweight enough to keep in the shared environment. The much

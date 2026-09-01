@@ -11,18 +11,18 @@ import numpy as np
 from loguru import logger
 from rank_bm25 import BM25Okapi
 
-from agents import agent_common
-from agents.agent_common import InvalidLLMResponse
-from data_structures import BugLocation, MessageThread
-from log import print_acr, print_patch_generation
-from model import common
-from post_process import (
+from . import agent_common
+from .agent_common import InvalidLLMResponse
+from ..data_structures import BugLocation, MessageThread
+from ..log import print_acr, print_patch_generation
+from ..model import common
+from ..post_process import (
     ExtractStatus,
     convert_response_to_diff,
     record_extract_status, record_extract_status_idx,
 )
-from search.search_manage import SearchManager
-from task import Task
+from ..search.search_manage import SearchManager
+from ..task import Task
 
 SYSTEM_PROMPT_W_REPO = """You are a software developer maintaining the GitHub project {repo_name}.
 You are working on an issue submitted to your project.

@@ -19,10 +19,10 @@ from shutil import move
 
 from loguru import logger
 
-import utils as apputils
-from agents.patch_utils import apply_edit, parse_edits
-from model import common
-from search.search_utils import is_test_file
+from . import utils as apputils
+from .agents.patch_utils import apply_edit, parse_edits
+from .model import common
+from .search.search_utils import is_test_file
 
 
 def count_and_organize_tasks(

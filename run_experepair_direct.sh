@@ -1,37 +1,41 @@
 #!/bin/bash
-# Run ExpeRepair Baseline (no memory, no iteration) on CI failures
+# Run ExpeRepair with Memory Integration
 #
-# Usage: ./run_experepair_direct.sh [issue-ids] [model] [repo_filters] [dataset] [workers]
+# Usage: ./run_experepair_direct.sh [issue-ids] [ablation] [direction] [model] [repo_filters] [dataset] [workers]
 #   [issue-ids]:    Comma-separated IDs, or empty "" for all (default: all from eval_issue_ids.json)
-#   [model]:        minimax/minimax-m2.5 | gpt-5-mini | deepseek-v4-flash (default: minimax/minimax-m2.5)
+#   [ablation]:     baseline|L1|L1+L2|L1+L2+L3 (default: baseline)
+#   [direction]:    none (baseline) | backward|forward|bidirectional (default: none)
+#   [model]:        minimax/minimax-m2.5 | gpt-5.4-mini | deepseek-v4-flash (default: minimax/minimax-m2.5)
 #   [repo_filters]: Optional comma-separated repo names or owner/repo slugs
 #   [dataset]:      Path to eval_set.jsonl (default: data/eval_set.jsonl)
-#   [workers]:      Parallel workers (default: 4)
+#   [workers]:      Parallel workers (default: 1)
 #
 # Examples:
-#   # Run all issues with default model
-#   ./run_experepair_direct.sh
+#   # Baseline (no memory)
+#   ./run_experepair_direct.sh "" baseline none deepseek-v4-flash "" data/eval_set.jsonl 1
 #
-#   # Run specific issues
-#   ./run_experepair_direct.sh "129,130" minimax/minimax-m2.5
+#   # L1+L2+L3 with bidirectional
+#   ./run_experepair_direct.sh "" L1+L2+L3 bidirectional deepseek-v4-flash "" data/eval_set.jsonl 1
 #
-#   # Run with repo filters
-#   ./run_experepair_direct.sh "" minimax/minimax-m2.5 "agno,axolotl" data/eval_set.jsonl 4
+#   # L1 with backward
+#   ./run_experepair_direct.sh "" L1 backward minimax/minimax-m2.5 "" data/eval_set.jsonl 1
 
 set -euo pipefail
 
-# Handle empty string for "all issues"
+# Parse arguments
 if [ $# -eq 0 ]; then
     ISSUE_IDS=""
 else
     if [ -z "${1:-}" ]; then ISSUE_IDS=""; else ISSUE_IDS="$1"; fi
 fi
 
-MODEL=${2:-minimax/minimax-m2.5}
-REPO_FILTERS=${3:-}
-DATASET=${4:-data/eval_set.jsonl}
-WORKERS=${5:-4}
-RESULTS_ROOT=${EXPEREPAIR_RESULTS_ROOT:-results/miniswe-agent}
+ABLATION=${2:-baseline}
+DIRECTION=${3:-none}
+MODEL=${4:-minimax/minimax-m2.5}
+REPO_FILTERS=${5:-}
+DATASET=${6:-data/eval_set.jsonl}
+WORKERS=${7:-1}
+RESULTS_ROOT=${EXPEREPAIR_RESULTS_ROOT:-results/experepair}
 
 # Load .env for API keys
 [ -f .env ] && source .env
@@ -67,16 +71,49 @@ esac
 
 # Canonicalize model name for directory
 MODEL_DIR=$(echo "$MODEL" | tr '/' '_' | tr '.' '-')
-OUTPUT_DIR="$RESULTS_ROOT/experepair_baseline_$MODEL_DIR"
 
-echo "════ ExpeRepair Baseline ═══════════════════════════════════════"
-echo "Issues:   ${ISSUE_IDS:-ALL}"
-if [ -n "$REPO_FILTERS" ]; then echo "Repos:    $REPO_FILTERS (from $DATASET)"; fi
-echo "Model:    $MODEL"
-echo "Provider: $PROVIDER"
-echo "Dataset:  $DATASET"
-echo "Workers:  $WORKERS"
-echo "Output:   $OUTPUT_DIR"
+# Determine output directory based on ablation and direction
+if [ "$ABLATION" == "baseline" ]; then
+    OUTPUT_DIR="$RESULTS_ROOT/experepair_baseline_$MODEL_DIR"
+else
+    # Memory ablations go under direction subdirectory
+    ABL_DIR=$(echo "$ABLATION" | tr '+' '_' | tr -d ' ' | tr 'A-Z' 'a-z')
+    OUTPUT_DIR="$RESULTS_ROOT/experepair_$DIRECTION/${ABL_DIR}_$MODEL_DIR"
+fi
+
+# Determine memory directory
+if [ "$ABLATION" == "baseline" ]; then
+    MEMORY_DIR=""
+else
+    case "$DIRECTION" in
+        backward)
+            MEMORY_DIR="data/back_trs"
+            ;;
+        forward)
+            MEMORY_DIR="data/fwr_trs"
+            ;;
+        bidirectional)
+            MEMORY_DIR="data/bidirect_trs"
+            ;;
+        *)
+            echo "ERROR: Invalid direction '$DIRECTION' for ablation '$ABLATION'" >&2
+            echo "       Use: backward, forward, or bidirectional" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+echo "════ ExpeRepair with Memory ════════════════════════════════════"
+echo "Issues:    ${ISSUE_IDS:-ALL}"
+echo "Ablation:  $ABLATION"
+echo "Direction: $DIRECTION"
+if [ -n "$MEMORY_DIR" ]; then echo "Memory:    $MEMORY_DIR"; fi
+if [ -n "$REPO_FILTERS" ]; then echo "Repos:     $REPO_FILTERS (from $DATASET)"; fi
+echo "Model:     $MODEL"
+echo "Provider:  $PROVIDER"
+echo "Dataset:   $DATASET"
+echo "Workers:   $WORKERS"
+echo "Output:    $OUTPUT_DIR"
 echo "════════════════════════════════════════════════════════════════"
 
 # Activate venv
@@ -140,10 +177,14 @@ if [ -z "$ISSUE_IDS" ] && [ -f data/eval_issue_ids.json ]; then
 fi
 
 # Build command
-CMD="PYTHONPATH=. python3 scripts/run_experepair_baseline.py --dataset $DATASET --model $MODEL --output $OUTPUT_DIR --workers $WORKERS"
+CMD="PYTHONPATH=. python3 scripts/run_experepair_baseline.py --dataset $DATASET --model $MODEL --output $OUTPUT_DIR --workers $WORKERS --ablation $ABLATION"
 
 if [ -n "$ISSUE_IDS" ]; then
     CMD="$CMD --issue-ids $ISSUE_IDS"
+fi
+
+if [ -n "$MEMORY_DIR" ]; then
+    CMD="$CMD --memory-dir $MEMORY_DIR"
 fi
 
 echo ""
@@ -155,6 +196,6 @@ eval $CMD
 
 echo ""
 echo "════════════════════════════════════════════════════════════════"
-echo "✓ ExpeRepair Baseline Complete"
+echo "✓ ExpeRepair Complete ($ABLATION / $DIRECTION)"
 echo "  Results: $OUTPUT_DIR/preds.json"
 echo "════════════════════════════════════════════════════════════════"

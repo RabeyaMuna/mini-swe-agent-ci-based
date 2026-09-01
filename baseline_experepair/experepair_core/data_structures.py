@@ -10,8 +10,8 @@ from openai.types.chat.chat_completion_message_tool_call import (
     Function as OpenaiFunction,
 )
 
-import utils as apputils
-from search import search_utils
+from . import utils as apputils
+from .search import search_utils
 
 
 @dataclass
