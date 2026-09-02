@@ -68,6 +68,7 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--output_root", default=str(Path("results/miniswe-agent")))
     p.add_argument("--memory_top_k", type=int, default=5)
+    p.add_argument("--reverse", action="store_true", help="Process instances in reverse order (last to first)")
     args = p.parse_args()
 
     # Resolve and slug the model name for stable output paths
@@ -94,6 +95,31 @@ def main() -> None:
     output_dir = Path(args.output_root) / f"{safe_ablation}_{model_slug}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Handle reverse order if requested
+    dataset_path = Path(args.dataset)
+    if args.reverse:
+        import json
+        import tempfile
+
+        print(f"📖 Loading dataset to reverse order: {dataset_path}")
+        instances = []
+        with open(dataset_path, 'r') as f:
+            for line in f:
+                if line.strip():
+                    instances.append(json.loads(line))
+
+        print(f"🔄 Reversing {len(instances)} instances (processing last to first)")
+        instances.reverse()
+
+        # Write reversed dataset to temp file
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.jsonl', prefix='reversed_dataset_')
+        with open(temp_fd, 'w') as f:
+            for inst in instances:
+                f.write(json.dumps(inst) + '\n')
+
+        dataset_path = Path(temp_path)
+        print(f"📝 Reversed dataset written to: {dataset_path}")
+
     # Import and call the Typer command function directly
     from minisweagent.run.benchmarks.cibench import main as cibench_main  # type: ignore
 
@@ -101,7 +127,7 @@ def main() -> None:
     config_path = Path(__file__).parent.parent / "miniswe-agent/src/minisweagent/config/benchmarks/cibench.yaml"
 
     cibench_main(
-        dataset=str(Path(args.dataset)),
+        dataset=str(dataset_path),
         split="train",  # not used for local JSONL
         output=str(output_dir),
         workers=args.workers,

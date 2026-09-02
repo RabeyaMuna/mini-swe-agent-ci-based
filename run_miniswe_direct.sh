@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run Mini-SWE-Agent (CIBench) over eval issues with consistent flags
-# Usage: ./run_miniswe_direct.sh <issue-ids> [ablation] [direction] [model] [repo_filters] [dataset] [workers]
+# Usage: ./run_miniswe_direct.sh <issue-ids> [ablation] [direction] [model] [repo_filters] [dataset] [workers] [reverse]
 #   <issue-ids>: Comma-separated IDs, or empty string "" to use data/eval_issue_ids.json, or omit to RUN ALL
 #   [ablation]:  baseline|L1|L2|L3|L1+L2|L1+L2+L3|all   (default: all)
 #   [direction]: none (baseline) | backward|forward|bidirectional|both|all
@@ -10,6 +10,7 @@
 #                   (overrides <issue-ids>)
 #   [dataset]:   Path to eval_set.jsonl (default: data/eval_set.jsonl)
 #   [workers]:   Parallel issues per ablation (default: 1)
+#   [reverse]:   1 to process instances in reverse order (last to first), 0 or omit for normal order
 
 set -euo pipefail
 
@@ -28,6 +29,7 @@ MODEL=${4:-gpt-5-mini}
 REPO_FILTERS=${5:-}
 DATASET=${6:-data/eval_set.jsonl}
 WORKERS=${7:-1}
+REVERSE=${8:-0}
 RESULTS_ROOT=${MINISWE_RESULTS_ROOT:-results/miniswe-agent}
 
 # Load provider credentials from the project file, then expose only the key
@@ -82,6 +84,7 @@ echo "Model:     $MODEL"
 echo "Provider:  $PROVIDER"
 echo "Endpoint:  $API_BASE"
 echo "Dataset:   $DATASET"
+if [ "$REVERSE" = "1" ]; then echo "Order:     REVERSE (last→first)"; else echo "Order:     normal (first→last)"; fi
 echo "════════════════════════════════════════════════════════════════"
 
 if [ "${MINISWE_CONFIG_ONLY:-0}" = "1" ]; then
@@ -219,7 +222,13 @@ fi
 
 run_one() {
   local ablation="$1"; local direction="$2"
-  echo "→ Mini-SWE: abl=$ablation dir=$direction"
+  local reverse_flag=""
+  if [ "$REVERSE" = "1" ]; then
+    reverse_flag="--reverse"
+    echo "→ Mini-SWE: abl=$ablation dir=$direction (REVERSE ORDER: last→first)"
+  else
+    echo "→ Mini-SWE: abl=$ablation dir=$direction"
+  fi
 
   # For baseline, don't use direction in output path (baseline doesn't use directional memory)
   local ablation_lower=$(echo "$ablation" | tr '[:upper:]' '[:lower:]')
@@ -235,7 +244,8 @@ run_one() {
     --direction "$direction" \
     --model "$MODEL" \
     --output_root "$output_root" \
-    --workers "$WORKERS"
+    --workers "$WORKERS" \
+    $reverse_flag
 }
 
 FAILS=0; TOTAL=0

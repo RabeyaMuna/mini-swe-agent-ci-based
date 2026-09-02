@@ -1907,6 +1907,14 @@ def prediction_from_result(result_file: Path) -> dict[str, Any]:
     else:
         patch_content = ""
 
+    # Aggregate cost and time from problem results
+    total_cost_usd = sum(
+        pr.get("cost_usd", 0.0) for pr in result.get("problem_results", [])
+    )
+    total_elapsed_seconds = sum(
+        pr.get("elapsed_seconds", 0.0) for pr in result.get("problem_results", [])
+    )
+
     return {
         "id": result["id"],
         "sha_fail": result["sha_fail"],
@@ -1917,6 +1925,8 @@ def prediction_from_result(result_file: Path) -> dict[str, Any]:
         "patch_bytes": result["patch_bytes"],
         "changed_files": result["changed_files"],
         "verification_passed": result.get("verification_passed"),
+        "total_cost_usd": total_cost_usd,
+        "total_elapsed_seconds": total_elapsed_seconds,
     }
 
 

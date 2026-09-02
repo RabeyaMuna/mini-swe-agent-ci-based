@@ -28,6 +28,12 @@ Usage
     --memory-dir data/bidirect_trs
 """
 
+# Configuration: Clone timeouts
+# First attempt uses --no-single-branch to get all branches (useful for checkout)
+# If that times out, automatically retries with --single-branch (much faster)
+CLONE_TIMEOUT_MULTIBRANCH = 600  # 10 minutes for first attempt
+CLONE_TIMEOUT_SINGLE_BRANCH = 300  # 5 minutes for retry
+
 import argparse
 import json
 import sys
@@ -80,15 +86,40 @@ def process_one_instance(
     import subprocess
 
     if not repo_path.exists():
-        # Clone the repo
         github_url = f"https://github.com/{repo_owner}/{repo_name}.git"
-        print(f"[{instance_id}] Cloning {github_url}")
-        subprocess.run(
-            ['git', 'clone', github_url, str(repo_path)],
-            check=True,
-            capture_output=True,
-            timeout=300  # 5 minute timeout
-        )
+
+        # Try multi-branch clone first (allows checking out any commit)
+        print(f"[{instance_id}] Cloning {github_url} (shallow, multi-branch, {CLONE_TIMEOUT_MULTIBRANCH}s timeout)")
+        clone_args = ['git', 'clone', '--depth=1', '--no-single-branch', '--progress', github_url, str(repo_path)]
+
+        try:
+            subprocess.run(
+                clone_args,
+                check=True,
+                timeout=CLONE_TIMEOUT_MULTIBRANCH,
+                stderr=subprocess.STDOUT,
+                stdout=subprocess.PIPE,
+                text=True
+            )
+        except subprocess.TimeoutExpired:
+            # If multi-branch timed out, retry with single-branch (much faster)
+            print(f"[{instance_id}] ⚠️  Clone timed out, retrying with single-branch ({CLONE_TIMEOUT_SINGLE_BRANCH}s)...")
+            try:
+                subprocess.run(
+                    ['git', 'clone', '--depth=1', '--single-branch', '--progress', github_url, str(repo_path)],
+                    check=True,
+                    timeout=CLONE_TIMEOUT_SINGLE_BRANCH,
+                    stderr=subprocess.STDOUT,
+                    stdout=subprocess.PIPE,
+                    text=True
+                )
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                print(f"[{instance_id}] ❌ Clone retry also timed out/failed, skipping")
+                return None
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stdout if e.stdout else 'unknown error'
+            print(f"[{instance_id}] ❌ Clone failed: {error_msg}")
+            return None
 
     # Checkout the failing commit
     try:
@@ -96,17 +127,30 @@ def process_one_instance(
             ['git', 'checkout', sha_fail],
             cwd=str(repo_path),
             check=True,
-            capture_output=True
+            capture_output=True,
+            timeout=60
         )
     except subprocess.CalledProcessError:
-        # If checkout fails, try fetching first
-        print(f"[{instance_id}] Fetching commit {sha_fail[:8]}")
-        subprocess.run(
-            ['git', 'fetch', 'origin', sha_fail],
-            cwd=str(repo_path),
-            check=False,
-            capture_output=True
-        )
+        # If checkout fails (shallow clone), fetch the specific commit
+        print(f"[{instance_id}] Fetching commit {sha_fail[:8]} (unshallowing)")
+        try:
+            # Try fetching with depth increase
+            subprocess.run(
+                ['git', 'fetch', '--depth=100', 'origin', sha_fail],
+                cwd=str(repo_path),
+                check=True,
+                capture_output=True,
+                timeout=300
+            )
+            subprocess.run(
+                ['git', 'checkout', sha_fail],
+                cwd=str(repo_path),
+                check=True,
+                capture_output=True
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            print(f"[{instance_id}] ❌ Failed to fetch/checkout commit: {e}")
+            return None
         subprocess.run(
             ['git', 'checkout', sha_fail],
             cwd=str(repo_path),
@@ -257,6 +301,7 @@ def main():
     parser.add_argument('--ablation', default='baseline', help='Memory ablation: baseline|L1|L1+L2|L1+L2+L3')
     parser.add_argument('--memory-dir', help='Memory directory (e.g., data/back_trs)')
     parser.add_argument('--top-k', type=int, default=5, help='Top-k memories to retrieve')
+    parser.add_argument('--no-resume', action='store_true', help='Force reprocess all instances (ignore existing results)')
 
     args = parser.parse_args()
 
@@ -320,9 +365,39 @@ def main():
             print(f"Warning: Memory directory not found: {memory_dir}")
 
     # Process instances
-    results = {}
-    total_cost = 0.0
     preds_file = output_dir / 'preds.json'
+
+    # Load existing results for resume (unless --no-resume)
+    results = {}
+    if not args.no_resume and preds_file.exists():
+        try:
+            with open(preds_file, 'r') as f:
+                results = json.load(f)
+            print(f"📂 Loaded {len(results)} existing results from {preds_file}")
+        except Exception as e:
+            print(f"⚠️  Could not load existing results: {e}")
+            results = {}
+
+        # Filter out already processed instances
+        # Normalize IDs to strings for comparison
+        completed_ids = set(str(k) for k in results.keys())
+        instances_to_process = [inst for inst in instances if str(inst['id']) not in completed_ids]
+
+        if completed_ids:
+            print(f"⏭️  Skipping {len(completed_ids)} already completed instances")
+        if not instances_to_process:
+            print(f"✅ All {len(instances)} instances already completed!")
+            print(f"   Results: {preds_file}")
+            return
+
+        print(f"🔄 Processing {len(instances_to_process)} remaining instances")
+        instances = instances_to_process
+    elif args.no_resume:
+        print(f"🔄 --no-resume: Processing all {len(instances)} instances from scratch")
+    else:
+        print(f"🔄 Processing {len(instances)} instances")
+
+    total_cost = sum(r.get('cost', 0.0) for r in results.values())
 
     if args.workers > 1:
         # Parallel processing

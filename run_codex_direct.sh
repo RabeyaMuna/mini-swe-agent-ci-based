@@ -1,11 +1,11 @@
 #!/bin/bash
-# Run Codex with any OpenAI or Anthropic model
+# Run Codex with any model via OpenRouter
 #
 # Usage: ./run_codex_direct.sh <issue-ids> [ablation] [direction] [model] [repo_filters] [dataset] [workers]
 #   <issue-ids>: Comma-separated IDs, or empty string "" to use eval_issue_ids.json, or omit to RUN ALL
 #   [ablation]:  baseline|L1|L2|L3|L1+L2|L1+L2+L3|all   (default: all)
 #   [direction]: backward|forward|both                   (default: both)
-#   [model]:     gpt-5-mini | gpt-5.4-mini-2026-03-17 | minimax/minimax-m2.5 (default: gpt-5-mini)
+#   [model]:     Any OpenRouter model (e.g., gpt-5-mini, deepseek-v4-flash, minimax/minimax-m2.5) (default: gpt-5-mini)
 #   [repo_filters]: Optional comma-separated repo names or owner/repo slugs
 #                   (overrides <issue-ids>)
 #   [dataset]:   Path to eval_set.jsonl (default: data/eval_set.jsonl)
@@ -14,10 +14,12 @@
 #   Examples:
 #     # Run ALL ablations and BOTH directions for all issues in eval_issue_ids.json using GPT‑5‑mini
 #     ./run_codex_direct.sh "" all both gpt-5-mini
+#     # Run DeepSeek on a single issue with backward memory L1+L2+L3
+#     ./run_codex_direct.sh 129 L1+L2+L3 backward deepseek-v4-flash
 #     # Run MiniMax on a single issue with backward memory L1+L2+L3
 #     ./run_codex_direct.sh 129 L1+L2+L3 backward minimax/minimax-m2.5
 #     # Run several repos, including all owners of the short name "agno"
-#     ./run_codex_direct.sh "" L1+L2+L3 forward minimax/minimax-m2.5 \
+#     ./run_codex_direct.sh "" L1+L2+L3 forward deepseek-v4-flash \
 #       "agno,axolotl,owner/demo-repo" data/eval_set.jsonl 4
 
 set -e
@@ -50,6 +52,9 @@ case "$MODEL" in
     minimax|minimax2.5|minimax-m2.5)
         MODEL="minimax/minimax-m2.5"
         ;;
+    deepseek|deepseek-v4-flash|deepseek-v4)
+        MODEL="deepseek/deepseek-v4-flash"
+        ;;
 esac
 
 echo "=========================================="
@@ -68,12 +73,9 @@ if [ -n "$REPO_FILTERS" ]; then
 fi
 echo ""
 
-# Load .env BUT save specific keys first
+# Load .env and save OpenRouter key
 [ -f .env ] && source .env
-SAVED_OPENAI_KEY="$OPENAI_API_KEY"
-SAVED_ANTHROPIC_KEY="$ANTHROPIC_API_KEY"
 SAVED_OPENROUTER_KEY="$OPENROUTER_API_KEY"
-SAVED_MINIMAX_KEY="$MINIMAX_API_KEY"
 
 # Use a separate project-local Codex home for every model. Provider and auth
 # settings are machine-local Codex settings, so sharing one config.toml lets a
@@ -99,97 +101,33 @@ unset CODEX_PROVIDER
 unset CODEX_API_BASE
 
 ##############################################
-# Configure API based on requested model
-# - OpenAI models: use OpenAI API directly
-# - MiniMax: route via OpenRouter to avoid provider/model-id drift
+# Configure API - All models use OpenRouter
 ##############################################
-case "$MODEL" in
-    gpt-*|chatgpt-*|o[0-9]*|codex-*)
-        # OpenAI models - use OpenAI API directly
-        if [ -z "$SAVED_OPENAI_KEY" ]; then
-            echo "ERROR: OPENAI_API_KEY not set in .env"
-            exit 1
-        fi
-        # Set only the OpenAI credential. Keep the unused provider variables
-        # present-but-empty so python-dotenv (loaded by the benchmark runner)
-        # cannot restore OpenRouter values from .env in secondary context and
-        # decomposition calls.
-        export OPENAI_API_KEY="$SAVED_OPENAI_KEY"
-        export OPENROUTER_API_KEY=""
-        export OPENROUTER_BASE_URL=""
-        export MINIMAX_API_KEY=""
-        export ANTHROPIC_API_KEY=""
-        CODEX_MODEL="$MODEL"
-        CONTEXT_MODEL="$MODEL"
-        echo "Using OpenAI API"
-        echo "  Model: $CODEX_MODEL"
-        echo "  API Key: ${OPENAI_API_KEY:0:10}..."
-        PROVIDER="OpenAI"
-        AUTH_MODE="apikey"
-        API_BASE="https://api.openai.com/v1"
-        export CODEX_PROVIDER="openai"
-        export CODEX_API_BASE="$API_BASE"
+# All models route through OpenRouter for unified access
+if [ -z "$SAVED_OPENROUTER_KEY" ]; then
+    echo "ERROR: OPENROUTER_API_KEY not set in .env"
+    exit 1
+fi
 
-        # Write provider config for Codex (project-local)
-        mkdir -p "$CODEX_HOME"
-        cat > "$CODEX_HOME/config.toml" << 'EOF'
-# Codex configuration for OpenAI (native)
-model_reasoning_effort = "medium"
+export OPENAI_API_KEY="$SAVED_OPENROUTER_KEY"
+export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+export OPENROUTER_APP_NAME="Codex CI Repair"
+export OPENROUTER_SITE_URL="https://github.com/openai/codex"
+CODEX_MODEL="$MODEL"
+CONTEXT_MODEL="$MODEL"
+echo "Using OpenRouter"
+echo "  Model: $CODEX_MODEL"
+echo "  API Key: ${OPENAI_API_KEY:0:10}..."
+PROVIDER="OpenRouter"
+AUTH_MODE="apikey"
+API_BASE="$OPENAI_BASE_URL"
+export CODEX_PROVIDER="openrouter"
+export CODEX_API_BASE="$API_BASE"
 
-[shell_environment_policy]
-inherit = "all"
-EOF
-        cat > "$CODEX_HOME/auth.json" << EOF
-{
-  "auth_mode": "apikey",
-  "OPENAI_API_KEY": "$OPENAI_API_KEY"
-}
-EOF
-        chmod 600 "$CODEX_HOME/auth.json"
-        ;;
-
-    anthropic/*)
-        # Anthropic models - Codex supports them natively
-        if [ -z "$SAVED_ANTHROPIC_KEY" ]; then
-            echo "ERROR: ANTHROPIC_API_KEY not set in .env"
-            exit 1
-        fi
-        # Set ONLY Anthropic key
-        export ANTHROPIC_API_KEY="$SAVED_ANTHROPIC_KEY"
-        CODEX_MODEL="$MODEL"
-        CONTEXT_MODEL="claude-opus-4"
-        echo "Using Anthropic API"
-        echo "  Model: $CODEX_MODEL"
-        PROVIDER="Anthropic"
-        AUTH_MODE="apikey"
-        API_BASE="https://api.anthropic.com"
-        ;;
-
-    minimax*|minimax/*)
-        # Always use OpenRouter for MiniMax to ensure correct model ids
-        if [ -z "$SAVED_OPENROUTER_KEY" ]; then
-            echo "ERROR: OPENROUTER_API_KEY not set in .env (required for MiniMax)"
-            exit 1
-        fi
-        export OPENAI_API_KEY="$SAVED_OPENROUTER_KEY"
-        export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-        export OPENROUTER_APP_NAME="Codex CI Repair"
-        export OPENROUTER_SITE_URL="https://github.com/openai/codex"
-        CODEX_MODEL="$MODEL"
-        CONTEXT_MODEL="$MODEL"
-        echo "Using OpenRouter for MiniMax"
-        echo "  Model: $CODEX_MODEL"
-        echo "  API Key: ${OPENAI_API_KEY:0:10}..."
-        PROVIDER="OpenRouter"
-        AUTH_MODE="apikey"
-        API_BASE="$OPENAI_BASE_URL"
-        export CODEX_PROVIDER="openrouter"
-        export CODEX_API_BASE="$API_BASE"
-
-        # Write provider config for Codex (project-local)
-        mkdir -p "$CODEX_HOME"
-        cat > "$CODEX_HOME/config.toml" << 'EOF'
-# Codex configuration for MiniMax via OpenRouter
+# Write provider config for Codex (project-local)
+mkdir -p "$CODEX_HOME"
+cat > "$CODEX_HOME/config.toml" << 'EOF'
+# Codex configuration for OpenRouter (all models)
 model_provider = "openrouter"
 model_reasoning_effort = "medium"
 
@@ -202,25 +140,13 @@ base_url = "https://openrouter.ai/api/v1"
 wire_api = "responses"
 requires_openai_auth = true
 EOF
-        cat > "$CODEX_HOME/auth.json" << EOF
+cat > "$CODEX_HOME/auth.json" << EOF
 {
   "auth_mode": "apikey",
   "OPENAI_API_KEY": "$OPENAI_API_KEY"
 }
 EOF
-        chmod 600 "$CODEX_HOME/auth.json"
-        ;;
-
-    *)
-        echo "ERROR: Unknown model: $MODEL"
-        echo ""
-        echo "Supported models:"
-        echo "  OpenAI (direct):    any gpt-*, chatgpt-*, o<number>*, or codex-* model"
-        echo "  Anthropic:          anthropic/claude-opus-4, anthropic/claude-sonnet-4, anthropic/claude-sonnet-3.5"
-        echo "  MiniMax:            minimax/minimax-m2.5, minimax/minimax-m3, minimax-*"
-        exit 1
-        ;;
-esac
+chmod 600 "$CODEX_HOME/auth.json"
 
 echo ""
 
