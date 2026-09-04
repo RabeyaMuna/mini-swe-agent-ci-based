@@ -3395,7 +3395,11 @@ def _extract_diff(submission: str) -> str:
 
     Also detects duplicate file patches (multiple diffs for the same file)
     and logs a warning - these will be merged later in update_preds_file().
+
+    Filters out corrupted patches (shell artifacts, command output, etc.)
     """
+    from minisweagent.run.benchmarks.utils.patch_merger import filter_corrupted_patches
+
     sentinel = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     if sentinel in submission:
         diff = submission[submission.index(sentinel) + len(sentinel) :].lstrip()
@@ -3407,6 +3411,10 @@ def _extract_diff(submission: str) -> str:
         parts.pop()
 
     diff = ("\n".join(parts) + "\n") if parts else ""
+
+    # Filter corrupted patches early (shell artifacts, command output, etc.)
+    if diff:
+        diff = filter_corrupted_patches(diff)
 
     # Detect duplicate patches (will be merged in update_preds_file)
     if diff:

@@ -182,7 +182,13 @@ run:
   # to the exact failing commit. Keep this limited to lightweight setup.
   startup_command: |
     git config user.email "ci-repair@mini-swe-agent" && \
-    git config user.name "mini-swe-agent"
+    git config user.name "mini-swe-agent" && \
+    # Add common shell artifacts to .gitignore (doesn't affect tracked files)
+    echo "# Shell redirection artifacts" >> .gitignore && \
+    echo "=[0-9]*" >> .gitignore && \
+    echo ">[0-9]*" >> .gitignore && \
+    echo "*.tmp" >> .gitignore && \
+    echo "*.log" >> .gitignore
 
 # ── Environment ───────────────────────────────────────────────────────────────
 # Uses LocalEnvironment — no Docker or container runtime required.
@@ -190,6 +196,8 @@ run:
 # do not set it here.
 environment:
   timeout: 120
+  # Using bash with pipefail to catch command failures in pipes
+  # Note: We don't use -e (exit on error) as it would break agent's error handling
   interpreter: ["bash", "-c"]
   env:
     PAGER: cat
@@ -198,6 +206,8 @@ environment:
     PIP_PROGRESS_BAR: "off"
     TQDM_DISABLE: "1"
     GIT_PAGER: cat
+    # Prevent bash from creating files from failed redirections
+    BASH_ENV: /dev/null
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model:

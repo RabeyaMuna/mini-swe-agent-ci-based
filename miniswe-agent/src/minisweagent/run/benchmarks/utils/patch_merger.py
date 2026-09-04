@@ -87,6 +87,45 @@ def _deduplicate_hunks(hunks_list: List[str]) -> List[str]:
     return unique_hunks
 
 
+def _is_valid_filename(filename: str) -> bool:
+    """
+    Check if a filename is valid for a patch.
+
+    Filters out:
+    - Files starting with = (shell redirection artifacts)
+    - Files that look like command output captures
+    - Files with invalid characters for typical paths
+
+    Args:
+        filename: The file path to validate
+
+    Returns:
+        True if the filename is valid, False otherwise
+    """
+    if not filename or filename == '/dev/null':
+        return False
+
+    # Filter shell redirection artifacts (=4.6.0, =>output, etc.)
+    if filename.startswith('=') or filename.startswith('>'):
+        logger.warning(f"[Patch Merger] Ignoring patch for invalid filename (shell artifact): {filename}")
+        return False
+
+    # Filter obvious command output files
+    invalid_patterns = [
+        r'^[0-9]+\.[0-9]+\.[0-9]+$',  # Version numbers like "4.6.0"
+        r'^\d+$',  # Pure numbers
+        r'^<.*>$',  # Angle brackets
+        r'^\[.*\]$',  # Square brackets
+    ]
+
+    for pattern in invalid_patterns:
+        if re.match(pattern, filename):
+            logger.warning(f"[Patch Merger] Ignoring patch for suspicious filename: {filename}")
+            return False
+
+    return True
+
+
 def parse_unified_diff(diff_text: str) -> List[Dict[str, str]]:
     """
     Parse a unified diff into individual file patches.
@@ -114,6 +153,10 @@ def parse_unified_diff(diff_text: str) -> List[Dict[str, str]]:
             continue
 
         file_path = file_match.group(1)
+
+        # Validate filename before adding to patches
+        if not _is_valid_filename(file_path):
+            continue
 
         # Extract header (everything before first @@)
         header_match = re.search(r'(.*?)(?=^@@|\Z)', match, re.MULTILINE | re.DOTALL)
@@ -152,6 +195,42 @@ def group_patches_by_file(patches: List[Dict[str, str]]) -> Dict[str, List[Dict[
     return grouped
 
 
+def _contains_command_output(patch: str) -> bool:
+    """
+    Detect if patch content contains command output instead of actual code.
+
+    Common indicators:
+    - pip/npm install output
+    - wget/curl download output
+    - Build system output
+    - Error messages
+
+    Args:
+        patch: The patch text to check
+
+    Returns:
+        True if patch appears to contain command output
+    """
+    command_output_patterns = [
+        r'\+Collecting [a-zA-Z0-9_-]+',  # pip install output
+        r'\+Successfully installed',      # pip success
+        r'\+Using cached.*\.whl',         # pip cache messages
+        r'\+Downloading.*\([\d.]+\s*[KMG]B\)',  # pip/wget download
+        r'\+npm (WARN|ERR!)',             # npm output
+        r'\+error: command failed',       # Build errors
+        r'\+\[[\d/]+\].*\d+%',           # Progress bars
+    ]
+
+    for pattern in command_output_patterns:
+        if re.search(pattern, patch, re.MULTILINE):
+            logger.warning(
+                f"[Patch Merger] Patch appears to contain command output, not code: {pattern}"
+            )
+            return True
+
+    return False
+
+
 def _is_valid_patch_structure(patch: str) -> Tuple[bool, str]:
     """
     Check if patch has valid unified diff format.
@@ -161,12 +240,17 @@ def _is_valid_patch_structure(patch: str) -> Tuple[bool, str]:
     2. 'index', '---', '+++' lines after diff header
     3. All hunks (@@) must come after complete file headers
     4. NO orphaned hunks (hunks without proper file context)
+    5. NO command output in patch content
 
     Returns:
         (is_valid, error_message)
     """
     if not patch or not patch.strip():
         return False, "Empty patch"
+
+    # Check for command output first
+    if _contains_command_output(patch):
+        return False, "Patch contains command output instead of code changes"
 
     lines = patch.split('\n')
 
@@ -404,6 +488,64 @@ def _manual_apply_patch(file_path: Path, patch: Dict[str, str]) -> None:
     pass
 
 
+def filter_corrupted_patches(diff_text: str) -> str:
+    """
+    Pre-process diff to remove obviously corrupted patches before parsing.
+
+    This catches patches with:
+    - Invalid filenames (shell artifacts like =4.6.0)
+    - Command output in content
+    - Malformed structure
+
+    Args:
+        diff_text: Raw diff text
+
+    Returns:
+        Filtered diff text with corrupted patches removed
+    """
+    if not diff_text or not diff_text.strip():
+        return diff_text
+
+    # Split into individual patches
+    diff_pattern = r'(diff --git a/[^\n]+\n(?:(?!diff --git).*\n)*)'
+    matches = re.findall(diff_pattern, diff_text, re.MULTILINE)
+
+    valid_patches = []
+    removed_count = 0
+
+    for match in matches:
+        # Check filename
+        file_match = re.search(r'diff --git a/([^ ]+) b/([^ ]+)', match)
+        if not file_match:
+            logger.debug("[Patch Merger] Skipping patch: no file path found")
+            removed_count += 1
+            continue
+
+        file_path = file_match.group(1)
+
+        # Validate filename
+        if not _is_valid_filename(file_path):
+            removed_count += 1
+            continue
+
+        # Check for command output
+        if _contains_command_output(match):
+            logger.warning(
+                f"[Patch Merger] Removing corrupted patch for {file_path}: contains command output"
+            )
+            removed_count += 1
+            continue
+
+        valid_patches.append(match)
+
+    if removed_count > 0:
+        logger.info(
+            f"[Patch Merger] Filtered out {removed_count} corrupted patch(es), kept {len(valid_patches)}"
+        )
+
+    return "\n".join(valid_patches) if valid_patches else ""
+
+
 def merge_duplicate_patches(diff_text: str, repo_path: Path = None) -> str:
     """
     Main entry point: merge all duplicate file patches in a unified diff.
@@ -417,6 +559,13 @@ def merge_duplicate_patches(diff_text: str, repo_path: Path = None) -> str:
     """
     if not diff_text or not diff_text.strip():
         return diff_text
+
+    # Filter corrupted patches first
+    diff_text = filter_corrupted_patches(diff_text)
+
+    if not diff_text:
+        logger.warning("[Patch Merger] All patches were filtered out as corrupted")
+        return ""
 
     # Parse all patches
     patches = parse_unified_diff(diff_text)
