@@ -189,6 +189,23 @@ def merge_patches_for_file(file_patches: List[Dict[str, str]], original_content:
     # Use first patch's header as base
     base_header = file_patches[0]['header']
 
+    # CRITICAL: Ensure header has required file markers (--- a/ and +++ b/)
+    # The header must have these for git apply to work
+    if '--- a/' not in base_header or '+++ b/' not in base_header:
+        logger.debug(f"[Patch Merger] Adding missing file markers to header for {file_path}")
+        # Insert file markers after diff --git line
+        header_lines = base_header.split('\n')
+        # Find the diff --git line
+        git_diff_idx = next((i for i, line in enumerate(header_lines) if line.startswith('diff --git')), 0)
+        # Insert markers after it (skip index line if present)
+        insert_idx = git_diff_idx + 1
+        if insert_idx < len(header_lines) and header_lines[insert_idx].startswith('index '):
+            insert_idx += 1
+        # Add file markers
+        header_lines.insert(insert_idx, f'--- a/{file_path}')
+        header_lines.insert(insert_idx + 1, f'+++ b/{file_path}')
+        base_header = '\n'.join(header_lines)
+
     # Collect all hunks
     all_hunks = []
     for patch in file_patches:

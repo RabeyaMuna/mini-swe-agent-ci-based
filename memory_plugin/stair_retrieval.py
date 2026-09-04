@@ -726,11 +726,156 @@ Use `problem_type: "dependency"` for all returned problems.
 """
 
             try:
-                response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
-                result = response if isinstance(response, dict) else {"problems": response} if isinstance(response, list) else {}
+                # Get model capacity dynamically from litellm
+                # Try multiple attributes to find model name
+                # NOTE: For wrapped LLMs (like _LLMShim from cibench), the model_name
+                # should be attached to the wrapper by _make_langchain_llm()
+                model_name = (
+                    getattr(self.llm, 'model_name', None) or
+                    getattr(self.llm, 'model', None) or
+                    getattr(self.llm, 'model_id', None) or
+                    getattr(self.llm, '_model', None) or
+                    getattr(self.llm, '_model_name', None) or
+                    getattr(getattr(self.llm, 'config', None), 'model', None) or
+                    'unknown'
+                )
 
-                # Extract all problems (both dependency and consecutive)
-                problems = result.get("problems", [])
+                # Debug: Log what we found
+                if model_name == 'unknown':
+                    # Print LLM attributes to help debug
+                    llm_attrs = [a for a in dir(self.llm) if not a.startswith('_')]
+                    print(f"[Memory] STAGE 4: WARNING - Could not detect model name. LLM type: {type(self.llm).__name__}, public attributes: {llm_attrs[:10]}")
+                    print(f"[Memory] STAGE 4: HINT - If using cibench, ensure _make_context_llm() attaches model_name to the callable")
+
+                try:
+                    import litellm
+                    model_info = litellm.get_model_info(str(model_name))
+                    model_context = model_info.get('max_input_tokens') or model_info.get('max_tokens', 128000)
+                except Exception as e:
+                    # Fallback: try to infer from model name string if litellm doesn't know it
+                    model_name_lower = str(model_name).lower()
+                    known_contexts = {
+                        'minimax': 245760,
+                        'claude': 200000,
+                        'gpt-4': 128000,
+                        'gpt-3.5': 16000,
+                        'deepseek': 64000,
+                        'o1': 200000,
+                    }
+                    model_context = next(
+                        (ctx for key, ctx in known_contexts.items() if key in model_name_lower),
+                        128000  # Ultimate fallback
+                    )
+                    if model_context != 128000:
+                        print(f"[Memory] STAGE 4: Using known context for {model_name}: {model_context} tokens")
+
+                # Calculate safe prompt size (reserve 50% for prompt, 50% for response)
+                max_prompt_tokens = model_context // 2
+                max_prompt_chars = max_prompt_tokens * 4  # ~4 chars per token
+
+                prompt_size = len(prompt)
+                prompt_size_kb = prompt_size / 1024
+                capacity_pct = (prompt_size / max_prompt_chars) * 100
+
+                # Log prompt size vs model capacity
+                print(f"[Memory] STAGE 4: Prompt={prompt_size_kb:.1f}KB / Model={model_name} / Capacity={capacity_pct:.0f}% (max={model_context} tokens)")
+
+                response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
+
+                # Check if response is empty/failed due to large prompt
+                # NOTE: {"problems": []} is a VALID response meaning "no dependencies found"
+                # Only treat as empty if:
+                # 1. Response is None/False
+                # 2. Response is an empty list []
+                # 3. Response is an empty dict {}
+                # 4. Response is a dict WITHOUT the "problems" key
+                is_truly_empty = (
+                    not response  # None or False
+                    or (isinstance(response, list) and len(response) == 0)  # []
+                    or (isinstance(response, dict) and len(response) == 0)  # {}
+                    or (isinstance(response, dict) and "problems" not in response)  # Missing "problems" key
+                )
+                if is_truly_empty:
+                    if capacity_pct > 40:  # Using >40% of safe capacity
+                        print(f"[Memory] STAGE 4: ⚠️ Empty response (prompt uses {capacity_pct:.0f}% of model capacity)")
+                        print(f"[Memory] STAGE 4: 🔄 Fallback - processing L1/L2/L3 separately to reduce prompt size")
+
+                        # Fallback: Process each level separately
+                        all_level_problems = []
+                        for level_name, level_matches in [("L1", l1_matches), ("L2", l2_matches), ("L3", l3_matches)]:
+                            if not level_matches:
+                                continue
+
+                            # Build compact data for just this level
+                            level_compact = {
+                                "l1": [self._compact_retrieved_item(item, "L1", i, include_dependencies=True) for i, item in enumerate(l1_matches)] if level_name == "L1" else [],
+                                "l2": [self._compact_retrieved_item(item, "L2", i, include_dependencies=True) for i, item in enumerate(l2_matches)] if level_name == "L2" else [],
+                                "l3": [self._compact_retrieved_item(item, "L3", i, include_dependencies=True) for i, item in enumerate(l3_matches)] if level_name == "L3" else [],
+                            }
+
+                            # Replace the full compact data with level-specific data
+                            level_prompt = prompt.replace(json.dumps(compact, indent=2), json.dumps(level_compact, indent=2))
+                            level_prompt_kb = len(level_prompt) / 1024
+                            level_capacity_pct = (len(level_prompt) / max_prompt_chars) * 100
+                            print(f"[Memory] STAGE 4:   {level_name}: {level_prompt_kb:.1f}KB ({level_capacity_pct:.0f}% capacity)")
+
+                            try:
+                                level_response = invoke_llm_with_retry(llm=self.llm, prompt=level_prompt, parse_json=True)
+                                level_result = level_response if isinstance(level_response, dict) else {"problems": level_response} if isinstance(level_response, list) else {}
+                                level_problems = level_result.get("problems", [])
+                                valid_level = [p for p in level_problems if p and isinstance(p, dict) and self._is_valid_problem(p)]
+                                all_level_problems.extend(valid_level)
+                                print(f"[Memory] STAGE 4:   {level_name} ✓ {len(valid_level)} dependencies found")
+                            except Exception as e:
+                                print(f"[Memory] STAGE 4:   {level_name} ✗ {str(e)[:80]}")
+
+                        problems = all_level_problems
+                        print(f"[Memory] STAGE 4: 🔄 Fallback completed: {len(problems)} total dependencies")
+                    else:
+                        # Empty response but prompt wasn't large - likely API/model issue
+                        print(f"[Memory] STAGE 4: ⚠️ Empty response (prompt only {capacity_pct:.0f}% capacity - likely API/model issue)")
+                        print(f"[Memory] STAGE 4: 🔄 Fallback - retrying with same prompt (may be transient API issue)")
+
+                        # Fallback: Retry with backoff (similar to large-prompt fallback above)
+                        all_retry_problems = []
+                        MAX_RETRIES = 2
+
+                        for retry_num in range(MAX_RETRIES):
+                            import time
+                            wait_time = 2 ** retry_num  # 1s, 2s
+                            print(f"[Memory] STAGE 4:   Retry {retry_num + 1}/{MAX_RETRIES} (after {wait_time}s wait)")
+                            time.sleep(wait_time)
+
+                            try:
+                                retry_response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
+                                # Check if retry response is valid (using same logic as main check)
+                                # {"problems": []} is VALID - means no dependencies found
+                                retry_is_valid = (
+                                    retry_response  # Not None/False
+                                    and not (isinstance(retry_response, list) and len(retry_response) == 0)  # Not []
+                                    and not (isinstance(retry_response, dict) and len(retry_response) == 0)  # Not {}
+                                    and not (isinstance(retry_response, dict) and "problems" not in retry_response)  # Has "problems" key
+                                )
+                                if retry_is_valid:
+                                    retry_result = retry_response if isinstance(retry_response, dict) else {"problems": retry_response} if isinstance(retry_response, list) else {}
+                                    retry_problems = retry_result.get("problems", [])
+                                    valid_retry = [p for p in retry_problems if p and isinstance(p, dict) and self._is_valid_problem(p)]
+                                    all_retry_problems.extend(valid_retry)
+                                    print(f"[Memory] STAGE 4:   Retry {retry_num + 1} ✓ {len(valid_retry)} dependencies found")
+                                    break  # Success - stop retrying
+                                else:
+                                    print(f"[Memory] STAGE 4:   Retry {retry_num + 1} ✗ Still empty")
+                            except Exception as e:
+                                print(f"[Memory] STAGE 4:   Retry {retry_num + 1} ✗ {str(e)[:80]}")
+
+                        problems = all_retry_problems
+                        if problems:
+                            print(f"[Memory] STAGE 4: 🔄 Fallback completed: {len(problems)} total dependencies")
+                        else:
+                            print(f"[Memory] STAGE 4: ✗ All retries failed - skipping dependency extraction")
+                else:
+                    result = response if isinstance(response, dict) else {"problems": response} if isinstance(response, list) else {}
+                    problems = result.get("problems", [])
 
                 # Validate and add only non-empty problems
                 valid_problems = []

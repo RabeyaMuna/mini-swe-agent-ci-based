@@ -358,9 +358,44 @@ def _make_context_llm(
                     model=str(model_name),
                     duration_seconds=time.time() - call_started,
                 )
+
+            # Extract content and check if empty
             content = str(response.choices[0].message.content or "").strip()
             if not content:
-                raise RuntimeError("LLM returned empty content")
+                # Log response metadata to diagnose WHY content is empty
+                finish_reason = getattr(response.choices[0], 'finish_reason', 'unknown')
+                usage = getattr(response, 'usage', None)
+                prompt_tokens = getattr(usage, 'prompt_tokens', 0) if usage else 0
+                completion_tokens = getattr(usage, 'completion_tokens', 0) if usage else 0
+
+                logger.warning(
+                    "[CIBench] LLM returned empty content: "
+                    f"finish_reason={finish_reason}, "
+                    f"prompt_tokens={prompt_tokens}, "
+                    f"completion_tokens={completion_tokens}, "
+                    f"model={model_name}"
+                )
+
+                # Check for common causes
+                if finish_reason == "length":
+                    logger.error(
+                        "[CIBench] Empty due to LENGTH LIMIT: "
+                        f"Model hit max_tokens ({call_kwargs.get('max_tokens', 'unknown')}) "
+                        "before generating response. Increase max_tokens or reduce prompt size."
+                    )
+                elif finish_reason == "content_filter":
+                    logger.error(
+                        "[CIBench] Empty due to CONTENT FILTER: "
+                        "Prompt triggered safety/content policy. Try rephrasing or different model."
+                    )
+                elif completion_tokens == 0:
+                    logger.error(
+                        "[CIBench] Empty due to ZERO OUTPUT TOKENS: "
+                        f"Model generated 0 tokens (finish_reason={finish_reason}). "
+                        "Likely prompt format issue or model refusal."
+                    )
+
+                raise RuntimeError(f"LLM returned empty content (finish_reason={finish_reason})")
             return content
 
         try:
@@ -375,6 +410,8 @@ def _make_context_llm(
             logger.warning("[CIBench] context LLM call failed after retries: %s", exc)
             return ""
 
+    # Attach model_name as attribute so downstream code can access it
+    _call.model_name = model_name  # type: ignore
     return _call
 
 

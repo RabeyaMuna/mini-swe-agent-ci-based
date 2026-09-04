@@ -89,9 +89,8 @@ fi
 2. Inspect the repository and understand the problem from the supplied context
 3. Make the minimal correct change to fix the issue
 4. Do not modify unrelated files
-5. Commit your changes with a descriptive message
+5. **Leave your changes in the working tree** (do NOT commit - the harness will capture them)
 6. OPTIONAL: Run validation ONLY on files you changed (not the whole repo)
-7. The fix should be committed in git (not as uncommitted changes)
 
 **Scope:**
 - Fix this problem only (do not fix unrelated issues)
@@ -103,8 +102,8 @@ fi
 - If you verify, run validation ONLY on the specific files you changed
 
 **Important:**
-- COMMIT your changes (don't leave as uncommitted diff)
-- Use descriptive commit messages
+- **DO NOT commit** - leave all changes as uncommitted diff in the working tree
+- The harness will capture your changes and convert them to unified diff format
 - Don't worry if repo-wide validation fails due to other issues
 - Your fix should address the specific problem described below
 

@@ -192,7 +192,7 @@ run_one() {
             $memory_args \
             "${RESUME_ARGS[@]}" \
             --workers "$WORKERS" \
-            --codex-command "codex exec --sandbox danger-full-access --model $CODEX_MODEL"
+            --codex-command "codex exec --sandbox workspace-write --model $CODEX_MODEL"
     else
         PYTHONPATH=. python3 codex/scripts/run_codex_ci_repair.py \
             --issue-ids "$ISSUE_IDS" \
@@ -203,7 +203,7 @@ run_one() {
             $memory_args \
             "${RESUME_ARGS[@]}" \
             --workers "$WORKERS" \
-            --codex-command "codex exec --sandbox danger-full-access --model $CODEX_MODEL"
+            --codex-command "codex exec --sandbox workspace-write --model $CODEX_MODEL"
     fi
 }
 

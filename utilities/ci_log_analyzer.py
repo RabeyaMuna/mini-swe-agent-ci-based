@@ -1712,6 +1712,9 @@ def _make_langchain_llm(llm: Any) -> Any:
     class _LLMShim:
         def __init__(self, fn: Any) -> None:
             self._fn = fn
+            # Preserve model_name if attached to the callable
+            self.model_name = getattr(fn, 'model_name', None)
+            self.model = getattr(fn, 'model_name', None)  # Also set .model for compatibility
 
         def invoke(self, messages: Any, **kwargs: Any) -> Any:
             # Extract text from a list of messages or pass through a plain string
