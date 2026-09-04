@@ -35,58 +35,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _extract_hunk_signature(hunk: str) -> str:
-    """Extract a unique signature from a hunk for deduplication."""
-    lines = hunk.strip().split('\n')
-    if not lines:
-        return ""
-
-    # Get hunk header (@@ ...)
-    header = lines[0] if lines[0].startswith('@@') else ""
-
-    # Get first 3 changed lines (skip context lines)
-    changed_lines = [l for l in lines[1:6] if l.startswith(('+', '-'))]
-
-    return header + '|' + '|'.join(changed_lines)
-
-
-def _deduplicate_hunks(hunks_list: List[str]) -> List[str]:
-    """
-    Remove duplicate hunks while preserving order.
-
-    Args:
-        hunks_list: List of hunk blocks
-
-    Returns:
-        Deduplicated list of hunks
-    """
-    from typing import Set
-    seen_signatures: Set[str] = set()
-    unique_hunks = []
-
-    for hunk_block in hunks_list:
-        if not hunk_block or not hunk_block.strip():
-            continue
-
-        # Split into individual hunks
-        individual_hunks = re.split(r'(^@@.*)', hunk_block, flags=re.MULTILINE)
-
-        for i in range(1, len(individual_hunks), 2):
-            if i + 1 < len(individual_hunks):
-                hunk = individual_hunks[i] + individual_hunks[i + 1]
-            else:
-                hunk = individual_hunks[i]
-
-            sig = _extract_hunk_signature(hunk)
-            if sig and sig not in seen_signatures:
-                seen_signatures.add(sig)
-                unique_hunks.append(hunk)
-            elif sig:
-                logger.debug(f"[Patch Merger] Removing duplicate hunk: {sig[:80]}...")
-
-    return unique_hunks
-
-
 def parse_unified_diff(diff_text: str) -> List[Dict[str, str]]:
     """
     Parse a unified diff into individual file patches.
@@ -152,72 +100,41 @@ def group_patches_by_file(patches: List[Dict[str, str]]) -> Dict[str, List[Dict[
     return grouped
 
 
-def _is_valid_patch_structure(patch: str) -> Tuple[bool, str]:
+def _is_valid_patch_structure(patch: str) -> bool:
     """
     Check if patch has valid unified diff format.
 
     Valid patches must have:
     1. A 'diff --git' header
-    2. 'index', '---', '+++' lines after diff header
-    3. All hunks (@@) must come after complete file headers
-    4. NO orphaned hunks (hunks without proper file context)
+    2. All hunks (@@) must come after a header
+    3. No orphaned hunks without file context
 
     Returns:
-        (is_valid, error_message)
+        True if patch structure is valid, False otherwise
     """
     if not patch or not patch.strip():
-        return False, "Empty patch"
+        return False
 
     lines = patch.split('\n')
+    has_header = any(line.startswith('diff --git') for line in lines)
 
-    # Track state as we parse
-    last_diff_idx = -100
-    last_index_idx = -100
-    last_minus_idx = -100
-    last_plus_idx = -100
+    if not has_header:
+        logger.warning("[Patch Merger] Patch missing 'diff --git' header")
+        return False
 
+    # Check all hunks have a header before them
+    last_header_index = -1
     for i, line in enumerate(lines):
-        # Track diff header
         if line.startswith('diff --git'):
-            last_diff_idx = i
-            # Reset other markers when we see a new file
-            last_index_idx = -100
-            last_minus_idx = -100
-            last_plus_idx = -100
+            last_header_index = i
+        elif line.startswith('@@'):
+            if last_header_index == -1:
+                logger.warning(
+                    f"[Patch Merger] Found hunk at line {i+1} without preceding 'diff --git' header"
+                )
+                return False
 
-        # Track index line
-        elif line.startswith('index '):
-            last_index_idx = i
-
-        # Track --- line
-        elif line.startswith('--- '):
-            last_minus_idx = i
-
-        # Track +++ line
-        elif line.startswith('+++ '):
-            last_plus_idx = i
-
-        # Check hunks
-        elif line.startswith('@@') and ' @@' in line:
-            # Hunk header found - validate it has proper file context
-
-            # Must have diff header before it (not too far back)
-            if last_diff_idx < 0 or i - last_diff_idx > 20:
-                return False, f"Line {i+1}: Orphaned hunk without diff header: {line[:60]}"
-
-            # Must have index/---/+++ after the diff header and before this hunk
-            if last_index_idx < last_diff_idx:
-                return False, f"Line {i+1}: Missing 'index' line before hunk"
-            if last_minus_idx < last_diff_idx:
-                return False, f"Line {i+1}: Missing '--- a/' line before hunk"
-            if last_plus_idx < last_diff_idx:
-                return False, f"Line {i+1}: Missing '+++ b/' line before hunk"
-
-            # Markers must be in order and close to the hunk
-            if not (last_diff_idx < last_index_idx < last_minus_idx < last_plus_idx < i):
-                return False, f"Line {i+1}: File headers out of order before hunk"
-
-    return True, "OK"
+    return True
 
 
 def merge_patches_for_file(file_patches: List[Dict[str, str]], original_content: str = "") -> str:
@@ -246,9 +163,8 @@ def merge_patches_for_file(file_patches: List[Dict[str, str]], original_content:
     # Validate each input patch first
     invalid_patches = []
     for i, patch in enumerate(file_patches):
-        is_valid, error = _is_valid_patch_structure(patch['full_patch'])
-        if not is_valid:
-            logger.warning(f"[Patch Merger] Input patch {i+1}/{len(file_patches)} invalid: {error}")
+        if not _is_valid_patch_structure(patch['full_patch']):
+            logger.warning(f"[Patch Merger] Input patch {i+1}/{len(file_patches)} has invalid structure")
             invalid_patches.append(i)
 
     if invalid_patches:
@@ -291,34 +207,30 @@ def merge_patches_for_file(file_patches: List[Dict[str, str]], original_content:
         base_header = '\n'.join(header_lines)
 
     # Collect all hunks
-    all_hunks_raw = []
-    for i, patch in enumerate(file_patches):
-        if i not in invalid_patches and patch['hunks']:
-            all_hunks_raw.append(patch['hunks'])
+    all_hunks = []
+    for patch in file_patches:
+        if patch['hunks']:
+            all_hunks.append(patch['hunks'])
 
-    # CRITICAL FIX: Deduplicate hunks before merging!
-    if all_hunks_raw:
-        unique_hunks = _deduplicate_hunks(all_hunks_raw)
+    # If we have hunks, combine them
+    if all_hunks:
+        combined_hunks = "".join(all_hunks)
+        merged_patch = f"{base_header}\n{combined_hunks}"
 
-        if unique_hunks:
-            combined_hunks = "\n".join(unique_hunks)  # Use newline separator, not empty string!
-            merged_patch = f"{base_header}\n{combined_hunks}"
+        # CRITICAL: Validate the merged patch structure
+        if not _is_valid_patch_structure(merged_patch):
+            logger.warning(
+                f"[Patch Merger] Merged patch for {file_path} has invalid structure, "
+                "falling back to git-based merge"
+            )
+            try:
+                return _git_based_merge(file_patches, file_path, original_content)
+            except Exception as e:
+                logger.error(f"[Patch Merger] Git-based merge failed: {e}, returning first patch")
+                return file_patches[0]['full_patch']
 
-            # CRITICAL: Validate the merged patch structure
-            is_valid, error = _is_valid_patch_structure(merged_patch)
-            if not is_valid:
-                logger.warning(
-                    f"[Patch Merger] Merged patch for {file_path} invalid: {error}, "
-                    "falling back to git-based merge"
-                )
-                try:
-                    return _git_based_merge(file_patches, file_path, original_content)
-                except Exception as e:
-                    logger.error(f"[Patch Merger] Git-based merge failed: {e}, returning first patch")
-                    return file_patches[0]['full_patch']
-
-            logger.info(f"[Patch Merger] Combined {len(file_patches)} patches into {len(unique_hunks)} unique hunks")
-            return merged_patch
+        logger.debug(f"[Patch Merger] Combined {len(file_patches)} patches with {len(all_hunks)} hunk blocks")
+        return merged_patch
 
     # Fallback: Try git-based merge with actual content
     try:

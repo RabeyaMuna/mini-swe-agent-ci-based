@@ -1078,6 +1078,133 @@ def write_issue_document(result_dir: Path, problem: dict[str, Any], document: st
     return path
 
 
+def _validate_and_locate_problem_files(
+    problem: dict[str, Any], checkout: Path
+) -> tuple[bool, str]:
+    """
+    Validate problem before attempting to fix it.
+    Try to locate files even if paths don't match exactly.
+
+    Returns:
+        (is_valid, skip_reason) - True if valid, False with reason if should skip
+    """
+    # Check for impossible stdlib module import errors
+    error_signals = problem.get("error_signals", []) or problem.get("failure_signals", [])
+    if not isinstance(error_signals, list):
+        error_signals = [error_signals] if error_signals else []
+
+    # Python stdlib modules that cannot actually be missing
+    STDLIB_MODULES = [
+        'itertools', 'os', 'sys', 'json', 're', 'time', 'datetime',
+        'collections', 'functools', 'typing', 'pathlib', 'subprocess',
+        'math', 'random', 'string', 'copy', 'io', 'traceback'
+    ]
+
+    for signal in error_signals:
+        signal_str = str(signal).lower()
+        for mod in STDLIB_MODULES:
+            if f"no module named '{mod}'" in signal_str or f'no module named "{mod}"' in signal_str:
+                return False, f"Invalid error: '{mod}' is Python stdlib, cannot be missing"
+
+    # Check and try to locate affected files
+    files = problem.get("files", [])
+    if not files:
+        # No files specified - let agent try (might be environment/config issue)
+        return True, ""
+
+    if not isinstance(files, list):
+        files = [files]
+
+    located_files = []
+    missing_files = []
+
+    for f in files:
+        # Extract path from various formats
+        if isinstance(f, dict):
+            file_path_str = f.get("path") or f.get("file") or ""
+        else:
+            file_path_str = str(f)
+
+        if not file_path_str:
+            continue
+
+        file_path = checkout / file_path_str
+
+        # 1. Check exact path
+        if file_path.exists():
+            located_files.append(file_path_str)
+            continue
+
+        # 2. Try to find by filename using find command
+        filename = Path(file_path_str).name
+        try:
+            result = subprocess.run(
+                ["find", str(checkout), "-type", "f", "-name", filename, "-not", "-path", "*/.git/*"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            found_paths = [p.strip() for p in result.stdout.split('\n') if p.strip()]
+
+            if found_paths:
+                # Found at least one match - use first one
+                try:
+                    relative_path = Path(found_paths[0]).relative_to(checkout)
+                    located_files.append(str(relative_path))
+                    print(f"  ✓ Located {filename} at: {relative_path}")
+                    # Update problem with correct path
+                    if isinstance(f, dict):
+                        f["path"] = str(relative_path)
+                        f["file"] = str(relative_path)
+                    continue
+                except ValueError:
+                    pass
+        except (subprocess.TimeoutExpired, Exception):
+            pass
+
+        # 3. Search in common directories
+        for common_dir in ['src', 'lib', 'tests', 'test', '.', 'app']:
+            search_path = checkout / common_dir
+            if not search_path.exists():
+                continue
+            # Use find in subdirectory
+            try:
+                result = subprocess.run(
+                    ["find", str(search_path), "-type", "f", "-name", filename, "-not", "-path", "*/.git/*"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3
+                )
+                found = [p.strip() for p in result.stdout.split('\n') if p.strip()]
+                if found:
+                    try:
+                        relative_path = Path(found[0]).relative_to(checkout)
+                        located_files.append(str(relative_path))
+                        print(f"  ✓ Located {filename} in {common_dir}/: {relative_path}")
+                        if isinstance(f, dict):
+                            f["path"] = str(relative_path)
+                            f["file"] = str(relative_path)
+                        break
+                    except ValueError:
+                        pass
+            except (subprocess.TimeoutExpired, Exception):
+                continue
+        else:
+            # Not found anywhere
+            missing_files.append(file_path_str)
+
+    # Decision: Skip only if ALL files are missing
+    if files and not located_files and missing_files:
+        return False, f"Cannot locate any affected files: {', '.join(missing_files[:3])}"
+
+    if missing_files:
+        print(f"  ⚠️  Could not locate {len(missing_files)} file(s): {', '.join(missing_files[:2])}")
+        print(f"  ✓ But found {len(located_files)} file(s) - proceeding with those")
+
+    return True, ""
+
+
 def run_codex(
     checkout: Path,
     prompt_path: Path,
@@ -1651,6 +1778,25 @@ def _run_issue(
     print()
     problem_results = []
     for problem in problems:
+        # ═══════════════════════════════════════════════════════════════
+        # VALIDATE PROBLEM: Skip if files can't be located or problem is invalid
+        # ═══════════════════════════════════════════════════════════════
+        is_valid, skip_reason = _validate_and_locate_problem_files(problem, checkout)
+        if not is_valid:
+            print(f"\n{'='*80}")
+            print(f"⚠️  SKIPPING Problem {problem.get('number', '?')}: {skip_reason}")
+            print(f"{'='*80}\n")
+            problem_results.append({
+                "problem": problem,
+                "returncode": -1,
+                "elapsed_seconds": 0,
+                "skipped": True,
+                "skip_reason": skip_reason,
+                "usage": {},
+                "cost_usd": 0,
+            })
+            continue  # Skip to next problem
+
         document = compose_issue_document(
             issue,
             ci_failure,
@@ -1676,16 +1822,41 @@ def _run_issue(
             if cm:
                 codex_cmd = f"{codex_cmd} --model {cm}"
 
-        run_result = run_codex(
-            checkout,
-            prompt_path,
-            transcript_path,
-            codex_cmd,
-            args.timeout,
-            args.dry_run,
-            metrics_recorder=metrics,
-            metrics_phase=f"repair_agent.problem_{problem['number']}",
-        )
+        # Run Codex with timeout - catch timeout exception to continue to next problem
+        try:
+            run_result = run_codex(
+                checkout,
+                prompt_path,
+                transcript_path,
+                codex_cmd,
+                args.timeout,
+                args.dry_run,
+                metrics_recorder=metrics,
+                metrics_phase=f"repair_agent.problem_{problem['number']}",
+            )
+        except subprocess.TimeoutExpired:
+            print(f"\n{'='*80}")
+            print(f"⏱️  TIMEOUT: Problem {problem.get('number', '?')} exceeded {args.timeout}s limit")
+            print(f"{'='*80}\n")
+            run_result = {
+                "returncode": -2,
+                "elapsed_seconds": args.timeout,
+                "timeout": True,
+                "usage": {},
+                "cost_usd": 0,
+            }
+        except Exception as e:
+            print(f"\n{'='*80}")
+            print(f"❌ ERROR: Problem {problem.get('number', '?')} failed: {e}")
+            print(f"{'='*80}\n")
+            run_result = {
+                "returncode": -3,
+                "elapsed_seconds": 0,
+                "error": str(e),
+                "usage": {},
+                "cost_usd": 0,
+            }
+
         problem_results.append(
             {"problem": problem, "prompt_cache": cache_info, **run_result}
         )

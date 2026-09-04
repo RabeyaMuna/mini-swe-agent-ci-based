@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run Codex with any model via OpenRouter
 #
-# Usage: ./run_codex_direct.sh <issue-ids> [ablation] [direction] [model] [repo_filters] [dataset] [workers]
+# Usage: ./run_codex_direct.sh <issue-ids> [ablation] [direction] [model] [repo_filters] [dataset] [workers] [timeout]
 #   <issue-ids>: Comma-separated IDs, or empty string "" to use eval_issue_ids.json, or omit to RUN ALL
 #   [ablation]:  baseline|L1|L2|L3|L1+L2|L1+L2+L3|all   (default: all)
 #   [direction]: backward|forward|both                   (default: both)
@@ -10,6 +10,7 @@
 #                   (overrides <issue-ids>)
 #   [dataset]:   Path to eval_set.jsonl (default: data/eval_set.jsonl)
 #   [workers]:   Parallel issues per ablation (default: 1)
+#   [timeout]:   Timeout per problem in seconds (default: 480 = 8 minutes)
 #
 #   Examples:
 #     # Run ALL ablations and BOTH directions for all issues in eval_issue_ids.json using GPT‑5‑mini
@@ -41,6 +42,7 @@ MODEL=${4:-gpt-5-mini}
 REPO_FILTERS=${5:-}
 DATASET=${6:-data/eval_set.jsonl}
 WORKERS=${7:-1}
+TIMEOUT=${8:-480}  # 8 minutes per problem (480s)
 RESULTS_ROOT=${CODEX_RESULTS_ROOT:-results/codex}
 
 # Canonicalize model aliases before selecting the provider or CODEX_HOME.
@@ -192,6 +194,7 @@ run_one() {
             $memory_args \
             "${RESUME_ARGS[@]}" \
             --workers "$WORKERS" \
+            --timeout "$TIMEOUT" \
             --codex-command "codex exec --sandbox workspace-write --model $CODEX_MODEL"
     else
         PYTHONPATH=. python3 codex/scripts/run_codex_ci_repair.py \
@@ -203,6 +206,7 @@ run_one() {
             $memory_args \
             "${RESUME_ARGS[@]}" \
             --workers "$WORKERS" \
+            --timeout "$TIMEOUT" \
             --codex-command "codex exec --sandbox workspace-write --model $CODEX_MODEL"
     fi
 }

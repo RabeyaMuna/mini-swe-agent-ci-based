@@ -191,7 +191,7 @@ OUTPUT JSON:
 FILES IN CHUNK: {", ".join(chunk_files)}
 
 DIFF:
-{chunk_diff[:6000]}
+{chunk_diff}
 
 CI FAILURE: {failure_summary}
 

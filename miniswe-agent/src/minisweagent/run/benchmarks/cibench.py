@@ -91,6 +91,9 @@ from minisweagent.run.benchmarks.utils.patch_merger import (
     detect_duplicate_patches,
 )
 
+# Import diff filtering to exclude binary/large files from stored patches
+from commit_decomposition.diff_filter import filter_diff, is_binary_patch
+
 # Memory-guided repair is now integrated into ci_memory_system.py
 # No need for separate import
 from minisweagent.utils.log import add_file_handler, logger
@@ -2129,14 +2132,20 @@ ALWAYS activate before running ANY command:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-IMPORTANT: If this is an infrastructure problem that CANNOT be fixed by code changes, skip it immediately:
-- Rate limiting (HTTP 429, API limits)
-- Network timeouts or connection failures
-- External service outages (GitHub Actions, Docker Hub, npm registry)
-- Download failures for external dependencies/actions
-- Transient errors not caused by code
+CRITICAL CONSTRAINTS:
 
-For infrastructure problems: Respond with "This is an infrastructure issue, not fixable by code" and submit an empty patch.
+1. BINARY FILES: Do not add or modify binary files (executables, compiled libraries, build outputs).
+   Binary files are not source code and cause repository issues.
+   Add dependencies to dependency manifests (requirements.txt, package.json, pom.xml, etc.) instead.
+
+2. SOURCE FILES ONLY: Modify only human-readable source files (code, configs, build scripts, tests).
+   If unsure whether a file is binary: Use 'file' command to check before modifying.
+
+3. INFRASTRUCTURE ISSUES: If the problem cannot be fixed by code changes:
+   - Examples: rate limits, network failures, external service outages, transient errors
+   - Response: "Infrastructure issue, not fixable by code" and submit empty patch.
+
+Before submitting: Run 'git status' and remove any unintended binary files.
 """
 
 
