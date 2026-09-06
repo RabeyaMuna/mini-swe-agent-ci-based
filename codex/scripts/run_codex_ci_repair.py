@@ -42,7 +42,6 @@ from codex.scripts.ci_repair_prompts import (
 from utilities.ci_log_analyzer import _run_log_analysis
 from utilities.git_checkout import prepare_repo_checkout as prepare_git_checkout
 from utilities.git_patch import PatchValidationError
-from utilities.patch_reconciliation import collect_with_reconciliation, write_reconciliation_prompt
 from utilities.run_metrics import (
     RunMetricsRecorder,
     completed_instance_ids,
@@ -1602,11 +1601,19 @@ def _decode_git_diff(checkout: Path, revision_args: list[str]) -> tuple[str, int
     return patch, binary_proc.returncode
 
 
-def git_diff(checkout: Path, original_commit: str = None, resolve_conflict=None) -> str:
-    """Capture and round-trip all agent changes against the failed commit."""
+def git_diff(checkout: Path, original_commit: str = None) -> str:
+    """Capture all agent changes against the failed commit as a unified diff."""
     if not original_commit:
         raise PatchValidationError("The failed commit is required to generate a complete repair patch")
-    return collect_with_reconciliation(checkout, original_commit, resolve_conflict)
+
+    result = subprocess.run(
+        ["git", "diff", original_commit],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    return result.stdout
 
 
 def changed_files(checkout: Path, original_commit: str = None) -> list[str]:
@@ -1683,12 +1690,10 @@ def save_patch_and_result(
     verification: dict[str, Any],
     verification_result: dict[str, Any] | None,
     original_sha: str = None,
-    resolve_conflict=None,
-    reconciliation_results: list[dict[str, Any]] | None = None,
 ) -> None:
     print(f"[save_patch_and_result] Getting git diff from {checkout}")
     print(f"[save_patch_and_result] Original SHA: {original_sha}")
-    diff = git_diff(checkout, original_sha or issue.get("sha_fail"), resolve_conflict)
+    diff = git_diff(checkout, original_sha or issue.get("sha_fail"))
     stats = subprocess.run(
         ["git", "apply", "--numstat", "-z"], input=diff.encode("utf-8"),
         cwd=checkout, capture_output=True, check=True,
@@ -1720,7 +1725,6 @@ def save_patch_and_result(
                 else verification_result.get("returncode") == 0
             ),
             "problem_results": problem_results,
-            "patch_reconciliation": reconciliation_results or [],
         },
     )
 
@@ -1995,26 +1999,7 @@ def _run_issue(
     print(f"[DEBUG]   Checkout: {checkout}")
     print(f"[DEBUG]   Problem results: {len(problem_results)} problems processed")
 
-    reconciliation_results = []
-
-    def resolve_conflict(error: str, attempt: int) -> None:
-        artifacts = result_dir / "patch-reconciliation"
-        prompt_path = write_reconciliation_prompt(
-            artifacts, checkout, original_sha, problems, error, attempt, verification,
-        )
-        command = args.codex_command
-        if " --model " not in f" {command} ":
-            model = canonical_model(args.context_model)
-            if model:
-                command = f"{command} --model {model}"
-        result = run_codex(
-            checkout, prompt_path, artifacts / f"transcript-{attempt}.txt",
-            command, args.timeout, args.dry_run, metrics_recorder=metrics,
-            metrics_phase=f"repair_agent.patch_reconciliation_{attempt}",
-        )
-        reconciliation_results.append({"attempt": attempt, **result})
-        write_json(artifacts / f"result-{attempt}.json", result)
-
+    # Simple patch collection - no reconciliation
     save_patch_and_result(
         result_dir,
         checkout,
@@ -2025,15 +2010,12 @@ def _run_issue(
         verification,
         None,  # No external verification
         original_sha,
-        resolve_conflict=resolve_conflict,
-        reconciliation_results=reconciliation_results,
     )
 
     print(f"[DEBUG] ✓ Saved patch.diff and result.json")
     completed = bool(
         len(problem_results) == len(problems)
         and all(result.get("returncode") == 0 for result in problem_results)
-        and all(result.get("returncode") == 0 for result in reconciliation_results)
         and (result_dir / "patch.diff").exists()
         and (result_dir / "patch.diff").read_text(encoding="utf-8").strip()
     )
