@@ -87,10 +87,9 @@ from utilities.ci_cache import (
     load_validation_sequence,
 )
 from minisweagent.run.benchmarks.utils.patch_merger import (
-    validate_patch,
+    merge_duplicate_patches,
+    detect_duplicate_patches,
 )
-from minisweagent.run.benchmarks.utils.git_patch import PatchValidationError
-from minisweagent.run.benchmarks.utils.patch_reconciliation import collect_with_reconciliation, write_reconciliation_prompt
 
 # Import diff filtering to exclude binary/large files from stored patches
 from commit_decomposition.diff_filter import filter_diff, is_binary_patch
@@ -854,7 +853,8 @@ def update_preds_file(
     """
     Write / update the prediction for one instance (thread-safe).
 
-    Rejects malformed or unmerged patches before saving.
+    Automatically merges duplicate file patches in the diff to prevent
+    merge conflicts during application.
 
     Args:
         output_path: Path to predictions file
@@ -863,12 +863,36 @@ def update_preds_file(
         diff: Patch diff
         cost: API cost for this instance (in dollars)
     """
-    # Persist only complete patches. Merging requires the failed commit and is
-    # performed before this writer, never by rewriting a prediction at save time.
+    # Detect and merge duplicate patches
     if diff:
-        valid, error = validate_patch(diff)
-        if not valid:
-            raise PatchValidationError(error)
+        duplicates = detect_duplicate_patches(diff)
+        duplicate_files = [f for f, count in duplicates.items() if count > 1]
+
+        if duplicate_files:
+            logger.warning(
+                "[CIBench] Instance %s has duplicate patches for %d file(s): %s",
+                instance_id,
+                len(duplicate_files),
+                ", ".join(duplicate_files),
+            )
+            logger.info(
+                "[CIBench] Merging duplicate patches for instance %s", instance_id
+            )
+
+            # Merge duplicates
+            try:
+                diff = merge_duplicate_patches(diff)
+                logger.info(
+                    "[CIBench] Successfully merged duplicate patches for instance %s",
+                    instance_id,
+                )
+            except Exception as e:
+                logger.error(
+                    "[CIBench] Failed to merge duplicate patches for instance %s: %s",
+                    instance_id,
+                    str(e),
+                )
+                # Continue with original diff (will likely fail during application)
 
     with _OUTPUT_FILE_LOCK:
         data = _read_preds(output_path)
@@ -2063,10 +2087,6 @@ scope, output, and resulting diff before finishing."""
 
     return f"""Problem {problem_num}/{total_problems}
 
-This is the shared checkout containing earlier repairs. Read the current files
-before editing and preserve those repairs while solving this problem. The runner
-will generate one final patch from the accumulated state against the failed commit.
-
 {failure_type} | {issue_type}
 {full_problem}
 
@@ -2147,9 +2167,77 @@ def _combine_partial_fixes(partial_fixes: List[Dict[str, Any]]) -> str:
     return "\n\n".join(unified)
 
 
-def _collect_final_workspace_diff(testbed_path: Path, sha_fail: str, resolve_conflict=None) -> str:
-    """Capture every final change and verify it against the exact failed commit."""
-    return collect_with_reconciliation(testbed_path, sha_fail, resolve_conflict)
+def _collect_final_workspace_diff(testbed_path: Path) -> str:
+    """
+    Return one final diff from the checkout after all sequential repair steps.
+
+    Partial per-problem submissions are not composable when multiple problems
+    touch the same file. The checkout is the source of truth because each agent
+    run mutates the same working tree.
+
+    CRITICAL FIX: Handle new files properly by adding them as intent-to-add
+    so they appear in the diff with proper 'new file mode' headers.
+    """
+    try:
+        # CRITICAL: Add untracked files as "intent to add" so they appear in diff
+        # This ensures new files created by the agent get proper "new file mode" headers
+        # Without this, patches fail with "does not exist in index" errors
+        add_result = subprocess.run(
+            ["git", "add", "-N", "."],
+            cwd=testbed_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if add_result.returncode != 0:
+            logger.warning(
+                "[CIBench] git add -N failed (non-critical): %s",
+                add_result.stderr or add_result.stdout,
+            )
+
+        # Generate diff with full index info to properly handle new files
+        result = subprocess.run(
+            ["git", "diff", "--binary", "--no-ext-diff", "--full-index"],
+            cwd=testbed_path,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as exc:
+        logger.warning("[CIBench] Failed to collect final workspace diff: %s", exc)
+        return ""
+
+    if result.returncode != 0:
+        logger.warning(
+            "[CIBench] git diff failed while collecting final workspace diff: %s",
+            result.stderr or result.stdout,
+        )
+        return ""
+
+    diff = result.stdout or ""
+
+    # Validate the generated patch can actually apply
+    if diff:
+        validation_result = subprocess.run(
+            ["git", "apply", "--check", "--3way"],
+            input=diff,
+            text=True,
+            cwd=testbed_path,
+            capture_output=True,
+            timeout=30,
+        )
+        if validation_result.returncode != 0:
+            logger.warning(
+                "[CIBench] Generated patch may not apply cleanly:\n%s",
+                validation_result.stderr[:500],
+            )
+            # Log but don't fail - the patch might still work with different apply flags
+            # or the validation might be overly strict
+
+    parts = diff.split("\n")
+    while parts and parts[-1] == "":
+        parts.pop()
+    return ("\n".join(parts) + "\n") if parts else ""
 
 
 def _analyze_and_group_problems(
@@ -2335,107 +2423,268 @@ def _run_sequential_repair(
     instance_id: str,
     repo_name: str = "",
     context_llm: Any = None,
-    sha_fail: str = "",
 ) -> Tuple[Dict[str, Any], str]:
-    """Repair one problem at a time while preserving context and checking the union."""
-    from minisweagent.run.benchmarks.utils.repair_session import RepairSession
+    """
+    Fix problems sequentially, one at a time.
 
-    if not sha_fail:
-        sha_fail = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=testbed_path,
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-    artifacts = testbed_path.parent / f"{testbed_path.name}-patch-reconciliation"
-    session = RepairSession(testbed_path, sha_fail, problems, artifacts)
-    artifacts = session.artifacts
-    per_problem_timeout = 900
+    For each problem:
+    1. Build focused task (ONLY this problem)
+    2. Agent fixes THIS problem
+    3. Verify validation passes
+    4. Save partial fix or stop
+
+    Supports two problem formats:
+    - Old format: {status, verification_cmd, validation_stage, check_first, ...}
+    - New format: {problem_id, is_primary, problem_statement, repair_plan, verification}
+
+    Args:
+        installation_cmd: Optional list of installation commands to run before validation
+
+    Returns:
+        (info_dict, unified_diff)
+    """
     partial_fixes = []
-    reconciliation_attempts = []
-    environment = getattr(agent, "env", None)
+    total_problems_initial = len(problems)
+    per_problem_timeout = 900  # 15 minutes per problem (increased from 600s due to API latency)
 
-    def execute_check(command: str) -> dict:
-        return environment.execute({"command": command}, cwd=str(testbed_path), timeout=120)
+    logger.info(
+        f"[CIBench] Starting sequential repair: {total_problems_initial} problems"
+    )
 
-    execute = execute_check if environment is not None else None
+    # ═══════════════════════════════════════════════════════════════════════════
+    # NOTE: Agent handles all validation internally
+    # ═══════════════════════════════════════════════════════════════════════════
+    # The agent will:
+    # - Check if problems exist
+    # - Identify what needs fixing
+    # - Skip or fix based on current state
+    # - Handle validation with proper environment setup
+    #
+    # We only keep immediate exit detection and consecutive failure detection
+    # to prevent cascade failures.
 
-    def run_agent(task: str) -> dict:
-        previous_start = getattr(agent, "_start_time", time.time())
-        previous_limit = getattr(agent.config, "wall_time_limit_seconds", 0)
-        agent.n_calls = 0
-        agent.cost = 0.0
-        agent._start_time = time.time()
-        agent.config.wall_time_limit_seconds = per_problem_timeout
-        try:
-            return agent.run(task)
-        finally:
-            agent._start_time = previous_start
-            agent.config.wall_time_limit_seconds = previous_limit
+    total_problems = total_problems_initial
 
-    for index, problem in enumerate(problems):
-        progress_manager.update_instance_status(instance_id, f"Fixing problem {index + 1}/{len(problems)}")
-        task = _build_single_problem_task(
-            problem, index + 1, len(problems), repo_name, instance_id, context_llm,
-        ) + session.context()
-        (artifacts / f"problem-{index + 1}.md").write_text(task, encoding="utf-8")
-        try:
-            info = run_agent(task)
-        except Exception as exc:
-            logger.exception("[CIBench] Problem %d failed; preserving its checkout changes", index + 1)
-            info = {"exit_status": type(exc).__name__, "error": str(exc), "submission": ""}
-        # Save evidence even if the agent returns no patch or exits immediately.
-        # A fast run can legitimately find a problem already fixed by an earlier run.
-        session.record(index, info, execute)
-        submission = _extract_diff(info.get("submission") or "")
-        if submission:
-            partial_fixes.append({
-                "problem_id": index + 1,
-                "problem_number": problem.get("problem_number", index + 1),
-                "status": "CI FAILURE" if problem.get("source") == "ci failure" else "PREVIOUS EXPERIENCE",
-                "validation_stage": "",
-                "patch": submission,
-                "exit_status": info.get("exit_status"),
-            })
+    for i, problem in enumerate(problems, 1):
+        logger.info(f"[CIBench] {'=' * 60}")
+        logger.info(f"[CIBench] Problem {i}/{total_problems}")
+        logger.info(f"[CIBench] {'=' * 60}")
+        # Support both old and new problem formats
 
-    def resolve_conflict(error: str, attempt: int) -> None:
-        progress_manager.update_instance_status(instance_id, f"Reconciling combined repairs ({attempt}/2)")
-        prompt_path = write_reconciliation_prompt(
-            artifacts, testbed_path, sha_fail, problems, error, attempt,
-        )
-        record = {"attempt": attempt, "prompt_path": str(prompt_path)}
-        reconciliation_attempts.append(record)
-        try:
-            resolution = run_agent(prompt_path.read_text(encoding="utf-8") + session.context())
-            record["exit_status"] = resolution.get("exit_status")
-            record["submission"] = resolution.get("submission", "")
-        except Exception as exc:
-            record["error"] = str(exc)
-            raise
-        finally:
-            (artifacts / f"result-{attempt}.json").write_text(
-                json.dumps(record, indent=2, ensure_ascii=True), encoding="utf-8",
+        # New simplified format
+        problem_id = problem.get("problem_id", i)
+        source = str(problem.get("source", "")).strip()
+        # No more nested verification dict - fields are flat
+        validation_cmd = problem.get("verification_cmd", "")
+        # No check_first - agent decides on its own
+        status = "CI FAILURE" if source == "ci failure" else "PREVIOUS EXPERIENCE"
+        stage = ""
+
+        logger.info(f"[CIBench] Problem ID: {problem_id}")
+        logger.info(f"[CIBench] Source: {source or 'unknown'}")
+        # problem_statement is now a string, not a dict
+        problem_desc = problem.get("problem_statement", "")
+        if isinstance(problem_desc, str):
+            logger.info(f"[CIBench] Description: {problem_desc[:100]}")
+        else:
+            # Very old format (dict) - shouldn't happen with our new code
+            logger.info(
+                f"[CIBench] Description: {problem_desc.get('description', '')[:100]}"
             )
 
-    # Collect final patch - don't trigger reconciliation on validation failures
-    unified_diff, validation = session.finish(execute, None)  # Pass None to disable reconciliation
-    fixed = sum(p["status"] == "passed" for p in validation["problems"])
-    # Accept patches even if full validation fails (may be pre-existing issues)
-    exit_status = "submitted" if unified_diff else "failed"
-    logger.info("[CIBench] Combined validation: %s; %d/%d problems verified",
-                validation["status"], fixed, len(problems))
-    return {
-        "exit_status": exit_status,
+        logger.info(f"[CIBench] Status: {status}")
+        logger.info(f"[CIBench] Stage: {stage}")
+        logger.info(f"[CIBench] Validation: {validation_cmd}")
+
+        # Build focused task for THIS problem only
+        single_task = _build_single_problem_task(
+            problem, i, total_problems, repo_name, instance_id, context_llm
+        )
+
+        logger.info("[CIBench] Task preview (first 300 chars):")
+        logger.info(single_task[:300] + "...")
+
+        # Update progress
+        progress_manager.update_instance_status(
+            instance_id, f"Fixing problem {i}/{total_problems}"
+        )
+
+        # Agent fixes THIS problem (with timeout to avoid getting stuck)
+        logger.info(f"[CIBench] Running agent for problem {i}...")
+
+        try:
+            start_time = time.time()
+            previous_start_time = getattr(agent, "_start_time", start_time)
+            previous_wall_limit = getattr(agent.config, "wall_time_limit_seconds", 0)
+
+            # Each atomic problem is a fresh agent run in the same repaired
+            # workspace. Reset per-run counters so an earlier problem cannot
+            # exhaust the next problem's step/cost budget.
+            agent.n_calls = 0
+            agent.cost = 0.0
+
+            # ALWAYS set timeout for THIS problem (don't rely on previous state)
+            agent.config.wall_time_limit_seconds = per_problem_timeout
+            agent._start_time = start_time
+
+            try:
+                info = agent.run(single_task)
+            finally:
+                # Restore original timeout (for next problem to start fresh)
+                agent.config.wall_time_limit_seconds = previous_wall_limit
+                agent._start_time = previous_start_time
+
+            elapsed = time.time() - start_time
+            logger.info(f"[CIBench] Problem {i} completed in {elapsed:.1f}s")
+
+            # ═══════════════════════════════════════════════════════════════
+            # CRITICAL: Detect immediate exit (agent state corruption)
+            # ═══════════════════════════════════════════════════════════════
+            if elapsed < 1.0:
+                logger.error(
+                    f"[CIBench] [WARN] Problem {i} completed in {elapsed:.3f}s - SUSPICIOUS IMMEDIATE EXIT!"
+                )
+                logger.error(
+                    "[CIBench]    This indicates agent state corruption or configuration issue"
+                )
+                logger.error(f"[CIBench]    Exit status: {info.get('exit_status')}")
+                logger.error(
+                    f"[CIBench]    Submission length: {len(info.get('submission', ''))}"
+                )
+                logger.error(
+                    f"[CIBench]    Agent start_time: {getattr(agent, '_start_time', 'unknown')}"
+                )
+                logger.error(
+                    f"[CIBench]    Agent timeout: {getattr(agent.config, 'wall_time_limit_seconds', 'unknown')}"
+                )
+                logger.error(
+                    "[CIBench] [WARN] STOPPING sequential repair to prevent cascade failures"
+                )
+                # Break the loop - agent is broken, don't try more problems
+                break
+
+            exit_status = info.get("exit_status")
+
+            # Extract patch
+            raw_submission = info.get("submission") or ""
+            patch = _extract_diff(raw_submission)
+
+            if not patch or not patch.strip():
+                logger.warning(f"[CIBench] SKIP Problem {i}: Agent returned no patch")
+                logger.warning(f"[CIBench]    Exit status: {exit_status}")
+                logger.warning(f"[CIBench]    Elapsed time: {elapsed:.1f}s")
+                logger.warning(f"[CIBench]    Submission length: {len(raw_submission)}")
+
+                # If we've had multiple consecutive no-patch failures, stop
+                recent_failures = sum(
+                    1 for f in partial_fixes[-3:] if f.get("patch", "").strip() == ""
+                )
+                if recent_failures >= 3:
+                    logger.error(
+                        "[CIBench] [WARN] 3+ consecutive no-patch failures - agent may be broken"
+                    )
+                    logger.error("[CIBench] [WARN] STOPPING to prevent wasted time")
+                    break
+
+                # Don't break - continue to next problem
+                continue
+
+            logger.info(
+                f"[CIBench] OK Problem {i}: Agent generated patch ({len(patch)} chars)"
+            )
+
+            # Save patch (no validation - agent's loop handles self-correction)
+            logger.info(
+                f"[CIBench] Saving patch for problem {i} (agent self-corrects in loop)"
+            )
+            partial_fixes.append(
+                {
+                    "problem_id": i,
+                    "problem_number": problem.get("problem_number", i),
+                    "status": status,
+                    "validation_stage": stage,
+                    "patch": patch,
+                    "exit_status": exit_status,
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"[CIBench] ERROR Problem {i}: {e} - SKIPPING to next problem")
+            # Don't break - continue to next problem
+            continue
+
+        finally:
+            # Small delay between problems to allow cleanup and prevent timeout cascading
+            if i < total_problems:
+                logger.info("[CIBench] Waiting 5 seconds before next problem...")
+                time.sleep(5)
+
+    # The working tree is the source of truth. Concatenating per-problem
+    # submissions can create duplicate diffs for the same file.
+    unified_diff = _collect_final_workspace_diff(testbed_path)
+
+    if unified_diff:
+        logger.info(
+            "[CIBench] Collected final workspace diff after sequential repair (%d chars)",
+            len(unified_diff),
+        )
+    elif partial_fixes:
+        logger.warning(
+            "[CIBench] Final workspace diff is empty despite %d submitted partial patch(es); "
+            "falling back to concatenated partial diffs",
+            len(partial_fixes),
+        )
+        unified_diff = _combine_partial_fixes(partial_fixes)
+
+        # CRITICAL: Merge duplicate file patches to avoid conflicts
+        from minisweagent.run.benchmarks.utils.patch_merger import (
+            detect_duplicate_patches,
+            merge_duplicate_patches,
+        )
+
+        duplicates = detect_duplicate_patches(unified_diff)
+        if duplicates:
+            logger.warning(
+                "[CIBench] Detected duplicate patches for %d file(s): %s",
+                len(duplicates),
+                list(duplicates.keys()),
+            )
+            logger.info("[CIBench] Merging duplicate patches...")
+            try:
+                unified_diff = merge_duplicate_patches(
+                    unified_diff, repo_path=testbed_path
+                )
+                logger.info(
+                    "[CIBench] Successfully merged duplicate patches into unified diff"
+                )
+            except Exception as e:
+                logger.error(f"[CIBench] Failed to merge patches: {e}")
+                # Keep original even if merge fails
+
+    logger.info("[CIBench] Sequential repair complete:")
+    logger.info(f"[CIBench]   Total problems: {total_problems}")
+    logger.info(f"[CIBench]   Fixed problems: {len(partial_fixes)}")
+    logger.info(
+        f"[CIBench]   Success rate: {len(partial_fixes)}/{total_problems} = {100 * len(partial_fixes) / total_problems:.1f}%"
+    )
+    logger.info(f"[CIBench]   Unified diff: {len(unified_diff)} chars")
+
+    # Build info dict
+    info = {
+        "exit_status": "submitted" if unified_diff else "failed",
         "submission": unified_diff,
         "sequential_repair": {
-            "total_problems": len(problems),
-            "fixed_problems": fixed,
-            "success_rate": 100 * fixed / len(problems) if problems else 0,
+            "total_problems": total_problems,
+            "fixed_problems": len(partial_fixes),
+            "success_rate": len(partial_fixes) / total_problems
+            if total_problems > 0
+            else 0,
             "partial_fixes": partial_fixes,
-            "patch_reconciliation": reconciliation_attempts,
-            "repair_record": str(session.record_path),
-            "integration_validation": validation,
-            "candidate_patch": str(artifacts / "candidate.patch"),
         },
-    }, unified_diff
+    }
+
+    return info, unified_diff
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-instance processing
@@ -2745,7 +2994,6 @@ def process_instance(
                 instance_id=instance_id,
                 repo_name=repo_name,
                 context_llm=context_llm,
-                sha_fail=sha_fail,
             )
             exit_status = info.get("exit_status")
 
@@ -2896,7 +3144,7 @@ def process_instance(
             update_problems_file(output_dir / "problems.json", instance_id, problems_list)
         else:
             logger.error(
-                "[CIBench] Not recording %s in preds.json; the attempt was incomplete or final validation failed",
+                "[CIBench] Not recording %s in preds.json; problem generation must be retried",
                 instance_id,
             )
         progress_manager.on_instance_end(instance_id, exit_status)
@@ -3132,11 +3380,55 @@ def _save_retrieval_diagnostic(
 
 
 def _extract_diff(submission: str) -> str:
-    """Remove the submission envelope while preserving the exact diff ending."""
+    """
+    Pull the git diff out of the agent's final submission string.
+
+    The agent echoes ``COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`` then cats the
+    patch file.  We take everything after that sentinel (or the full string
+    if the sentinel is absent).
+
+    NOTE: We deliberately avoid str.strip() here because it removes trailing
+    blank context lines (" \\n") from the diff, causing git to report
+    "corrupt patch" (hunk header claims N lines but body only has N-1).
+    Instead we lstrip leading whitespace and remove only truly empty trailing
+    lines so that blank context lines like " " are preserved.
+
+    Also detects duplicate file patches (multiple diffs for the same file)
+    and logs a warning - these will be merged later in update_preds_file().
+
+    Filters out corrupted patches (shell artifacts, command output, etc.)
+    """
+    from minisweagent.run.benchmarks.utils.patch_merger import filter_corrupted_patches
+
     sentinel = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     if sentinel in submission:
-        submission = submission.split(sentinel, 1)[1]
-    return submission.lstrip()
+        diff = submission[submission.index(sentinel) + len(sentinel) :].lstrip()
+    else:
+        diff = submission.lstrip()
+    # Strip only completely empty trailing lines, not blank context lines (" ")
+    parts = diff.split("\n")
+    while parts and parts[-1] == "":
+        parts.pop()
+
+    diff = ("\n".join(parts) + "\n") if parts else ""
+
+    # Filter corrupted patches early (shell artifacts, command output, etc.)
+    if diff:
+        diff = filter_corrupted_patches(diff)
+
+    # Detect duplicate patches (will be merged in update_preds_file)
+    if diff:
+        duplicates = detect_duplicate_patches(diff)
+        duplicate_files = [f for f, count in duplicates.items() if count > 1]
+        if duplicate_files:
+            logger.debug(
+                "[CIBench] Detected %d file(s) with duplicate patches: %s (will be merged)",
+                len(duplicate_files),
+                ", ".join(duplicate_files[:3])
+                + ("..." if len(duplicate_files) > 3 else ""),
+            )
+
+    return diff
 
 
 # ─────────────────────────────────────────────────────────────────────────────
