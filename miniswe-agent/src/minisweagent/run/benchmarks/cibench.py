@@ -1498,12 +1498,16 @@ def setup_local_environment(
     def _run_git(
         args: list[str], cwd: Path, timeout: int = 300
     ) -> subprocess.CompletedProcess[str]:
+        # Skip LFS downloads to avoid failures when LFS objects are missing
+        env = os.environ.copy()
+        env["GIT_LFS_SKIP_SMUDGE"] = "1"
         return subprocess.run(
             ["git", *args],
             cwd=str(cwd),
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
 
     def _ensure_commit_available(
