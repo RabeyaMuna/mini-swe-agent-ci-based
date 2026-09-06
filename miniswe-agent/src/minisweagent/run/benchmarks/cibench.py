@@ -1499,6 +1499,7 @@ def setup_local_environment(
         args: list[str], cwd: Path, timeout: int = 300
     ) -> subprocess.CompletedProcess[str]:
         # Skip LFS downloads to avoid failures when LFS objects are missing
+        import os
         env = os.environ.copy()
         env["GIT_LFS_SKIP_SMUDGE"] = "1"
         return subprocess.run(
