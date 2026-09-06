@@ -3396,36 +3396,30 @@ def decompose_issue(
             return {}
 
         print(
-            f"  OK Identified {len(atomic_problems)} atomic problems (before merging)"
+            f"  OK Identified {len(atomic_problems)} atomic problems"
         )
 
-        # NEW: Auto-cluster and merge similar problems
-        print("  Step 4: Clustering and merging similar problems...")
-        validation_groups_for_merge = defaultdict(list)
-        for prob in atomic_problems:
-            validation_cmd = prob.get("validation_cmd", "unknown")
-            validation_groups_for_merge[validation_cmd].append(prob)
+        # Step 4: Similarity-based grouping + LLM merge decision
+        # Process:
+        # 1. Cluster by similarity → groups of similar problems
+        # 2. For each group, LLM analyzes if they should be merged
+        # 3. If LLM determines they're the same problem → merge into one unified problem
+        # 4. If LLM determines they're different → keep separate
 
-        print(
-            f"    Grouped into {len(validation_groups_for_merge)} validation commands"
-        )
-
-        optimized_problems = []
-        for validation_cmd, val_problems in validation_groups_for_merge.items():
-            if len(val_problems) > 1:
-                print(f"    {validation_cmd}: {len(val_problems)} problems")
-                # Apply clustering + LLM merge
-                optimized = _cluster_and_merge_problems(
-                    val_problems,
-                    validation_cmd=validation_cmd,
-                    llm=llm,
-                    similarity_threshold=0.85,  # High threshold for similar problems
-                )
-                print(f"      -> Optimized to {len(optimized)} problems")
-                optimized_problems.extend(optimized)
-            else:
-                # Single problem, keep as-is
-                optimized_problems.extend(val_problems)
+        optimized_problems = atomic_problems
+        if len(atomic_problems) > 1:
+            print("  Step 4: Similarity grouping + LLM merge decision...")
+            optimized_problems = _cluster_and_merge_problems(
+                atomic_problems,
+                validation_cmd="backward_deduplication",
+                llm=llm,
+                similarity_threshold=0.85,
+            )
+            merged = len(atomic_problems) - len(optimized_problems)
+            if merged > 0:
+                print(f"    ✓ Merged {merged} redundant: {len(atomic_problems)} -> {len(optimized_problems)} problems")
+        else:
+            print("  Step 4: Single problem, no deduplication needed")
 
         # Reorder after merging
         print("  Step 5: Reordering by repair trajectory...")

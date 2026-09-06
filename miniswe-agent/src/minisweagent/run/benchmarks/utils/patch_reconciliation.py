@@ -15,17 +15,37 @@ def collect_with_reconciliation(
     resolve_conflict: Callable[[str, int], None] | None = None,
     max_attempts: int = 2,
 ) -> str:
-    """Retry agent-resolvable conflicts; never retry infrastructure/encoding errors."""
+    """
+    Collect workspace patch, only retrying for ACTUAL Git merge conflicts.
+
+    SIMPLIFIED: Only handles real Git conflicts (unmerged index entries),
+    not validation failures or pre-existing code issues.
+    """
     known_conflicts = set()
+
+    # First attempt: check for any existing conflicts
+    known_conflicts.update(conflicted_paths(checkout))
+
+    # If no Git conflicts exist, collect and return patch immediately
+    if not known_conflicts:
+        return collect_workspace_patch(checkout, sha_fail)
+
+    # Git conflicts exist - try to resolve them
     for attempt in range(max_attempts + 1):
-        known_conflicts.update(conflicted_paths(checkout))
         try:
             check_resolved_files(checkout, list(known_conflicts))
             return collect_workspace_patch(checkout, sha_fail)
         except UnresolvedMergeConflict as exc:
+            # Only invoke agent if we have a conflict resolver and attempts remaining
             if resolve_conflict is None or attempt == max_attempts:
                 raise
+
+            # This is a REAL Git conflict that needs agent intervention
             resolve_conflict(str(exc), attempt + 1)
+
+            # Update known conflicts after resolution attempt
+            known_conflicts.update(conflicted_paths(checkout))
+
     raise ValueError("max_attempts must be nonnegative")
 
 

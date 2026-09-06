@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Set
 
 from utilities.llm_invoker import STRICT_JSON_RULES, invoke_llm_with_retry, get_model_max_output_tokens
 
@@ -133,27 +133,16 @@ def _normalize_problem(problem: Dict[str, Any]) -> Dict[str, Any]:
         files = [files]
 
     return {
-        "problem": str(problem.get("problem") or problem.get("problem_statement") or "").strip(),
-        "root_cause": str(problem.get("root_cause") or "").strip(),
-        "how_fixed": str(
-            problem.get("how_fixed")
-            or problem.get("fix_strategy")
-            or problem.get("repair_strategy")
-            or ""
-        ).strip(),
-        "why_fix_works": str(
-            problem.get("why_fix_works")
-            or problem.get("why_fixed_works")
-            or ""
-        ).strip(),
+        "problem": str(problem.get("problem", "")).strip(),
+        "root_cause": str(problem.get("root_cause", "")).strip(),
+        "how_fixed": str(problem.get("how_fixed", "")).strip(),
+        "why_fix_works": str(problem.get("why_fix_works", "")).strip(),
         "affected_files": _unique_strings(files),
-        "verification_cmd": str(
-            problem.get("verification_cmd") or problem.get("validation_cmd") or ""
-        ).strip(),
+        "validation_cmd": str(problem.get("validation_cmd", "")).strip(),
         "validation_order": problem.get("validation_order"),
-        "failure_type": str(problem.get("failure_type") or "").strip(),
-        "issue_type": str(problem.get("issue_type") or "").strip(),
-        "problem_type": str(problem.get("problem_type") or "").strip(),
+        "failure_type": str(problem.get("failure_type", "")).strip(),
+        "issue_type": str(problem.get("issue_type", "")).strip(),
+        "problem_type": str(problem.get("problem_type", "")).strip(),
     }
 
 
@@ -164,7 +153,7 @@ def _similarity_document(problem: Dict[str, Any]) -> str:
     how_fixed = problem.get("how_fixed", "")
     failure_type = problem.get("failure_type", "")
     issue_type = problem.get("issue_type", "")
-    command = problem.get("verification_cmd", "")
+    command = problem.get("validation_cmd", "")
     files = " ".join(problem.get("affected_files", []))
     return " ".join(
         [
@@ -173,7 +162,7 @@ def _similarity_document(problem: Dict[str, Any]) -> str:
             f"fix_strategy {how_fixed}",
             f"failure_type {failure_type} {failure_type}",
             f"issue_type {issue_type}",
-            f"verification_cmd {command} {command}",
+            f"validation_cmd {command} {command}",
             f"affected_files {files} {files}",
         ]
     )
@@ -294,7 +283,7 @@ For each field, analyze BOTH sources and choose the BEST data based on reasoning
 - **how_fixed**: Choose most detailed implementation (forward has actual changes, but if backward explains better, use that)
 - **why_fix_works**: Choose best technical explanation (analyze both, pick clearest)
 - **affected_files**: UNION of all files from both sources
-- **verification_cmd**: Choose actual CI command (forward has real command, backward has validator - pick most accurate)
+- **validation_cmd**: Choose actual CI command (forward has real command, backward has validator - pick most accurate)
 
 CRITICAL - PACKAGE VERSION INFORMATION:
 When merging dependency/config problems, unified problem MUST include:
@@ -320,7 +309,7 @@ OUTPUT JSON:
       "how_fixed": "Most detailed fix after analyzing both",
       "why_fix_works": "Best explanation after analyzing both",
       "affected_files": ["union", "of", "all", "files"],
-      "verification_cmd": "Most accurate command",
+      "validation_cmd": "Most accurate command",
       "failure_type": "...",
       "issue_type": "...",
       "validation_order": 1
@@ -419,10 +408,10 @@ def _build_group_problem(
         "affected_files": _unique_strings(list(group_files) + all_files),
 
         # Commands and metadata
-        "verification_cmd": str(
-            group.get("verification_cmd")
-            or _first_nonempty(forward_problems, "verification_cmd")
-            or _first_nonempty(backward_problems, "verification_cmd")
+        "validation_cmd": str(
+            group.get("validation_cmd")
+            or _first_nonempty(forward_problems, "validation_cmd")
+            or _first_nonempty(backward_problems, "validation_cmd")
         ),
         "validation_order": group.get("validation_order")
         or _first_nonempty(originals, "validation_order"),
@@ -493,7 +482,7 @@ VERIFICATION TASKS:
    - Check if problem is **INDIRECTLY relevant**: prerequisite or supporting fix for another problem
    - Verify root_cause is supported by CI error messages and failure reasons
    - Validate how_fixed matches the actual repair evidence
-   - Confirm verification_cmd matches validation_sequence
+   - Confirm validation_cmd matches validation_sequence
    - **SELECTION RULE**: Keep ONLY if:
      * Reasoning is correct and complete (problem + root_cause + how_fixed all make sense together)
      * AND (directly relevant to failed jobs OR indirectly relevant as prerequisite)
@@ -593,17 +582,52 @@ def _enforce_primary_and_dependency_rules(
         if str(p.get("problem_type") or "").lower() == "primary"
     )
     workflow_excluded = set(enforced.get("workflow_excluded_problem_ids", []))
-    # Forward records describe files actually changed by the successful repair.
-    # They may be merged with duplicates, but cannot be discarded as irrelevant.
-    implemented_ids = {
+
+    # CORRECT BIDIRECTIONAL LOGIC (based on RETRACE paper):
+    #
+    # 1. Backward singletons = GROUND TRUTH (auto-keep)
+    #    → Based on actual successful patch, knows what worked
+    #
+    # 2. Forward singletons = POTENTIAL FALSE POSITIVE (validate)
+    #    → Based on issue interpretation, could be wrong
+    #    → Must validate against CI before keeping
+    #
+    # 3. Matched (both F+B) = STRONG SIGNAL (auto-keep or reconcile)
+    #    → Both directions agree, high confidence
+
+    # Backward singletons: Auto-keep (ground truth from successful patch)
+    backward_singletons = {
         p["problem_id"]
         for p in problems
-        if any(str(source_id).startswith("F") for source_id in p.get("source_ids", []))
+        if p.get("_similarity_singleton")
+        and any(str(sid).startswith("B") for sid in p.get("source_ids", []))
     } - workflow_excluded
-    singleton_ids = {
-        p["problem_id"] for p in problems if p.get("_similarity_singleton")
+
+    # Forward singletons: Validate against CI (potential false positives)
+    forward_singletons = {
+        p["problem_id"]
+        for p in problems
+        if p.get("_similarity_singleton")
+        and any(str(sid).startswith("F") for sid in p.get("source_ids", []))
     } - workflow_excluded
-    protected_ids = implemented_ids | singleton_ids
+
+    # Note: forward_singletons will be validated via _validated_independent_ids
+    # (set during dependency inference or explicitly during clustering)
+
+    # Validated forward singletons (passed CI check)
+    validated_forward_ids = set(_valid_int_set(
+        enforced.get("_validated_independent_ids", []), valid_ids
+    )) - workflow_excluded
+
+    # Matched problems (in clusters with both F+B): Strong signal, auto-keep
+    matched_problems = {
+        p["problem_id"]
+        for p in problems
+        if not p.get("_similarity_singleton")  # Was clustered with other problems
+    } - workflow_excluded
+
+    # Protected IDs: Backward singletons + Validated forward + Matched
+    protected_ids = backward_singletons | validated_forward_ids | matched_problems
     irrelevant = _valid_int_set(enforced.get("irrelevant_problem_ids", []), valid_ids)
     enforced["irrelevant_problem_ids"] = sorted(irrelevant - protected_ids)
     kept = _valid_int_set(enforced.get("kept_problem_ids", []), valid_ids)
@@ -810,9 +834,21 @@ only supplied problem IDs and evidence from this instance.
         # Filter dependencies with detailed logging
         print(f"  → Validating {len(normalized_edges)} normalized edges...")
         filtered_deps = []
+        independent_problems = set()  # Track problems marked as independent
+
         for edge in normalized_edges:
             has_evidence = _has_concrete_dependency_evidence(edge)
             is_causal = _is_causal_dependency_type(edge.get("dependency_type"))
+            dependency_type = str(edge.get("dependency_type", "")).strip().lower()
+
+            # Special handling for "independent" - validate against CI failures
+            if dependency_type == "independent":
+                print(f"    ⚠ Edge {edge['from']}→{edge['to']}: INDEPENDENT (validating against CI failures)")
+                independent_problems.add(edge['from'])
+                independent_problems.add(edge['to'])
+                # Don't add edge (they're independent), but mark problems for CI validation
+                continue
+
             passed = has_evidence and is_causal
 
             if not passed:
@@ -827,6 +863,21 @@ only supplied problem IDs and evidence from this instance.
                 print(f"    ✓ Edge {edge['from']}→{edge['to']}: ACCEPTED")
 
         print(f"  → After validation: {len(filtered_deps)}/{len(normalized_edges)} dependencies passed")
+
+        # Validate independent problems against CI failures
+        validated_independent = set()
+        if independent_problems:
+            print(f"  → Validating {len(independent_problems)} independent problems against CI failures...")
+            validated_independent = _validate_problems_against_ci_failures(
+                [p for p in problems if p['problem_id'] in independent_problems],
+                llm
+            )
+            if validated_independent:
+                print(f"    ✓ {len(validated_independent)}/{len(independent_problems)} independent problems are CI-related")
+                # Ensure validated independent problems are kept (they're marked later in enforcement)
+                decision["_validated_independent_ids"] = sorted(validated_independent)
+            else:
+                print(f"    ✗ No independent problems validated against CI failures")
 
         decision["dependencies"] = filtered_deps
 
@@ -846,6 +897,94 @@ only supplied problem IDs and evidence from this instance.
         # Try heuristic even on exception
         heuristic_deps = _infer_tool_enablement_heuristics(problems)
         return {"dependencies": heuristic_deps}
+
+
+def _validate_problems_against_ci_failures(
+    problems: List[Dict[str, Any]],
+    llm: Any
+) -> Set[int]:
+    """
+    Validate that independent problems are actually related to CI verification failures.
+
+    For problems marked as "independent" (no repair ordering dependency), use LLM to verify
+    they're legitimate CI failures that need fixing, not false positives or unrelated issues.
+
+    Returns: Set of problem IDs that are confirmed CI-related
+    """
+    if not problems:
+        return set()
+
+    # Build prompt to validate problems against CI failures
+    problems_json = json.dumps([{
+        "problem_id": p["problem_id"],
+        "failure_type": p.get("failure_type", "unknown"),
+        "issue_type": p.get("issue_type", "unknown"),
+        "problem": p.get("problem", "")[:500],  # Truncate for prompt
+        "validation_cmd": p.get("validation_cmd", ""),
+        "affected_files": p.get("affected_files", [])
+    } for p in problems], indent=2)
+
+    prompt = f"""You are validating whether problems are related to CI verification failures.
+
+For each problem below, determine if it represents a REAL CI verification failure that needs fixing.
+
+A problem is CI-related if:
+1. It causes a CI check/test/validation to fail
+2. It prevents the CI workflow from passing
+3. It's reported by a CI tool (linter, formatter, type checker, test runner, etc.)
+4. Fixing it is necessary for CI to pass
+
+DO NOT SELECT a problem if:
+5. It's a style preference or cosmetic change not enforced by CI
+6. It's a code improvement suggestion not blocking CI
+7. It's NOT relevant to any CI failure or has NO effect on CI verification
+8. It's a false positive or misidentified issue
+9. It's about the analysis process itself (rate limiting, diff unavailable, analysis errors)
+10. It has no concrete fix (empty how_fixed) AND no clear failure (failure_type="unknown")
+
+Problems to validate:
+{problems_json}
+
+Return JSON:
+{{
+  "ci_related_problem_ids": [1, 2],  // IDs of problems that ARE CI verification failures
+  "not_ci_related_ids": [3],         // IDs of problems that are NOT CI-related
+  "reasoning": {{
+    "1": "Causes pytest to fail with import error",
+    "2": "Blocks mypy type checking in CI",
+    "3": "Style suggestion not enforced by any CI check"
+  }}
+}}
+
+{STRICT_JSON_RULES}
+"""
+
+    try:
+        response = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True)
+        if isinstance(response, dict):
+            ci_related = response.get("ci_related_problem_ids", [])
+            reasoning = response.get("reasoning", {})
+
+            validated_ids = set()
+            for problem_id in ci_related:
+                if isinstance(problem_id, int) and problem_id in {p["problem_id"] for p in problems}:
+                    validated_ids.add(problem_id)
+                    reason = reasoning.get(str(problem_id), "CI-related")
+                    print(f"      ✓ Problem {problem_id}: {reason[:80]}")
+
+            not_related = response.get("not_ci_related_ids", [])
+            for problem_id in not_related:
+                reason = reasoning.get(str(problem_id), "Not CI-related")
+                print(f"      ✗ Problem {problem_id}: {reason[:80]}")
+
+            return validated_ids
+
+    except Exception as exc:
+        print(f"      ⚠ CI validation failed: {exc}, keeping all problems by default")
+        # On error, be conservative and keep all problems
+        return {p["problem_id"] for p in problems}
+
+    return set()
 
 
 def _infer_tool_enablement_heuristics(problems: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -877,20 +1016,20 @@ def _infer_tool_enablement_heuristics(problems: List[Dict[str, Any]]) -> List[Di
             "format", "formatting", "docs", "documentation",
             "lint", "linting", "type_check", "type_error"
         }
-        or "format" in str(p.get("verification_cmd", "")).lower()
-        or "lint" in str(p.get("verification_cmd", "")).lower()
-        or "docstr" in str(p.get("verification_cmd", "")).lower()
+        or "format" in str(p.get("validation_cmd", "")).lower()
+        or "lint" in str(p.get("validation_cmd", "")).lower()
+        or "docstr" in str(p.get("validation_cmd", "")).lower()
     ]
 
     # Infer dependencies between producers and consumers
     for producer in producers:
         producer_id = producer["problem_id"]
         producer_files = set(producer.get("affected_files", []))
-        producer_cmd = str(producer.get("verification_cmd", "")).lower()
+        producer_cmd = str(producer.get("validation_cmd", "")).lower()
 
         for consumer in consumers:
             consumer_id = consumer["problem_id"]
-            consumer_cmd = str(consumer.get("verification_cmd", "")).lower()
+            consumer_cmd = str(consumer.get("validation_cmd", "")).lower()
 
             # Skip self-loops
             if producer_id == consumer_id:

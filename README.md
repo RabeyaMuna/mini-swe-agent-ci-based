@@ -448,7 +448,7 @@ tmux new -s bidirect
 python3 scripts/decompose_bidirectional.py \
   --batch \
   --dataset data/memory_set.jsonl \
-  --model gpt-4o-mini \
+  --model gpt-5.4-mini \
   --output-dir data/bidirect_trs
 # Detach: Ctrl+B then D
 ```

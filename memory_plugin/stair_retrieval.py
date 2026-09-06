@@ -428,7 +428,7 @@ class STAIRRetrieval:
                 problem_query = {
                     **query,
                     "problem_description": ci_prob.get("problem", ""),
-                    "problem_files": ci_prob.get("files", []),
+                    "problem_files": ci_prob.get("files", []) or ci_prob.get("affected_files", []),
                     "problem_signals": ci_prob.get("failure_signals", []),
                     "problem_type": ci_prob.get("failure_type", ""),
                 }
@@ -2525,7 +2525,7 @@ Return JSON:
                     "root_cause": self._shorten(problem.get("root_cause")),
                     "validation_cmd": problem.get("verification_cmd")
                     or problem.get("validation_cmd"),
-                    "files": problem.get("affected_files", [])[:8] or problem.get("files", [])[:8],
+                    "files": problem.get("files", [])[:8] or problem.get("affected_files", [])[:8],
                     "fix_strategy": self._shorten(problem.get("how_fixed") or problem.get("fix_strategy")),
                 }
 
@@ -2685,7 +2685,7 @@ Return JSON:
         )
 
         # Extract files
-        files = problem.get("affected_files", []) or problem.get("files", [])
+        files = problem.get("files", []) or problem.get("affected_files", [])
         if not isinstance(files, list):
             files = []
 

@@ -23,22 +23,36 @@ PROBLEMS:
 
 ---
 
-YOUR TASK: Group similar problems together.
+YOUR TASK: Group problems that represent the SAME KIND of problem with the SAME fix strategy.
 
 MERGE CRITERIA (ALL must be true to merge):
-OK Root causes express the SAME underlying issue
-OK Fixes use the SAME pattern/approach
-OK Files can be treated as "same problem in multiple places"
-OK No interdependencies within cluster
+✓ Problem descriptions are SIMILAR (same kind of issue, even if wording differs)
+✓ Root causes are SIMILAR/SAME (same underlying reason)
+✓ Fix strategies are SAME/SIMILAR (same approach, same code change pattern)
+✓ Multiple files with the SAME problem type that need the SAME solution
+✓ No interdependencies within cluster
 
 KEEP SEPARATE if ANY true:
-FAIL Root causes are DIFFERENT
-FAIL Fixes require DIFFERENT approaches
-FAIL Problems have different complexity levels
-FAIL One problem is a configuration-key repair and another is a package,
-     environment, resolver, API-adaptation, or deprecation/replacement repair with a different causal explanation
+✗ Root causes are DIFFERENT (different reasons for failure)
+✗ Fix strategies are DIFFERENT (different approaches or code changes needed)
+✗ Problems have different complexity levels
+✗ Different problem types (even if same file type)
+✗ One problem is a configuration-key repair and another is a package,
+   environment, resolver, API-adaptation, or deprecation/replacement repair
 
-IMPORTANT: Be CONSERVATIVE. When in doubt, keep problems SEPARATE.
+IMPORTANT GUIDELINES:
+1. Same KIND of problem = Same root cause + Same fix strategy
+2. Wording can differ, but underlying issue must be the same
+3. NUMBER OF FILES DOES NOT MATTER:
+   - If 100 files have the SAME problem with the SAME fix → MERGE into one
+   - If 5 files have DIFFERENT problems with DIFFERENT fixes → KEEP SEPARATE
+4. Analyze the PROBLEM and FIX, not the file count
+5. Example: All RST files need same header format fix → merge all (even if 80+ files)
+6. Example: Some RST files need header fix, others need inline ref fix → keep separate
+
+DECISION RULE:
+- Same problem + Same root cause + Same fix strategy → MERGE (regardless of file count)
+- Different problem OR different root cause OR different fix → SEPARATE
 
 ---
 

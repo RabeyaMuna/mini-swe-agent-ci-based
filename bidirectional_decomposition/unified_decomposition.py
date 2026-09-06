@@ -14,6 +14,8 @@ import json
 import subprocess
 import sys
 
+from bidirectional_decomposition.simple_llm_reconciliation import simple_bidirectional_reconciliation
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FORWARD_CACHE = PROJECT_ROOT / "data/fwr_trs/decomposed_issues.json"
@@ -57,12 +59,20 @@ def build_unified_decomposition(
     backward_result = load_backward_decomposition(issue_id, model_name=model_name)
     backward_problems = backward_result.get("problems", [])
     ci_context = backward_result.get("benchmark_ci_context", {})
+
+    # Enrich ci_context with failed_jobs from dataset for CI verification
+    if not ci_context.get("failed_jobs"):
+        dataset_row = _dataset_metadata_by_issue().get(str(issue_id), {})
+        dataset_failed_jobs = dataset_row.get("failed_jobs", [])
+        if dataset_failed_jobs:
+            ci_context["failed_jobs"] = dataset_failed_jobs
+            print(f"  → Enriched ci_context with {len(dataset_failed_jobs)} failed jobs from dataset")
+
     print(f"  → {len(backward_problems)} problems")
     print(f"  → {len(ci_context.get('failed_jobs', []))} failed jobs")
 
-    # Step 3: Simple LLM reconciliation with graph-based dependency analysis
+    # Step 3: LLM reconciliation with graph-based dependency analysis
     print("\nStep 3: LLM-based reconciliation")
-    from bidirectional_decomposition.simple_llm_reconciliation import simple_bidirectional_reconciliation
 
     # Extract graph info for dependency analysis
     dependency_graph = backward_result.get("_dependency_graph") or {}

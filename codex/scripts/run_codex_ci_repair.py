@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import requests
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,8 @@ from codex.scripts.ci_repair_prompts import (
 )
 from utilities.ci_log_analyzer import _run_log_analysis
 from utilities.git_checkout import prepare_repo_checkout as prepare_git_checkout
+from utilities.git_patch import PatchValidationError
+from utilities.patch_reconciliation import collect_with_reconciliation, write_reconciliation_prompt
 from utilities.run_metrics import (
     RunMetricsRecorder,
     completed_instance_ids,
@@ -1285,6 +1288,39 @@ def run_codex(
         env.pop('OPENAI_BASE_URL', None)
 
     proc: subprocess.Popen[str] | None = None
+    watchdog_stop = threading.Event()
+    timed_out = False
+
+    def kill_process_group():
+        """Watchdog thread: enforce hard deadline and kill process group."""
+        nonlocal timed_out
+        if watchdog_stop.wait(timeout=timeout if timeout else 3600):
+            return  # Process finished normally
+
+        # Timeout reached - kill the entire process group
+        timed_out = True
+        print(f"\n{'='*80}")
+        print(f"⏱️  WATCHDOG TIMEOUT: Killing process after {timeout}s")
+        print(f"{'='*80}\n")
+
+        if proc and proc.poll() is None:
+            try:
+                # Kill entire process group (includes child processes)
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+                time.sleep(10)
+                if proc.poll() is None:
+                    os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                # Process already dead or permission issue - try direct kill
+                try:
+                    proc.terminate()
+                    time.sleep(5)
+                    if proc.poll() is None:
+                        proc.kill()
+                except:
+                    pass
+
     safe_metrics_call(
         metrics_recorder,
         "begin_api_call",
@@ -1293,6 +1329,7 @@ def run_codex(
     )
     try:
         with open(transcript_path, "w", encoding="utf-8") as f:
+            # Start process in its own process group for clean termination
             proc = subprocess.Popen(
                 cmd,
                 cwd=checkout,
@@ -1301,7 +1338,12 @@ def run_codex(
                 stderr=subprocess.STDOUT,
                 text=True,
                 env=env,
+                start_new_session=True,  # Create new process group
             )
+
+            # Start watchdog thread
+            watchdog = threading.Thread(target=kill_process_group, daemon=True)
+            watchdog.start()
 
             # Send prompt to stdin
             if proc.stdin:
@@ -1309,12 +1351,41 @@ def run_codex(
                 proc.stdin.close()
 
             # Stream output line by line and checkpoint usage events.
+            inactivity_timeout = 300  # 5 minutes of silence = timeout
+            last_output_time = time.time()
+
             if proc.stdout:
                 model_verified = json_mode
                 detected_model = None
                 line_count = 0
 
                 for line in proc.stdout:
+                    # Check if watchdog already killed the process
+                    if timed_out:
+                        break
+
+                    # Check inactivity timeout
+                    now = time.time()
+                    if now - last_output_time > inactivity_timeout:
+                        print(f"\n{'='*80}")
+                        print(f"⏱️  INACTIVITY TIMEOUT: No output for {inactivity_timeout}s")
+                        print(f"{'='*80}\n")
+                        watchdog_stop.set()  # Stop watchdog
+                        try:
+                            pgid = os.getpgid(proc.pid)
+                            os.killpg(pgid, signal.SIGTERM)
+                            time.sleep(5)
+                            if proc.poll() is None:
+                                os.killpg(pgid, signal.SIGKILL)
+                        except:
+                            proc.terminate()
+                            time.sleep(5)
+                            if proc.poll() is None:
+                                proc.kill()
+                        raise subprocess.TimeoutExpired(cmd=command, timeout=inactivity_timeout)
+
+                    last_output_time = now
+
                     event = None
                     if json_mode:
                         try:
@@ -1383,8 +1454,54 @@ def run_codex(
                     print(f"Codex output did not include model identification.")
                     print(f"{'='*80}\n")
 
-            proc.wait(timeout=timeout)
+            # Stop watchdog - process finished normally
+            watchdog_stop.set()
+
+            # Wait for process to complete
+            proc.wait(timeout=10)
+
+            # Check if watchdog killed the process
+            if timed_out:
+                raise subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+
+    except subprocess.TimeoutExpired as exc:
+        watchdog_stop.set()  # Stop watchdog
+        # Handle timeout gracefully - return timed_out result instead of crashing
+        elapsed = time.time() - started
+        if not usage_event_recorded and metrics_recorder is not None:
+            safe_metrics_call(
+                metrics_recorder,
+                "record_api_call",
+                phase=metrics_phase,
+                model=expected_model,
+                duration_seconds=elapsed,
+                status="timed_out",
+                error=f"Timeout after {elapsed:.1f}s",
+            )
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+        print(f"\n{'='*80}")
+        print(f"⏱️  TIMED OUT after {elapsed:.1f}s")
+        print(f"{'='*80}\n")
+
+        # Return partial result with timed_out flag
+        return {
+            "returncode": -1,
+            "elapsed_seconds": elapsed,
+            "dry_run": False,
+            "timed_out": True,
+            "usage": usage_totals,
+            "cost_usd": round(total_cost_usd, 10),
+            "cost_source": ",".join(sorted(cost_sources)) or "unavailable",
+        }
     except BaseException as exc:
+        watchdog_stop.set()  # Stop watchdog
         if not usage_event_recorded and metrics_recorder is not None:
             safe_metrics_call(
                 metrics_recorder,
@@ -1485,29 +1602,11 @@ def _decode_git_diff(checkout: Path, revision_args: list[str]) -> tuple[str, int
     return patch, binary_proc.returncode
 
 
-def git_diff(checkout: Path, original_commit: str = None) -> str:
-    """
-    Get diff of all changes made by agent (committed + uncommitted).
-
-    Codex agent commits its changes, so we need to diff against the original commit
-    before the agent ran, not just uncommitted working directory changes.
-    """
-    # Try to get uncommitted changes first
-    uncommitted, _ = _decode_git_diff(checkout, ["HEAD"])
-
-    # If original_commit provided, diff working tree (staged+unstaged) against it
-    # This captures BOTH committed and uncommitted changes in one unified patch.
-    if original_commit:
-        unified, _ = _decode_git_diff(checkout, [original_commit])
-        return unified if unified else uncommitted
-
-    # Fallback: try to get diff from last 5 commits (in case agent made commits)
-    # This covers the case where agent committed changes
-    recent_diff, returncode = _decode_git_diff(checkout, ["HEAD~5..HEAD"])
-    recent_commits = recent_diff if returncode == 0 else ""
-
-    # Return whichever has content
-    return recent_commits if recent_commits else uncommitted
+def git_diff(checkout: Path, original_commit: str = None, resolve_conflict=None) -> str:
+    """Capture and round-trip all agent changes against the failed commit."""
+    if not original_commit:
+        raise PatchValidationError("The failed commit is required to generate a complete repair patch")
+    return collect_with_reconciliation(checkout, original_commit, resolve_conflict)
 
 
 def changed_files(checkout: Path, original_commit: str = None) -> list[str]:
@@ -1584,21 +1683,24 @@ def save_patch_and_result(
     verification: dict[str, Any],
     verification_result: dict[str, Any] | None,
     original_sha: str = None,
+    resolve_conflict=None,
+    reconciliation_results: list[dict[str, Any]] | None = None,
 ) -> None:
     print(f"[save_patch_and_result] Getting git diff from {checkout}")
     print(f"[save_patch_and_result] Original SHA: {original_sha}")
-    diff = git_diff(checkout, original_sha)
-    files = changed_files(checkout, original_sha)
+    diff = git_diff(checkout, original_sha or issue.get("sha_fail"), resolve_conflict)
+    stats = subprocess.run(
+        ["git", "apply", "--numstat", "-z"], input=diff.encode("utf-8"),
+        cwd=checkout, capture_output=True, check=True,
+    ).stdout if diff else b""
+    files = [os.fsdecode(record.split(b"\t", 2)[2]) for record in stats.split(b"\0") if record]
 
     print(f"[save_patch_and_result] Diff size: {len(diff)} bytes")
     print(f"[save_patch_and_result] Changed files: {len(files)} files")
     print(f"[save_patch_and_result] Writing to {result_dir / 'patch.diff'}")
 
-    # Ensure patch ends with newline (required by git apply)
-    if diff and not diff.endswith('\n'):
-        diff = diff + '\n'
-
-    write_text(result_dir / "patch.diff", diff)
+    result_dir.mkdir(parents=True, exist_ok=True)
+    (result_dir / "patch.diff").write_bytes(diff.encode("utf-8"))
     write_json(
         result_dir / "result.json",
         {
@@ -1618,6 +1720,7 @@ def save_patch_and_result(
                 else verification_result.get("returncode") == 0
             ),
             "problem_results": problem_results,
+            "patch_reconciliation": reconciliation_results or [],
         },
     )
 
@@ -1892,6 +1995,26 @@ def _run_issue(
     print(f"[DEBUG]   Checkout: {checkout}")
     print(f"[DEBUG]   Problem results: {len(problem_results)} problems processed")
 
+    reconciliation_results = []
+
+    def resolve_conflict(error: str, attempt: int) -> None:
+        artifacts = result_dir / "patch-reconciliation"
+        prompt_path = write_reconciliation_prompt(
+            artifacts, checkout, original_sha, problems, error, attempt, verification,
+        )
+        command = args.codex_command
+        if " --model " not in f" {command} ":
+            model = canonical_model(args.context_model)
+            if model:
+                command = f"{command} --model {model}"
+        result = run_codex(
+            checkout, prompt_path, artifacts / f"transcript-{attempt}.txt",
+            command, args.timeout, args.dry_run, metrics_recorder=metrics,
+            metrics_phase=f"repair_agent.patch_reconciliation_{attempt}",
+        )
+        reconciliation_results.append({"attempt": attempt, **result})
+        write_json(artifacts / f"result-{attempt}.json", result)
+
     save_patch_and_result(
         result_dir,
         checkout,
@@ -1902,12 +2025,15 @@ def _run_issue(
         verification,
         None,  # No external verification
         original_sha,
+        resolve_conflict=resolve_conflict,
+        reconciliation_results=reconciliation_results,
     )
 
     print(f"[DEBUG] ✓ Saved patch.diff and result.json")
     completed = bool(
         len(problem_results) == len(problems)
         and all(result.get("returncode") == 0 for result in problem_results)
+        and all(result.get("returncode") == 0 for result in reconciliation_results)
         and (result_dir / "patch.diff").exists()
         and (result_dir / "patch.diff").read_text(encoding="utf-8").strip()
     )
