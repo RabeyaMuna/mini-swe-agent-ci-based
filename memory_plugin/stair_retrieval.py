@@ -154,6 +154,34 @@ class STAIRRetrieval:
             self.l3_memory = []
             self.l3_embeddings = np.array([])
 
+    def _get_max_tokens_for_stage(self) -> int:
+        """
+        Get appropriate max_tokens for LLM calls based on model capabilities.
+
+        Reasoning models (minimax, o1, etc.) need more tokens since they use
+        tokens for internal reasoning before producing the actual response.
+
+        Returns:
+            Maximum tokens to use for this LLM call
+        """
+        from utilities.llm_invoker import get_model_max_output_tokens
+
+        # Try to get model name from various attributes
+        model_name = (
+            getattr(self.llm, 'model_name', None) or
+            getattr(self.llm, 'model', None) or
+            getattr(self.llm, 'model_id', None) or
+            'unknown'
+        )
+
+        # Get model's max output capacity
+        max_output_tokens = get_model_max_output_tokens(model_name)
+
+        # For reasoning models and large-context models, use higher limits
+        # to ensure reasoning + actual response both fit
+        # Use 50% of max output capacity, capped at 16K for practicality
+        return min(max_output_tokens // 2, 16000)
+
     def _parse_memory_levels(self, memory_levels: str) -> set:
         """
         Parse memory_levels string into set of enabled levels.
@@ -562,7 +590,12 @@ class STAIRRetrieval:
 {STRICT_JSON_RULES}
 """
 
-            response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
+            response = invoke_llm_with_retry(
+                llm=self.llm,
+                prompt=prompt,
+                parse_json=True,
+                max_tokens=self._get_max_tokens_for_stage()
+            )
             enriched_prob = response if isinstance(response, dict) else ci_prob
 
             # Ensure problem_type is set
@@ -780,7 +813,11 @@ Use `problem_type: "dependency"` for all returned problems.
                 # Log prompt size vs model capacity
                 print(f"[Memory] STAGE 4: Prompt={prompt_size_kb:.1f}KB / Model={model_name} / Capacity={capacity_pct:.0f}% (max={model_context} tokens)")
 
-                response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
+                # Get max tokens for this stage (reasoning models need more)
+                max_tokens_for_stage = self._get_max_tokens_for_stage()
+                print(f"[Memory] STAGE 4: Using max_tokens={max_tokens_for_stage}")
+
+                response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True, max_tokens=max_tokens_for_stage)
 
                 # Check if response is empty/failed due to large prompt
                 # NOTE: {"problems": []} is a VALID response meaning "no dependencies found"
@@ -820,7 +857,7 @@ Use `problem_type: "dependency"` for all returned problems.
                             print(f"[Memory] STAGE 4:   {level_name}: {level_prompt_kb:.1f}KB ({level_capacity_pct:.0f}% capacity)")
 
                             try:
-                                level_response = invoke_llm_with_retry(llm=self.llm, prompt=level_prompt, parse_json=True)
+                                level_response = invoke_llm_with_retry(llm=self.llm, prompt=level_prompt, parse_json=True, max_tokens=max_tokens_for_stage)
                                 level_result = level_response if isinstance(level_response, dict) else {"problems": level_response} if isinstance(level_response, list) else {}
                                 level_problems = level_result.get("problems", [])
                                 valid_level = [p for p in level_problems if p and isinstance(p, dict) and self._is_valid_problem(p)]
@@ -847,7 +884,7 @@ Use `problem_type: "dependency"` for all returned problems.
                             time.sleep(wait_time)
 
                             try:
-                                retry_response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
+                                retry_response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True, max_tokens=max_tokens_for_stage)
                                 # Check if retry response is valid (using same logic as main check)
                                 # {"problems": []} is VALID - means no dependencies found
                                 retry_is_valid = (
@@ -2836,15 +2873,16 @@ Return JSON:
                 matched = None
                 best_sim = 0.0
                 for cluster in clusters:
-                    # Threshold 0.50 gives good clustering:
-                    # - 51 flower problems -> 26 clusters
-                    # - NumPy (11 problems, avg sim=0.56), RST (10 problems, avg sim=0.64)
-                    # - Click (3 problems, avg sim=0.58), Pytest (2 problems, avg sim=0.84)
+                    # Threshold τ=0.50 balances precision and recall:
+                    # - Avoids false merges (different problems with superficial similarity)
+                    # - Captures true duplicates (same problem, different wording)
+                    # - Empirically validated: 51 flower problems -> 26 clusters
+                    # - Representative similarities: NumPy (avg=0.56), RST (avg=0.64)
                     sim = self._candidate_similarity(
                         candidate, cluster["representative"]
                     )
                     best_sim = max(best_sim, sim)
-                    if sim >= 0.30:  # Lower threshold to group variations of same problem
+                    if sim >= 0.50:  # Moderate threshold balancing precision/recall
                         matched = cluster
                         break
 
