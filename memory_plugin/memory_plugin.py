@@ -200,6 +200,13 @@ For EACH problem, create structured query objects for L1/L2/L3 retrieval.
 **IMPORTANT:** Every problem MUST have either a non-empty root_cause OR non-empty failure_signals array.
 If CI log has error_types with evidence, use that evidence as failure_signals.
 
+**CRITICAL: Only generate well-defined problems**
+- Problem description must be specific and clear (not vague like "job failed without details")
+- Root cause must be technically specific (not vague like "insufficient log information")
+- Failure signals must be concrete error messages from CI logs (not placeholders)
+- Files should be specified when possible (can be empty only if problem/root_cause/signals are all well-defined)
+- If problem, root_cause, or failure_signals are vague or unclear, return {{"problems": []}} instead
+
 **Return JSON:**
 ```json
 {{
