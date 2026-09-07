@@ -1400,9 +1400,18 @@ def run_codex(
                         }
                         for field, value in normalized_usage.items():
                             usage_totals[field] += value
-                        call_cost, cost_source = estimate_cost_usd(
-                            expected_model or "", normalized_usage
-                        )
+
+                        # Extract cost from provider response if available (universal for any provider)
+                        provider_cost = event_usage.get("cost")
+                        if provider_cost is not None and float(provider_cost) > 0:
+                            call_cost = float(provider_cost)
+                            cost_source = "provider_usage"
+                        else:
+                            # Fall back to estimation only if provider didn't return cost
+                            call_cost, cost_source = estimate_cost_usd(
+                                expected_model or "", normalized_usage
+                            )
+
                         total_cost_usd += call_cost
                         cost_sources.add(cost_source)
                         if metrics_recorder is not None:

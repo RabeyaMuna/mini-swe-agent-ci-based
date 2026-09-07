@@ -10,7 +10,7 @@
 #                   (overrides <issue-ids>)
 #   [dataset]:   Path to eval_set.jsonl (default: data/eval_set.jsonl)
 #   [workers]:   Parallel issues per ablation (default: 1)
-#   [timeout]:   Timeout per problem in seconds (default: 480 = 8 minutes)
+#   [timeout]:   Timeout per problem in seconds (default: 3600 = 1 hour, Codex official)
 #
 #   Examples:
 #     # Run ALL ablations and BOTH directions for all issues in eval_issue_ids.json using GPT‑5‑mini
@@ -44,7 +44,7 @@ MODEL=${4:-gpt-5-mini}
 REPO_FILTERS=${5:-}
 DATASET=${6:-data/eval_set.jsonl}
 WORKERS=${7:-1}
-TIMEOUT=${8:-600}  # 10 minutes per problem (600s) - reduced from 480s for safety
+TIMEOUT=${8:-3600}  # Use Codex's official default: 1 hour per problem
 RESULTS_ROOT=${CODEX_RESULTS_ROOT:-results/codex}
 
 # Sandbox mode: Set CODEX_SANDBOX=none to disable sandboxing for restricted servers
