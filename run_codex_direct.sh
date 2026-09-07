@@ -204,13 +204,14 @@ run_one() {
     echo "Run: ablation=$ablation | direction=$direction"
     echo "=========================================="
 
-    # Build codex command - ALWAYS use workspace-write for CI repair
-    # SANDBOX_MODE only controls whether we warn about bwrap availability
+    # Build codex command - use workspace-write unless explicitly disabled
     if [ "$SANDBOX_MODE" = "none" ]; then
         echo "WARNING: Sandboxing disabled (server environment)"
         echo "         Agent has unrestricted filesystem access"
+        CODEX_CMD="codex exec --model $CODEX_MODEL"
+    else
+        CODEX_CMD="codex exec --sandbox workspace-write --model $CODEX_MODEL"
     fi
-    CODEX_CMD="codex exec --sandbox workspace-write --model $CODEX_MODEL"
 
     if [ -z "$ISSUE_IDS" ]; then
         PYTHONPATH=. python3 codex/scripts/run_codex_ci_repair.py \

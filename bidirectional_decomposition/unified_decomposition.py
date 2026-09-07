@@ -344,12 +344,15 @@ def resolve_issue_metadata(
         forward_result.get("repo_name"),
         backward_result.get("repo_name"),
     )
+    # Use repo_name only (short format) to match backward memory and query logic
     repo = first(
-        dataset.get("repo"),
-        f"{repo_owner}/{repo_name}" if repo_owner and repo_name else "",
-        forward_result.get("repo"),
+        repo_name,  # Prioritize short format
+        dataset.get("repo_name"),  # Try dataset repo_name first
+        backward_result.get("repo_name"),
+        forward_result.get("repo_name"),
+        dataset.get("repo"),  # Fallback to dataset repo (might be full format)
         backward_result.get("repo"),
-        repo_name,
+        forward_result.get("repo"),
     )
     workflow_path = first(
         dataset.get("workflow_path"),
@@ -357,12 +360,14 @@ def resolve_issue_metadata(
         backward_result.get("workflow_path"),
         ci_context.get("workflow_path"),
     )
-    workflow_name = first(
+    # Extract filename from workflow_path to match backward/forward format
+    # (workflow_name should be filename like "test.yml", not display name like "Unit Test")
+    workflow_name = Path(workflow_path).name if workflow_path else first(
         dataset.get("workflow_name"),
         forward_result.get("workflow_name"),
         backward_result.get("workflow_name"),
         ci_context.get("workflow_name"),
-        Path(workflow_path).name if workflow_path else "",
+        "",
     )
     return {
         "repo": repo,
