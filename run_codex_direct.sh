@@ -4,7 +4,7 @@
 # Usage: ./run_codex_direct.sh <issue-ids> [ablation] [direction] [model] [repo_filters] [dataset] [workers] [timeout]
 #   <issue-ids>: Comma-separated IDs, or empty string "" to use eval_issue_ids.json, or omit to RUN ALL
 #   [ablation]:  baseline|L1|L2|L3|L1+L2|L1+L2+L3|all   (default: all)
-#   [direction]: backward|forward|both|none              (default: both; "none" → backward for baseline)
+#   [direction]: backward|forward|bidirectional|both|none (default: both; "none" → backward for baseline)
 #   [model]:     Any OpenRouter model (e.g., gpt-5-mini, deepseek-v4-flash, minimax/minimax-m2.5) (default: gpt-5-mini)
 #   [repo_filters]: Optional comma-separated repo names or owner/repo slugs
 #                   (overrides <issue-ids>)
@@ -195,6 +195,7 @@ run_one() {
     if [ "$ablation" != "baseline" ]; then
         local memory_root="data/back_trs"
         [ "$direction" = "forward" ] && memory_root="data/fwr_trs"
+        [ "$direction" = "bidirectional" ] && memory_root="data/bidirect_trs"
         memory_args="--memory-root $memory_root"
     fi
     memory_args="$memory_args --context-model $CODEX_MODEL"
@@ -328,6 +329,8 @@ fi
 
 if [ "$DIRECTION" = "both" ]; then
     DIRECTIONS_LIST=(backward forward)
+elif [ "$DIRECTION" = "bidirectional" ]; then
+    DIRECTIONS_LIST=(bidirectional)
 else
     DIRECTIONS_LIST=($DIRECTION)
 fi

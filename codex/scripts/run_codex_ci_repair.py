@@ -2176,9 +2176,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--direction",
-        choices=["backward", "forward"],
+        choices=["backward", "forward", "bidirectional"],
         default="backward",
-        help="Select backward (default) or forward memory root when memory is enabled",
+        help="Select backward (default), forward, or bidirectional memory root when memory is enabled",
     )
     return parser.parse_args()
 
