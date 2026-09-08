@@ -2046,42 +2046,8 @@ def _build_single_problem_task(
             elif detail and str(detail) not in full_problem:
                 full_problem += f"\n{detail}"
 
-    # Analyze repair approach with LLM
-    repair_type = "manual"
-    if context_llm:
-        logger.info(f"[CIBench] Analyzing repair approach for problem {problem_num}...")
-        analysis = _analyze_repair_with_llm(problem, context_llm)
-        repair_plan = analysis.get("repair_plan", "")
-        repair_type = analysis.get("type", "manual_fix")
-    else:
-        # No LLM available - use fix_strategy
-        repair_plan = fix_strategy or "Analyze error and apply fix"
-        logger.info("[CIBench] → Manual repair (no LLM)")
-
-    # Format repair plan based on type
-    if repair_type == "automated_tool":
-        # Add strong directives for automated tool repairs
-        repair_plan_formatted = f"""**AUTOMATED FIX - DO NOT EDIT FILES MANUALLY**
-
-This problem can be solved completely by running these commands:
-
-{repair_plan}
-
-[WARN] CRITICAL INSTRUCTIONS:
-1. First inspect the tool configuration and confirm that every target path exists
-2. Confirm the reported failure is within that tool's configured scope
-3. If the tool is unavailable, install it in the repository-local environment
-   or tool cache rather than globally; preserve the requested version when one
-   is specified
-4. Execute the Run/Fix command with the verified target paths
-5. Inspect the resulting diff and run the relevant check command when feasible
-6. DO NOT manually edit files when the confirmed problem is purely mechanical
-
-The automated tool should make the mechanical changes, but you must verify its
-scope, output, and resulting diff before finishing."""
-    else:
-        # Manual fix or hybrid - use plan as-is
-        repair_plan_formatted = repair_plan
+    # Use repair strategy directly from L1/L2/L3 memory
+    repair_plan_formatted = fix_strategy or "Analyze error and apply fix"
 
     # Format files list
     files_str = (
@@ -2100,8 +2066,21 @@ Root Cause: {root_cause}
 Affected Files:
 {files_str}
 
+IMPORTANT: File paths listed above may be relative paths, not full paths.
+Search for the actual file location first before editing:
+  find {{{{testbed_path}}}} -name "filename.ext" -type f
+
+APPROACH:
+1. Understand the problem and locate the affected files
+2. If unable to locate or understand the problem clearly, proceed to the next available fix
+3. Do not spend excessive time on a single unlocatable issue
+
 Repair Plan:
 {repair_plan_formatted}
+
+REPAIR APPROACH:
+- If the repair plan above specifies automated tools or commands, follow that approach if it is similar to the problem and applicable.
+- If the problem can be solved by automated tools (formatting, linting, imports) or approach, use those tools or follow the approach instead of manual fix.
 
 Validation Command:
 {verification_cmd or "Determine from the CI workflow and run the relevant check."}
@@ -2112,7 +2091,7 @@ CRITICAL: ISOLATED ENVIRONMENT - USE REPO-SPECIFIC VIRTUAL ENVIRONMENT
 
 This issue has an ISOLATED virtual environment: .venv-{repo_name}{f"-{issue_id}" if issue_id else ""}/
 
-⚠️  MANDATORY: ALL installations and executions MUST use this venv!
+##  MANDATORY: ALL installations and executions MUST use this venv!
 
 For INSTALLING packages (if repair plan says "install X"):
   ✓ CORRECT:   .venv-{repo_name}{f"-{issue_id}" if issue_id else ""}/bin/pip install <package>
