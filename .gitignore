@@ -233,3 +233,4 @@ codex/.codex-config/config.toml
 .codex-local/
 tests/
 exception/
+eval/

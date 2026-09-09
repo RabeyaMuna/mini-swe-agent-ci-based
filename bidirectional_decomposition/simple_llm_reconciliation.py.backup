@@ -28,83 +28,6 @@ MAX_CLUSTER_PROMPT_BYTES = 30_000
 FILE_OVERLAP_MERGE_THRESHOLD = 0.50
 
 
-# Helper functions for data sanitization and validation
-def _sanitize_ci_context(ci_context: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Sanitize CI context to prevent data leakage.
-    Only include information needed for decision making.
-    """
-    safe_context = {}
-
-    # Only include safe fields
-    if 'failed_jobs' in ci_context:
-        # Only job names, not full logs
-        safe_context['failed_jobs'] = [
-            job if isinstance(job, str) else job.get('name', 'unknown')
-            for job in ci_context['failed_jobs'][:5]  # Limit to first 5
-        ]
-
-    if 'overall_failure_reasons' in ci_context:
-        safe_context['failure_reasons'] = ci_context['overall_failure_reasons'][:3]
-
-    if 'error_types' in ci_context:
-        safe_context['error_types'] = ci_context['error_types'][:5]
-
-    if 'workflow_path' in ci_context:
-        # Just the workflow name, not full path
-        workflow = ci_context['workflow_path']
-        if isinstance(workflow, str):
-            safe_context['workflow'] = workflow.split('/')[-1]
-
-    return safe_context
-
-
-def _verify_no_hallucination(merged: Dict[str, Any], source_problems: List[Dict[str, Any]]) -> None:
-    """
-    Verify merged content doesn't contain hallucinated information.
-    Raises exception if hallucination detected.
-    """
-    import re
-
-    # Check files
-    merged_files = set(merged.get('affected_files', []))
-    source_files = set()
-    for p in source_problems:
-        source_files.update(p.get('affected_files', []))
-        source_files.update(p.get('files', []))
-
-    hallucinated_files = merged_files - source_files
-    if hallucinated_files:
-        print(f"  WARNING: Merged content has files not in sources: {hallucinated_files}")
-
-    # Check for suspicious additions
-    merged_text = ' '.join([
-        str(merged.get('problem', '')),
-        str(merged.get('root_cause', '')),
-        str(merged.get('how_fixed', '')),
-    ]).lower()
-
-    # Patterns that indicate hallucination
-    suspicious_patterns = [
-        (r'\.gitignore', 'gitignore entries'),
-        (r'reorganize.*import', 'import reorganization'),
-        (r'from typing to collections', 'typing to collections'),
-    ]
-
-    for pattern, description in suspicious_patterns:
-        if re.search(pattern, merged_text):
-            # Check if any source mentions it
-            source_text = ' '.join([
-                str(p.get('problem', '')) + ' ' +
-                str(p.get('root_cause', '')) + ' ' +
-                str(p.get('how_fixed', ''))
-                for p in source_problems
-            ]).lower()
-
-            if not re.search(pattern, source_text):
-                print(f"  WARNING: Merged content mentions {description} not in sources")
-
-
 def simple_bidirectional_reconciliation(
     forward_problems: List[Dict[str, Any]],
     backward_problems: List[Dict[str, Any]],
@@ -387,23 +310,7 @@ def llm_merge_cluster(
     cluster_index: int = 1,
     ci_context: Dict[str, Any] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Two-phase reconciliation:
-    Phase 1: Decision making (SELECT/MERGE/CONFLICT/SEPARATE)
-    Phase 2: Content generation (only for MERGE)
-    """
-    # CRITICAL: Write to file so we can verify this code is actually running
-    import datetime
-    log_file = '/tmp/bidirectional_reconciliation.log'
-    with open(log_file, 'a') as f:
-        f.write(f"\n{'='*80}\n")
-        f.write(f"[{datetime.datetime.now()}] NEW TWO-PHASE RECONCILIATION CALLED\n")
-        f.write(f"Cluster {cluster_index}: {len(cluster)} problems\n")
-        f.write(f"{'='*80}\n")
-
-    print("\n" + "=" * 80)
-    print("DEBUG: NEW TWO-PHASE RECONCILIATION ACTIVE")
-    print("=" * 80)
+    """Ask the LLM to partition a candidate cluster into true problems and synthesize unified problems."""
     # Send every field without truncation. Oversized clusters are divided into
     # lossless batches; records are never shortened or dropped. Global duplicate
     # analysis can still reconcile matches that fall into different batches.
@@ -420,77 +327,10 @@ def llm_merge_cluster(
         return output
 
     ci_context = ci_context or {}
-    # Sanitize CI context to prevent data leakage
-    safe_ci_context = _sanitize_ci_context(ci_context)
-
-    # PHASE 1: Decision making
-    print(f"  Cluster {cluster_index}: Phase 1 - Analyzing relationships...")
-    print(f"  DEBUG: Cluster has {len(cluster)} problems")
-
-    # Log to file
-    with open('/tmp/bidirectional_reconciliation.log', 'a') as f:
-        f.write(f"\nPhase 1: Analyzing {len(cluster)} problems\n")
-        for p in cluster:
-            f.write(f"  {p.get('source_id')}: {p.get('problem', '')[:60]}...\n")
-
-    decisions = _llm_decide_actions(cluster, safe_ci_context, llm, cluster_index)
-    print(f"  DEBUG: Got {len(decisions.get('groups', []))} decision groups")
-
-    # Log decisions to file
-    with open('/tmp/bidirectional_reconciliation.log', 'a') as f:
-        f.write(f"\nPhase 1 Result: {len(decisions.get('groups', []))} decision groups\n")
-        for g in decisions.get('groups', []):
-            f.write(f"  Action: {g.get('action')} for {g.get('source_ids', [])}\n")
-
-    for g in decisions.get('groups', []):
-        print(f"    Action: {g.get('action')} for sources {g.get('source_ids', [])}")
-
-    # PHASE 2: Process each group based on action
-    print(f"  Cluster {cluster_index}: Phase 2 - Processing groups...")
-    results = []
-    for group in decisions.get('groups', []):
-        try:
-            processed = _process_group(group, cluster, safe_ci_context, llm)
-            if isinstance(processed, list):
-                results.extend(processed)
-            else:
-                results.append(processed)
-        except Exception as e:
-            print(f"    WARNING: Group {group['action']} failed: {e}")
-            # Fallback: keep originals
-            source_ids = group.get('source_ids', [])
-            fallback = [_copy_singleton(p) for p in cluster if p.get('source_id') in source_ids]
-            results.extend(fallback)
-
-    return results if results else [_copy_singleton(p) for p in cluster]
-
-
-def _llm_decide_actions(
-    cluster: List[Dict[str, Any]],
-    ci_context: Dict[str, Any],
-    llm: Any,
-    cluster_index: int = 1,
-) -> Dict[str, Any]:
-    """
-    Phase 1: Lightweight decision making.
-    Returns: {groups: [{action, source_ids, selected/reason, confidence}]}
-    """
     failed_jobs_str = json.dumps(ci_context.get("failed_jobs", []), indent=2)
     ci_metadata_str = json.dumps(ci_context.get("ci_metadata", {}), indent=2)
 
-    prompt = f"""You are analyzing relationships between forward (commit-based) and backward (CI failure-based) problems.
-
-**PHASE 1: DECISION ONLY** - Decide what action to take for each group. DO NOT generate problem content yet.
-
-**CRITICAL RULE - READ FIRST**:
-If problems describe the SAME FIX (same command, same change type):
-  → ACTION MUST BE: SELECT
-  → DO NOT use MERGE unless problems have DIFFERENT, COMPLEMENTARY information
-
-Examples:
-- "Add pylint disable" + "Add pylint disable" → SELECT (identical)
-- "Fix line length" + "Fix line length" → SELECT (identical)
-- "Import error in X" + "Import error cause is Y" → MERGE (complementary)
+    prompt = f"""You are reconciling forward (commit-based) and backward (CI failure-based) decompositions into unified problems.
 
 CANDIDATE CLUSTER {cluster_index}:
 {json.dumps(cluster, indent=2)}
@@ -499,86 +339,106 @@ CI CONTEXT (for verification):
 Failed jobs: {failed_jobs_str}
 CI metadata: {ci_metadata_str}
 
-YOUR TASK:
-Analyze relationships between problems and decide ONE action per group.
+TASK:
+1. Analyze each record against CI context and failed jobs
+2. Merge items ONLY when they describe the SAME underlying CI problem
+3. For each unified problem, intelligently synthesize fields by analyzing BOTH sources
 
-FOUR ACTIONS:
+MERGE DECISION RULES:
 
-1. **SELECT**: Problems are similar/identical
-   - Pick the most detailed/complete one
-   - Return: source_ids + selected (which to use) + reason
+MERGE if problems have the SAME FIX STRATEGY:
 
-2. **MERGE**: Problems are complementary (different useful info)
-   - Both provide valuable information that should be combined
-   - Return: source_ids + reason
-   - Note: Content generation happens in Phase 2
+PRIMARY CRITERION - Same fix strategy (how to fix):
+- Both fixed by SAME command (black ., ruff --fix, pip install X, etc.)
+- OR both need SAME type of code change (add import, remove code, etc.)
 
-3. **CONFLICT**: Problems contradict (different solutions to same problem)
-   - Return: source_ids + conflict_type + reason
-   - Note: Resolution happens in Phase 2
+SECONDARY CRITERIA - Same or similar problem:
+1. Same or similar failure_type (format, test, lint, dependency_error, etc.)
+2. Same or compatible validation_cmd
+3. Same or similar problem pattern (ignore wording differences)
 
-4. **SEPARATE**: Problem is unrelated to others
-   - Keep as-is
-   - Return: source_ids + reason
+ANALYSIS PROCESS:
+For each pair of problems, ask:
+1. How is problem A fixed?
+2. How is problem B fixed?
+3. Are the fixes THE SAME or DIFFERENT?
+   - If SAME fix strategy → MERGE into one problem
+   - If DIFFERENT fix strategies → KEEP SEPARATE
 
-DECISION CRITERIA:
+Examples of SAME fix strategy (MERGE):
+- "Black formatting in file1.py" + "Black formatting in file2.py"
+  Fix: Run 'black .' (one command fixes both) → MERGE
 
-**SELECT when:**
-- Forward and backward are identical or near-identical
-- One clearly has more detail than the other
-- Same fix, different wording
+- "F401 unused import in utils.py" + "F401 unused import in models.py"
+  Fix: Run 'ruff --fix' (one command fixes both) → MERGE
 
-**MERGE when:**
-- Problems are complementary (F has context, B has fix details)
-- Both provide non-overlapping useful information
-- Can be combined into one better problem
+- "test_foo timing issue" + "test_foo log message issue" (same test file)
+  Fix: Fix test_foo once (one change fixes both) → MERGE
 
-**CONFLICT when:**
-- Same problem but different/contradictory solutions
-- Incompatible approaches (need to choose one)
+Examples of DIFFERENT fix strategies (KEEP SEPARATE):
+- "Import error - missing package" + "Import error - wrong statement"
+  Fix A: pip install package
+  Fix B: Edit import line
+  Different fixes → KEEP SEPARATE
 
-**SEPARATE when:**
-- Problem is genuinely unrelated to others in cluster
-- Should remain independent
+- "test_foo failed" + "test_bar failed" (different tests)
+  Fix A: Fix test_foo
+  Fix B: Fix test_bar
+  Different fixes → KEEP SEPARATE
+
+IMPORTANT:
+- Same problem can be in different files - merge if same fix
+- Different wording is OK if same fix strategy
+- Backward + Forward perspectives often same fix → merge
+- Never merge if fixes are different, even if problems seem similar
+
+SYNTHESIS RULES (when merging forward F* and backward B*):
+For each field, analyze BOTH sources and choose the BEST data based on reasoning:
+
+- **problem**: Choose clearest failure description (backward usually clearer from CI logs, but analyze both)
+- **root_cause**: Choose most accurate technical cause (backward has ground truth from CI, forward has implementation context - choose best)
+- **how_fixed**: Choose most detailed implementation (forward has actual changes, but if backward explains better, use that)
+- **why_fix_works**: Choose best technical explanation (analyze both, pick clearest)
+- **affected_files**: UNION of all files from both sources
+- **validation_cmd**: Choose actual CI command (forward has real command, backward has validator - pick most accurate)
+
+CRITICAL - PACKAGE VERSION INFORMATION:
+When merging dependency/config problems, unified problem MUST include:
+- Exact package name + old version → new version
+- Config file changed
+- Technical reason WHY old version failed and WHY new version fixes
+
+Do NOT blindly prefer one source - ANALYZE both and choose best data for each field based on:
+- Completeness (which has more detail?)
+- Accuracy (which matches CI context/failed jobs?)
+- Technical correctness (which explanation makes sense?)
 
 OUTPUT JSON:
 {{
-  "analysis": "Brief overall assessment of cluster relationships",
   "groups": [
     {{
-      "action": "select",
-      "source_ids": ["F1", "F2", "B1"],
-      "selected": "B1",
-      "reason": "B1 has most complete description with CI context",
-      "confidence": "high"
-    }},
-    {{
-      "action": "merge",
-      "source_ids": ["F3", "B2"],
-      "reason": "F3 has problem description, B2 has root cause - complementary",
-      "confidence": "high"
-    }},
-    {{
-      "action": "conflict",
-      "source_ids": ["F4", "B3"],
-      "conflict_type": "different_solutions",
-      "reason": "Both fix line length but with different approaches",
-      "confidence": "medium"
-    }},
-    {{
-      "action": "separate",
-      "source_ids": ["F5"],
-      "reason": "Unrelated import issue",
-      "confidence": "high"
+      "source_ids": ["F1", "B1"],
+      "merge_reason": "Technical reason why these describe same problem",
+
+      // SYNTHESIZED UNIFIED PROBLEM (choose best data from both sources):
+      "problem": "Clearest failure description after analyzing both",
+      "root_cause": "Most accurate root cause after analyzing both",
+      "how_fixed": "Most detailed fix after analyzing both",
+      "why_fix_works": "Best explanation after analyzing both",
+      "affected_files": ["union", "of", "all", "files"],
+      "validation_cmd": "Most accurate command",
+      "failure_type": "...",
+      "issue_type": "...",
+      "validation_order": 1
     }}
   ]
 }}
 
 IMPORTANT:
-- Every source_id from cluster must appear exactly once
-- Be intelligent: if 10 problems are similar, SELECT can handle all 10
-- Only MERGE when problems are truly complementary
-- Be conservative with CONFLICT - most cases are SELECT or MERGE
+- Preserve every source_id exactly once across all groups
+- If only one source has data for a field, use that source
+- If BOTH have data, analyze and choose the BETTER one with reasoning
+- Include CI verification evidence in your reasoning
 
 {STRICT_JSON_RULES}
 """
@@ -588,196 +448,12 @@ IMPORTANT:
         max_tokens = get_model_max_output_tokens(model_name)
 
         response = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True, max_tokens=max_tokens)
-        if not isinstance(response, dict):
-            response = {"groups": []}
-
-        # Validate that all source_ids are covered
-        all_source_ids = {p.get('source_id') for p in cluster}
-        covered_ids = set()
-        for group in response.get("groups", []):
-            covered_ids.update(group.get('source_ids', []))
-
-        # Add missing problems as SEPARATE
-        missing = all_source_ids - covered_ids
-        if missing:
-            for sid in missing:
-                response.setdefault("groups", []).append({
-                    "action": "separate",
-                    "source_ids": [sid],
-                    "reason": "Not classified by LLM",
-                    "confidence": "low"
-                })
-
-        return response
+        groups = response.get("groups", []) if isinstance(response, dict) else []
+        normalized = _validate_cluster_groups(groups, cluster)
+        return normalized or [_copy_singleton(problem) for problem in cluster]
     except Exception as exc:
-        print(f"    WARNING: Phase 1 failed ({exc}), treating all as separate")
-        # Fallback: treat all as separate
-        return {
-            "analysis": "Phase 1 failed",
-            "groups": [
-                {"action": "separate", "source_ids": [p.get('source_id')], "reason": "Fallback"}
-                for p in cluster
-            ]
-        }
-
-
-def _process_group(
-    group: Dict[str, Any],
-    cluster: List[Dict[str, Any]],
-    ci_context: Dict[str, Any],
-    llm: Any,
-) -> List[Dict[str, Any]]:
-    """
-    Phase 2: Process based on action.
-    Returns list of problems (can be 1 or more).
-    """
-    action = group.get('action', 'separate').lower()
-    source_ids = group.get('source_ids', [])
-
-    # Get source problems
-    by_source = {p.get('source_id'): p for p in cluster}
-    source_problems = [by_source[sid] for sid in source_ids if sid in by_source]
-
-    if not source_problems:
-        return []
-
-    # AUTOMATIC ACTIONS (no LLM)
-    if action == "select":
-        # Use the selected problem
-        selected_id = group.get('selected', source_ids[0])
-        selected = by_source.get(selected_id, source_problems[0])
-        return [_copy_singleton(selected)]
-
-    elif action == "separate":
-        # Keep all as-is
-        return [_copy_singleton(p) for p in source_problems]
-
-    # LLM ACTIONS
-    elif action == "merge":
-        # Call LLM to merge complementary information
-        try:
-            merged = _llm_merge_problems(source_problems, group.get('reason', ''), ci_context, llm)
-            # Verify no hallucination
-            _verify_no_hallucination(merged, source_problems)
-
-            # CRITICAL: Block .gitignore if not in sources
-            if '.gitignore' in json.dumps(merged).lower():
-                source_has_gitignore = any('.gitignore' in json.dumps(p).lower()
-                                          for p in source_problems)
-                if not source_has_gitignore:
-                    print(f"      BLOCKED: Merged content adds .gitignore hallucination!")
-                    # Fall back to SELECT best source
-                    return [_copy_singleton(source_problems[0])]
-
-            return [merged]
-        except Exception as e:
-            print(f"      WARNING: MERGE failed: {e}, keeping originals")
-            return [_copy_singleton(p) for p in source_problems]
-
-    elif action == "conflict":
-        # Try to resolve conflict
-        try:
-            resolved = _resolve_conflict(source_problems, group, ci_context, llm)
-            return [resolved] if resolved else [_copy_singleton(p) for p in source_problems]
-        except Exception as e:
-            print(f"      WARNING: CONFLICT resolution failed: {e}, keeping first")
-            return [_copy_singleton(source_problems[0])]
-
-    else:
-        # Unknown action, keep as separate
-        return [_copy_singleton(p) for p in source_problems]
-
-
-def _llm_merge_problems(
-    source_problems: List[Dict[str, Any]],
-    reason: str,
-    ci_context: Dict[str, Any],
-    llm: Any,
-) -> Dict[str, Any]:
-    """
-    Phase 2 MERGE: Generate merged content from complementary problems.
-    """
-    prompt = f"""You are merging complementary problem descriptions into one unified problem.
-
-SOURCE PROBLEMS:
-{json.dumps(source_problems, indent=2)}
-
-REASON FOR MERGE: {reason}
-
-CI CONTEXT:
-{json.dumps(ci_context, indent=2)}
-
-TASK:
-Combine these problems into ONE unified problem that includes ALL useful information from both.
-
-CRITICAL REQUIREMENTS:
-1. If Source A fixes files X and Source B fixes files Y:
-   → Merged problem MUST address BOTH X and Y
-2. If Source A has 2 problems and Source B has 2 problems:
-   → Merged result MUST cover ALL 4 problem aspects
-3. DO NOT drop any fix from either source
-4. DO NOT add information not present in source problems
-5. DO NOT hallucinate files, changes, or details
-
-VERIFICATION:
-- Count fixes in Source A and list them
-- Count fixes in Source B and list them
-- Merged MUST include ALL of them
-
-RULES:
-1. Combine descriptions where complementary
-2. Use UNION of affected_files (ALL files from both sources)
-3. Combine how_fixed to include ALL changes from both sources
-4. Use more detailed field values when available
-
-OUTPUT JSON (unified problem):
-{{
-  "problem": "Combined problem description",
-  "root_cause": "Combined root cause",
-  "how_fixed": "Combined fix description",
-  "why_fix_works": "Combined explanation",
-  "affected_files": ["all", "files", "from", "both"],
-  "validation_cmd": "Most accurate command",
-  "failure_type": "...",
-  "issue_type": "...",
-  "validation_order": 1,
-  "source_ids": {json.dumps([p.get('source_id') for p in source_problems])}
-}}
-
-{STRICT_JSON_RULES}
-"""
-    model_name = getattr(llm, 'model_name', None) or getattr(llm, 'model', 'unknown')
-    max_tokens = get_model_max_output_tokens(model_name)
-
-    response = invoke_llm_with_retry(llm=llm, prompt=prompt, parse_json=True, max_tokens=max_tokens)
-
-    if not isinstance(response, dict):
-        # Fallback: use first problem
-        return _copy_singleton(source_problems[0])
-
-    # Ensure source_ids are preserved
-    if 'source_ids' not in response:
-        response['source_ids'] = [p.get('source_id') for p in source_problems]
-
-    return response
-
-
-def _resolve_conflict(
-    source_problems: List[Dict[str, Any]],
-    group: Dict[str, Any],
-    ci_context: Dict[str, Any],
-    llm: Any,
-) -> Dict[str, Any] | None:
-    """
-    Phase 2 CONFLICT: Try to resolve conflicting solutions.
-    Returns resolved problem or None if cannot resolve.
-    """
-    conflict_type = group.get('conflict_type', 'unknown')
-
-    # For now, simple resolution: pick first problem
-    # TODO: Add CI-based resolution or present both options
-    print(f"      CONFLICT ({conflict_type}): Using first problem as resolution")
-    return _copy_singleton(source_problems[0])
+        print(f"  Cluster {cluster_index}: merge fallback ({exc})")
+        return [_copy_singleton(problem) for problem in cluster]
 
 
 def _validate_cluster_groups(
@@ -902,18 +578,6 @@ def llm_filter_and_deduplicate(
         "dependency_graph": dependency_graph or {},
         "changed_files": (structured_diff or {}).get("changed_files", []),
     }
-
-    # CRITICAL: Never reject backward singletons
-    # Backward comes from actual successful patch, it's ground truth
-    backward_singletons = []
-    for p in problems:
-        source_ids = p.get('source_ids', [])
-        if len(source_ids) == 1 and str(source_ids[0]).startswith('B'):
-            backward_singletons.append(p['problem_id'])
-
-    if backward_singletons:
-        print(f"  Protecting {len(backward_singletons)} backward singletons from filter")
-
     prompt = f"""Review the complete reconciled problem list for one historical CI repair.
 
 Problems:
@@ -930,12 +594,6 @@ VERIFICATION TASKS:
 0. Treat this as an independent instance. Base every decision only on the supplied
    problems, current CI context, and current file/dependency evidence.
 
-CRITICAL PROTECTION RULE:
-Problems with source_ids starting with "B" and only 1 source (backward singletons)
-are from actual successful patches.
-DO NOT mark them as irrelevant unless they are COMPLETELY unrelated to CI failure.
-Backward singletons: {backward_singletons}
-
 1. **VERIFY EACH PROBLEM AGAINST CI CONTEXT**:
    - Check if problem is **DIRECTLY relevant**: explains a failed job from failed_jobs list
    - Check if problem is **INDIRECTLY relevant**: prerequisite or supporting fix for another problem
@@ -948,30 +606,15 @@ Backward singletons: {backward_singletons}
      * AND problem/root_cause are well-defined and applicable (NOT vague)
 
 2. **REJECT VAGUE OR INCOMPLETE PROBLEMS**:
-
-   IMPORTANT: A problem may have empty how_fixed/affected_files in the JSON,
-   but the CI context provides the actual fix information.
-   DO NOT reject solely based on empty fields.
-
-   REJECT ONLY IF:
-   - Problem description itself is generic: "fixed issues", "updated files"
-   - AND root_cause provides no technical detail
-   - AND CI context does not explain what failed
-
-   KEEP IF:
-   - Problem description is specific (names error code, file, failure type)
-   - OR root_cause explains the technical issue
-   - OR CI context shows what failed
-
-   Examples to KEEP (not vague):
-   - "Pylint R0801 duplicate-code in test_file.py" (Specific error code)
-   - "Import error - module X not found" (Specific failure)
-   - "Test test_foo failed with AssertionError" (Specific test)
-
-   Examples to REJECT (actually vague):
-   - "Fixed some issues" (Generic, no specifics)
-   - "Updated files" (No explanation)
-   - "Addressed problems" (No technical detail)
+   - **REJECT if problem is vague**: Generic descriptions like "fixed issues", "updated files", "addressed problems"
+   - **REJECT if root_cause is vague**: Missing technical details, no explanation of WHY it failed
+   - **REJECT if how_fixed is vague**: "Updated dependencies", "Fixed errors" without specifics
+   - **REQUIRE well-defined**:
+     * problem: Specific failure description (what broke, where, what error)
+     * root_cause: Technical reason WHY it failed (specific cause, not category)
+     * how_fixed: Concrete changes made (what changed, where, exact values)
+     * For dependency: MUST have exact package names + old version → new version + technical WHY
+   - **REQUIRE applicable**: Must be relevant to CI verification or failed job fixation (directly or indirectly)
 
 3. **DETECT DUPLICATES**:
    - Same problem or same file-level repair described twice
@@ -1293,18 +936,18 @@ only supplied problem IDs and evidence from this instance.
         normalized_edges = []
         for idx, edge in enumerate(raw_deps):
             if not isinstance(edge, dict):
-                print(f"    WARNING Edge {idx}: Not a dict, skipping")
+                print(f"    ⚠ Edge {idx}: Not a dict, skipping")
                 continue
             producer_id = _as_int(edge.get("producer_problem_id"))
             consumer_id = _as_int(edge.get("consumer_problem_id"))
             if producer_id not in valid_ids or consumer_id not in valid_ids:
-                print(f"    WARNING Edge {idx}: Invalid IDs ({producer_id}→{consumer_id}), skipping")
+                print(f"    ⚠ Edge {idx}: Invalid IDs ({producer_id}→{consumer_id}), skipping")
                 continue
             normalized_edge = dict(edge)
             normalized_edge["from"] = producer_id
             normalized_edge["to"] = consumer_id
             normalized_edges.append(normalized_edge)
-            print(f"    OK Edge {idx}: {producer_id}→{consumer_id} ({edge.get('dependency_type', 'N/A')})")
+            print(f"    ✓ Edge {idx}: {producer_id}→{consumer_id} ({edge.get('dependency_type', 'N/A')})")
         # Filter dependencies with detailed logging
         print(f"  → Validating {len(normalized_edges)} normalized edges...")
         filtered_deps = []
@@ -1317,7 +960,7 @@ only supplied problem IDs and evidence from this instance.
 
             # Special handling for "independent" - validate against CI failures
             if dependency_type == "independent":
-                print(f"    WARNING Edge {edge['from']}→{edge['to']}: INDEPENDENT (validating against CI failures)")
+                print(f"    ⚠ Edge {edge['from']}→{edge['to']}: INDEPENDENT (validating against CI failures)")
                 independent_problems.add(edge['from'])
                 independent_problems.add(edge['to'])
                 # Don't add edge (they're independent), but mark problems for CI validation
@@ -1331,10 +974,10 @@ only supplied problem IDs and evidence from this instance.
                     reason.append("lacks evidence")
                 if not is_causal:
                     reason.append(f"non-causal type: {edge.get('dependency_type')}")
-                print(f"    REJECTED Edge {edge['from']}→{edge['to']}: REJECTED ({', '.join(reason)})")
+                print(f"    ✗ Edge {edge['from']}→{edge['to']}: REJECTED ({', '.join(reason)})")
             else:
                 filtered_deps.append(edge)
-                print(f"    OK Edge {edge['from']}→{edge['to']}: ACCEPTED")
+                print(f"    ✓ Edge {edge['from']}→{edge['to']}: ACCEPTED")
 
         print(f"  → After validation: {len(filtered_deps)}/{len(normalized_edges)} dependencies passed")
 
@@ -1347,11 +990,11 @@ only supplied problem IDs and evidence from this instance.
                 llm
             )
             if validated_independent:
-                print(f"    OK {len(validated_independent)}/{len(independent_problems)} independent problems are CI-related")
+                print(f"    ✓ {len(validated_independent)}/{len(independent_problems)} independent problems are CI-related")
                 # Ensure validated independent problems are kept (they're marked later in enforcement)
                 decision["_validated_independent_ids"] = sorted(validated_independent)
             else:
-                print(f"    REJECTED No independent problems validated against CI failures")
+                print(f"    ✗ No independent problems validated against CI failures")
 
         decision["dependencies"] = filtered_deps
 
@@ -1444,17 +1087,17 @@ Return JSON:
                 if isinstance(problem_id, int) and problem_id in {p["problem_id"] for p in problems}:
                     validated_ids.add(problem_id)
                     reason = reasoning.get(str(problem_id), "CI-related")
-                    print(f"      OK Problem {problem_id}: {reason[:80]}")
+                    print(f"      ✓ Problem {problem_id}: {reason[:80]}")
 
             not_related = response.get("not_ci_related_ids", [])
             for problem_id in not_related:
                 reason = reasoning.get(str(problem_id), "Not CI-related")
-                print(f"      REJECTED Problem {problem_id}: {reason[:80]}")
+                print(f"      ✗ Problem {problem_id}: {reason[:80]}")
 
             return validated_ids
 
     except Exception as exc:
-        print(f"      WARNING CI validation failed: {exc}, keeping all problems by default")
+        print(f"      ⚠ CI validation failed: {exc}, keeping all problems by default")
         # On error, be conservative and keep all problems
         return {p["problem_id"] for p in problems}
 
