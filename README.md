@@ -900,12 +900,12 @@ bash ./run_codex_direct.sh "" L1+L2+L3 bidirectional  minimax/minimax-m2.5 "" da
 #### DeepSeek-V4-Flash (via OpenRouter - 1M context, 384K output)
 ```bash
 # Baseline
-bash ./run_codex_direct.sh "" baseline backward deepseek-v4-flash "" data/eval_set.jsonl 1
-bash ./run_codex_direct.sh "" baseline forward  deepseek-v4-flash "" data/eval_set.jsonl 1
+bash ./run_codex_direct.sh "" baseline none deepseek-v4-flash "" data/eval_set.jsonl 1
 
 # Full memory (L1+L2+L3) - leverages massive 1M context window
 bash ./run_codex_direct.sh "" L1+L2+L3 backward deepseek-v4-flash "" data/eval_set.jsonl 1
 bash ./run_codex_direct.sh "" L1+L2+L3 forward  deepseek-v4-flash "" data/eval_set.jsonl 1
+bash ./run_codex_direct.sh "" L1+L2+L3 bidirectional  deepseek-v4-flash "" data/eval_set.jsonl 1
 
 # Specific repositories with full memory
 bash ./run_codex_direct.sh "" L1+L2+L3 backward deepseek-v4-flash \
