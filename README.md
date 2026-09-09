@@ -912,73 +912,8 @@ bash ./run_codex_direct.sh "" L1+L2+L3 backward deepseek-v4-flash \
   "agno,axolotl,camel,crewai,django-import-export" data/eval_set.jsonl 1
 ```
 
-### ExpeRepair – Baseline & Memory Integration
 
-ExpeRepair is a one-shot repair approach (no iteration, `retries=1`, `patch_nums=1`).
-We've integrated it with the same memory hierarchy (L1/L2/L3) and ablations.
-
-**Key Distinction:**
-- **Baseline**: Passes ONLY decomposed problems (no memory retrieval)
-- **Memory modes (L1, L1+L2, L1+L2+L3)**: Passes decomposed problems + retrieved relevant memories
-
-**Setup Note:** Use `workers=1` for stability (PyTorch multiprocessing issues with embeddings).
-
-#### DeepSeek-V4-Flash (Recommended - 1M Context)
-```bash
-# Baseline (no memory, only decomposed problems)
-./run_experepair_direct.sh "" baseline none deepseek-v4-flash "" data/eval_set.jsonl 1
-
-# L1 Memory (failure-specific)
-./run_experepair_direct.sh "" L1 backward deepseek-v4-flash "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1 forward deepseek-v4-flash "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1 bidirectional deepseek-v4-flash "" data/eval_set.jsonl 1
-
-# L1+L2 Memory (failure + repo-specific)
-./run_experepair_direct.sh "" L1+L2 backward deepseek-v4-flash "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1+L2 forward deepseek-v4-flash "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1+L2 bidirectional deepseek-v4-flash "" data/eval_set.jsonl 1
-
-# L1+L2+L3 Memory (full hierarchy: failure + repo + cross-repo)
-./run_experepair_direct.sh "" L1+L2+L3 backward deepseek-v4-flash "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1+L2+L3 forward deepseek-v4-flash "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1+L2+L3 bidirectional deepseek-v4-flash "" data/eval_set.jsonl 1
-```
-
-**Results:**
-- Baseline: `results/experepair/experepair_baseline_<model>/preds.json`
-- Memory: `results/experepair/experepair_<direction>/<ablation>_<model>/preds.json`
-
-#### MiniMax M2.5
-```bash
-# Baseline
-./run_experepair_direct.sh "" baseline none minimax/minimax-m2.5 "" data/eval_set.jsonl 1
-
-# L1+L2+L3 Memory - All directions
-./run_experepair_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5 "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1+L2+L3 forward minimax/minimax-m2.5 "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1+L2+L3 bidirectional minimax/minimax-m2.5 "" data/eval_set.jsonl 1
-```
-
-#### GPT-5-mini
-```bash
-# Baseline
-./run_experepair_direct.sh "" baseline none gpt-5-mini "" data/eval_set.jsonl 1
-
-# L1+L2+L3 Memory - All directions
-./run_experepair_direct.sh "" L1+L2+L3 backward gpt-5-mini "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1+L2+L3 forward gpt-5-mini "" data/eval_set.jsonl 1
-./run_experepair_direct.sh "" L1+L2+L3 bidirectional gpt-5-mini "" data/eval_set.jsonl 1
-```
-
-#### Specific Issues or Repositories
-```bash
-# Run on specific issue
-./run_experepair_direct.sh "agno-agi__agno-129" L1+L2+L3 bidirectional deepseek-v4-flash "" data/eval_set.jsonl 1
-
-# Run on specific repositories
-./run_experepair_direct.sh "" L1+L2+L3 bidirectional deepseek-v4-flash "agno,axolotl" data/eval_set.jsonl 1
-```
-
+a
 #### Complete Experimental Grid
 
 For a complete ablation study (30 configurations):
