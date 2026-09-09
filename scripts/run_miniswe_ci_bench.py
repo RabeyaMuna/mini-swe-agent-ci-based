@@ -68,6 +68,7 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--output_root", default=str(Path("results/miniswe-agent")))
     p.add_argument("--memory_top_k", type=int, default=5)
+    p.add_argument("--slice", default="", help="Slice notation for dataset (e.g., '0:150' for first 150 instances)")
     p.add_argument("--reverse", action="store_true", help="Process instances in reverse order (last to first)")
     args = p.parse_args()
 
@@ -135,7 +136,7 @@ def main() -> None:
         model_class=None,
         config_spec=[str(config_path)],  # Load cibench.yaml config
         filter_spec=args.issue_regex,
-        slice_spec="",
+        slice_spec=args.slice,  # Use slice from command line (e.g., "0:150")
         shuffle=False,
         redo_existing=False,
         memory_enabled=True,  # Always enable for custom plugin (even baseline uses decompose_only)

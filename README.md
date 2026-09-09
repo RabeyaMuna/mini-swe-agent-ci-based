@@ -826,6 +826,57 @@ python3 scripts/decompose_bidirectional.py \
 - ChatGPT login is not required; runs use API keys from .env.
 
 
+### Mini‑SWE – Ablation Study on First 150 Instances
+
+Run ablation experiments (L1, L1+L2, L1+L2+L3) on the first 150 instances using DeepSeek-V4 with bidirectional memory:
+
+```bash
+# Activate environment and load env vars
+source .venv-miniswe/bin/activate
+set -a
+source .env
+set +a
+
+# Ablation 1: L1 only (failure memory)
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset data/eval_set.jsonl \
+  --slice "0:150" \
+  --ablation L1 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --workers 1
+
+# Ablation 2: L1+L2 (failure + repo memory)
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset data/eval_set.jsonl \
+  --slice "0:150" \
+  --ablation L1+L2 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --workers 1
+
+# Ablation 3: L1+L2+L3 (full memory hierarchy)
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset data/eval_set.jsonl \
+  --slice "0:150" \
+  --ablation L1+L2+L3 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --workers 1
+```
+
+**Results will be saved to:**
+- `results/miniswe-agent/bidirectional/l1_deepseek-v4-flash/`
+- `results/miniswe-agent/bidirectional/l1_l2_deepseek-v4-flash/`
+- `results/miniswe-agent/bidirectional/l1_l2_l3_deepseek-v4-flash/`
+
+**Notes:**
+- `--slice "0:150"` processes instances 0-149 (first 150)
+- Use `--slice "150:300"` for instances 150-299, etc.
+- Each ablation uses the SAME 150 instances for fair comparison
+- `--workers 1` processes instances sequentially (safer for API rate limits)
+- Results include `predictions.json`, cost reports, and per-instance logs
+
 ### Mini‑SWE – Quick Commands
 
 Run all evaluation issues for each model and ablation (workers=4,
