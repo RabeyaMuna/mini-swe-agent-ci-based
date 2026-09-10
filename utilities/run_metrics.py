@@ -60,8 +60,26 @@ def _get(value: Any, key: str, default: Any = None) -> Any:
 
 def extract_usage(response: Any) -> dict[str, int]:
     """Normalize OpenAI, LiteLLM, LangChain, and OpenRouter usage objects."""
-    usage = _get(response, "usage") or _get(response, "usage_metadata") or {}
-    response_metadata = _get(response, "response_metadata") or {}
+    # Import here to avoid circular dependency
+    try:
+        from utilities.llm_invoker import MetadataList
+    except ImportError:
+        MetadataList = None  # type: ignore
+
+    # Check for attached metadata from invoke_llm_with_retry
+    if isinstance(response, dict) and '_metadata' in response:
+        metadata = response['_metadata']
+        usage = metadata.get('usage') or metadata.get('usage_metadata') or {}
+        response_metadata = metadata.get('response_metadata') or {}
+    # Check for list attributes (including MetadataList)
+    elif isinstance(response, list) or (MetadataList and isinstance(response, MetadataList)):
+        usage = getattr(response, '_usage', None) or getattr(response, '_usage_metadata', None) or {}
+        response_metadata = getattr(response, '_response_metadata', None) or {}
+    # Standard extraction from response object
+    else:
+        usage = _get(response, "usage") or _get(response, "usage_metadata") or {}
+        response_metadata = _get(response, "response_metadata") or {}
+
     if not usage and response_metadata:
         usage = _get(response_metadata, "token_usage") or {}
 
@@ -116,11 +134,31 @@ def extract_usage(response: Any) -> dict[str, int]:
 
 def response_cost_usd(response: Any) -> tuple[float, str]:
     """Return provider/LiteLLM supplied cost when it is present."""
-    usage = _get(response, "usage") or {}
+    # Import here to avoid circular dependency
+    try:
+        from utilities.llm_invoker import MetadataList
+    except ImportError:
+        MetadataList = None  # type: ignore
+
+    # Check for metadata wrapper (from invoke_llm_with_retry with parse_json=True)
+    if isinstance(response, dict) and '_metadata' in response:
+        metadata = response['_metadata']
+        usage = metadata.get('usage') or metadata.get('usage_metadata') or {}
+        response_metadata = metadata.get('response_metadata') or {}
+    # Check for list attributes (including MetadataList)
+    elif isinstance(response, list) or (MetadataList and isinstance(response, MetadataList)):
+        usage = getattr(response, '_usage', None) or getattr(response, '_usage_metadata', None) or {}
+        response_metadata = getattr(response, '_response_metadata', None) or {}
+    else:
+        usage = _get(response, "usage") or {}
+        response_metadata = _get(response, "response_metadata") or {}
+
+    # Check multiple locations for cost
     for value, source in (
         (_get(usage, "cost"), "provider_usage"),
         (_get(response, "response_cost"), "provider_response"),
         (_get(_get(response, "_hidden_params") or {}, "response_cost"), "litellm_response"),
+        (_get(response_metadata, "cost"), "response_metadata_cost"),
     ):
         if value is None:
             continue
@@ -164,10 +202,17 @@ def estimate_cost_usd(model: str, usage: dict[str, int]) -> tuple[float, str]:
         import litellm
 
         candidates = [str(model or "")]
+
+        # Try OpenAI variants
         if candidates[0].startswith("openai/"):
             candidates.append(candidates[0].removeprefix("openai/"))
         elif "/" not in candidates[0]:
             candidates.append(f"openai/{candidates[0]}")
+
+        # Try OpenRouter variants (for minimax, deepseek, etc.)
+        if not candidates[0].startswith("openrouter/"):
+            candidates.append(f"openrouter/{candidates[0]}")
+
         for candidate in candidates:
             try:
                 input_cost, output_cost = litellm.cost_per_token(
@@ -370,6 +415,15 @@ class RunMetricsRecorder:
         self._started_epoch = time.time()
         self._finished = False
         self._heartbeat_stop = threading.Event()
+
+        # Initialize detailed usage tracker for step-by-step breakdown
+        from utilities.detailed_tracker import DetailedUsageTracker
+        self.detailed_tracker = DetailedUsageTracker(
+            instance_id=instance_id,
+            output_dir=output_dir,
+            model=str(model or "")
+        )
+
         self._start_attempt()
         heartbeat_seconds = max(
             float(_as_number(os.getenv("RUN_METRICS_HEARTBEAT_SECONDS", "10"))),
@@ -513,6 +567,22 @@ class RunMetricsRecorder:
         }
         if error:
             call["error"] = str(error)
+
+        # Record to detailed tracker for step-by-step breakdown
+        self.detailed_tracker.record_call(
+            phase=call["phase"],
+            model=call["model"],
+            duration_seconds=call["duration_seconds"],
+            input_tokens=normalized_usage["input_tokens"],
+            cached_input_tokens=normalized_usage["cached_input_tokens"],
+            output_tokens=normalized_usage["output_tokens"],
+            reasoning_output_tokens=normalized_usage["reasoning_output_tokens"],
+            cost_usd=call["cost_usd"],
+            cost_source=cost_source,
+            status=status,
+            error=error or ""
+        )
+
         with self._locked_ledger() as data:
             attempt = self._find_attempt(data)
             attempt.pop("in_progress_api_call", None)
@@ -555,6 +625,13 @@ class RunMetricsRecorder:
     ) -> dict[str, Any]:
         if self._finished:
             return self.snapshot()
+
+        # Save detailed usage breakdown to separate JSON file
+        try:
+            self.detailed_tracker.save()
+        except Exception as exc:
+            LOGGER.warning("Could not save detailed usage tracker: %s", exc)
+
         self._heartbeat_stop.set()
         now = _utc_now()
         with self._locked_ledger() as data:

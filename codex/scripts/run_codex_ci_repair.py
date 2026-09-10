@@ -541,6 +541,7 @@ def load_memory_context(
     ablation: str,
     top_k: int,
     context_llm: Any = None,
+    metrics_recorder: Any = None,
 ) -> tuple[str, dict]:
     """
     Load memory context by passing raw CI failure data to memory plugin.
@@ -562,7 +563,8 @@ def load_memory_context(
             ablation=ablation,
             top_k=top_k,
             llm=context_llm,  # Pass the LLM!
-            enabled=True
+            enabled=True,
+            metrics_recorder=metrics_recorder  # Track API calls!
         )
 
         # Pass RAW ci_failure and verification to memory plugin
@@ -1838,6 +1840,7 @@ def _run_issue(
             ablation,
             args.memory_top_k,
             context_llm,  # Pass LLM for dynamic stages!
+            metrics,  # Pass metrics recorder for tracking!
         )
 
         memory_problems = memory_retrieval.get("problems", [])

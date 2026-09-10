@@ -38,7 +38,8 @@ class MemoryPlugin:
         ablation: str = "L1+L2+L3",
         top_k: int = 5,
         llm: Optional[Any] = None,
-        enabled: bool = True
+        enabled: bool = True,
+        metrics_recorder: Optional[Any] = None
     ):
         """
         Initialize memory plugin.
@@ -50,6 +51,7 @@ class MemoryPlugin:
             top_k: Number of results to retrieve per level
             llm: Optional LLM client for advanced filtering
             enabled: Enable/disable memory (False for baseline mode)
+            metrics_recorder: Optional RunMetricsRecorder for tracking API calls
         """
         self.memory_root = str(memory_root)
         self.result_dir = result_dir
@@ -57,13 +59,15 @@ class MemoryPlugin:
         self.top_k = top_k
         self.llm = llm
         self.enabled = enabled
+        self.metrics_recorder = metrics_recorder
 
         # Initialize STAIR retrieval system
         self.retrieval = STAIRRetrieval(
             memory_dir=self.memory_root,
             llm_client=llm,
             baseline_mode=(not enabled),
-            memory_levels=ablation
+            memory_levels=ablation,
+            metrics_recorder=metrics_recorder
         )
 
     def retrieve(
@@ -252,7 +256,32 @@ If CI log has error_types with evidence, use that evidence as failure_signals.
 {STRICT_JSON_RULES}
 """
 
+        # Track API call timing
+        import time
+        start_time = time.time()
+
         response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
+
+        duration = time.time() - start_time
+
+        # Record to metrics if available
+        if self.metrics_recorder:
+            from utilities.run_metrics import extract_usage, response_cost_usd, estimate_cost_usd
+            usage = extract_usage(response)
+            cost, source = response_cost_usd(response)
+            if cost == 0.0 and source == "unavailable":
+                # Estimate cost from usage
+                model_name = getattr(self.llm, "model_name", "") or getattr(self.llm, "model", "")
+                cost, source = estimate_cost_usd(str(model_name), usage)
+
+            self.metrics_recorder.record_api_call(
+                phase="memory.decomposition",
+                model=getattr(self.llm, "model_name", None) or getattr(self.llm, "model", None),
+                duration_seconds=duration,
+                usage=usage,
+                cost_usd=cost,
+                cost_source=source
+            )
 
         # Handle both formats
         if isinstance(response, list):

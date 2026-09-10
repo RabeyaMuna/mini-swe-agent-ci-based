@@ -21,6 +21,8 @@ from utilities.llm_invoker import (
     STRICT_JSON_RULES,
     invoke_llm_with_retry,
 )
+from utilities.run_metrics import extract_usage, response_cost_usd, estimate_cost_usd
+import time
 
 
 class DecompositionGenerationError(RuntimeError):
@@ -96,6 +98,7 @@ class STAIRRetrieval:
         embedding_model: str = "all-MiniLM-L6-v2",
         baseline_mode: bool = False,
         memory_levels: str = "l1+l2+l3",
+        metrics_recorder=None,
     ):
         """
         Initialize retrieval system.
@@ -107,12 +110,14 @@ class STAIRRetrieval:
             baseline_mode: If True, skip memory retrieval (for baseline comparison)
             memory_levels: Which levels to use - "l1", "l1+l2", or "l1+l2+l3"
                           For ablation studies to measure impact of each level
+            metrics_recorder: Optional RunMetricsRecorder for tracking API calls
         """
         self.memory_dir = Path(memory_dir)
         self.llm = llm_client
         self.baseline_mode = baseline_mode
         self.enabled_levels = self._parse_memory_levels(memory_levels)
         self.embedding_model = embedding_model
+        self.metrics_recorder = metrics_recorder
 
         # Storage for dependency problems (extracted in STAGE 4)
         self._dependency_problems = []
@@ -153,6 +158,48 @@ class STAIRRetrieval:
         else:
             self.l3_memory = []
             self.l3_embeddings = np.array([])
+
+    def _invoke_llm_tracked(self, prompt: str, phase: str, **kwargs):
+        """
+        Invoke LLM with automatic metrics tracking.
+
+        Args:
+            prompt: The prompt to send
+            phase: Phase name for tracking (e.g., "memory.filtering")
+            **kwargs: Additional args for invoke_llm_with_retry
+
+        Returns:
+            LLM response
+        """
+        start_time = time.time()
+
+        # Call LLM
+        response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, **kwargs)
+
+        # Record to metrics if available
+        if self.metrics_recorder:
+            duration = time.time() - start_time
+
+            # Extract usage and cost from response
+            # The invoke_llm_with_retry now properly attaches metadata to the response
+            usage = extract_usage(response)
+            cost, source = response_cost_usd(response)
+
+            # If cost still unavailable, estimate it
+            if cost == 0.0 and source == "unavailable":
+                model_name = getattr(self.llm, "model_name", "") or getattr(self.llm, "model", "")
+                cost, source = estimate_cost_usd(str(model_name), usage)
+
+            self.metrics_recorder.record_api_call(
+                phase=phase,
+                model=getattr(self.llm, "model_name", None) or getattr(self.llm, "model", None),
+                duration_seconds=duration,
+                usage=usage,
+                cost_usd=cost,
+                cost_source=source
+            )
+
+        return response
 
     def _get_max_tokens_for_stage(self) -> int:
         """
@@ -590,9 +637,9 @@ class STAIRRetrieval:
 {STRICT_JSON_RULES}
 """
 
-            response = invoke_llm_with_retry(
-                llm=self.llm,
+            response = self._invoke_llm_tracked(
                 prompt=prompt,
+                phase="memory.enrichment",
                 parse_json=True,
                 max_tokens=self._get_max_tokens_for_stage()
             )
@@ -817,7 +864,7 @@ Use `problem_type: "dependency"` for all returned problems.
                 max_tokens_for_stage = self._get_max_tokens_for_stage()
                 print(f"[Memory] STAGE 4: Using max_tokens={max_tokens_for_stage}")
 
-                response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True, max_tokens=max_tokens_for_stage)
+                response = self._invoke_llm_tracked(prompt=prompt, phase="memory.dependencies", parse_json=True, max_tokens=max_tokens_for_stage)
 
                 # Check if response is empty/failed due to large prompt
                 # NOTE: {"problems": []} is a VALID response meaning "no dependencies found"
@@ -1442,7 +1489,7 @@ Return JSON:
     {STRICT_JSON_RULES}
     """
 
-        response = invoke_llm_with_retry(llm=self.llm, prompt=prompt, parse_json=True)
+        response = self._invoke_llm_tracked(prompt=prompt, phase="memory.filtering", parse_json=True)
 
         # Response is already parsed JSON (parse_json=True)
         result = response if isinstance(response, dict) else {}

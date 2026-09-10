@@ -282,10 +282,15 @@ class LitellmModel:
                     "       Generation exhausted its output budget; inspect reasoning usage before splitting input"
                 )
 
-            # Return result
+            # Return result with properly exposed metadata
             class Result:
-                content = response.choices[0].message.content or ""
-                raw_response = response
+                def __init__(self):
+                    self.content = response.choices[0].message.content or ""
+                    self.raw_response = response
+                    # Expose usage metadata attributes for _attach_usage_metadata
+                    self.usage = getattr(response, 'usage', None)
+                    self.usage_metadata = getattr(response, 'usage_metadata', None)
+                    self.response_metadata = getattr(response, 'response_metadata', None)
 
             return Result()
 

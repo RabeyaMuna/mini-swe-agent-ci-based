@@ -106,6 +106,68 @@ def get_model_max_output_tokens(model_name: str, default: int = 16000) -> int:
 HEALTH_CHECK_PROMPT = "Reply with exactly: OK"
 
 
+class MetadataList(list):
+    """
+    A list subclass that can hold usage metadata attributes.
+
+    Regular Python lists don't support arbitrary attribute assignment,
+    causing metadata to be lost. This wrapper preserves metadata while
+    maintaining list behavior.
+    """
+    def __init__(self, items=None):
+        super().__init__(items or [])
+        self._usage = None
+        self._usage_metadata = None
+        self._response_metadata = None
+
+
+def _attach_usage_metadata(result: Any, raw_response: Any) -> Any:
+    """Attach usage metadata from raw LLM response to parsed result.
+
+    This preserves usage/token information when invoke_llm_with_retry returns
+    parsed JSON instead of the raw response object.
+    """
+    if raw_response is None or isinstance(result, str):
+        return result
+
+    # Extract metadata from raw response - check multiple levels
+    usage = getattr(raw_response, 'usage', None)
+    usage_metadata = getattr(raw_response, 'usage_metadata', None)
+    response_metadata = getattr(raw_response, 'response_metadata', None)
+
+    # If metadata not found directly, check if wrapped (e.g., Result.raw_response)
+    if not any([usage, usage_metadata, response_metadata]):
+        nested_response = getattr(raw_response, 'raw_response', None)
+        if nested_response:
+            usage = getattr(nested_response, 'usage', None)
+            usage_metadata = getattr(nested_response, 'usage_metadata', None)
+            response_metadata = getattr(nested_response, 'response_metadata', None)
+
+    # If no metadata found, return result as-is
+    if not any([usage, usage_metadata, response_metadata]):
+        return result
+
+    # For dict results, inject metadata
+    if isinstance(result, dict):
+        # Don't modify if result already has usage data
+        if 'usage' not in result and '_metadata' not in result:
+            result['_metadata'] = {
+                'usage': usage,
+                'usage_metadata': usage_metadata,
+                'response_metadata': response_metadata,
+            }
+    # For list results, wrap in MetadataList to preserve metadata
+    elif isinstance(result, list):
+        # Only wrap if not already a MetadataList
+        if not isinstance(result, MetadataList):
+            result = MetadataList(result)
+        result._usage = usage
+        result._usage_metadata = usage_metadata
+        result._response_metadata = response_metadata
+
+    return result
+
+
 def _invoke_llm(llm: Any, prompt: str, **kwargs: Any) -> Any:
     """Invoke either an ``.invoke()`` model wrapper or a plain callable.
 
@@ -570,6 +632,7 @@ def invoke_llm_with_retry(
     # ============================================================
     # STEP 1: Invoke LLM with error handling
     # ============================================================
+    raw_response = None  # Store original response for usage metadata
     try:
         try:
             invoke_kwargs: dict[str, Any] = {}
@@ -585,11 +648,13 @@ def invoke_llm_with_retry(
             if response_format:
                 invoke_kwargs["response_format"] = response_format
             response = _invoke_llm(llm, prompt, **invoke_kwargs)
+            raw_response = response  # Save for usage metadata
         except TypeError:
             # Compatibility fallback for wrappers whose ``invoke`` method only
             # accepts the prompt. Retrying with the same token keyword would
             # reproduce the TypeError and get converted into empty content.
             response = _invoke_llm(llm, prompt)
+            raw_response = response  # Save for usage metadata
 
         # Some wrappers return an empty Result with an embedded error instead
         # of raising. Promote that error so transient transport failures enter
@@ -869,18 +934,21 @@ def invoke_llm_with_retry(
                     f"          -> Returning {length_signal!r}; output budget was exhausted"
                 )
             LOGGER.warning("Length limit hit; generation exhausted output budget")
-            return length_signal
+            # Attach metadata even for length limit signal
+            return _attach_usage_metadata(length_signal, raw_response) if parse_json else length_signal
 
         LOGGER.warning(
             f"LLM empty content. Prompt size: {len(prompt)} chars. {error_details}"
         )
-        return [] if parse_json else ""
+        # Attach metadata even for empty results
+        empty_result = [] if parse_json else ""
+        return _attach_usage_metadata(empty_result, raw_response) if parse_json else empty_result
 
     # ============================================================
     # STEP 3: Return raw content if JSON parsing not requested
     # ============================================================
     if not parse_json:
-        return content
+        return content  # String content doesn't need metadata attachment
 
     # ============================================================
     # STEP 4: Parse JSON
@@ -893,10 +961,10 @@ def invoke_llm_with_retry(
         content_stripped = content.strip()
         if content_stripped in ('[]', '{}') or (content_stripped.startswith('[') and content_stripped.endswith(']')) or (content_stripped.startswith('{') and content_stripped.endswith('}')):
             # Valid JSON structure (even if empty)
-            return parsed
+            return _attach_usage_metadata(parsed, raw_response)
         # Non-empty parsed result
         if parsed not in ([], {}):
-            return parsed
+            return _attach_usage_metadata(parsed, raw_response)
 
     # ============================================================
     # STEP 5: Attempt JSON repair
@@ -938,7 +1006,7 @@ If the output is truncated, close the current JSON structure conservatively and 
 
         if repaired not in (None, [], {}):
             LOGGER.info("Recovered malformed JSON with repair prompt")
-            return repaired
+            return _attach_usage_metadata(repaired, raw_response)
     except Exception as exc:
         LOGGER.warning("JSON repair prompt failed: %s", exc)
 
@@ -946,7 +1014,8 @@ If the output is truncated, close the current JSON structure conservatively and 
         f"All JSON parsing attempts failed. Returning empty. Original content length: {len(content)}"
     )
     # Ensure we always return a valid type (never None)
-    return parsed if parsed is not None else []
+    result = parsed if parsed is not None else []
+    return _attach_usage_metadata(result, raw_response)
 
 
 # Convenience alias for backward compatibility

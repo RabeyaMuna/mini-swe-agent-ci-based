@@ -1730,11 +1730,23 @@ def _make_langchain_llm(llm: Any) -> Any:
                 result = self._fn(content)
 
             # Return an object with a .content attribute
+            # Preserve usage metadata if present (from invoke_llm_with_retry)
             class _Resp:
-                def __init__(self, c: str) -> None:
+                def __init__(self, c: str, original_result: Any = None) -> None:
                     self.content = c
+                    # Preserve metadata from invoke_llm_with_retry
+                    if original_result is not None:
+                        if isinstance(original_result, dict) and '_metadata' in original_result:
+                            metadata = original_result['_metadata']
+                            self.usage = metadata.get('usage')
+                            self.usage_metadata = metadata.get('usage_metadata')
+                            self.response_metadata = metadata.get('response_metadata')
+                        elif isinstance(original_result, list):
+                            self.usage = getattr(original_result, '_usage', None)
+                            self.usage_metadata = getattr(original_result, '_usage_metadata', None)
+                            self.response_metadata = getattr(original_result, '_response_metadata', None)
 
-            return _Resp(str(result) if result is not None else "")
+            return _Resp(str(result) if result is not None else "", original_result=result)
 
     return _LLMShim(llm)
 
