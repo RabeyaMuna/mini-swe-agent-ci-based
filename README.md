@@ -892,12 +892,6 @@ The wrapper loads `.env` and selects OpenAI or OpenRouter automatically.
 # Baseline (no direction or memory retrieval)
 bash ./run_miniswe_direct.sh "" BASELINE none gpt-5.4-mini "" data/eval_set.jsonl 4
 
-# Memory modes (results saved to results/miniswe-agent/<direction>/l1_l2_l3_gpt-5.4-mini/)
-bash ./run_miniswe_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini "" data/eval_set.jsonl 4
-bash ./run_miniswe_direct.sh "" L1+L2+L3 bidirectional gpt-5.4-mini "" data/eval_set.jsonl 4
-```
-
 #### MiniMax M2.5
 ```bash
 # Baseline (no direction or memory retrieval)
@@ -943,7 +937,7 @@ bash ./run_codex_direct.sh \
 #### MiniMax M2.5 (via OpenRouter)
 ```bash
 bash ./run_codex_direct.sh "" baseline none minimax/minimax-m2.5 "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" baseline forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" L1+L2+L3 forward  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 backward minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 bash ./run_codex_direct.sh "" L1+L2+L3 bidirectional  minimax/minimax-m2.5 "" data/eval_set.jsonl 4
 ```

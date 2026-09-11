@@ -2089,6 +2089,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--issue-ids", help="Comma-separated issue ids")
     parser.add_argument(
+        "--slice",
+        default="",
+        help="Slice notation for dataset (e.g., '0:204' for first 204 instances)",
+    )
+    parser.add_argument(
         "--issue-ids-file",
         type=Path,
         default=DEFAULT_ISSUE_IDS_FILE,
@@ -2449,6 +2454,18 @@ def main() -> int:
         issue_ids = [x.strip() for x in args.issue_ids.split(",") if x.strip()]
     else:
         issue_ids = load_issue_ids(args.issue_ids_file)
+
+    # Apply slice if specified (e.g., "0:204" for first 204 instances)
+    if args.slice:
+        try:
+            parts = args.slice.split(":")
+            start = int(parts[0]) if parts[0] else None
+            end = int(parts[1]) if len(parts) > 1 and parts[1] else None
+            issue_ids = issue_ids[start:end]
+            print(f"Applied slice '{args.slice}': selected {len(issue_ids)} issues")
+        except (ValueError, IndexError) as e:
+            print(f"ERROR: Invalid slice notation '{args.slice}': {e}", file=sys.stderr)
+            return 1
 
     ablations = [x.strip() for x in args.ablations.split(",") if x.strip()]
 

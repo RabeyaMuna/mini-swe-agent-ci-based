@@ -1357,20 +1357,13 @@ only supplied problem IDs and evidence from this instance.
 
         # Heuristic fallback: Add common tool-enablement patterns if LLM missed them
         if len(decision["dependencies"]) == 0:
-            print(f"  → No LLM dependencies passed validation, trying heuristic fallback...")
-            heuristic_deps = _infer_tool_enablement_heuristics(problems)
-            print(f"  → Heuristic found {len(heuristic_deps)} potential dependencies")
-            if heuristic_deps:
-                print(f"  ℹ Added {len(heuristic_deps)} heuristic tool-enablement dependencies")
-                decision["dependencies"].extend(heuristic_deps)
+            print(f"  → LLM determined problems are independent (no causal dependencies)")
 
         print(f"  → Final dependencies: {len(decision['dependencies'])}")
         return decision
     except Exception as exc:
-        print(f"  Focused dependency fallback: {exc}")
-        # Try heuristic even on exception
-        heuristic_deps = _infer_tool_enablement_heuristics(problems)
-        return {"dependencies": heuristic_deps}
+        print(f"  Dependency inference failed: {exc}")
+        return {"dependencies": []}  # Return empty - problems are independent
 
 
 def _validate_problems_against_ci_failures(
@@ -1459,124 +1452,6 @@ Return JSON:
         return {p["problem_id"] for p in problems}
 
     return set()
-
-
-def _infer_tool_enablement_heuristics(problems: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Heuristic inference for common tool-enablement patterns.
-
-    Patterns:
-    - dependency_error/dependency_incompatibility → format/docs/lint/type_check
-    - package_install → test/import_error
-    """
-    dependencies = []
-
-    # Find potential producer problems (tool-enabling)
-    producers = [
-        p for p in problems
-        if p.get("failure_type") in {
-            "dependency_error", "dependency_incompatibility",
-            "package_install", "plugin_error"
-        }
-        or "plugin" in str(p.get("problem", "")).lower()
-        or "dependency" in str(p.get("problem", "")).lower()
-        or "package" in str(p.get("problem", "")).lower()
-    ]
-
-    # Find potential consumer problems (enabled by tools)
-    consumers = [
-        p for p in problems
-        if p.get("failure_type") in {
-            "format", "formatting", "docs", "documentation",
-            "lint", "linting", "type_check", "type_error"
-        }
-        or "format" in str(p.get("validation_cmd", "")).lower()
-        or "lint" in str(p.get("validation_cmd", "")).lower()
-        or "docstr" in str(p.get("validation_cmd", "")).lower()
-    ]
-
-    # Infer dependencies between producers and consumers
-    for producer in producers:
-        producer_id = producer["problem_id"]
-        producer_files = set(producer.get("affected_files", []))
-        producer_cmd = str(producer.get("validation_cmd", "")).lower()
-
-        for consumer in consumers:
-            consumer_id = consumer["problem_id"]
-            consumer_cmd = str(consumer.get("validation_cmd", "")).lower()
-
-            # Skip self-loops
-            if producer_id == consumer_id:
-                continue
-
-            # Check if producer's verification command enables consumer's command
-            # Example: producer fixes "mdformat" plugin, consumer runs "mdformat --check"
-            # Or: producer affects pyproject.toml, consumer is format/docs check
-
-            enables_tool = False
-            reason = ""
-            tool_match = None
-
-            # Pattern 1: Producer mentions specific tool that consumer uses
-            producer_text = f"{producer.get('problem', '')} {producer.get('how_fixed', '')}".lower()
-            for tool in ["mdformat", "docstrfmt", "mypy", "pytest", "flake8", "black", "isort", "pylint"]:
-                if tool in producer_text and tool in consumer_cmd:
-                    enables_tool = True
-                    tool_match = tool
-                    reason = f"Fixing {tool} plugin enables {tool} validation"
-                    break
-
-            # Pattern 2: Producer affects dependency manifest AND shares tool domain with consumer
-            if not enables_tool and any(f.endswith(("pyproject.toml", "requirements.txt", "package.json")) for f in producer_files):
-                # Extract tool from producer's problem description
-                for tool in ["mdformat", "docstrfmt", "mypy", "pytest"]:
-                    if tool in producer_text:
-                        tool_match = tool
-                        # Check if consumer uses same or related tool
-                        if tool in consumer_cmd:
-                            enables_tool = True
-                            reason = f"Dependency manifest fix for {tool} enables {tool} validation"
-                            break
-
-            # Pattern 2: Producer mentions tool name that consumer uses
-            producer_text = f"{producer.get('problem', '')} {producer.get('how_fixed', '')}".lower()
-            for tool in ["mdformat", "docstrfmt", "mypy", "pytest", "flake8", "black", "isort"]:
-                if tool in producer_text and tool in consumer_cmd:
-                    enables_tool = True
-                    reason = f"Fixing {tool} enables {tool} validation"
-                    break
-
-            # Pattern 3: Producer is dependency_error and consumer is in same verification domain
-            if producer.get("failure_type") == "dependency_error":
-                # Extract tool from producer's verification command
-                producer_tool_match = None
-                for tool in ["mdformat", "docstrfmt", "mypy", "pytest", "pylint", "flake8"]:
-                    if tool in producer_cmd:
-                        producer_tool_match = tool
-                        break
-
-                # Check if consumer uses same or related tool
-                if producer_tool_match and producer_tool_match in consumer_cmd:
-                    enables_tool = True
-                    reason = f"Fixing {producer_tool_match} plugin enables {producer_tool_match} validation"
-
-            if enables_tool:
-                dependencies.append({
-                    "from": producer_id,
-                    "to": consumer_id,
-                    "producer_problem_id": producer_id,
-                    "consumer_problem_id": consumer_id,
-                    "dependency_type": "tool_enablement",
-                    "producer_change": producer.get("how_fixed", ""),
-                    "consumer_assumption": f"Assumes {reason.split('enables')[0]} is working",
-                    "relationship_analysis": reason,
-                    "reason": reason,
-                    "evidence_files": list(producer_files)[:2] if producer_files else ["heuristic"],
-                    "counterfactual": "If producer fix reverted, consumer validation would fail due to tool error",
-                    "heuristic": True
-                })
-
-    return dependencies
 
 
 def _has_concrete_dependency_evidence(edge: Dict[str, Any]) -> bool:
