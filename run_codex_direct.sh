@@ -51,12 +51,9 @@ RESULTS_ROOT=${CODEX_RESULTS_ROOT:-results/codex}
 # Default: workspace-write (isolated execution)
 SANDBOX_MODE=${CODEX_SANDBOX:-workspace-write}
 
-# Handle "none" direction: for baseline, default to backward
+# Handle "none" direction: for baseline, keep as "none" (no direction in path)
 if [ "$DIRECTION" = "none" ]; then
-    if [ "$ABLATION" = "baseline" ]; then
-        DIRECTION="backward"
-        echo "Note: 'none' direction converted to 'backward' for baseline"
-    else
+    if [ "$ABLATION" != "baseline" ]; then
         echo "ERROR: Direction 'none' is only valid with ablation=baseline" >&2
         exit 1
     fi
@@ -191,7 +188,19 @@ esac
 run_one() {
     local ablation="$1"; local direction="$2"
     local memory_args=""
-    local direction_output_root="$RESULTS_ROOT/$direction"
+
+    # For "none" direction: save to base results path, pass "backward" to Python
+    # (Python script only accepts backward/forward/bidirectional, not "none")
+    local python_direction="$direction"
+    local direction_output_root
+
+    if [ "$direction" = "none" ]; then
+        direction_output_root="$RESULTS_ROOT"
+        python_direction="backward"  # Python requires valid choice; ignored for baseline
+    else
+        direction_output_root="$RESULTS_ROOT/$direction"
+    fi
+
     if [ "$ablation" != "baseline" ]; then
         local memory_root="data/back_trs"
         [ "$direction" = "forward" ] && memory_root="data/fwr_trs"
@@ -217,7 +226,7 @@ run_one() {
         PYTHONPATH=. python3 codex/scripts/run_codex_ci_repair.py \
             --ablations "$ablation" \
             --dataset "$DATASET" \
-            --direction "$direction" \
+            --direction "$python_direction" \
             --output-root "$direction_output_root" \
             $memory_args \
             "${RESUME_ARGS[@]}" \
@@ -229,7 +238,7 @@ run_one() {
             --issue-ids "$ISSUE_IDS" \
             --ablations "$ablation" \
             --dataset "$DATASET" \
-            --direction "$direction" \
+            --direction "$python_direction" \
             --output-root "$direction_output_root" \
             $memory_args \
             "${RESUME_ARGS[@]}" \
@@ -354,6 +363,8 @@ echo "=========================================="
 echo "Completed $TOTAL runs. Failures: $FAILS"
 if [ "$DIRECTION" = "both" ]; then
     echo "Results: $RESULTS_ROOT/{backward,forward}/"
+elif [ "$DIRECTION" = "none" ]; then
+    echo "Results: $RESULTS_ROOT/"
 else
     echo "Results: $RESULTS_ROOT/$DIRECTION/"
 fi

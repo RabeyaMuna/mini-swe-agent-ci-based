@@ -919,9 +919,7 @@ The launcher automatically loads `.env` and creates the correct provider configu
 
 #### Manual Commands with GPT-5.4-mini
 ```bash
-bash ./run_codex_direct.sh "" baseline backward gpt-5.4-mini "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" L1+L2+L3 backward gpt-5.4-mini "" data/eval_set.jsonl 4
-bash ./run_codex_direct.sh "" L1+L2+L3 forward  gpt-5.4-mini "" data/eval_set.jsonl 4
+bash ./run_codex_direct.sh "" baseline none gpt-5.4-mini "" data/eval_set.jsonl 4
 
 bash ./run_codex_direct.sh \
   "" \
