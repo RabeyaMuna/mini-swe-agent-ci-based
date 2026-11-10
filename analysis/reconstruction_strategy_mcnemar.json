@@ -1,0 +1,37 @@
+{
+  "mini-SWE_minimax-m2.5": {
+    "ReCAP Endpoint": {
+      "resolved": 111,
+      "total": 408,
+      "pass_at_1": 27.205882352941174,
+      "avg_input_tokens_k": 2490.951,
+      "cache_hit_rate": 48.28775596157005,
+      "avg_cost": 0.15605066125
+    },
+    "ReCAP Development": {
+      "resolved": 116,
+      "total": 408,
+      "pass_at_1": 28.431372549019606,
+      "avg_input_tokens_k": 3936.7604571428574,
+      "cache_hit_rate": 43.36271897588994,
+      "avg_cost": 0.4452725434285714
+    },
+    "ReCAP (full)": {
+      "resolved": 130,
+      "total": 407,
+      "pass_at_1": 31.941031941031937,
+      "avg_input_tokens_k": 2631.7794338235294,
+      "cache_hit_rate": 47.14116569030065,
+      "avg_cost": 0.1993359568137255
+    },
+    "mcnemar_tests": {
+      "ReCAP Endpoint_vs_ReCAP Development": {
+        "chi2": 0.3902439024390244,
+        "p_value": 0.5321712241488488,
+        "contingency": {
+          "both_correct": 93,
+          "method1_only": 18,
+          "method2_only": 23,
+          "both_wrong": 274
+        },
+        "significant": 

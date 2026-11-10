@@ -31,23 +31,18 @@ def _ablation_to_miniswe(ablation: str) -> tuple[bool, str]:
     NOTE: For custom memory plugin integration:
     - memory_enabled=True always (plugin handles decomposition for all modes)
     - memory_ablation_levels="" for baseline (decompose_only, no retrieval)
-    - memory_ablation_levels="L1", "L1+L2", or "L1+L2+L3" for memory modes
+    - a single level ("L1", "L2", or "L3") loads only that level
+    - cumulative modes use "L1+L2" or "L1+L2+L3"
     """
-    a = (ablation or "").strip().lower()
+    a = (ablation or "").strip().lower().replace("_", "+").replace(" ", "")
     if a == "baseline":
         return True, ""  # Empty levels = baseline mode (decompose only, no retrieval)
-    if a in {"l1", "l1+ l2", "l1+l2", "l1_l2", "l1+l2+l3", "l1_l2_l3"}:
-        # normalize with pluses
-        a = a.replace("_", "+").replace(" ", "")
+    if a in {"l1", "l2", "l3", "l1+l2", "l1+l2+l3"}:
         return True, a.upper()
-    if a == "l2":
-        # Mini-SWE does not support pure L2; use L1+L2 as the closest
-        return True, "L1+L2"
-    if a == "l3":
-        # Mini-SWE does not support pure L3; use full memory
-        return True, "L1+L2+L3"
-    # Default to full memory
-    return True, "L1+L2+L3"
+    raise ValueError(
+        f"Unsupported ablation {ablation!r}; expected baseline, L1, L2, L3, "
+        "L1+L2, or L1+L2+L3"
+    )
 
 
 def main() -> None:
@@ -58,10 +53,18 @@ def main() -> None:
     p.add_argument(
         "--direction",
         default="none",
-        choices=["none", "backward", "forward", "bidirectional"],
+        choices=[
+            "none",
+            "backward",
+            "forward",
+            "bidirectional",
+            "cross_repo",
+            "whole_history",
+        ],
         help=(
             "Memory direction. Use 'none' for baseline; backward, forward, and "
-            "bidirectional are for memory ablations."
+            "bidirectional use the standard memories; cross_repo uses the "
+            "repository-disjoint memory; whole_history uses the one-record-per-PR control."
         ),
     )
     p.add_argument("--model", required=True)
@@ -70,22 +73,48 @@ def main() -> None:
     p.add_argument("--memory_top_k", type=int, default=5)
     p.add_argument("--slice", default="", help="Slice notation for dataset (e.g., '0:150' for first 150 instances)")
     p.add_argument("--reverse", action="store_true", help="Process instances in reverse order (last to first)")
+    # Component ablation flags for reviewer experiments
+    p.add_argument("--disable-dependency-expansion", action="store_true",
+                   help="Skip STAGE 4 dependency extraction (for component ablation)")
+    p.add_argument("--disable-recurring-recall", action="store_true",
+                   help="Skip STAGE 5 common patterns detection (for component ablation)")
+    p.add_argument("--disable-filtering", action="store_true",
+                   help="Skip STAGE 2 applicability filtering (for component ablation)")
+    p.add_argument("--disable-ordering", action="store_true",
+                   help="Skip STAGE 6 dependency-based reordering (for component ablation)")
+    p.add_argument("--minimal-retrieval", action="store_true",
+                   help="Minimal mode: only retrieve and enrich, skip ALL enhancements (filtering, dependency expansion, recurring recall, ordering). Equivalent to disabling all 4 components.")
     args = p.parse_args()
+
+    # If --minimal-retrieval is set, enable all disable flags
+    if args.minimal_retrieval:
+        args.disable_dependency_expansion = True
+        args.disable_recurring_recall = True
+        args.disable_filtering = True
+        args.disable_ordering = True
 
     # Resolve and slug the model name for stable output paths
     resolved_model = resolve_model_alias(args.model) or args.model
     model_slug = model_output_name(resolved_model)
 
-    memory_enabled, memory_levels = _ablation_to_miniswe(args.ablation)
+    try:
+        memory_enabled, memory_levels = _ablation_to_miniswe(args.ablation)
+    except ValueError as exc:
+        p.error(str(exc))
     is_baseline = args.ablation.strip().lower() == "baseline"
     direction = "none" if is_baseline else args.direction
     if not is_baseline and direction == "none":
-        p.error("memory ablations require backward, forward, or bidirectional direction")
+        p.error(
+            "memory ablations require backward, forward, bidirectional, or "
+            "cross_repo, or whole_history direction"
+        )
     memory_roots = {
         "none": "data/back_trs",  # Unused by baseline's decompose-only mode.
         "backward": "data/back_trs",
         "forward": "data/fwr_trs",
         "bidirectional": "data/bidirect_trs",
+        "cross_repo": "experimental_data/bidirect_trs",
+        "whole_history": "experimental_data/whole_repair_history/bidirect_trs",
     }
     memory_root = Path(memory_roots[direction]).resolve()
 
@@ -120,6 +149,14 @@ def main() -> None:
 
         dataset_path = Path(temp_path)
         print(f"📝 Reversed dataset written to: {dataset_path}")
+
+    # Set component ablation flags as environment variables
+    # These will be read by MemoryPlugin to control which stages to skip
+    import os
+    os.environ["RECAP_ENABLE_DEPENDENCY_EXPANSION"] = "0" if args.disable_dependency_expansion else "1"
+    os.environ["RECAP_ENABLE_RECURRING_RECALL"] = "0" if args.disable_recurring_recall else "1"
+    os.environ["RECAP_ENABLE_FILTERING"] = "0" if args.disable_filtering else "1"
+    os.environ["RECAP_ENABLE_ORDERING"] = "0" if args.disable_ordering else "1"
 
     # Import and call the Typer command function directly
     from minisweagent.run.benchmarks.cibench import main as cibench_main  # type: ignore

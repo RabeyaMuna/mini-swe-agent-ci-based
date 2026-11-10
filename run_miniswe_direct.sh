@@ -1,9 +1,11 @@
 #!/bin/bash
 # Run Mini-SWE-Agent (CIBench) over eval issues with consistent flags
 # Usage: ./run_miniswe_direct.sh <issue-ids> [ablation] [direction] [model] [repo_filters] [dataset] [workers] [reverse]
-#   <issue-ids>: Comma-separated IDs, or empty string "" to use data/eval_issue_ids.json, or omit to RUN ALL
+#   <issue-ids>: Comma-separated IDs, a JSON file containing an ID array, or
+#                empty string "" to use data/eval_issue_ids.json.
 #   [ablation]:  baseline|L1|L2|L3|L1+L2|L1+L2+L3|all   (default: all)
-#   [direction]: none (baseline) | backward|forward|bidirectional|both|all
+#                L1, L2, and L3 each load only that single memory level.
+#   [direction]: none (baseline) | backward|forward|bidirectional|cross_repo|whole_history|both|all
 #                "both" runs backward+forward; "all" runs all memory directions
 #   [model]:     gpt-5-mini | gpt-5.4-mini-2026-03-17 | minimax/minimax-m2.5 (default: gpt-5-mini)
 #   [repo_filters]: Optional comma-separated repo names or owner/repo slugs
@@ -31,6 +33,71 @@ DATASET=${6:-data/eval_set.jsonl}
 WORKERS=${7:-1}
 REVERSE=${8:-0}
 RESULTS_ROOT=${MINISWE_RESULTS_ROOT:-results/miniswe-agent}
+
+# Normalize and validate experiment selectors before credentials, environment
+# activation, or configuration-only exits.
+DIRECTION_LOWER=$(echo "$DIRECTION" | tr '[:upper:]' '[:lower:]')
+ABLATION_LOWER=$(echo "$ABLATION" | tr '[:upper:]' '[:lower:]')
+
+case "$ABLATION_LOWER" in
+  baseline|l1|l2|l3|l1+l2|l1+l2+l3|all) ;;
+  *)
+    echo "ERROR: Ablation must be baseline, L1, L2, L3, L1+L2, L1+L2+L3, or all." >&2
+    exit 2
+    ;;
+esac
+
+if [ "$ABLATION_LOWER" = "all" ]; then
+  ABLATIONS=(baseline L1 L1+L2 L1+L2+L3)
+else
+  ABLATIONS=("$ABLATION")
+fi
+
+# Baseline never loads directional memory.
+if [ "$ABLATION_LOWER" = "baseline" ]; then
+  DIRECTION_LOWER="none"
+fi
+
+case "$DIRECTION_LOWER" in
+  none) DIRECTIONS=() ;;
+  backward|forward|bidirectional|cross_repo|whole_history) DIRECTIONS=("$DIRECTION_LOWER") ;;
+  both) DIRECTIONS=(backward forward) ;;
+  all) DIRECTIONS=(backward forward bidirectional) ;;
+  *)
+    echo "ERROR: Direction must be none, backward, forward, bidirectional, cross_repo, whole_history, both, or all." >&2
+    exit 2
+    ;;
+esac
+
+if [ "$ABLATION_LOWER" != "baseline" ] && [ "$DIRECTION_LOWER" = "none" ]; then
+  echo "ERROR: Direction 'none' is valid only for baseline; memory ablations require a direction." >&2
+  exit 2
+fi
+
+# A JSON ID-list path is expanded to the same comma-separated representation
+# accepted by the existing runner interface.
+if [ -n "$ISSUE_IDS" ] && [ -f "$ISSUE_IDS" ]; then
+  case "$ISSUE_IDS" in
+    *.json)
+      ISSUE_IDS=$(ISSUE_IDS_FILE="$ISSUE_IDS" python3 - << 'PY'
+import json
+import os
+
+path = os.environ["ISSUE_IDS_FILE"]
+with open(path, encoding="utf-8") as handle:
+    values = json.load(handle)
+if not isinstance(values, list):
+    raise SystemExit(f"Issue ID file must contain a JSON array: {path}")
+print(",".join(str(value) for value in values))
+PY
+      )
+      ;;
+    *)
+      echo "ERROR: Issue ID file must be JSON: $ISSUE_IDS" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 # Load provider credentials from the project file, then expose only the key
 # selected by the model. Keeping the unused key present-but-empty prevents
@@ -190,35 +257,6 @@ safe = [re.escape(x) for x in ids]
 print('^(' + '|'.join(safe) + ')$')
 PY
 )
-
-# Translate ablation list
-if [ "$ABLATION" = "all" ]; then ABLATIONS=(baseline L1 L1+L2 L1+L2+L3); else ABLATIONS=($ABLATION); fi
-
-# Convert to lowercase (Bash 3.2 compatible)
-DIRECTION_LOWER=$(echo "$DIRECTION" | tr '[:upper:]' '[:lower:]')
-ABLATION_LOWER=$(echo "$ABLATION" | tr '[:upper:]' '[:lower:]')
-
-# For BASELINE, direction is always "none" (no memory used)
-if [ "$ABLATION_LOWER" = "baseline" ]; then
-  DIRECTION_LOWER="none"
-fi
-
-case "$DIRECTION_LOWER" in
-  none) DIRECTIONS=() ;;
-  backward|forward|bidirectional) DIRECTIONS=("$DIRECTION_LOWER") ;;
-  both) DIRECTIONS=(backward forward) ;;
-  all) DIRECTIONS=(backward forward bidirectional) ;;
-  *)
-    echo "ERROR: Direction must be none, backward, forward, bidirectional, both, or all." >&2
-    exit 2
-    ;;
-esac
-
-# Validate: memory ablations require a direction
-if [ "$ABLATION_LOWER" != "baseline" ] && [ "$DIRECTION_LOWER" = "none" ]; then
-  echo "ERROR: Direction 'none' is valid only for baseline; memory ablations require a direction." >&2
-  exit 2
-fi
 
 run_one() {
   local ablation="$1"; local direction="$2"

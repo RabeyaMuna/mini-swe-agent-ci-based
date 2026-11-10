@@ -100,6 +100,10 @@ class STAIRRetrieval:
         baseline_mode: bool = False,
         memory_levels: str = "l1+l2+l3",
         metrics_recorder=None,
+        enable_dependency_expansion: bool = True,
+        enable_recurring_recall: bool = True,
+        enable_filtering: bool = True,
+        enable_ordering: bool = True,
     ):
         """
         Initialize retrieval system.
@@ -112,6 +116,10 @@ class STAIRRetrieval:
             memory_levels: Which levels to use - "l1", "l1+l2", or "l1+l2+l3"
                           For ablation studies to measure impact of each level
             metrics_recorder: Optional RunMetricsRecorder for tracking API calls
+            enable_dependency_expansion: If False, skip STAGE 4 dependency extraction
+            enable_recurring_recall: If False, skip STAGE 5 common patterns detection
+            enable_filtering: If False, skip STAGE 2 applicability filtering
+            enable_ordering: If False, skip STAGE 6 dependency-based reordering
         """
         self.memory_dir = Path(memory_dir)
         self.llm = llm_client
@@ -119,6 +127,12 @@ class STAIRRetrieval:
         self.enabled_levels = self._parse_memory_levels(memory_levels)
         self.embedding_model = embedding_model
         self.metrics_recorder = metrics_recorder
+
+        # Component ablation flags for reviewer experiments
+        self.enable_dependency_expansion = enable_dependency_expansion
+        self.enable_recurring_recall = enable_recurring_recall
+        self.enable_filtering = enable_filtering
+        self.enable_ordering = enable_ordering
 
         # Storage for dependency problems (extracted in STAGE 4)
         self._dependency_problems = []
@@ -345,7 +359,21 @@ class STAIRRetrieval:
                 continue
 
             # STAGE 2: Filter matches for THIS CI problem
-            filtered = self._stage_2_per_problem_filtering(matches, query)
+            if self.enable_filtering:
+                filtered = self._stage_2_per_problem_filtering(matches, query)
+                print(f"[Memory]     Filtering applied")
+            else:
+                # Skip filtering - use all matches without filtering
+                # Transform matches structure to match filtered structure
+                filtered = []
+                for match_set in matches:
+                    filtered.append({
+                        "ci_problem": match_set["ci_problem"],
+                        "l1_filtered": match_set["l1_matches"],  # Use all L1 matches
+                        "l2_filtered": match_set["l2_matches"],  # Use all L2 matches
+                        "l3_filtered": match_set["l3_matches"],  # Use all L3 matches
+                    })
+                print(f"[Memory]     SKIP Filtering (disabled by component ablation)")
 
             if not filtered or len(filtered) == 0:
                 # Filtering removed all matches
@@ -383,29 +411,33 @@ class STAIRRetrieval:
                 print(f"[Memory]     FAIL Enrichment failed - added without repair strategy")
 
             # STAGE 4: Extract dependencies for THIS CI problem
-            related = self._stage_4_extract_related_problems([match_set], [enriched])
-
-            # Append dependencies (flat)
-            dep_count = len(related)
-
-            if related:
-                problems_list.extend(related)
-                total_dependencies += dep_count
-                print(f"[Memory]     OK Found {dep_count} dependency problem(s)")
+            if self.enable_dependency_expansion:
+                related = self._stage_4_extract_related_problems([match_set], [enriched])
+                # Append dependencies (flat)
+                dep_count = len(related)
+                if related:
+                    problems_list.extend(related)
+                    total_dependencies += dep_count
+                    print(f"[Memory]     OK Found {dep_count} dependency problem(s)")
+                else:
+                    print(f"[Memory]     FAIL No dependency problems")
             else:
-                print(f"[Memory]     FAIL No dependency problems")
+                print(f"[Memory]     SKIP Dependency extraction (disabled by component ablation)")
 
         print(f"[Memory] STAGE 1-4: Completed {total_enriched} CI problems, {total_dependencies} dependencies")
 
         # ============================================================
-        # STAGE 5: Detect common patterns
+        # STAGE 5: Detect common patterns (recurring problems)
         # ============================================================
-        print("[Memory] STAGE 4: Detecting common patterns...")
-        common_problems = self._stage_5_detect_common_patterns(query)
-        print(f"[Memory] STAGE 5: Found {len(common_problems)} common patterns")
-
-        # Append common problems to the flat list
-        problems_list.extend(common_problems)
+        if self.enable_recurring_recall:
+            print("[Memory] STAGE 5: Detecting common patterns...")
+            common_problems = self._stage_5_detect_common_patterns(query)
+            print(f"[Memory] STAGE 5: Found {len(common_problems)} common patterns")
+            # Append common problems to the flat list
+            problems_list.extend(common_problems)
+        else:
+            common_problems = []
+            print("[Memory] STAGE 5: SKIP Common patterns detection (disabled by component ablation)")
 
         # ============================================================
         # STAGE 5.5: Deduplicate across all problem sources
@@ -429,9 +461,13 @@ class STAIRRetrieval:
         # ============================================================
         # STAGE 6: Reorder by dependencies and priority
         # ============================================================
-        print("[Memory] STAGE 6: Reordering problems by dependencies and priority...")
-        final_problems = self._stage_6_final_reorder(deduped_problems)
-        print(f"[Memory] STAGE 6: Final ordered: {len(final_problems)} problems")
+        if self.enable_ordering:
+            print("[Memory] STAGE 6: Reordering problems by dependencies and priority...")
+            final_problems = self._stage_6_final_reorder(deduped_problems)
+            print(f"[Memory] STAGE 6: Final ordered: {len(final_problems)} problems")
+        else:
+            final_problems = deduped_problems
+            print("[Memory] STAGE 6: SKIP Reordering (disabled by component ablation)")
 
         # ============================================================
         # NO FILTERING: Keep all problems after deduplication and reordering

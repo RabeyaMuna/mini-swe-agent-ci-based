@@ -913,6 +913,118 @@ bash ./run_miniswe_direct.sh "" L1+L2+L3 backward deepseek-v4-flash "" data/eval
 bash ./run_miniswe_direct.sh "" L1+L2+L3 forward  deepseek-v4-flash "" data/eval_set.jsonl 4
 bash ./run_miniswe_direct.sh "" L1+L2+L3 bidirectional deepseek-v4-flash "" data/eval_set.jsonl 4
 ```
+
+### Mini‑SWE – Component Ablation Experiments (Reviewer Q&A)
+
+Component ablation flags allow disabling individual pipeline stages to measure their contributions. All flags work with any model and direction.
+
+**Available flags:**
+- `--disable-dependency-expansion` - Skip STAGE 4 (dependency extraction)
+- `--disable-recurring-recall` - Skip STAGE 5 (common patterns detection)
+- `--disable-filtering` - Skip STAGE 2 (applicability filtering)
+- `--disable-ordering` - Skip STAGE 6 (dependency-based reordering)
+- `--minimal-retrieval` - Skip ALL enhancements (equivalent to all 4 above)
+
+#### Full ReCAP Baseline (all 100 instances)
+```bash
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset experimental_data/eval_set.jsonl \
+  --slice "0:100" \
+  --ablation L1+L2+L3 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --output_root results/ablations/full_recap \
+  --workers 1
+```
+
+#### Component Ablations for jcJU Q2 (50 instances)
+```bash
+# 1. Without Dependency Expansion
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset experimental_data/eval_set.jsonl \
+  --slice "0:50" \
+  --ablation L1+L2+L3 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --disable-dependency-expansion \
+  --output_root results/ablations/no_dependency \
+  --workers 1
+
+# 2. Without Recurring-Problem Recall
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset experimental_data/eval_set.jsonl \
+  --slice "0:50" \
+  --ablation L1+L2+L3 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --disable-recurring-recall \
+  --output_root results/ablations/no_recurring \
+  --workers 1
+
+# 3. Without Applicability Filtering
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset experimental_data/eval_set.jsonl \
+  --slice "0:50" \
+  --ablation L1+L2+L3 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --disable-filtering \
+  --output_root results/ablations/no_filtering \
+  --workers 1
+
+# 4. Without Repair Ordering
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset experimental_data/eval_set.jsonl \
+  --slice "0:50" \
+  --ablation L1+L2+L3 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --disable-ordering \
+  --output_root results/ablations/no_ordering \
+  --workers 1
+
+# 5. Full ReCAP on same 50 instances (for direct comparison)
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset experimental_data/eval_set.jsonl \
+  --slice "0:50" \
+  --ablation L1+L2+L3 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --output_root results/ablations/full_recap_50 \
+  --workers 1
+```
+
+#### Hidden-Problem Prediction for u2Pr Q1 (100 instances)
+```bash
+# Minimal Retrieval: only retrieve and enrich, no enhancements
+PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
+  --dataset experimental_data/eval_set.jsonl \
+  --slice "0:100" \
+  --ablation L1+L2+L3 \
+  --direction bidirectional \
+  --model deepseek-v4-flash \
+  --minimal-retrieval \
+  --output_root results/ablations/minimal_retrieval \
+  --workers 1
+```
+
+**Results location:** `results/ablations/*/l1_l2_l3_deepseek-v4-flash/`
+
+**Log verification:** When components are disabled, you'll see:
+```
+[Memory]     SKIP Filtering (disabled by component ablation)
+[Memory]     SKIP Dependency extraction (disabled by component ablation)
+[Memory] STAGE 5: SKIP Common patterns detection (disabled by component ablation)
+[Memory] STAGE 6: SKIP Reordering (disabled by component ablation)
+```
+
+**Notes:**
+- All ablations use `data/bidirect_trs/` memory (L1/L2/L3 files)
+- `--minimal-retrieval` = disable all 4 components at once
+- Existing commands without flags work unchanged (backward compatible)
+- Dataset has 100 instances total in `experimental_data/eval_set.jsonl`
+- Change slice as needed: `--slice "0:50"` (first 50), `--slice "0:100"` (all 100), `--slice "50:100"` (last 50), etc.
+
 ### Codex – Quick Commands
 
 The launcher automatically loads `.env` and creates the correct provider configuration.

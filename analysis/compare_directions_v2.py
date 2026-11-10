@@ -11,6 +11,7 @@ Generates comprehensive comparison including:
 - Direction-specific (only one solved)
 - Per-direction success/failure lists
 - Comparison lists (A solved but B missed)
+- A clean three-circle overlap figure
 """
 
 import argparse
@@ -18,6 +19,21 @@ import json
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, Set, List, Tuple
+
+
+# Dataset directory names describe the decomposition direction. In the paper,
+# those directions are reported under these ReCAP configuration names.
+CONFIGURATION_LABELS = {
+    "forward": "ReCAP development",
+    "backward": "ReCAP endpoint",
+    "bidirectional": "ReCAP full",
+}
+
+FIGURE_LABELS = {
+    "forward": r"ReCAP$_{\mathrm{development}}$",
+    "backward": r"ReCAP$_{\mathrm{endpoint}}$",
+    "bidirectional": r"ReCAP$_{\mathrm{full}}$",
+}
 
 
 def load_results(filepath: Path) -> Dict[str, Dict]:
@@ -119,6 +135,124 @@ def analyze_success_patterns(
     return patterns, counts
 
 
+def save_overlap_figure(
+    counts: Dict[str, int], output_path: Path, dpi: int = 600
+) -> None:
+    """Save a publication-quality three-circle diagram with no extra text."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle
+
+    forward_total = (
+        counts["only_forward"]
+        + counts["forward_backward"]
+        + counts["forward_bidir"]
+        + counts["all_three"]
+    )
+    backward_total = (
+        counts["only_backward"]
+        + counts["forward_backward"]
+        + counts["backward_bidir"]
+        + counts["all_three"]
+    )
+    bidirectional_total = (
+        counts["only_bidir"]
+        + counts["forward_bidir"]
+        + counts["backward_bidir"]
+        + counts["all_three"]
+    )
+
+    fig, ax = plt.subplots(figsize=(5.0, 4.2))
+
+    circles = (
+        Circle(
+            (-0.62, 0.30),
+            1.0,
+            facecolor="#4C8DFF",
+            edgecolor="#246BFD",
+            alpha=0.18,
+            linewidth=1.5,
+        ),
+        Circle(
+            (0.62, 0.30),
+            1.0,
+            facecolor="#B06CFF",
+            edgecolor="#8E44E8",
+            alpha=0.18,
+            linewidth=1.5,
+        ),
+        Circle(
+            (0.0, -0.58),
+            1.0,
+            facecolor="#31C48D",
+            edgecolor="#00A86B",
+            alpha=0.18,
+            linewidth=1.5,
+        ),
+    )
+    for circle in circles:
+        ax.add_patch(circle)
+
+    # Set labels: each label includes the total number solved in that direction.
+    ax.text(
+        -0.85,
+        1.38,
+        f"{FIGURE_LABELS['forward']} ({forward_total})",
+        color="#246BFD",
+        ha="center",
+        va="center",
+        fontsize=8,
+        fontweight="bold",
+    )
+    ax.text(
+        0.85,
+        1.38,
+        f"{FIGURE_LABELS['backward']} ({backward_total})",
+        color="#8E44E8",
+        ha="center",
+        va="center",
+        fontsize=8,
+        fontweight="bold",
+    )
+    ax.text(
+        0.0,
+        -1.72,
+        f"{FIGURE_LABELS['bidirectional']} ({bidirectional_total})",
+        color="#00A86B",
+        ha="center",
+        va="center",
+        fontsize=8,
+        fontweight="bold",
+    )
+
+    # Seven mutually exclusive Venn regions.
+    region_labels = (
+        (-1.04, 0.48, counts["only_forward"]),
+        (1.04, 0.48, counts["only_backward"]),
+        (0.0, 0.76, counts["forward_backward"]),
+        (-0.55, -0.36, counts["forward_bidir"]),
+        (0.55, -0.36, counts["backward_bidir"]),
+        (0.0, -1.18, counts["only_bidir"]),
+        (0.0, -0.08, counts["all_three"]),
+    )
+    for x, y, value in region_labels:
+        ax.text(x, y, str(value), ha="center", va="center", fontsize=11, color="black")
+
+    ax.set_xlim(-1.75, 1.75)
+    ax.set_ylim(-1.95, 1.62)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        output_path,
+        dpi=dpi,
+        bbox_inches="tight",
+        pad_inches=0.02,
+        facecolor="white",
+    )
+    plt.close(fig)
+
+
 def save_id_lists(patterns: Dict[str, Set[str]], output_dir: Path):
     """Save comprehensive ID lists for re-running experiments."""
 
@@ -140,7 +274,7 @@ def save_id_lists(patterns: Dict[str, Set[str]], output_dir: Path):
     with open(output_dir / "ids_common_all_three.txt", "w") as f:
         for id in sorted(patterns["all_three"]):
             f.write(f"{id}\n")
-    print(f"\n✓ COMMON (all 3 solved): {len(patterns['all_three'])} IDs")
+    print(f"\n✓ COMMON (all 3 configurations solved): {len(patterns['all_three'])} IDs")
     print(f"  → ids_common_all_three.txt")
 
     # 2. Pairwise common (solved by 2, missed by 1)
@@ -148,43 +282,43 @@ def save_id_lists(patterns: Dict[str, Set[str]], output_dir: Path):
     with open(output_dir / "ids_forward_backward_only.txt", "w") as f:
         for id in sorted(patterns["forward_backward"]):
             f.write(f"{id}\n")
-    print(f"\n✓ Forward + Backward solved, Bidirectional missed: {len(patterns['forward_backward'])} IDs")
+    print(f"\n✓ Development + Endpoint solved, Full missed: {len(patterns['forward_backward'])} IDs")
     print(f"  → ids_forward_backward_only.txt")
 
     # Forward + Bidirectional solved, Backward missed
     with open(output_dir / "ids_forward_bidirectional_only.txt", "w") as f:
         for id in sorted(patterns["forward_bidir"]):
             f.write(f"{id}\n")
-    print(f"\n✓ Forward + Bidirectional solved, Backward missed: {len(patterns['forward_bidir'])} IDs")
+    print(f"\n✓ Development + Full solved, Endpoint missed: {len(patterns['forward_bidir'])} IDs")
     print(f"  → ids_forward_bidirectional_only.txt")
 
     # Backward + Bidirectional solved, Forward missed
     with open(output_dir / "ids_backward_bidirectional_only.txt", "w") as f:
         for id in sorted(patterns["backward_bidir"]):
             f.write(f"{id}\n")
-    print(f"\n✓ Backward + Bidirectional solved, Forward missed: {len(patterns['backward_bidir'])} IDs")
+    print(f"\n✓ Endpoint + Full solved, Development missed: {len(patterns['backward_bidir'])} IDs")
     print(f"  → ids_backward_bidirectional_only.txt")
 
     # 3. Direction-specific (only one solved)
-    print(f"\n✓ DIRECTION-SPECIFIC (only 1 solved):")
+    print(f"\n✓ CONFIGURATION-SPECIFIC (only 1 solved):")
 
     with open(output_dir / "ids_only_forward.txt", "w") as f:
         for id in sorted(patterns["only_forward"]):
             f.write(f"{id}\n")
-    print(f"  - Only Forward: {len(patterns['only_forward'])} IDs → ids_only_forward.txt")
+    print(f"  - Only Development: {len(patterns['only_forward'])} IDs → ids_only_forward.txt")
 
     with open(output_dir / "ids_only_backward.txt", "w") as f:
         for id in sorted(patterns["only_backward"]):
             f.write(f"{id}\n")
-    print(f"  - Only Backward: {len(patterns['only_backward'])} IDs → ids_only_backward.txt")
+    print(f"  - Only Endpoint: {len(patterns['only_backward'])} IDs → ids_only_backward.txt")
 
     with open(output_dir / "ids_only_bidirectional.txt", "w") as f:
         for id in sorted(patterns["only_bidir"]):
             f.write(f"{id}\n")
-    print(f"  - Only Bidirectional: {len(patterns['only_bidir'])} IDs → ids_only_bidirectional.txt")
+    print(f"  - Only Full: {len(patterns['only_bidir'])} IDs → ids_only_bidirectional.txt")
 
     # 4. Per-direction success/failure lists
-    print(f"\n✓ PER-DIRECTION LISTS:")
+    print(f"\n✓ PER-CONFIGURATION LISTS:")
 
     # Forward: what it solved vs missed
     fwd_failed = (patterns["only_backward"] | patterns["only_bidir"]
@@ -195,8 +329,8 @@ def save_id_lists(patterns: Dict[str, Set[str]], output_dir: Path):
     with open(output_dir / "ids_forward_failure.txt", "w") as f:
         for id in sorted(fwd_failed):
             f.write(f"{id}\n")
-    print(f"  - Forward success: {len(fwd_success)} IDs → ids_forward_success.txt")
-    print(f"  - Forward failure: {len(fwd_failed)} IDs → ids_forward_failure.txt")
+    print(f"  - Development success: {len(fwd_success)} IDs → ids_forward_success.txt")
+    print(f"  - Development failure: {len(fwd_failed)} IDs → ids_forward_failure.txt")
 
     # Backward: what it solved vs missed
     back_failed = (patterns["only_forward"] | patterns["only_bidir"]
@@ -207,8 +341,8 @@ def save_id_lists(patterns: Dict[str, Set[str]], output_dir: Path):
     with open(output_dir / "ids_backward_failure.txt", "w") as f:
         for id in sorted(back_failed):
             f.write(f"{id}\n")
-    print(f"  - Backward success: {len(back_success)} IDs → ids_backward_success.txt")
-    print(f"  - Backward failure: {len(back_failed)} IDs → ids_backward_failure.txt")
+    print(f"  - Endpoint success: {len(back_success)} IDs → ids_backward_success.txt")
+    print(f"  - Endpoint failure: {len(back_failed)} IDs → ids_backward_failure.txt")
 
     # Bidirectional: what it solved vs missed
     bidir_failed = (patterns["only_forward"] | patterns["only_backward"]
@@ -219,8 +353,8 @@ def save_id_lists(patterns: Dict[str, Set[str]], output_dir: Path):
     with open(output_dir / "ids_bidirectional_failure.txt", "w") as f:
         for id in sorted(bidir_failed):
             f.write(f"{id}\n")
-    print(f"  - Bidirectional success: {len(bidir_success)} IDs → ids_bidirectional_success.txt")
-    print(f"  - Bidirectional failure: {len(bidir_failed)} IDs → ids_bidirectional_failure.txt")
+    print(f"  - Full success: {len(bidir_success)} IDs → ids_bidirectional_success.txt")
+    print(f"  - Full failure: {len(bidir_failed)} IDs → ids_bidirectional_failure.txt")
 
     # 5. Comparison lists (what one solved that another didn't)
     print(f"\n✓ COMPARISON LISTS (A solved but B missed):")
@@ -230,35 +364,35 @@ def save_id_lists(patterns: Dict[str, Set[str]], output_dir: Path):
     with open(output_dir / "ids_forward_beats_backward.txt", "w") as f:
         for id in sorted(fwd_not_back):
             f.write(f"{id}\n")
-    print(f"  - Forward solved, Backward missed: {len(fwd_not_back)} IDs → ids_forward_beats_backward.txt")
+    print(f"  - Development solved, Endpoint missed: {len(fwd_not_back)} IDs → ids_forward_beats_backward.txt")
 
     # Backward solved, Forward missed
     back_not_fwd = back_success - fwd_success
     with open(output_dir / "ids_backward_beats_forward.txt", "w") as f:
         for id in sorted(back_not_fwd):
             f.write(f"{id}\n")
-    print(f"  - Backward solved, Forward missed: {len(back_not_fwd)} IDs → ids_backward_beats_forward.txt")
+    print(f"  - Endpoint solved, Development missed: {len(back_not_fwd)} IDs → ids_backward_beats_forward.txt")
 
     # Bidirectional solved, Forward missed
     bidir_not_fwd = bidir_success - fwd_success
     with open(output_dir / "ids_bidirectional_beats_forward.txt", "w") as f:
         for id in sorted(bidir_not_fwd):
             f.write(f"{id}\n")
-    print(f"  - Bidirectional solved, Forward missed: {len(bidir_not_fwd)} IDs → ids_bidirectional_beats_forward.txt")
+    print(f"  - Full solved, Development missed: {len(bidir_not_fwd)} IDs → ids_bidirectional_beats_forward.txt")
 
     # Bidirectional solved, Backward missed
     bidir_not_back = bidir_success - back_success
     with open(output_dir / "ids_bidirectional_beats_backward.txt", "w") as f:
         for id in sorted(bidir_not_back):
             f.write(f"{id}\n")
-    print(f"  - Bidirectional solved, Backward missed: {len(bidir_not_back)} IDs → ids_bidirectional_beats_backward.txt")
+    print(f"  - Full solved, Endpoint missed: {len(bidir_not_back)} IDs → ids_bidirectional_beats_backward.txt")
 
     # Forward + Backward solved, Bidirectional missed
     fwd_back_not_bidir = fwd_success & back_success - bidir_success
     with open(output_dir / "ids_forward_and_backward_beat_bidirectional.txt", "w") as f:
         for id in sorted(fwd_back_not_bidir):
             f.write(f"{id}\n")
-    print(f"  - Forward AND Backward solved, Bidirectional missed: {len(fwd_back_not_bidir)} IDs → ids_forward_and_backward_beat_bidirectional.txt")
+    print(f"  - Development AND Endpoint solved, Full missed: {len(fwd_back_not_bidir)} IDs → ids_forward_and_backward_beat_bidirectional.txt")
 
     # 6. All failures (none succeeded)
     with open(output_dir / "ids_all_failed.txt", "w") as f:
@@ -282,17 +416,18 @@ def print_summary(
     print("="*80)
 
     print(f"\nTotal instances: {counts['total']}")
-    print("\nResults by direction:")
+    print("\nResults by configuration:")
     for direction in ["forward", "backward", "bidirectional"]:
         success = sum(1 for r in data[direction].values() if r["conclusion"] == "success")
         total = len(data[direction])
-        print(f"  {direction:15} SUCCESS: {success:3} ({success/max(total,1)*100:5.1f}%)")
+        label = CONFIGURATION_LABELS[direction]
+        print(f"  {label:20} SUCCESS: {success:3} ({success/max(total,1)*100:5.1f}%)")
 
     print("\n" + "-"*80)
-    print(f"✓ All 3 directions succeeded:     {counts['all_three']:3} ({counts['all_three']/counts['total']*100:5.1f}%)")
-    print(f"✓ Only Forward succeeded:          {counts['only_forward']:3}")
-    print(f"✓ Only Backward succeeded:         {counts['only_backward']:3}")
-    print(f"✓ Only Bidirectional succeeded:    {counts['only_bidir']:3}")
+    print(f"✓ All 3 configurations succeeded: {counts['all_three']:3} ({counts['all_three']/counts['total']*100:5.1f}%)")
+    print(f"✓ Only Development succeeded:      {counts['only_forward']:3}")
+    print(f"✓ Only Endpoint succeeded:         {counts['only_backward']:3}")
+    print(f"✓ Only Full succeeded:             {counts['only_bidir']:3}")
     print(f"✗ None succeeded:                  {counts['none']:3} ({counts['none']/counts['total']*100:5.1f}%)")
 
 
@@ -303,17 +438,17 @@ def main():
     parser.add_argument(
         "--forward",
         type=Path,
-        help="Path to forward results JSONL"
+        help="Path to forward/ReCAP-development results JSONL"
     )
     parser.add_argument(
         "--backward",
         type=Path,
-        help="Path to backward results JSONL"
+        help="Path to backward/ReCAP-endpoint results JSONL"
     )
     parser.add_argument(
         "--bidirectional",
         type=Path,
-        help="Path to bidirectional results JSONL"
+        help="Path to bidirectional/ReCAP-full results JSONL"
     )
     parser.add_argument(
         "--base-dir",
@@ -332,15 +467,31 @@ def main():
         default=Path("analysis"),
         help="Output directory for ID lists and JSON"
     )
+    parser.add_argument(
+        "--figure",
+        type=Path,
+        help=(
+            "Output path for the three-circle overlap figure "
+            "(default: <output-dir>/direction_overlap.png)"
+        ),
+    )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=600,
+        help="Raster figure resolution in DPI (default: 600)",
+    )
 
     args = parser.parse_args()
+    if args.dpi <= 0:
+        parser.error("--dpi must be greater than zero")
 
     # Use defaults if not specified
     if not args.forward:
         args.forward = (args.base_dir / "forward" / args.model / "L1_L2_L3"
                        / "jobs_results_diff.jsonl")
     if not args.backward:
-        args.backward = (args.base_dir / "backward" / args.model
+        args.backward = (args.base_dir / "backward" / args.model / "L1_L2_L3"
                         / "jobs_results_diff.jsonl")
     if not args.bidirectional:
         args.bidirectional = (args.base_dir / "bidirectional" / args.model / "L1_L2_L3"
@@ -360,6 +511,11 @@ def main():
     # Analyze
     patterns, counts = analyze_success_patterns(data)
 
+    # Save a clean figure containing only the three circles and their counts.
+    figure_path = args.figure or (args.output_dir / "direction_overlap.png")
+    save_overlap_figure(counts, figure_path, dpi=args.dpi)
+    print(f"\nOverlap figure saved to: {figure_path}")
+
     # Print summary
     print_summary(data, patterns, counts)
 
@@ -369,6 +525,10 @@ def main():
     # Save JSON
     output_json = args.output_dir / "direction_comparison.json"
     output_data = {
+        "configuration_mapping": {
+            CONFIGURATION_LABELS[direction]: direction
+            for direction in ["forward", "backward", "bidirectional"]
+        },
         "summary": counts,
         "patterns": {k: sorted(list(v)) for k, v in patterns.items()}
     }

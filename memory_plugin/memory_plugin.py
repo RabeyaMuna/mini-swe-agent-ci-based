@@ -61,13 +61,24 @@ class MemoryPlugin:
         self.enabled = enabled
         self.metrics_recorder = metrics_recorder
 
+        # Read component ablation flags from environment variables
+        import os
+        enable_dependency_expansion = os.environ.get("RECAP_ENABLE_DEPENDENCY_EXPANSION", "1") == "1"
+        enable_recurring_recall = os.environ.get("RECAP_ENABLE_RECURRING_RECALL", "1") == "1"
+        enable_filtering = os.environ.get("RECAP_ENABLE_FILTERING", "1") == "1"
+        enable_ordering = os.environ.get("RECAP_ENABLE_ORDERING", "1") == "1"
+
         # Initialize STAIR retrieval system
         self.retrieval = STAIRRetrieval(
             memory_dir=self.memory_root,
             llm_client=llm,
             baseline_mode=(not enabled),
             memory_levels=ablation,
-            metrics_recorder=metrics_recorder
+            metrics_recorder=metrics_recorder,
+            enable_dependency_expansion=enable_dependency_expansion,
+            enable_recurring_recall=enable_recurring_recall,
+            enable_filtering=enable_filtering,
+            enable_ordering=enable_ordering,
         )
 
     def retrieve(
