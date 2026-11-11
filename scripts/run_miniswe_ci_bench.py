@@ -114,7 +114,7 @@ def main() -> None:
         "forward": "data/fwr_trs",
         "bidirectional": "data/bidirect_trs",
         "cross_repo": "experimental_data/bidirect_trs",
-        "whole_history": "experimental_data/whole_repair_history/bidirect_trs",
+        "whole_history": "experimental_data/whole_repair_history/whole_pr_trs",
     }
     memory_root = Path(memory_roots[direction]).resolve()
 

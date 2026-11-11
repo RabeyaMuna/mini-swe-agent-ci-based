@@ -15,13 +15,14 @@ collects:
 
 - initial failing CI evidence;
 - repository and workflow metadata;
-- the ordered commit sequence;
+- the fail-to-pass SHA transition and commit metadata available in the dataset;
 - the complete cumulative fail-to-pass patch;
 - all changed files; and
 - the final successful CI outcome.
 
-The ordered commits are evidence nested inside the PR record. They are not
-separate memory records and are not associated with individual CI problems.
+The complete cumulative patch is treated as one aggregate repair event. The
+builder does not reconstruct or separate individual commits, and it does not
+associate changes with individual CI problems.
 
 ## What is excluded
 
@@ -42,30 +43,63 @@ because those files already contain ReCAP's reconstructed associations.
 Each source PR produces exactly one item per level:
 
 - **L1:** one concrete whole-PR episode. For compatibility, it is wrapped in a
-  one-element `problems` array, but the element describes the complete PR.
+  one-element `problems` array, but the element describes the complete PR and
+  is marked `record_scope: whole_pr`. It has no `problem_id`, `enabled`,
+  `dependencies`, or `repair_sequence` fields.
 - **L2:** one repository-level strategy in a one-element `repair_strategies`
   array.
 - **L3:** one flat transferable whole-PR pattern.
+
+Construction is sequential, matching the normal abstraction direction while
+using singular whole-PR prompts:
+
+```text
+raw whole-PR evidence
+  -> direct whole-PR analysis when it fits
+  -> dependency-graph chunk summaries + hierarchical reduction when oversized
+  -> one L1 record -> one L2 strategy -> one L3 pattern
+```
+
+Oversized cumulative patches reuse the repository's deterministic diff parser,
+changed-file dependency graph, and token-aware chunker. Related callers,
+callees, tests, configuration, and source files stay together when possible;
+oversized components are split at file/hunk boundaries with graph context
+retained. A strict coverage check adds a recovery chunk if the shared chunker
+omits a file or hunk. CI logs and workflow evidence are chunked separately at
+logical source boundaries. All chunk summaries are reduced into one aggregate
+L1 input; chunks never become problems or retrieval records.
+
+For CI evidence, the builder uses the existing structured log analysis when
+available and records the raw-log count, size, and SHA-256 fingerprint. It
+falls back to raw logs only when structured analysis is unavailable. Full
+patch evidence is never truncated. Each L1 record reports whether chunking was
+patch evidence is never truncated. Construction details such as graph/chunk
+counts, file/hunk coverage, reduction rounds, and `evidence_truncated: false`
+are stored separately in `abstraction_metadata.json`; they are not embedded in
+retrieval-facing L1 memory.
+
+The ordinary plural-producing L2/L3 prompts are not used because they could
+reintroduce problem-specific records.
 
 For the fixed 157 historical PRs, a completed build therefore contains 157 L1
 records, 157 L2 strategies, and 157 L3 patterns.
 
 ## Build the memory
 
-The default command uses `data/memory_issue_ids.json`, the raw
-`ci-benchmark-user/ci-repair-bench` dataset, GitHub compare data for ordered
-commits, and DeepSeek-V4-Flash for the three singular abstractions:
+The default command uses `data/memory_issue_ids.json`, the pinned raw
+`ci-benchmark-user/ci-repair-bench` dataset, and DeepSeek-V4-Flash for the
+three singular abstractions. It does not call GitHub or require a GitHub token:
 
 ```bash
-export GITHUB_TOKEN=<github-token>
 python experiments/01_whole_repair_history/build_whole_pr_memory.py \
   --model deepseek-v4-flash
 ```
 
-A GitHub token is required for the complete 157-PR build because the
-unauthenticated hourly API allowance is too small. The script checks the
-available allowance before collecting and resumes from completed raw episodes
-and completed L1/L2/L3 records.
+All 157 records use the same benchmark-only evidence policy: failing logs,
+workflow and repository metadata, fail/pass SHAs, cumulative repair diff,
+changed files, and the benchmark's successful endpoint. This avoids mixing
+GitHub-enriched records with dataset-only records. The script resumes from
+completed raw episodes and completed L1/L2/L3 records.
 
 If a raw local benchmark JSONL is available, use it to pin the exact rows:
 
@@ -83,10 +117,10 @@ python experiments/01_whole_repair_history/build_whole_pr_memory.py \
   --limit 1
 ```
 
-`--allow-incomplete` and `--no-github` are debugging options only. Data built
-with either option is not reviewer-grade because the ordered commit sequence
-may be missing. The manifest records any incompleteness and any LLM evidence
-truncation.
+`--allow-incomplete` is a debugging option only. Reviewer-grade data should
+contain every required benchmark field. The manifest records incompleteness,
+which issues used dependency-graph chunking, and verifies that no abstraction
+evidence was truncated.
 
 ## Generated files
 
@@ -94,8 +128,9 @@ truncation.
 experimental_data/whole_repair_history/
 ├── memory_issue_ids.json
 ├── raw_episodes.json
+├── abstraction_metadata.json
 ├── build_manifest.json
-└── bidirect_trs/
+└── whole_pr_trs/
     ├── failure_memory.json
     ├── repo_memory.json
     └── cross_memory.json
