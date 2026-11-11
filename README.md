@@ -922,8 +922,10 @@ Component ablation flags allow disabling individual pipeline stages to measure t
 - `--disable-dependency-expansion` - Skip STAGE 4 (dependency extraction)
 - `--disable-recurring-recall` - Skip STAGE 5 (common patterns detection)
 - `--disable-filtering` - Skip STAGE 2 (applicability filtering)
+- `--disable-deduplication` - Skip STAGE 5.5 (semantic clustering and duplicate merging)
 - `--disable-ordering` - Skip STAGE 6 (dependency-based reordering)
-- `--minimal-retrieval` - Skip ALL enhancements (equivalent to all 4 above)
+- `--disable-memory-optimization` - Keep all retrieved L1/L2/L3 matches without cross-level pruning
+- `--minimal-retrieval` - Retrieve and enrich only; disable all six operations above
 
 #### Full ReCAP Baseline (all 100 instances)
 ```bash
@@ -1013,14 +1015,16 @@ PYTHONPATH=. python scripts/run_miniswe_ci_bench.py \
 **Log verification:** When components are disabled, you'll see:
 ```
 [Memory]     SKIP Filtering (disabled by component ablation)
+[Memory]     SKIP Cross-level memory optimization (disabled by component ablation)
 [Memory]     SKIP Dependency extraction (disabled by component ablation)
 [Memory] STAGE 5: SKIP Common patterns detection (disabled by component ablation)
+[Memory] STAGE 5.5: SKIP Deduplication/clustering (disabled by component ablation)
 [Memory] STAGE 6: SKIP Reordering (disabled by component ablation)
 ```
 
 **Notes:**
 - All ablations use `data/bidirect_trs/` memory (L1/L2/L3 files)
-- `--minimal-retrieval` = disable all 4 components at once
+- `--minimal-retrieval` preserves raw L1/L2/L3 retrieval and Stage 3 enrichment, while disabling filtering, cross-level optimization, dependency expansion, recurring recall, deduplication/clustering, and ordering
 - Existing commands without flags work unchanged (backward compatible)
 - Dataset has 100 instances total in `experimental_data/eval_set.jsonl`
 - Change slice as needed: `--slice "0:50"` (first 50), `--slice "0:100"` (all 100), `--slice "50:100"` (last 50), etc.

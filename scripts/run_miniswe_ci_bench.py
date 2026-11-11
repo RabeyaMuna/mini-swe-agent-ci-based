@@ -11,7 +11,6 @@ import argparse
 import sys
 import warnings
 from pathlib import Path
-from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -79,20 +78,48 @@ def main() -> None:
     p.add_argument("--slice", default="", help="Slice notation for dataset (e.g., '0:150' for first 150 instances)")
     p.add_argument("--reverse", action="store_true", help="Process instances in reverse order (last to first)")
     # Component ablation flags for reviewer experiments
-    p.add_argument("--disable-dependency-expansion", action="store_true",
-                   help="Skip STAGE 4 dependency extraction (for component ablation)")
-    p.add_argument("--disable-recurring-recall", action="store_true",
-                   help="Skip STAGE 5 common patterns detection (for component ablation)")
-    p.add_argument("--disable-filtering", action="store_true",
-                   help="Skip STAGE 2 applicability filtering (for component ablation)")
-    p.add_argument("--disable-ordering", action="store_true",
-                   help="Skip STAGE 6 dependency-based reordering (for component ablation)")
-    p.add_argument("--disable-deduplication", action="store_true",
-                   help="Skip STAGE 5.5 semantic clustering and duplicate merging")
-    p.add_argument("--disable-memory-optimization", action="store_true",
-                   help="Pass all retrieved L1/L2/L3 matches to enrichment without cross-level pruning")
-    p.add_argument("--minimal-retrieval", action="store_true",
-                   help="Minimal mode: only retrieve and enrich; skip filtering, dependency expansion, recurring recall, deduplication/clustering, ordering, and cross-level memory optimization.")
+    p.add_argument(
+        "--disable-dependency-expansion",
+        action="store_true",
+        help="Skip STAGE 4 dependency extraction (for component ablation)",
+    )
+    p.add_argument(
+        "--disable-recurring-recall",
+        action="store_true",
+        help="Skip STAGE 5 common patterns detection (for component ablation)",
+    )
+    p.add_argument(
+        "--disable-filtering",
+        action="store_true",
+        help="Skip STAGE 2 applicability filtering (for component ablation)",
+    )
+    p.add_argument(
+        "--disable-ordering",
+        action="store_true",
+        help="Skip STAGE 6 dependency-based reordering (for component ablation)",
+    )
+    p.add_argument(
+        "--disable-deduplication",
+        action="store_true",
+        help="Skip STAGE 5.5 semantic clustering and duplicate merging",
+    )
+    p.add_argument(
+        "--disable-memory-optimization",
+        action="store_true",
+        help=(
+            "Pass all retrieved L1/L2/L3 matches to enrichment without "
+            "cross-level pruning"
+        ),
+    )
+    p.add_argument(
+        "--minimal-retrieval",
+        action="store_true",
+        help=(
+            "Only retrieve and enrich; skip filtering, dependency expansion, "
+            "recurring recall, deduplication/clustering, ordering, and "
+            "cross-level memory optimization"
+        ),
+    )
     args = p.parse_args()
 
     # If --minimal-retrieval is set, enable all disable flags
