@@ -8,11 +8,16 @@ importing the Typer command function directly and invoking it with options.
 from __future__ import annotations
 
 import argparse
+import sys
 import warnings
 from pathlib import Path
 from typing import Optional
 
-from utilities.model_registry import resolve_model_alias, model_output_name
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utilities.model_registry import model_output_name, resolve_model_alias  # noqa: E402
 
 # Suppress Pydantic serialization warnings from LiteLLM/minimax responses
 warnings.filterwarnings(
