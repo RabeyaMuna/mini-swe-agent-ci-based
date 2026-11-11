@@ -104,6 +104,8 @@ class STAIRRetrieval:
         enable_recurring_recall: bool = True,
         enable_filtering: bool = True,
         enable_ordering: bool = True,
+        enable_deduplication: bool = True,
+        enable_memory_optimization: bool = True,
     ):
         """
         Initialize retrieval system.
@@ -120,6 +122,9 @@ class STAIRRetrieval:
             enable_recurring_recall: If False, skip STAGE 5 common patterns detection
             enable_filtering: If False, skip STAGE 2 applicability filtering
             enable_ordering: If False, skip STAGE 6 dependency-based reordering
+            enable_deduplication: If False, skip STAGE 5.5 clustering/merging
+            enable_memory_optimization: If False, pass all retrieved L1/L2/L3
+                matches to enrichment without cross-level pruning
         """
         self.memory_dir = Path(memory_dir)
         self.llm = llm_client
@@ -133,6 +138,8 @@ class STAIRRetrieval:
         self.enable_recurring_recall = enable_recurring_recall
         self.enable_filtering = enable_filtering
         self.enable_ordering = enable_ordering
+        self.enable_deduplication = enable_deduplication
+        self.enable_memory_optimization = enable_memory_optimization
 
         # Storage for dependency problems (extracted in STAGE 4)
         self._dependency_problems = []
@@ -442,21 +449,31 @@ class STAIRRetrieval:
         # ============================================================
         # STAGE 5.5: Deduplicate across all problem sources
         # ============================================================
-        print("[Memory] STAGE 5.5: Deduplicating problems...")
-
         all_problems = problems_list  # Already combined: CI + dependencies + common
         # Filter out any None values that might have been returned by LLM stages
         all_problems = [p for p in all_problems if p is not None and isinstance(p, dict)]
-        print(f"[Memory] STAGE 5.5: Before dedup: {len(all_problems)} problems")
+        if self.enable_deduplication:
+            print("[Memory] STAGE 5.5: Deduplicating problems...")
+            print(f"[Memory] STAGE 5.5: Before dedup: {len(all_problems)} problems")
 
-        # Cluster similar problems for deduplication
-        clusters = self._cluster_for_deduplication(all_problems)
-        print(f"[Memory] STAGE 5.5: Created {len(clusters)} clusters")
+            # Cluster similar problems for deduplication
+            clusters = self._cluster_for_deduplication(all_problems)
+            print(f"[Memory] STAGE 5.5: Created {len(clusters)} clusters")
 
-        # LLM processes ONE CLUSTER AT A TIME to merge or separate problems
-        deduped_result = self._stage_6_llm_merge_duplicates(clusters, query, common_problems)
-        deduped_problems = deduped_result.get("problems", all_problems)
-        print(f"[Memory] STAGE 5.5: After dedup: {len(deduped_problems)} problems")
+            # LLM processes ONE CLUSTER AT A TIME to merge or separate problems
+            deduped_result = self._stage_6_llm_merge_duplicates(
+                clusters, query, common_problems
+            )
+            deduped_problems = deduped_result.get("problems", all_problems)
+            print(
+                f"[Memory] STAGE 5.5: After dedup: {len(deduped_problems)} problems"
+            )
+        else:
+            deduped_problems = all_problems
+            print(
+                "[Memory] STAGE 5.5: SKIP Deduplication/clustering "
+                "(disabled by component ablation)"
+            )
 
         # ============================================================
         # STAGE 6: Reorder by dependencies and priority
@@ -607,8 +624,20 @@ class STAIRRetrieval:
             ci_prob = match_set["ci_problem"]
             print(f"[Memory]   Enriching problem {idx+1}: {ci_prob.get('problem', 'N/A')[:50]}...")
 
-            l1_opt, l2_opt, l3_opt = optimize_memories(
-                match_set["l1_filtered"], match_set["l2_filtered"], match_set["l3_filtered"])
+            if self.enable_memory_optimization:
+                l1_opt, l2_opt, l3_opt = optimize_memories(
+                    match_set["l1_filtered"],
+                    match_set["l2_filtered"],
+                    match_set["l3_filtered"],
+                )
+            else:
+                l1_opt = match_set["l1_filtered"]
+                l2_opt = match_set["l2_filtered"]
+                l3_opt = match_set["l3_filtered"]
+                print(
+                    "[Memory]     SKIP Cross-level memory optimization "
+                    "(disabled by component ablation)"
+                )
 
             compact = {
                 "l1": [

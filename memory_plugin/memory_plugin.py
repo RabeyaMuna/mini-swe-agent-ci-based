@@ -67,6 +67,8 @@ class MemoryPlugin:
         enable_recurring_recall = os.environ.get("RECAP_ENABLE_RECURRING_RECALL", "1") == "1"
         enable_filtering = os.environ.get("RECAP_ENABLE_FILTERING", "1") == "1"
         enable_ordering = os.environ.get("RECAP_ENABLE_ORDERING", "1") == "1"
+        enable_deduplication = os.environ.get("RECAP_ENABLE_DEDUPLICATION", "1") == "1"
+        enable_memory_optimization = os.environ.get("RECAP_ENABLE_MEMORY_OPTIMIZATION", "1") == "1"
 
         # Initialize STAIR retrieval system
         self.retrieval = STAIRRetrieval(
@@ -79,6 +81,8 @@ class MemoryPlugin:
             enable_recurring_recall=enable_recurring_recall,
             enable_filtering=enable_filtering,
             enable_ordering=enable_ordering,
+            enable_deduplication=enable_deduplication,
+            enable_memory_optimization=enable_memory_optimization,
         )
 
     def retrieve(

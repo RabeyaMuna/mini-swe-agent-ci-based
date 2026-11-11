@@ -87,8 +87,12 @@ def main() -> None:
                    help="Skip STAGE 2 applicability filtering (for component ablation)")
     p.add_argument("--disable-ordering", action="store_true",
                    help="Skip STAGE 6 dependency-based reordering (for component ablation)")
+    p.add_argument("--disable-deduplication", action="store_true",
+                   help="Skip STAGE 5.5 semantic clustering and duplicate merging")
+    p.add_argument("--disable-memory-optimization", action="store_true",
+                   help="Pass all retrieved L1/L2/L3 matches to enrichment without cross-level pruning")
     p.add_argument("--minimal-retrieval", action="store_true",
-                   help="Minimal mode: only retrieve and enrich, skip ALL enhancements (filtering, dependency expansion, recurring recall, ordering). Equivalent to disabling all 4 components.")
+                   help="Minimal mode: only retrieve and enrich; skip filtering, dependency expansion, recurring recall, deduplication/clustering, ordering, and cross-level memory optimization.")
     args = p.parse_args()
 
     # If --minimal-retrieval is set, enable all disable flags
@@ -97,6 +101,8 @@ def main() -> None:
         args.disable_recurring_recall = True
         args.disable_filtering = True
         args.disable_ordering = True
+        args.disable_deduplication = True
+        args.disable_memory_optimization = True
 
     # Resolve and slug the model name for stable output paths
     resolved_model = resolve_model_alias(args.model) or args.model
@@ -162,6 +168,8 @@ def main() -> None:
     os.environ["RECAP_ENABLE_RECURRING_RECALL"] = "0" if args.disable_recurring_recall else "1"
     os.environ["RECAP_ENABLE_FILTERING"] = "0" if args.disable_filtering else "1"
     os.environ["RECAP_ENABLE_ORDERING"] = "0" if args.disable_ordering else "1"
+    os.environ["RECAP_ENABLE_DEDUPLICATION"] = "0" if args.disable_deduplication else "1"
+    os.environ["RECAP_ENABLE_MEMORY_OPTIMIZATION"] = "0" if args.disable_memory_optimization else "1"
 
     # Import and call the Typer command function directly
     from minisweagent.run.benchmarks.cibench import main as cibench_main  # type: ignore
