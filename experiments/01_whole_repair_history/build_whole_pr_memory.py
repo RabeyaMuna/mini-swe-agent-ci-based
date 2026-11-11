@@ -39,6 +39,7 @@ from utilities.llm_invoker import (  # noqa: E402
 )
 from utilities.llm_model import LitellmModel  # noqa: E402
 from utilities.model_registry import configure_model_environment  # noqa: E402
+from utilities.run_metrics import RunMetricsRecorder  # noqa: E402
 from utilities.dependency_evidence import (  # noqa: E402
     build_dependency_graph_from_structured_diff,
 )
@@ -52,6 +53,7 @@ DEFAULT_MEMORY_IDS = PROJECT_ROOT / "data" / "memory_issue_ids.json"
 DEFAULT_LOG_DETAILS = PROJECT_ROOT / "data" / "log_details.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "experimental_data" / "whole_repair_history"
 DEFAULT_DATASET = "ci-benchmark-user/ci-repair-bench"
+CONSTRUCTION_METRICS_DIRNAME = "construction_metrics"
 
 
 def issue_id(record: dict[str, Any]) -> str:
@@ -680,6 +682,8 @@ def _reduce_summaries_to_fit(
     """Hierarchically reduce summaries; never truncate or silently discard one."""
     reduced = summaries
     rounds = 0
+    old_phase = getattr(llm, "_current_phase", None)
+
     while len(json.dumps(reduced, ensure_ascii=False)) > max_chars:
         rounds += 1
         if rounds > 8:
@@ -687,6 +691,10 @@ def _reduce_summaries_to_fit(
         batches = _summary_batches(reduced, max_chars)
         next_round = []
         for batch_index, batch in enumerate(batches, 1):
+            # Set phase for metrics tracking
+            if hasattr(llm, 'metrics_recorder') and llm.metrics_recorder:
+                llm._current_phase = f"reduction_r{rounds}_b{batch_index}"
+
             result = _invoke_single_object(
                 llm,
                 _reduction_prompt(batch, rounds),
@@ -706,6 +714,11 @@ def _reduce_summaries_to_fit(
                 "--max-evidence-chars"
             )
         reduced = next_round
+
+    # Restore phase
+    if old_phase is not None:
+        llm._current_phase = old_phase
+
     return reduced, rounds
 
 
@@ -780,11 +793,82 @@ Do not return a universal_patterns array or multiple patterns.
 
 def _invoke_single_object(llm: Any, prompt: str, context: str) -> dict[str, Any]:
     value = invoke_llm_with_retry(
-        llm=llm, prompt=prompt, parse_json=True, max_tokens=16_000
+        llm=llm, prompt=prompt, parse_json=True, max_tokens=32_000
     )
+
+    # Handle length limit signal - chunk/prompt was too large for model output
+    if value == "SPLIT_REQUIRED":
+        raise ValueError(
+            f"{context}: generation exhausted output budget (32k tokens). "
+            "The model could not fit its response within the token limit. "
+            "This usually means the input was too complex or the chunk too large."
+        )
+
     if not isinstance(value, dict):
         raise ValueError(f"{context}: model did not return one object")
+
+    # Extract and log token usage before removing metadata
+    metadata = value.get("_metadata", {})
+    if metadata:
+        usage = metadata.get("usage") or metadata.get("usage_metadata") or {}
+        if usage:
+            input_tok = usage.get("prompt_tokens") or usage.get("input_tokens", 0)
+            output_tok = usage.get("completion_tokens") or usage.get("output_tokens", 0)
+            total_tok = usage.get("total_tokens", input_tok + output_tok)
+            print(f"      [API] {context}")
+            print(f"            tokens: prompt={input_tok:,}, completion={output_tok:,}, total={total_tok:,}")
+
+    # Usage is recorded durably by RunMetricsRecorder. Do not leak accounting
+    # metadata into retrieval-facing L1/L2/L3 memory records.
+    value.pop("_metadata", None)
     return value
+
+
+def _construction_metrics_manifest(
+    output_dir: Path, generated_ids: list[str]
+) -> dict[str, Any]:
+    """Summarize durable memory-construction accounting for the build manifest."""
+    metrics_dir = output_dir / CONSTRUCTION_METRICS_DIRNAME
+    report_path = metrics_dir / "cost_time_report.json"
+    result: dict[str, Any] = {
+        "directory": CONSTRUCTION_METRICS_DIRNAME,
+        "report": f"{CONSTRUCTION_METRICS_DIRNAME}/cost_time_report.json",
+        "instrumented_issue_count": 0,
+        "completed_instrumented_issue_count": 0,
+        "complete_memory_coverage": False,
+        "summary": {},
+    }
+    if not report_path.exists():
+        return result
+
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return result
+
+    instances = report.get("instances", [])
+    if not isinstance(instances, list):
+        instances = []
+    instrumented_ids = {
+        str(item.get("instance_id"))
+        for item in instances
+        if isinstance(item, dict)
+    }
+    completed_ids = {
+        str(item.get("instance_id"))
+        for item in instances
+        if isinstance(item, dict) and int(item.get("completed_attempts", 0)) > 0
+    }
+    generated_set = {str(iid) for iid in generated_ids}
+    result.update(
+        {
+            "instrumented_issue_count": len(instrumented_ids),
+            "completed_instrumented_issue_count": len(completed_ids),
+            "complete_memory_coverage": generated_set.issubset(completed_ids),
+            "summary": report.get("summary", {}),
+        }
+    )
+    return result
 
 
 def _invoke_validated_object(
@@ -799,7 +883,19 @@ def _invoke_validated_object(
     attempt_prompt = prompt
     last_error: ValueError | None = None
     for attempt in range(1, max_attempts + 1):
-        value = _invoke_single_object(llm, attempt_prompt, context)
+        try:
+            value = _invoke_single_object(llm, attempt_prompt, context)
+        except ValueError as exc:
+            # If we hit a length limit, propagate it immediately
+            if "exhausted output budget" in str(exc):
+                raise ValueError(
+                    f"{context}: model output budget exhausted. The evidence or "
+                    "cumulative patch is too large. Consider increasing "
+                    "--max-evidence-chars or reviewing the input complexity."
+                ) from exc
+            # For other errors, re-raise
+            raise
+
         try:
             validator(value)
             return value
@@ -912,7 +1008,15 @@ def generate_whole_pr_abstractions(
         )
         context_payloads = _context_payloads(episode, payload_chars=payload_chars)
         summaries: list[dict[str, Any]] = []
+
+        # Track phase for metrics
+        old_phase = getattr(llm, "_current_phase", None)
+
         for payload_index, payload in enumerate(patch_payloads, 1):
+            # Set phase for metrics tracking
+            if hasattr(llm, 'metrics_recorder') and llm.metrics_recorder:
+                llm._current_phase = f"patch_chunk_{payload_index}"
+
             result = _invoke_single_object(
                 llm,
                 _patch_summary_prompt(payload, global_context),
@@ -926,7 +1030,12 @@ def generate_whole_pr_abstractions(
                     "summary": result,
                 }
             )
+
         for payload_index, payload in enumerate(context_payloads, 1):
+            # Set phase for metrics tracking
+            if hasattr(llm, 'metrics_recorder') and llm.metrics_recorder:
+                llm._current_phase = f"context_chunk_{payload_index}"
+
             result = _invoke_single_object(
                 llm,
                 _context_summary_prompt(payload, global_context),
@@ -940,6 +1049,10 @@ def generate_whole_pr_abstractions(
                     "summary": result,
                 }
             )
+
+        # Restore phase
+        if old_phase is not None:
+            llm._current_phase = old_phase
         reduced_summaries, reduction_rounds = _reduce_summaries_to_fit(
             summaries, llm, iid, reduction_chars
         )
@@ -975,27 +1088,107 @@ def generate_whole_pr_abstractions(
         )
 
     processing["processing_schema_version"] = 1
+
+    # Track phases for L1/L2/L3 generation
+    old_phase = getattr(llm, "_current_phase", None)
+
+    if hasattr(llm, 'metrics_recorder') and llm.metrics_recorder:
+        llm._current_phase = "l1_generation"
     l1 = _invoke_validated_object(
         llm,
         l1_prompt,
         f"Issue {iid} L1",
         lambda value: _validate_l1_object(value, iid),
     )
+
+    if hasattr(llm, 'metrics_recorder') and llm.metrics_recorder:
+        llm._current_phase = "l2_generation"
     l2 = _invoke_validated_object(
         llm,
         build_l2_prompt(l1),
         f"Issue {iid} L2",
         lambda value: _validate_l2_object(value, iid),
     )
+
+    if hasattr(llm, 'metrics_recorder') and llm.metrics_recorder:
+        llm._current_phase = "l3_generation"
     l3 = _invoke_validated_object(
         llm,
         build_l3_prompt(l1, l2),
         f"Issue {iid} L3",
         lambda value: _validate_l3_object(value, iid),
     )
+
+    # Restore phase
+    if old_phase is not None:
+        llm._current_phase = old_phase
+
     value = {"l1": l1, "l2": l2, "l3": l3}
     validate_abstraction(value, iid)
     return value, processing
+
+
+def _print_instance_usage_summary(metrics: Any, iid: str) -> None:
+    """Print comprehensive token usage and cost summary for the instance."""
+    if metrics is None:
+        return
+
+    try:
+        snapshot = metrics.snapshot()
+        if not snapshot:
+            return
+
+        totals = snapshot.get("totals", {})
+        api_calls = snapshot.get("api_calls", [])
+
+        if not totals:
+            return
+
+        print(f"\n      ═══ Instance {iid} Token Usage Summary ═══")
+        print(f"      API Calls: {totals.get('api_calls', 0)}")
+        print(f"      Input Tokens: {totals.get('input_tokens', 0):,}")
+        print(f"      Cached Input: {totals.get('cached_input_tokens', 0):,}")
+        print(f"      Output Tokens: {totals.get('output_tokens', 0):,}")
+        print(f"      Reasoning Tokens: {totals.get('reasoning_output_tokens', 0):,}")
+        total_tokens = (
+            totals.get('input_tokens', 0) +
+            totals.get('output_tokens', 0) +
+            totals.get('reasoning_output_tokens', 0)
+        )
+        print(f"      Total Tokens: {total_tokens:,}")
+        print(f"      Cost: ${totals.get('cost_usd', 0):.6f}")
+        print(f"      API Time: {totals.get('api_time_seconds', 0):.1f}s")
+
+        # Show breakdown by phase
+        phase_breakdown = {}
+        for call in api_calls:
+            if not isinstance(call, dict):
+                continue
+            phase = call.get("phase", "unknown")
+            if phase not in phase_breakdown:
+                phase_breakdown[phase] = {
+                    "calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_usd": 0.0
+                }
+            phase_breakdown[phase]["calls"] += 1
+            phase_breakdown[phase]["input_tokens"] += call.get("input_tokens", 0)
+            phase_breakdown[phase]["output_tokens"] += call.get("output_tokens", 0)
+            phase_breakdown[phase]["cost_usd"] += call.get("cost_usd", 0.0)
+
+        if phase_breakdown:
+            print(f"\n      Phase Breakdown:")
+            for phase, stats in sorted(phase_breakdown.items()):
+                print(
+                    f"        {phase}: {stats['calls']} calls, "
+                    f"{stats['input_tokens']:,} in + {stats['output_tokens']:,} out, "
+                    f"${stats['cost_usd']:.6f}"
+                )
+        print(f"      ═══════════════════════════════════════════\n")
+
+    except Exception as exc:
+        print(f"      Warning: Could not print usage summary: {exc}")
 
 
 def _required_text(mapping: dict[str, Any], key: str, context: str) -> str:
@@ -1242,6 +1435,7 @@ def main() -> int:
     # retrieval-compatible names, but the directory describes their true
     # record scope.
     memory_dir = output_dir / "whole_pr_trs"
+    construction_metrics_dir = output_dir / CONSTRUCTION_METRICS_DIRNAME
     raw_path = output_dir / "raw_episodes.json"
     processing_path = output_dir / "abstraction_metadata.json"
     l1_path = memory_dir / "failure_memory.json"
@@ -1324,22 +1518,67 @@ def main() -> int:
             continue
 
         print(f"[{index}/{len(memory_ids)}] {iid}: building singular L1/L2/L3")
-        abstraction, processing_metadata = generate_whole_pr_abstractions(
-            episode, llm, args.max_evidence_chars
+        metrics = RunMetricsRecorder(
+            construction_metrics_dir,
+            iid,
+            agent="whole_pr_memory_builder",
+            model=str(getattr(llm, "model_name", None) or args.model),
+            direction="whole_history",
+            ablation="whole_pr_l1_l2_l3",
         )
-        l1, l2, l3 = build_memory_records(
-            episode,
-            abstraction,
-        )
-        l1_by_id[iid], l2_by_id[iid], l3_by_id[iid] = l1, l2, l3
-        processing_by_id[iid] = {"issue_id": iid, **processing_metadata}
-        _write_json(l1_path, [l1_by_id[key] for key in memory_ids if key in l1_by_id])
-        _write_json(l2_path, [l2_by_id[key] for key in memory_ids if key in l2_by_id])
-        _write_json(l3_path, [l3_by_id[key] for key in memory_ids if key in l3_by_id])
-        _write_json(
-            processing_path,
-            [processing_by_id[key] for key in memory_ids if key in processing_by_id],
-        )
+        llm.metrics_recorder = metrics
+        try:
+            abstraction, processing_metadata = generate_whole_pr_abstractions(
+                episode, llm, args.max_evidence_chars
+            )
+            l1, l2, l3 = build_memory_records(
+                episode,
+                abstraction,
+            )
+            l1_by_id[iid], l2_by_id[iid], l3_by_id[iid] = l1, l2, l3
+            processing_by_id[iid] = {"issue_id": iid, **processing_metadata}
+            _write_json(
+                l1_path, [l1_by_id[key] for key in memory_ids if key in l1_by_id]
+            )
+            _write_json(
+                l2_path, [l2_by_id[key] for key in memory_ids if key in l2_by_id]
+            )
+            _write_json(
+                l3_path, [l3_by_id[key] for key in memory_ids if key in l3_by_id]
+            )
+            _write_json(
+                processing_path,
+                [processing_by_id[key] for key in memory_ids if key in processing_by_id],
+            )
+        except BaseException as exc:
+            status = (
+                "interrupted"
+                if isinstance(exc, (KeyboardInterrupt, SystemExit))
+                else "failed"
+            )
+            metrics.finish(status, error=f"{type(exc).__name__}: {exc}")
+            _print_instance_usage_summary(metrics, iid)
+            raise
+        else:
+            metrics.finish(
+                "completed",
+                metadata={
+                    "issue_id": iid,
+                    "chunking_applied": processing_metadata.get("chunking_applied"),
+                    "graph_chunk_count": processing_metadata.get(
+                        "graph_chunk_count"
+                    ),
+                    "patch_payload_count": processing_metadata.get(
+                        "patch_payload_count"
+                    ),
+                    "context_payload_count": processing_metadata.get(
+                        "context_payload_count"
+                    ),
+                },
+            )
+            _print_instance_usage_summary(metrics, iid)
+        finally:
+            llm.metrics_recorder = None
 
     _write_json(output_dir / "memory_issue_ids.json", memory_ids)
     generated_ids = [
@@ -1389,6 +1628,9 @@ def main() -> int:
         "incomplete_issue_ids": incomplete_ids,
         "dependency_graph_chunked_issue_ids": chunked_ids,
         "abstraction_input_truncated_issue_ids": truncated_ids,
+        "construction_metrics": _construction_metrics_manifest(
+            output_dir, generated_ids
+        ),
         "invariants": {
             "problem_decomposition": False,
             "problem_repair_attribution": False,
@@ -1407,9 +1649,64 @@ def main() -> int:
             }
     _write_json(output_dir / "build_manifest.json", manifest)
 
+    print(f"\n{'='*70}")
+    print(f"Build Summary:")
+    print(f"{'='*70}")
     print(f"Raw episodes: {manifest['raw_episode_count']}/{len(memory_ids)}")
     print(f"Complete L1/L2/L3: {len(generated_ids)}/{len(memory_ids)}")
     print(f"Output: {output_dir}")
+
+    # Print aggregate token usage and cost summary
+    if not args.collect_only:
+        construction_metrics = manifest.get("construction_metrics", {})
+        summary = construction_metrics.get("summary", {})
+        if summary:
+            print(f"\n{'─'*70}")
+            print(f"Aggregate Token Usage & Cost Across All Instances:")
+            print(f"{'─'*70}")
+            print(f"Total Instances Processed: {summary.get('instances', 0)}")
+            print(f"Total API Calls: {summary.get('total_input_tokens', 0) + summary.get('total_output_tokens', 0):,}")
+            print(f"Total Input Tokens: {summary.get('total_input_tokens', 0):,}")
+            print(f"  - Cached: {summary.get('total_cached_input_tokens', 0):,}")
+            print(f"  - Uncached: {summary.get('total_input_tokens', 0) - summary.get('total_cached_input_tokens', 0):,}")
+            print(f"Total Output Tokens: {summary.get('total_output_tokens', 0):,}")
+            print(f"Total Reasoning Tokens: {summary.get('total_reasoning_output_tokens', 0):,}")
+            total_all_tokens = (
+                summary.get('total_input_tokens', 0) +
+                summary.get('total_output_tokens', 0) +
+                summary.get('total_reasoning_output_tokens', 0)
+            )
+            print(f"Grand Total Tokens: {total_all_tokens:,}")
+            print(f"Total Cost: ${summary.get('total_cost_usd', 0):.6f}")
+            print(f"Total API Time: {summary.get('total_api_time_seconds', 0):.1f}s")
+
+            # Calculate averages
+            if summary.get('instances', 0) > 0:
+                avg_tokens = total_all_tokens / summary['instances']
+                avg_cost = summary.get('total_cost_usd', 0) / summary['instances']
+                print(f"\nAverages per Instance:")
+                print(f"  Tokens: {avg_tokens:,.0f}")
+                print(f"  Cost: ${avg_cost:.6f}")
+
+            # Estimate for remaining instances
+            remaining = len(memory_ids) - len(generated_ids)
+            if remaining > 0 and summary.get('instances', 0) > 0:
+                est_tokens = remaining * avg_tokens
+                est_cost = remaining * avg_cost
+                print(f"\nEstimate for Remaining {remaining} Instances:")
+                print(f"  Estimated Tokens: {est_tokens:,.0f}")
+                print(f"  Estimated Cost: ${est_cost:.6f}")
+
+                # Estimate for all 157 instances
+                total_instances = 157
+                if len(generated_ids) < total_instances:
+                    total_est_tokens = total_instances * avg_tokens
+                    total_est_cost = total_instances * avg_cost
+                    print(f"\nEstimate for All {total_instances} Instances:")
+                    print(f"  Estimated Total Tokens: {total_est_tokens:,.0f}")
+                    print(f"  Estimated Total Cost: ${total_est_cost:.6f}")
+
+    print(f"{'='*70}\n")
     return 0
 
 

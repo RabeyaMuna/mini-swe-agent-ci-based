@@ -84,6 +84,24 @@ reintroduce problem-specific records.
 For the fixed 157 historical PRs, a completed build therefore contains 157 L1
 records, 157 L2 strategies, and 157 L3 patterns.
 
+## Recent Improvements (2026-11-10)
+
+**Token Tracking & Error Handling**  
+The build script now provides comprehensive real-time token usage tracking and
+improved error handling. See [CHANGES.md](CHANGES.md) for detailed documentation.
+
+Key features:
+- Real-time token usage display for every API call
+- Per-instance summary with phase breakdown
+- Aggregate statistics with cost estimates for remaining work
+- Enhanced error handling for token length limits
+- Detailed phase tracking (patch chunks, reduction rounds, L1/L2/L3)
+
+All token usage and costs are automatically saved to:
+- `construction_metrics/run_metrics.json` - Full API call ledger
+- `construction_metrics/cost_time_report.json` - Summary report
+- `construction_metrics/detailed_usage.json` - Per-instance breakdown
+
 ## Build the memory
 
 The default command uses `data/memory_issue_ids.json`, the pinned raw
@@ -94,6 +112,10 @@ three singular abstractions. It does not call GitHub or require a GitHub token:
 python experiments/01_whole_repair_history/build_whole_pr_memory.py \
   --model deepseek-v4-flash
 ```
+
+The build provides real-time token usage feedback and estimates costs for
+remaining instances. At the end, you'll see aggregate statistics including
+estimated total cost for all 157 instances.
 
 All 157 records use the same benchmark-only evidence policy: failing logs,
 workflow and repository metadata, fail/pass SHAs, cumulative repair diff,
@@ -130,11 +152,25 @@ experimental_data/whole_repair_history/
 ├── raw_episodes.json
 ├── abstraction_metadata.json
 ├── build_manifest.json
+├── construction_metrics/
+│   ├── run_metrics.json
+│   ├── cost_time_report.json
+│   ├── cost_time_report.csv
+│   └── detailed_usage.json
 └── whole_pr_trs/
     ├── failure_memory.json
     ├── repo_memory.json
     └── cross_memory.json
 ```
+
+Memory construction accounting is checkpointed after every LLM call. The JSON
+and CSV reports include per-PR and aggregate API calls, input, cached-input,
+cache-write, output and reasoning tokens, API time, cost, pricing source, and
+failed or resumed attempts. `build_manifest.json` records whether every
+generated memory record has complete construction-metrics coverage. A build
+that was partially completed before accounting was introduced must be rebuilt
+to obtain reviewer-grade totals for all historical PRs; missing historical
+calls are never estimated silently.
 
 The existing standard and cross-repository memories are not modified.
 

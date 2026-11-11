@@ -196,10 +196,13 @@ class LitellmModel:
                 completion_kwargs["api_base"] = self.api_base
 
             # Make API call
+            # Use _current_phase if set, otherwise default to "context_llm"
+            phase = getattr(self, "_current_phase", "context_llm")
+
             safe_metrics_call(
                 self.metrics_recorder,
                 "begin_api_call",
-                phase="context_llm",
+                phase=phase,
                 model=self.model_name,
             )
             response = litellm.completion(**completion_kwargs)
@@ -210,7 +213,7 @@ class LitellmModel:
                     self.metrics_recorder,
                     "record_response",
                     response=response,
-                    phase="context_llm",
+                    phase=phase,
                     model=self.model_name,
                     duration_seconds=elapsed,
                 )
@@ -296,11 +299,12 @@ class LitellmModel:
 
         except Exception as e:
             elapsed = time.time() - start_time if "start_time" in locals() else 0.0
+            phase = getattr(self, "_current_phase", "context_llm")
             if self.metrics_recorder is not None:
                 safe_metrics_call(
                     self.metrics_recorder,
                     "record_api_call",
-                    phase="context_llm",
+                    phase=phase,
                     model=self.model_name,
                     duration_seconds=elapsed,
                     status="failed",

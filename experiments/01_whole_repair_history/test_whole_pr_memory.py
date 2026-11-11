@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -195,6 +196,52 @@ def test_retries_incomplete_l1_before_generating_l2(monkeypatch):
 
     assert actual == expected
     assert stages == ["l1", "l1", "l2", "l3"]
+
+
+def test_single_object_strips_usage_metadata_from_retrieval_memory(monkeypatch):
+    def fake_invoke(**kwargs):
+        return {
+            "problem": "Aggregate CI failure",
+            "_metadata": {"usage": {"prompt_tokens": 10}},
+        }
+
+    monkeypatch.setattr(builder, "invoke_llm_with_retry", fake_invoke)
+
+    value = builder._invoke_single_object(object(), "prompt", "test")
+
+    assert value == {"problem": "Aggregate CI failure"}
+
+
+def test_construction_metrics_manifest_reports_incomplete_coverage(tmp_path):
+    metrics_dir = tmp_path / builder.CONSTRUCTION_METRICS_DIRNAME
+    metrics_dir.mkdir()
+    (metrics_dir / "cost_time_report.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "instances": 1,
+                    "total_input_tokens": 100,
+                    "total_output_tokens": 20,
+                    "total_cost_usd": 0.01,
+                },
+                "instances": [
+                    {
+                        "instance_id": "100",
+                        "completed_attempts": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    partial = builder._construction_metrics_manifest(tmp_path, ["100", "101"])
+    complete = builder._construction_metrics_manifest(tmp_path, ["100"])
+
+    assert partial["complete_memory_coverage"] is False
+    assert partial["instrumented_issue_count"] == 1
+    assert partial["summary"]["total_cost_usd"] == 0.01
+    assert complete["complete_memory_coverage"] is True
 
 
 def test_strict_collection_rejects_missing_cumulative_patch():
