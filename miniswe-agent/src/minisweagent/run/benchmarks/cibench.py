@@ -2529,6 +2529,7 @@ def process_instance(
     diff = ""
     ci_ctx = {}
     ci_memory: Dict[str, Any] = {}  # full memory retrieval result - saved to trajectory
+    memory_plugin = None
     extra_info: Dict[str, Any] = {}
     prediction_ready = True
 
@@ -2682,6 +2683,52 @@ def process_instance(
 
     try:
         env, testbed_path = setup_local_environment(config, instance, instance_dir)
+
+        # The retrieval stages operate before the repository is cloned, so log
+        # evidence is the strongest signal available there.  Now that sha_fail
+        # is checked out, independently verify every memory-only recurring or
+        # dependency hypothesis against the actual failure-state source before
+        # it can enter the repair-agent prompt.
+        if memory_enabled and ci_memory and memory_plugin is not None:
+            before_source_gate = len(ci_memory.get("problems") or [])
+            ci_memory = memory_plugin.validate_candidates_against_checkout(
+                ci_memory,
+                Path(testbed_path),
+                command_runner=lambda command, timeout: env.execute(
+                    {"command": command},
+                    cwd=str(testbed_path),
+                    timeout=timeout,
+                ),
+            )
+            actionable = ci_memory.get("problems") or []
+            separate_problems = [
+                _normalize_memory_problem_for_agent(problem, index)
+                for index, problem in enumerate(actionable, 1)
+                if isinstance(problem, dict)
+            ]
+            ci_memory.setdefault("llm_selection", {})[
+                "separate_problems"
+            ] = separate_problems
+            validation_summary = ci_memory.get("source_validation") or {}
+            logger.info(
+                "[CIBench] Failure-state source gate: input=%d, actionable=%d, withheld=%d",
+                before_source_gate,
+                len(separate_problems),
+                int(validation_summary.get("withheld_count") or 0),
+            )
+            extra_info["memory_summary"].update({
+                "source_validation_enabled": bool(validation_summary.get("enabled")),
+                "source_validated_actionable": len(separate_problems),
+                "source_validation_withheld": int(
+                    validation_summary.get("withheld_count") or 0
+                ),
+            })
+            _save_retrieval_diagnostic(
+                output_dir / "memory_source_validation_debug.jsonl",
+                instance_id,
+                ci_ctx,
+                ci_memory,
+            )
 
         # Fix max_tokens -> max_completion_tokens for GPT-4o and newer models
         model_config = dict(config.get("model", {}))
@@ -3009,6 +3056,12 @@ def _build_memory_traj(ci_memory: Dict[str, Any], task: str) -> Dict[str, Any]:
         # ── Step 5b: LLM 2 - Experience Synthesizer output ───────────────
         # The full repair guidance document produced from relevant candidates
         "llm2_guidance": llm_sel.get("guidance_document") or {},
+        # ── Failure-state source validation before repair handoff ────────
+        "source_validation": ci_memory.get("source_validation") or {},
+        "actionable_problems": ci_memory.get("problems") or [],
+        "source_rejected_memory_problems": (
+            ci_memory.get("source_rejected_memory_problems") or []
+        ),
         # ── What went into the agent's context ────────────────────────────
         # The exact ## Memory Context section injected into problem_statement
         "injected_memory_block": _extract_memory_block(task),
@@ -3167,6 +3220,12 @@ def _save_retrieval_diagnostic(
                 # full document also stored for completeness
                 "_full_guidance_document": guidance,
             },
+            # ── Failure-state source gate ────────────────────────────────
+            "source_validation": memory.get("source_validation") or {},
+            "actionable_problems": memory.get("problems") or [],
+            "source_rejected_memory_problems": (
+                memory.get("source_rejected_memory_problems") or []
+            ),
             # ── What was injected into agent context ──────────────────────
             "analysis_summary": str(llm_sel.get("analysis_summary") or ""),
         }

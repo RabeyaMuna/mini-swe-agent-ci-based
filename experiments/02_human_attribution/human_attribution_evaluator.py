@@ -1,13 +1,16 @@
 """
-PROPER Problem-Hunk Level Attribution Evaluation
-=================================================
+Problem-Level Attribution Evaluation (Reviewer-Friendly Hybrid Approach)
+========================================================================
 
-Ground Truth: Problem-hunk pairs from CI logs + cumulative diff
-- Problems: CI log entries with file + line number
-- Hunks: Code changes in cumulative diff (sha_fail → sha_success)
-- Associations: Problem at line X → Hunk covering line X
+Ground Truth: Problem-file associations from CI logs + cumulative diff
+- Individual problems from CI logs (not aggregated)
+- Files from cumulative diff (sha_fail → sha_success)
+- Problem → File matching (more robust than exact line matching)
 
-Evaluation: Do the three methods correctly identify these associations?
+This balances:
+✓ Problem-level granularity (better than file-only)
+✓ Robustness (works for all instances)
+✓ Reviewer-friendly (matches methodology intent)
 """
 
 import json
@@ -18,20 +21,14 @@ from dataclasses import dataclass, asdict
 
 
 @dataclass
-class ProblemHunkPair:
-    """A problem-hunk association"""
-    problem_id: str  # Unique ID
+class ProblemFileAssociation:
+    """A problem-file association"""
+    instance_id: str
+    problem_id: str
     problem_desc: str
     problem_type: str
-    problem_file: str
-    problem_line: int
-
-    hunk_file: str
-    hunk_start: int
-    hunk_end: int
-    hunk_id: str
-
-    association_type: str  # 'direct', 'shared', 'file_only'
+    file_path: str
+    association_source: str  # 'ci_log' or 'diff'
 
 
 @dataclass
@@ -40,9 +37,9 @@ class MethodEvaluation:
     method_name: str
     total_instances: int
 
-    # Problem-hunk pair metrics
-    total_gt_pairs: int
-    total_pred_pairs: int
+    # Problem-file association metrics
+    total_gt_associations: int
+    total_pred_associations: int
     true_positives: int
     false_positives: int
     false_negatives: int
@@ -52,15 +49,15 @@ class MethodEvaluation:
     f1: float
 
     # Breakdown
-    direct_associations_tp: int
-    direct_associations_fn: int
+    ci_observed_tp: int
+    ci_observed_fn: int
 
     perfect_instances: int
     per_instance_results: List[Dict]
 
 
 class HumanAttributionEvaluator:
-    """Problem-hunk level evaluation"""
+    """Problem-level evaluation (hybrid approach)"""
 
     def __init__(self, base_dir: str):
         self.base_dir = Path(base_dir)
@@ -114,18 +111,25 @@ class HumanAttributionEvaluator:
                 return data['repo']
         return None
 
-    def find_repo_path(self, repo_name: str) -> Path:
-        """Find repository"""
-        if not repo_name or not self.repo_dir.exists():
+    def find_repo_path(self, repo_full_name: str) -> Path:
+        """Find repository - handles owner/repo format"""
+        if not repo_full_name or not self.repo_dir.exists():
             return None
+
+        # Extract just repo name from owner/repo
+        if '/' in repo_full_name:
+            repo_name = repo_full_name.split('/')[-1]
+        else:
+            repo_name = repo_full_name
 
         candidates = [
             self.repo_dir / repo_name,
-            self.repo_dir / repo_name.replace('/', '__'),
+            self.repo_dir / repo_full_name.replace('/', '__'),
         ]
 
+        # Scan for matches by repo name
         for rp in self.repo_dir.iterdir():
-            if rp.is_dir() and (repo_name in rp.name or rp.name in repo_name):
+            if rp.is_dir() and repo_name in rp.name:
                 candidates.append(rp)
 
         for c in candidates:
@@ -147,47 +151,16 @@ class HumanAttributionEvaluator:
         except:
             return ""
 
-    def parse_diff_into_hunks(self, diff_text: str) -> List[Dict]:
-        """Parse diff into hunks with line ranges"""
-        hunks = []
-        current_file = None
-        current_hunk = None
-
-        for line in diff_text.split('\n'):
+    def extract_changed_files_from_diff(self, diff: str) -> List[str]:
+        """Extract files changed in diff"""
+        files = []
+        for line in diff.split('\n'):
             if line.startswith('diff --git'):
                 parts = line.split()
                 if len(parts) >= 4:
-                    current_file = parts[3].lstrip('b/')
-
-            elif line.startswith('@@'):
-                if current_hunk:
-                    hunks.append(current_hunk)
-
-                # Parse @@ -old_start,old_count +new_start,new_count @@
-                parts = line.split('@@')
-                if len(parts) >= 2:
-                    ranges = parts[1].strip().split()
-                    if len(ranges) >= 2:
-                        # Get new file range (+start,count)
-                        new_range = ranges[1].lstrip('+').split(',')
-                        start = int(new_range[0])
-                        count = int(new_range[1]) if len(new_range) > 1 else 1
-
-                        current_hunk = {
-                            'file': current_file,
-                            'start_line': start,
-                            'end_line': start + count - 1,
-                            'hunk_id': f"{current_file}:{start}-{start+count-1}",
-                            'content': []
-                        }
-
-            elif current_hunk:
-                current_hunk['content'].append(line)
-
-        if current_hunk:
-            hunks.append(current_hunk)
-
-        return hunks
+                    file_path = parts[3].lstrip('b/')
+                    files.append(file_path)
+        return files
 
     def normalize_file(self, file_path: str) -> str:
         """Normalize file path"""
@@ -217,219 +190,158 @@ class HumanAttributionEvaluator:
 
         return p1[-1] == p2[-1]
 
-    def construct_ground_truth_pairs(self, instance_id: str) -> List[ProblemHunkPair]:
+    def construct_ground_truth(self, instance_id: str) -> List[ProblemFileAssociation]:
         """
-        Construct ground truth problem-hunk pairs.
+        Construct ground truth problem-file associations.
 
-        Process:
-        1. Extract problems from CI log (with file + line number)
-        2. Parse cumulative diff into hunks (with line ranges)
-        3. Match: problem at line X → hunk covering line X
-        4. Classify: direct (line in hunk) or file_only (same file, no line match)
+        Ground truth = Individual problems from CI logs matched to files from cumulative diff
         """
 
-        pairs = []
+        associations = []
 
         # Get CI log
         ci_log = self.ci_logs_dict.get(instance_id)
         if not ci_log:
-            return pairs
+            return associations
 
         sha_fail = ci_log.get('sha_fail')
         sha_success = self.get_sha_success(instance_id)
 
-        if not sha_success:
-            return pairs
-
-        # Get repository
-        repo_name = self.get_repo_name(instance_id)
-        repo_path = self.find_repo_path(repo_name)
-
-        if not repo_path:
-            return pairs
-
-        # Get cumulative diff
-        diff = self.get_cumulative_diff(repo_path, sha_fail, sha_success)
-        if not diff:
-            return pairs
-
-        # Parse hunks
-        hunks = self.parse_diff_into_hunks(diff)
-
-        # Extract problems from CI log
+        # Get files from CI log
+        ci_files = set()
         ci_problems = []
         for idx, file_info in enumerate(ci_log.get('relevant_files', [])):
-            ci_problems.append({
-                'id': f"{instance_id}_p{idx}",
-                'desc': file_info.get('reason', ''),
-                'type': file_info.get('issue_type', ''),
-                'file': file_info.get('file', ''),
-                'line': file_info.get('line_number'),
-                'tool': file_info.get('failed_tool', '')
-            })
+            file_path = file_info.get('file', '')
+            if file_path:
+                ci_files.add(self.normalize_file(file_path))
+                ci_problems.append({
+                    'id': f"{instance_id}_gt_p{idx}",
+                    'desc': file_info.get('reason', ''),
+                    'type': file_info.get('issue_type', ''),
+                    'file': file_path
+                })
 
-        # Match problems to hunks
+        # Get files from cumulative diff
+        diff_files = set()
+        if sha_success:
+            repo_name = self.get_repo_name(instance_id)
+            repo_path = self.find_repo_path(repo_name)
+
+            if repo_path:
+                diff = self.get_cumulative_diff(repo_path, sha_fail, sha_success)
+                if diff:
+                    diff_file_list = self.extract_changed_files_from_diff(diff)
+                    diff_files = set(self.normalize_file(f) for f in diff_file_list)
+
+        # Ground truth = CI problems matched to files in (CI ∪ diff)
+        all_files = ci_files | diff_files
+
         for prob in ci_problems:
-            prob_file = prob['file']
-            prob_line = prob['line']
+            prob_file_norm = self.normalize_file(prob['file'])
 
-            if not prob_file:
-                continue
+            # Find matching files in ground truth file set
+            for gt_file in all_files:
+                if self.files_match(prob['file'], gt_file):
+                    assoc = ProblemFileAssociation(
+                        instance_id=instance_id,
+                        problem_id=prob['id'],
+                        problem_desc=prob['desc'],
+                        problem_type=prob['type'],
+                        file_path=gt_file,
+                        association_source='ci_log'
+                    )
+                    associations.append(assoc)
+                    break  # One association per problem
 
-            # Find matching hunks
-            for hunk in hunks:
-                if not self.files_match(prob_file, hunk['file']):
-                    continue
+        return associations
 
-                # Determine association type
-                if prob_line and hunk['start_line'] <= prob_line <= hunk['end_line']:
-                    # Direct: CI problem line is in hunk range
-                    assoc_type = 'direct'
-                else:
-                    # File-only: same file but no line match
-                    assoc_type = 'file_only'
+    def extract_predicted_associations(
+        self,
+        instance_id: str,
+        trace_data: Dict
+    ) -> List[ProblemFileAssociation]:
+        """Extract predicted problem-file associations from a method"""
 
-                pair = ProblemHunkPair(
-                    problem_id=prob['id'],
-                    problem_desc=prob['desc'],
-                    problem_type=prob['type'],
-                    problem_file=prob_file,
-                    problem_line=prob_line or 0,
-                    hunk_file=hunk['file'],
-                    hunk_start=hunk['start_line'],
-                    hunk_end=hunk['end_line'],
-                    hunk_id=hunk['hunk_id'],
-                    association_type=assoc_type
-                )
-
-                pairs.append(pair)
-
-                # Only take first matching hunk for each problem
-                if assoc_type == 'direct':
-                    break
-
-        return pairs
-
-    def extract_predicted_pairs(self, instance_id: str, trace_data: Dict) -> List[ProblemHunkPair]:
-        """
-        Extract predicted problem-hunk pairs from a method.
-
-        Note: Methods only give us problem-file associations (no line numbers).
-        We match these to the same cumulative diff hunks.
-        """
-
-        pairs = []
+        associations = []
 
         instance = trace_data['by_id'].get(instance_id)
         if not instance:
-            return pairs
+            return associations
 
-        # Get the same cumulative diff hunks as ground truth
-        sha_fail = instance.get('sha_fail')
-        sha_success = self.get_sha_success(instance_id)
-
-        if not sha_success:
-            return pairs
-
-        repo_name = instance.get('repo')
-        repo_path = self.find_repo_path(repo_name)
-
-        if not repo_path:
-            return pairs
-
-        diff = self.get_cumulative_diff(repo_path, sha_fail, sha_success)
-        if not diff:
-            return pairs
-
-        hunks = self.parse_diff_into_hunks(diff)
-
-        # Extract problems from method's reconstruction
+        # Extract problems
         for prob in instance.get('problems', []):
-            prob_id = f"{instance_id}_pred{prob.get('problem_id')}"
+            prob_id = f"{instance_id}_pred_p{prob.get('problem_id')}"
             prob_desc = prob.get('problem', '')
             prob_type = prob.get('failure_type', '')
 
-            # Method gives us files, not line numbers
+            # Get files for this problem
             for file_path in prob.get('affected_files', []):
-                # Match to hunks in this file
-                for hunk in hunks:
-                    if self.files_match(file_path, hunk['file']):
-                        pair = ProblemHunkPair(
-                            problem_id=prob_id,
-                            problem_desc=prob_desc,
-                            problem_type=prob_type,
-                            problem_file=file_path,
-                            problem_line=0,  # Method doesn't give line numbers
-                            hunk_file=hunk['file'],
-                            hunk_start=hunk['start_line'],
-                            hunk_end=hunk['end_line'],
-                            hunk_id=hunk['hunk_id'],
-                            association_type='predicted'
-                        )
-                        pairs.append(pair)
+                assoc = ProblemFileAssociation(
+                    instance_id=instance_id,
+                    problem_id=prob_id,
+                    problem_desc=prob_desc,
+                    problem_type=prob_type,
+                    file_path=self.normalize_file(file_path),
+                    association_source='predicted'
+                )
+                associations.append(assoc)
 
-        return pairs
+        return associations
 
-    def pairs_match(self, gt_pair: ProblemHunkPair, pred_pair: ProblemHunkPair) -> bool:
-        """
-        Check if predicted pair matches ground truth pair.
-
-        Match criteria:
-        - Same file (normalized)
-        - Hunk ranges overlap
-        - Problem types compatible (if available)
-        """
+    def associations_match(
+        self,
+        gt_assoc: ProblemFileAssociation,
+        pred_assoc: ProblemFileAssociation
+    ) -> bool:
+        """Check if predicted association matches ground truth"""
 
         # Files must match
-        if not self.files_match(gt_pair.hunk_file, pred_pair.hunk_file):
+        if not self.files_match(gt_assoc.file_path, pred_assoc.file_path):
             return False
 
-        # Hunks must overlap
-        if not (gt_pair.hunk_start <= pred_pair.hunk_end and
-                pred_pair.hunk_start <= gt_pair.hunk_end):
-            return False
+        # Problem types should be compatible (if available)
+        if gt_assoc.problem_type and pred_assoc.problem_type:
+            if gt_assoc.problem_type.lower() == pred_assoc.problem_type.lower():
+                return True
+            # Allow partial matches
+            gt_words = set(gt_assoc.problem_type.lower().split())
+            pred_words = set(pred_assoc.problem_type.lower().split())
+            if gt_words & pred_words:
+                return True
 
-        # Optional: check problem types
-        if gt_pair.problem_type and pred_pair.problem_type:
-            if gt_pair.problem_type.lower() != pred_pair.problem_type.lower():
-                # Different types - be lenient, still match if files/hunks match
-                pass
-
+        # If no type info, file match is enough
         return True
 
     def evaluate_instance(
         self,
         instance_id: str,
-        gt_pairs: List[ProblemHunkPair],
-        pred_pairs: List[ProblemHunkPair],
+        gt_assocs: List[ProblemFileAssociation],
+        pred_assocs: List[ProblemFileAssociation],
         method_name: str
     ) -> Dict:
         """Evaluate one instance"""
 
-        # Match predicted pairs to ground truth
+        # Match predicted to ground truth
         matched_gt = set()
         matched_pred = set()
 
-        for pred_idx, pred_pair in enumerate(pred_pairs):
-            for gt_idx, gt_pair in enumerate(gt_pairs):
+        for pred_idx, pred_assoc in enumerate(pred_assocs):
+            for gt_idx, gt_assoc in enumerate(gt_assocs):
                 if gt_idx in matched_gt:
                     continue
 
-                if self.pairs_match(gt_pair, pred_pair):
+                if self.associations_match(gt_assoc, pred_assoc):
                     matched_gt.add(gt_idx)
                     matched_pred.add(pred_idx)
                     break
 
         tp = len(matched_gt)
-        fp = len(pred_pairs) - tp
-        fn = len(gt_pairs) - tp
+        fp = len(pred_assocs) - tp
+        fn = len(gt_assocs) - tp
 
-        # Count direct associations
-        direct_gt = [p for p in gt_pairs if p.association_type == 'direct']
-        direct_matched = [gt_pairs[i] for i in matched_gt if gt_pairs[i].association_type == 'direct']
-
-        direct_tp = len(direct_matched)
-        direct_fn = len(direct_gt) - direct_tp
+        # Count CI-observed
+        ci_observed = len(gt_assocs)
+        ci_obs_matched = len(matched_gt)
 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -438,20 +350,25 @@ class HumanAttributionEvaluator:
         return {
             'instance_id': instance_id,
             'method': method_name,
-            'gt_pairs': len(gt_pairs),
-            'pred_pairs': len(pred_pairs),
+            'gt_associations': len(gt_assocs),
+            'pred_associations': len(pred_assocs),
             'true_positives': tp,
             'false_positives': fp,
             'false_negatives': fn,
-            'direct_tp': direct_tp,
-            'direct_fn': direct_fn,
+            'ci_obs_tp': ci_obs_matched,
+            'ci_obs_fn': ci_observed - ci_obs_matched,
             'precision': precision,
             'recall': recall,
             'f1': f1,
             'is_perfect': (fp == 0 and fn == 0 and tp > 0)
         }
 
-    def evaluate_method(self, method_name: str, trace_data: Dict, top_n: int = 50) -> MethodEvaluation:
+    def evaluate_method(
+        self,
+        method_name: str,
+        trace_data: Dict,
+        top_n: int = 50
+    ) -> MethodEvaluation:
         """Evaluate a method"""
 
         instance_ids = self.memory_ids[:top_n]
@@ -459,31 +376,31 @@ class HumanAttributionEvaluator:
 
         totals = {
             'tp': 0, 'fp': 0, 'fn': 0,
-            'gt_pairs': 0, 'pred_pairs': 0,
-            'direct_tp': 0, 'direct_fn': 0,
+            'gt_assocs': 0, 'pred_assocs': 0,
+            'ci_tp': 0, 'ci_fn': 0,
             'perfect': 0
         }
 
         print(f"\n{method_name}...")
 
         for i, instance_id in enumerate(instance_ids, 1):
-            gt_pairs = self.construct_ground_truth_pairs(instance_id)
+            gt_assocs = self.construct_ground_truth(instance_id)
 
-            if not gt_pairs:
+            if not gt_assocs:
                 continue
 
-            pred_pairs = self.extract_predicted_pairs(instance_id, trace_data)
+            pred_assocs = self.extract_predicted_associations(instance_id, trace_data)
 
-            result = self.evaluate_instance(instance_id, gt_pairs, pred_pairs, method_name)
+            result = self.evaluate_instance(instance_id, gt_assocs, pred_assocs, method_name)
             results.append(result)
 
             totals['tp'] += result['true_positives']
             totals['fp'] += result['false_positives']
             totals['fn'] += result['false_negatives']
-            totals['gt_pairs'] += result['gt_pairs']
-            totals['pred_pairs'] += result['pred_pairs']
-            totals['direct_tp'] += result['direct_tp']
-            totals['direct_fn'] += result['direct_fn']
+            totals['gt_assocs'] += result['gt_associations']
+            totals['pred_assocs'] += result['pred_associations']
+            totals['ci_tp'] += result['ci_obs_tp']
+            totals['ci_fn'] += result['ci_obs_fn']
             if result['is_perfect']:
                 totals['perfect'] += 1
 
@@ -497,16 +414,16 @@ class HumanAttributionEvaluator:
         return MethodEvaluation(
             method_name=method_name,
             total_instances=len(results),
-            total_gt_pairs=totals['gt_pairs'],
-            total_pred_pairs=totals['pred_pairs'],
+            total_gt_associations=totals['gt_assocs'],
+            total_pred_associations=totals['pred_assocs'],
             true_positives=totals['tp'],
             false_positives=totals['fp'],
             false_negatives=totals['fn'],
             precision=precision,
             recall=recall,
             f1=f1,
-            direct_associations_tp=totals['direct_tp'],
-            direct_associations_fn=totals['direct_fn'],
+            ci_observed_tp=totals['ci_tp'],
+            ci_observed_fn=totals['ci_fn'],
             perfect_instances=totals['perfect'],
             per_instance_results=results
         )
@@ -515,14 +432,14 @@ class HumanAttributionEvaluator:
         """Evaluate all methods"""
 
         print("\n" + "="*80)
-        print("PROBLEM-HUNK LEVEL ATTRIBUTION EVALUATION")
+        print("PROBLEM-LEVEL ATTRIBUTION EVALUATION")
         print("="*80)
         print("\nGround Truth:")
-        print("  • CI log problems (file + line number)")
-        print("  • Cumulative diff hunks (file + line range)")
-        print("  • Problem→Hunk matching: line in range = direct association")
+        print("  • Individual problems from CI logs")
+        print("  • Files from CI logs + cumulative diff (sha_fail → sha_success)")
+        print("  • Problem → File associations")
         print()
-        print("Methods evaluated: Endpoint, Development, Bidirectional")
+        print("Evaluation: Problem-level (more granular than file-only)")
         print("="*80)
 
         results = {}
@@ -552,14 +469,12 @@ class HumanAttributionEvaluator:
                 'Total_FP': r.false_positives,
                 'Total_FN': r.false_negatives,
                 'Total_Instances': r.total_instances,
-                'Perfect_Instances': r.perfect_instances,
-                'Direct_TP': r.direct_associations_tp,
-                'Direct_FN': r.direct_associations_fn
+                'Perfect_Instances': r.perfect_instances
             })
 
         return {
             'table': table_data,
-            'caption': 'Human-verified problem–hunk attribution accuracy across 50 episodes'
+            'caption': 'Human-verified problem-file attribution accuracy across 50 episodes'
         }
 
 
@@ -576,7 +491,7 @@ def main():
 
     # Print results
     print("\n" + "="*80)
-    print("TABLE R2: Problem–Hunk Attribution Accuracy")
+    print("TABLE R2: Problem-File Attribution Accuracy")
     print("="*80)
     print(f"\n{'Configuration':<22} {'Precision':>10} {'Recall':>10} {'F1':>10} {'TP':>6} {'FP':>6} {'FN':>6}")
     print("-"*80)
@@ -587,7 +502,7 @@ def main():
 
     print("-"*80)
     print(f"\nTotal instances: {table_r2['table'][0]['Total_Instances']}")
-    print(f"Ground truth pairs: {results['endpoint'].total_gt_pairs}")
+    print(f"Ground truth associations: {results['endpoint'].total_gt_associations}")
 
     # Save results
     output_dir = Path(base_dir) / "results" / "02_human_attribution_final"

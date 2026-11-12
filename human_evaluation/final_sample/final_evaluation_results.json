@@ -1,0 +1,23 @@
+{
+  "configuration": "Full ReCAP (Bidirectional)",
+  "sample_size": 83,
+  "instances": 26,
+  "outcomes": {
+    "correct": 14,
+    "incorrect": 69,
+    "partial": 0
+  },
+  "precision": {
+    "strict": 0.169,
+    "with_partial": 0.169,
+    "percentage": "16.9%"
+  },
+  "recall": {
+    "value": 1.0,
+    "percentage": "100.0%"
+  },
+  "f1": {
+    "value": 0.289,
+    "percentage": "28.9%"
+  }
+}

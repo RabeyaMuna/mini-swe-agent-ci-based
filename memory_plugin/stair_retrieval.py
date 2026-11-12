@@ -106,6 +106,7 @@ class STAIRRetrieval:
         enable_ordering: bool = True,
         enable_deduplication: bool = True,
         enable_memory_optimization: bool = True,
+        enable_evidence_gate: bool = True,
     ):
         """
         Initialize retrieval system.
@@ -125,6 +126,8 @@ class STAIRRetrieval:
             enable_deduplication: If False, skip STAGE 5.5 clustering/merging
             enable_memory_optimization: If False, pass all retrieved L1/L2/L3
                 matches to enrichment without cross-level pruning
+            enable_evidence_gate: If False, allow unconfirmed memory-derived
+                problems into the repair prompt
         """
         self.memory_dir = Path(memory_dir)
         self.llm = llm_client
@@ -140,6 +143,7 @@ class STAIRRetrieval:
         self.enable_ordering = enable_ordering
         self.enable_deduplication = enable_deduplication
         self.enable_memory_optimization = enable_memory_optimization
+        self.enable_evidence_gate = enable_evidence_gate
 
         # Storage for dependency problems (extracted in STAGE 4)
         self._dependency_problems = []
@@ -446,6 +450,22 @@ class STAIRRetrieval:
             common_problems = []
             print("[Memory] STAGE 5: SKIP Common patterns detection (disabled by component ablation)")
 
+        # Dependency and recurring problems are hypotheses, not observed target
+        # failures. Keep them out of the actionable repair list unless the
+        # target log/tool/file evidence independently supports them.
+        rejected_memory_problems = []
+        if self.enable_evidence_gate:
+            problems_list, rejected_memory_problems = self._filter_by_target_evidence(
+                problems_list, query
+            )
+            print(
+                "[Memory] STAGE 5.25: Target evidence gate kept "
+                f"{len(problems_list)} problem(s), rejected "
+                f"{len(rejected_memory_problems)} unsupported memory candidate(s)"
+            )
+        else:
+            print("[Memory] STAGE 5.25: SKIP Target evidence gate (disabled)")
+
         # ============================================================
         # STAGE 5.5: Deduplicate across all problem sources
         # ============================================================
@@ -487,9 +507,9 @@ class STAIRRetrieval:
             print("[Memory] STAGE 6: SKIP Reordering (disabled by component ablation)")
 
         # ============================================================
-        # NO FILTERING: Keep all problems after deduplication and reordering
+        # Keep all evidence-gated problems after deduplication and reordering
         # ============================================================
-        print("[Memory] FINAL STAGE: Keeping all problems (no filtering)")
+        print("[Memory] FINAL STAGE: Keeping all evidence-gated problems")
         # Filter out None values that might have been returned by LLM stages
         valid_problems = [p for p in final_problems if p is not None and isinstance(p, dict)]
         print(f"[Memory] Kept {len(valid_problems)} problems (removed {len(final_problems) - len(valid_problems)} None/invalid types)")
@@ -513,7 +533,14 @@ class STAIRRetrieval:
         print()
 
         print("[Memory] Retrieval complete!\n")
-        return {"problems": valid_problems}
+        return {
+            "problems": valid_problems,
+            "rejected_memory_problems": rejected_memory_problems,
+            "evidence_gate": {
+                "enabled": self.enable_evidence_gate,
+                "rejected_count": len(rejected_memory_problems),
+            },
+        }
 
     # ============================================================
     # NEW PIPELINE STAGES (0-8)
@@ -930,9 +957,15 @@ WRONG Output (copying memory's files):
             )
             enriched_prob = response if isinstance(response, dict) else ci_prob
 
-            # Ensure problem_type is set
-            if "problem_type" not in enriched_prob:
-                enriched_prob["problem_type"] = "ci_failure"
+            # This object enriches an observed target-CI problem. The LLM may
+            # adapt its repair strategy, but must not reclassify the anchor as
+            # a historical dependency/common hypothesis.
+            enriched_prob["problem_type"] = "ci_failure"
+            source = enriched_prob.get("source")
+            if not isinstance(source, dict):
+                source = {}
+            source["current_failure"] = True
+            enriched_prob["source"] = source
 
             enriched.append(enriched_prob)
 
@@ -2866,7 +2899,10 @@ Return JSON:
             "failure_signals": [self._shorten(str(s), 200) for s in query.get("failure_signals", [])[:5]],
             "error_types": query.get("error_types", [])[:10],
             "relevant_files": [str(f)[:100] for f in query.get("relevant_files", [])[:15]],
-            "failed_job": [self._shorten(str(j), 300) for j in query.get("failed_job", [])[:3]],
+            "failed_job": [
+                self._shorten(str(j), 300)
+                for j in (query.get("failed_jobs") or query.get("failed_job") or [])[:3]
+            ],
         }
 
     def _compact_retrieved_item(
@@ -3875,6 +3911,165 @@ Return JSON with the MOST REPETITIVE problem/repair from each cluster:
         )
 
         return text_match and tool_match and file_match
+
+    def _filter_by_target_evidence(
+        self, problems: list[dict], query: dict
+    ) -> tuple[list[dict], list[dict]]:
+        """Keep observed CI problems and gate memory-derived hypotheses.
+
+        Rejected candidates remain available for audit and can be reconsidered
+        after a repair/rerun exposes a new failure.
+        """
+        kept: list[dict] = []
+        rejected: list[dict] = []
+
+        for problem in problems:
+            problem_type = self._normalize_text(problem.get("problem_type", ""))
+            source = problem.get("source", {})
+            source_text = self._normalize_text(source)
+            is_observed = (
+                problem_type == "ci_failure"
+                or (isinstance(source, dict) and source.get("current_failure"))
+                or source_text.startswith("ci_failure")
+            )
+
+            if is_observed:
+                annotated = dict(problem)
+                annotated["evidence_status"] = "observed_in_target_ci"
+                kept.append(annotated)
+                continue
+
+            evidence = self._target_evidence_for_candidate(problem, query)
+            annotated = dict(problem)
+            annotated["target_evidence"] = evidence
+            if evidence["supported"]:
+                annotated["evidence_status"] = "confirmed_in_target_failure"
+                kept.append(annotated)
+            else:
+                annotated["evidence_status"] = "withheld_unconfirmed_hypothesis"
+                rejected.append(annotated)
+
+        return kept, rejected
+
+    def _target_evidence_for_candidate(self, problem: dict, query: dict) -> dict:
+        """Return a conservative, auditable support decision for one candidate."""
+        query_text = " ".join(
+            [str(value) for value in query.get("error_context", [])]
+            + [str(value) for value in query.get("failure_signals", [])]
+            + [json.dumps(value) for value in query.get("error_types", [])]
+            + [json.dumps(value) for value in query.get("failed_jobs", [])]
+        )
+        problem_signals = [
+            str(value) for value in problem.get("failure_signals", []) or []
+        ]
+        problem_text = " ".join(
+            [
+                str(problem.get("problem", "")),
+                str(problem.get("root_cause", "")),
+                " ".join(problem_signals),
+            ]
+        )
+        description_similarity = self._text_similarity(query_text, problem_text)
+        signal_similarity = max(
+            (self._text_similarity(query_text, signal) for signal in problem_signals),
+            default=0.0,
+        )
+
+        query_files = self._query_file_set(query)
+        problem_files = {
+            str(value) for value in problem.get("files", []) or [] if value
+        }
+        matching_files = sorted(
+            {
+                candidate
+                for candidate in problem_files
+                if any(self._paths_overlap(candidate, observed) for observed in query_files)
+            }
+        )
+
+        query_tools = {
+            self._validation_tool(command)
+            for command in query.get("failed_cmd", []) or []
+            if command
+        }
+        for relevant in query.get("relevant_files", []) or []:
+            if isinstance(relevant, dict) and relevant.get("failed_tool"):
+                query_tools.add(self._normalize_text(relevant.get("failed_tool")))
+        query_tools.discard("")
+
+        repair_strategy = problem.get("repair_strategy") or {}
+        candidate_command = (
+            problem.get("validation_cmd")
+            or problem.get("verification_cmd")
+            or (
+                repair_strategy.get("validation_cmd")
+                if isinstance(repair_strategy, dict)
+                else ""
+            )
+        )
+        candidate_tool = self._validation_tool(candidate_command)
+        tool_compatible = bool(
+            candidate_tool and query_tools and candidate_tool in query_tools
+        )
+
+        target_types = " ".join(
+            json.dumps(value) for value in query.get("error_types", []) or []
+        )
+        candidate_type = str(problem.get("failure_type", ""))
+        type_similarity = self._text_similarity(target_types, candidate_type)
+        type_compatible = bool(candidate_type and type_similarity >= 0.45)
+
+        # A candidate naming files must overlap a file observed in the target
+        # failure. Fileless candidates need much stronger textual evidence.
+        if problem_files:
+            supported = bool(
+                matching_files
+                and (tool_compatible or type_compatible)
+                and (description_similarity >= 0.30 or signal_similarity >= 0.35)
+            )
+            reason = (
+                "matching target file plus compatible failure evidence"
+                if supported
+                else "no sufficiently matching target file/tool/error evidence"
+            )
+        else:
+            supported = bool(
+                (tool_compatible or type_compatible)
+                and (description_similarity >= 0.55 or signal_similarity >= 0.60)
+            )
+            reason = (
+                "strong file-independent target error evidence"
+                if supported
+                else "fileless candidate lacks strong target error evidence"
+            )
+
+        return {
+            "supported": supported,
+            "reason": reason,
+            "matching_files": matching_files,
+            "query_tools": sorted(query_tools),
+            "candidate_tool": candidate_tool,
+            "description_similarity": round(description_similarity, 4),
+            "signal_similarity": round(signal_similarity, 4),
+            "type_similarity": round(type_similarity, 4),
+        }
+
+    @staticmethod
+    def _paths_overlap(left: Any, right: Any) -> bool:
+        """Match paths despite repository working-directory prefixes."""
+        left_path = str(left or "").strip().lower().replace("\\", "/")
+        right_path = str(right or "").strip().lower().replace("\\", "/")
+        left_path = re.sub(r"^(?:a/|b/|\./)", "", left_path)
+        right_path = re.sub(r"^(?:a/|b/|\./)", "", right_path)
+        return bool(
+            left_path
+            and right_path
+            and (
+                left_path == right_path
+                or left_path.endswith("/" + right_path)
+                or right_path.endswith("/" + left_path)
+            )
+        )
 
     def _query_file_set(self, query: dict) -> set:
         files = set()

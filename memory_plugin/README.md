@@ -12,6 +12,35 @@ OK **Common pattern detection**: Finds recurring problems across issues
 OK **Frequency-based**: Counts distinct CI failures, not problem instances  
 OK **LLM-driven**: Dynamic decisions for filtering, validation, and synthesis  
 OK **Ablation support**: Control which levels to use (baseline, L1, L1+L2, L1+L2+L3)  
+OK **Target-evidence gate**: Withholds recurring/dependency hypotheses that are not supported by the current target failure evidence
+OK **Failure-state source gate**: Confirms a remembered defect in the checked-out target before repair
+
+### Target-evidence policy
+
+Problems decomposed from the current CI log remain actionable. Problems recalled
+only from historical dependency chains or recurring patterns are treated as
+hypotheses: they must match the target's observed file, failed tool/failure type,
+and error evidence or subsequently pass the failure-state source gate before
+they are sent to the repair agent. Unsupported candidates are returned in
+`rejected_memory_problems` for audit and source review.
+
+The gate is enabled by default. Set `RECAP_ENABLE_EVIDENCE_GATE=0` only for a
+controlled ablation.
+
+After the failing commit is checked out, a second read-only gate resolves every
+remembered candidate's claimed files. It first runs a bounded, non-mutating
+verification command when the candidate provides a safe `ruff`, `mypy`,
+`pyright`, or targeted `pytest` invocation. A passing command rejects the
+remembered failure; a non-zero result confirms it only when the recorded failure
+signal appears in the output. Missing tools, setup errors, unrelated failures,
+unsafe commands, and unavailable commands fall back to failure-state source
+review. Only `confirmed` memory candidates reach the repair agent. Missing locations,
+contradicted/already-fixed code, ambiguous evidence, and runtime-only claims are
+saved in `source_rejected_memory_problems` but withheld from repair. Problems
+directly observed in the target CI log do not need this historical-memory check.
+This second gate also reviews hidden/dependency candidates absent from the log,
+because an earlier CI failure may have prevented them from executing.
+Set `RECAP_ENABLE_SOURCE_VALIDATION=0` only for a controlled ablation.
 
 ## Architecture
 

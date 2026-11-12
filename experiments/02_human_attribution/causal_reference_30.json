@@ -1,0 +1,67 @@
+{
+  "status": "independent model audit; requires human verification",
+  "episode_ids": ["2", "3", "5", "7", "18", "26", "27", "32", "42", "44", "47", "50", "58", "59", "64", "169", "231", "236", "243", "244", "275", "290", "316", "320", "361", "403", "416", "450", "510", "524"],
+  "episodes": {
+    "2": [{"id": "C1", "description": "F401 unused typing.Optional import in ip_adapter.py", "valid_hunks": ["2:H001:88b4151ba942"], "uncertain_hunks": []}],
+    "3": [{"id": "C1", "description": "deptry DEP002 reports the declared type_infer dependency as unused", "valid_hunks": [], "uncertain_hunks": ["3:H001:0e62271e17c2"], "note": "The visible diff removes a use of type_infer and appears inconsistent with repairing DEP002."}],
+    "5": [
+      {"id": "C1", "description": "test_no_match did not receive the expected TLS bad-certificate log message", "valid_hunks": ["5:H001:97a159e01996"], "uncertain_hunks": []},
+      {"id": "C2", "description": "Windows asynchronous cleanup produced an unawaited coroutine and unclosed socket warnings", "valid_hunks": ["5:H002:6b8c3dab0b1d"], "uncertain_hunks": []}
+    ],
+    "7": [{"id": "C1", "description": "pylint E0213 and E1101 caused by the local fake_isfile_no_nmconn helper being bound as an instance method", "valid_hunks": ["7:H001:2f8317af42a3", "7:H002:c7a4c1e10390", "7:H004:af6d09804b42", "7:H005:bd291164c25b"], "uncertain_hunks": []}],
+    "18": [{"id": "C1", "description": "Black formatting failure in test_smartplaylist.py", "valid_hunks": ["18:H001:11a052b7447e", "18:H002:e5f7b77050fb"], "uncertain_hunks": []}],
+    "26": [
+      {"id": "C1", "description": "pyupgrade rewrote outdated syntax in test_get_documentation.py and test_get_hacs_json.py", "valid_hunks": ["26:H003:1cbe36e4955a", "26:H005:6290cf19fdc6"], "uncertain_hunks": []},
+      {"id": "C2", "description": "Black reformatted the modified repository tests", "valid_hunks": ["26:H003:1cbe36e4955a", "26:H005:6290cf19fdc6"], "uncertain_hunks": []}
+    ],
+    "27": [{"id": "C1", "description": "Sphinx docstring formatting errors in the TPESampler documentation caused doctest and HTML builds to fail", "valid_hunks": ["27:H001:395bb239e2c4", "27:H002:0535b3a44b99"], "uncertain_hunks": [], "note": "The tutorial ValueError was explicitly non-fatal and is not a canonical CI problem."}],
+    "32": [{"id": "C1", "description": "flake8 E501 line-too-long violation in resources.py", "valid_hunks": ["32:H001:93044c74e710"], "uncertain_hunks": []}],
+    "42": [{"id": "C1", "description": "ruff I001 unsorted import block in httpx __init__.py", "valid_hunks": ["42:H001:8f114a82248b"], "uncertain_hunks": []}],
+    "44": [{"id": "C1", "description": "black-jupyter reformatted image.py and caused pre-commit to fail", "valid_hunks": [], "uncertain_hunks": ["44:H001:f7fd2d92bc9e"], "note": "The visible quote-direction change is not sufficient to establish the repair direction."}],
+    "47": [{"id": "C1", "description": "ruff I001 import ordering failures in the DeepSpeed and FSDP tests", "valid_hunks": ["47:H001:27d4b5431c09", "47:H002:efade6aaa4c1"], "uncertain_hunks": []}],
+    "50": [
+      {"id": "C1", "description": "Black required canonical formatting of the optional comment parameter", "valid_hunks": [], "uncertain_hunks": ["50:H001:6b6bc17adb0f"], "note": "The visible diff removes the reported trailing comma, so repair direction is uncertain."},
+      {"id": "C2", "description": "mypy rejected concatenating strings with an optional comment value", "valid_hunks": ["50:H002:18a06b020d26", "50:H003:10614d69b401", "50:H004:04dd9e399149"], "uncertain_hunks": []}
+    ],
+    "58": [{"id": "C1", "description": "line-plot weight test raised ZeroDivisionError because tick-label text selected an empty dataframe", "valid_hunks": ["58:H002:4a7a8f4f1520"], "uncertain_hunks": []}],
+    "59": [{"id": "C1", "description": "pyflakes F841 reported an assigned but unused filter_private local", "valid_hunks": [], "uncertain_hunks": ["59:H001:30cb38ab3bd6"], "note": "The visible diff adds the reported assignment, so repair direction is uncertain."}],
+    "64": [{"id": "C1", "description": "Black reported commands_test.py as non-canonical", "valid_hunks": ["64:H003:3a2aae89acc3"], "uncertain_hunks": []}],
+    "169": [{"id": "C1", "description": "ruff F821 undefined AccuracyResult, PerformanceResult, and ReliabilityResult type names", "valid_hunks": ["169:H001:425f005082e9"], "uncertain_hunks": []}],
+    "231": [
+      {"id": "C1", "description": "flake8 E302 and E127 layout violations in the CouchDB backend test", "valid_hunks": ["231:H001:01c8d0513097", "231:H002:ad8cce3d6afe"], "uncertain_hunks": []},
+      {"id": "C2", "description": "flake8 F901 required NotImplementedError rather than raising NotImplemented", "valid_hunks": ["231:H003:f5be1c383865"], "uncertain_hunks": []}
+    ],
+    "236": [{"id": "C1", "description": "ruff-format required spaces around the union operator in utils.py", "valid_hunks": ["236:H001:f20507114099"], "uncertain_hunks": []}],
+    "243": [{"id": "C1", "description": "editable package build failed because pyproject metadata referenced a missing README", "valid_hunks": ["243:H001:0b55f9ad6298"], "uncertain_hunks": []}],
+    "244": [
+      {"id": "C1", "description": "API conformity tests failed for missing Bot methods and parameters", "valid_hunks": ["244:H001:15bad3cdfaa0", "244:H002:a5e430a63e74"], "uncertain_hunks": []},
+      {"id": "C2", "description": "object conformity checks raised AttributeError for missing classes and attributes", "valid_hunks": ["244:H003:aa4b9dc96df9", "244:H004:801bfd35c035"], "uncertain_hunks": []},
+      {"id": "C3", "description": "conformity checks reported type-hint and required-field mismatches", "valid_hunks": ["244:H002:a5e430a63e74", "244:H004:801bfd35c035"], "uncertain_hunks": []}
+    ],
+    "275": [
+      {"id": "C1", "description": "ruff and mypy reported undefined typing alias t in doris.py", "valid_hunks": ["275:H001:591b9fa124b9"], "uncertain_hunks": []},
+      {"id": "C2", "description": "mypy reported invalid tuple unpacking and indeterminate unit and this types", "valid_hunks": ["275:H002:0b5ef525f258"], "uncertain_hunks": []}
+    ],
+    "290": [
+      {"id": "C1", "description": "pylint could not start because the dill package was missing", "valid_hunks": [], "uncertain_hunks": []},
+      {"id": "C2", "description": "Black reported core/thread.py as requiring reformatting", "valid_hunks": ["290:H001:3e877f09ecbd", "290:H002:890ec9387da3", "290:H003:0c41181787d6", "290:H004:a6d59154ac4e", "290:H005:2b7327b94df3"], "uncertain_hunks": []}
+    ],
+    "316": [
+      {"id": "C1", "description": "ruff-format modified rediscli.py during pre-commit", "valid_hunks": ["316:H001:d02f943e2b9c"], "uncertain_hunks": []},
+      {"id": "C2", "description": "trailing-whitespace modified the workflow YAML", "valid_hunks": [], "uncertain_hunks": []}
+    ],
+    "320": [{"id": "C1", "description": "pre-commit reported trailing whitespace in pathlib types.py", "valid_hunks": ["320:H001:d268a950cf3f"], "uncertain_hunks": []}],
+    "361": [
+      {"id": "C1", "description": "ruff-format and workflow formatting checks modified tracked files", "valid_hunks": ["361:H001:0fb629c9def7"], "uncertain_hunks": []},
+      {"id": "C2", "description": "Maven could not resolve the Spotless plugin after repository rate-limit failures", "valid_hunks": [], "uncertain_hunks": []}
+    ],
+    "403": [{"id": "C1", "description": "ruff PLR0915 reported too many statements in map_openai_params", "valid_hunks": ["403:H001:818308d727e5", "403:H002:b68ae4592a3d"], "uncertain_hunks": []}],
+    "416": [{"id": "C1", "description": "uv configuration referenced a missing default dev dependency group", "valid_hunks": ["416:H005:f0ad245ef450"], "uncertain_hunks": []}],
+    "450": [
+      {"id": "C1", "description": "Black reformatted data utils", "valid_hunks": ["450:H002:c88eb8c44549", "450:H003:7624cc7ff1d1"], "uncertain_hunks": []},
+      {"id": "C2", "description": "isort corrected import ordering in data utils", "valid_hunks": ["450:H001:6ae88187cdee"], "uncertain_hunks": []}
+    ],
+    "510": [{"id": "C1", "description": "end-of-file-fixer added the missing final newline to .gitignore", "valid_hunks": ["510:H001:6812b9972f28"], "uncertain_hunks": []}],
+    "524": [{"id": "C1", "description": "cross-platform dotenv integration assertion expected an incorrect path and separator representation", "valid_hunks": ["524:H001:046b6750808f"], "uncertain_hunks": []}]
+  }
+}

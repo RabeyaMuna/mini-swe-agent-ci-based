@@ -1,0 +1,23 @@
+{
+  "file1": {
+    "yes": 14,
+    "no": 69,
+    "partial": 0,
+    "precision": 0.169,
+    "recall": 1.0,
+    "f1": 0.289
+  },
+  "file2": {
+    "yes": 67,
+    "no": 9,
+    "partial": 7,
+    "precision": 0.849,
+    "recall": 1.0,
+    "f1": 0.919
+  },
+  "agreement": {
+    "percent": 27.7,
+    "kappa": 0.066,
+    "disagreements": 60
+  }
+}

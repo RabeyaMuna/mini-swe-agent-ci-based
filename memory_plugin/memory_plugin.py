@@ -4,6 +4,8 @@ Handles decomposition caching and orchestrates memory retrieval.
 """
 
 import json
+import re
+import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -69,6 +71,10 @@ class MemoryPlugin:
         enable_ordering = os.environ.get("RECAP_ENABLE_ORDERING", "1") == "1"
         enable_deduplication = os.environ.get("RECAP_ENABLE_DEDUPLICATION", "1") == "1"
         enable_memory_optimization = os.environ.get("RECAP_ENABLE_MEMORY_OPTIMIZATION", "1") == "1"
+        enable_evidence_gate = os.environ.get("RECAP_ENABLE_EVIDENCE_GATE", "1") == "1"
+        self.enable_source_validation = (
+            os.environ.get("RECAP_ENABLE_SOURCE_VALIDATION", "1") == "1"
+        )
 
         # Initialize STAIR retrieval system
         self.retrieval = STAIRRetrieval(
@@ -83,6 +89,7 @@ class MemoryPlugin:
             enable_ordering=enable_ordering,
             enable_deduplication=enable_deduplication,
             enable_memory_optimization=enable_memory_optimization,
+            enable_evidence_gate=enable_evidence_gate,
         )
 
     def retrieve(
@@ -132,18 +139,520 @@ class MemoryPlugin:
         if self.ablation.lower() == "baseline":
             return {"problems": decomposed_problems}
 
-        # 4. Memory mode: pass to stair_retrieval for memory work
-        # Pass metadata explicitly so retrieval doesn't have to extract from problems
-        query_metadata = {
-            "repo": issue_metadata.get("repo", ""),
-            "workflow_path": issue_metadata.get("workflow_path", ""),
-            "workflow_name": issue_metadata.get("workflow_name", ""),
-        }
+        # 4. Memory mode: pass the complete target evidence to retrieval.
+        # Passing only repo/workflow makes applicability filtering blind to the
+        # current log, failed tool, and affected files.
+        query_metadata = self._build_query(
+            ci_failure=ci_failure,
+            verification=verification,
+            issue_metadata=issue_metadata,
+        )
         return self.retrieval.retrieve(
             problems=decomposed_problems,
             top_k=self.top_k,
             query=query_metadata
         )
+
+    def validate_candidates_against_checkout(
+        self,
+        retrieval: Dict[str, Any],
+        checkout_path: Path,
+        command_runner: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Withhold memory hypotheses that are not supported by target source.
+
+        This gate runs after ``sha_fail`` has been checked out and before the
+        repair agent is constructed.  Problems observed in the target CI log
+        remain actionable.  Recurring/dependency/common problems are actionable
+        only when their claimed location exists and an independent read-only
+        source review confirms that the described defect is present there.
+
+        An unavailable model, absent location, malformed response, or ambiguous
+        evidence is fail-closed: the candidate is retained in diagnostics but
+        is not sent to the repair agent.
+        """
+        if not self.enable_source_validation or not retrieval:
+            return retrieval
+
+        root = Path(checkout_path).resolve()
+        result = dict(retrieval)
+        kept: List[Dict[str, Any]] = []
+        rejected: List[Dict[str, Any]] = list(
+            retrieval.get("source_rejected_memory_problems") or []
+        )
+
+        # A dependency/hidden failure may not appear in the current log because
+        # CI stopped at an earlier failure.  Therefore source validation also
+        # reviews hypotheses withheld by the log-evidence gate.  They can be
+        # promoted only by a positive source confirmation.
+        candidates = list(retrieval.get("problems") or [])
+        candidates.extend(retrieval.get("rejected_memory_problems") or [])
+        unique_candidates = []
+        seen_candidates = set()
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            identity = (
+                str(candidate.get("problem", "")).strip().lower(),
+                tuple(self._candidate_files(candidate)),
+                str(candidate.get("problem_type", "")).strip().lower(),
+            )
+            if identity in seen_candidates:
+                continue
+            seen_candidates.add(identity)
+            unique_candidates.append(candidate)
+
+        for index, original in enumerate(unique_candidates, 1):
+            problem = dict(original)
+            if self._is_observed_target_problem(problem):
+                problem["source_validation"] = {
+                    "decision": "observed",
+                    "reason": "Problem is directly supported by the target CI failure evidence.",
+                }
+                kept.append(problem)
+                continue
+
+            claimed_files = self._candidate_files(problem)
+            if not claimed_files:
+                rejected.append(self._with_source_decision(
+                    problem,
+                    "unverifiable",
+                    "Memory candidate names no target source location.",
+                    [],
+                ))
+                continue
+
+            resolved = []
+            for claimed in claimed_files[:8]:
+                matched = self._resolve_checkout_file(root, claimed)
+                if matched and matched not in resolved:
+                    resolved.append(matched)
+
+            if not resolved:
+                rejected.append(self._with_source_decision(
+                    problem,
+                    "rejected",
+                    "None of the claimed files exists in the failure-state checkout.",
+                    [],
+                ))
+                continue
+
+            command_check = self._run_lightweight_verification(
+                problem, root, resolved, command_runner
+            )
+            if command_check["status"] == "problem_absent":
+                annotated = self._with_source_decision(
+                    problem,
+                    "rejected",
+                    "The lightweight verification command passes at sha_fail; the remembered problem is absent.",
+                    [command_check.get("command", "")],
+                )
+                annotated["source_validation"]["lightweight_check"] = command_check
+                rejected.append(annotated)
+                continue
+            if command_check["status"] == "failure_confirmed":
+                annotated = self._with_source_decision(
+                    problem,
+                    "confirmed",
+                    "The lightweight verification command reproduces the candidate's failure signal at sha_fail.",
+                    command_check.get("matched_signals") or [],
+                )
+                annotated["source_validation"]["lightweight_check"] = command_check
+                kept.append(annotated)
+                continue
+
+            evidence = self._read_source_evidence(root, resolved, problem)
+            if not evidence or not self.llm:
+                reason = (
+                    "The claimed files could not be read as source evidence."
+                    if not evidence
+                    else "No independent source-validation model is configured."
+                )
+                rejected.append(self._with_source_decision(
+                    problem, "unverifiable", reason,
+                    [str(path.relative_to(root)) for path in resolved],
+                ))
+                continue
+
+            decision = self._review_candidate_source(
+                problem, evidence, index, command_check
+            )
+            annotated = self._with_source_decision(
+                problem,
+                decision["decision"],
+                decision["reason"],
+                decision.get("evidence") or [],
+            )
+            annotated["source_validation"]["lightweight_check"] = command_check
+            if decision["decision"] == "confirmed":
+                kept.append(annotated)
+            else:
+                rejected.append(annotated)
+
+        result["problems"] = kept
+        result["source_rejected_memory_problems"] = rejected
+        result["source_validation"] = {
+            "enabled": True,
+            "checkout": str(root),
+            "input_count": len(unique_candidates),
+            "actionable_count": len(kept),
+            "withheld_count": len(rejected),
+            "policy": "Only target-CI problems and source-confirmed memory candidates are actionable.",
+        }
+        return result
+
+    @staticmethod
+    def _verification_command(problem: Dict[str, Any]) -> str:
+        strategy = problem.get("repair_strategy")
+        strategy = strategy if isinstance(strategy, dict) else {}
+        return str(
+            problem.get("verification_cmd")
+            or problem.get("validation_cmd")
+            or strategy.get("validation_cmd")
+            or strategy.get("verification_cmd")
+            or ""
+        ).strip()
+
+    def _run_lightweight_verification(
+        self,
+        problem: Dict[str, Any],
+        root: Path,
+        resolved: List[Path],
+        command_runner: Optional[Any],
+    ) -> Dict[str, Any]:
+        """Run only bounded, non-installing validation commands.
+
+        A non-zero result is not automatically evidence: missing tools,
+        dependency/setup failures, and unrelated test failures are inconclusive.
+        """
+        command = self._verification_command(problem)
+        safe_command, reason = self._safe_lightweight_command(command, root, resolved)
+        if not command_runner or not safe_command:
+            return {
+                "status": "skipped",
+                "command": command,
+                "reason": reason or "No command runner is available.",
+            }
+
+        try:
+            result = command_runner(safe_command, timeout=45)
+        except Exception as exc:
+            return {
+                "status": "inconclusive",
+                "command": safe_command,
+                "reason": f"Command execution failed: {type(exc).__name__}",
+            }
+        if not isinstance(result, dict):
+            return {
+                "status": "inconclusive",
+                "command": safe_command,
+                "reason": "Command runner returned malformed output.",
+            }
+
+        returncode = int(result.get("returncode", -1))
+        output = str(result.get("output") or "")[:12000]
+        summary = {
+            "command": safe_command,
+            "returncode": returncode,
+            "output_excerpt": output[:3000],
+        }
+        if returncode == 0:
+            return {**summary, "status": "problem_absent", "reason": "Command passed."}
+
+        infrastructure_markers = (
+            "command not found", "no module named", "module not found",
+            "modulenotfounderror", "not installed", "no such file or directory",
+            "could not find a version", "failed to build", "connection error",
+            "network is unreachable", "timed out", "collected 0 items",
+            "unrecognized arguments", "usage:",
+        )
+        lowered_output = output.lower()
+        if returncode == -1 or any(marker in lowered_output for marker in infrastructure_markers):
+            return {
+                **summary,
+                "status": "inconclusive",
+                "reason": "The command failed because of setup/tooling rather than the described problem.",
+            }
+
+        signals = problem.get("failure_signals") or []
+        if isinstance(signals, str):
+            signals = [signals]
+        matched = []
+        for signal in signals:
+            signal_text = str(signal).strip()
+            if len(signal_text) >= 8 and signal_text.lower() in lowered_output:
+                matched.append(signal_text[:300])
+                continue
+            for code in re.findall(r"\b[A-Z][A-Z0-9_-]*\d{2,4}\b", signal_text):
+                if code.lower() in lowered_output:
+                    matched.append(code)
+        if matched:
+            return {
+                **summary,
+                "status": "failure_confirmed",
+                "reason": "Command output contains the candidate's recorded failure signal.",
+                "matched_signals": list(dict.fromkeys(matched)),
+            }
+        return {
+            **summary,
+            "status": "inconclusive",
+            "reason": "Command failed, but its output does not directly match the candidate failure.",
+        }
+
+    @staticmethod
+    def _safe_lightweight_command(
+        command: str,
+        root: Path,
+        resolved: List[Path],
+    ) -> tuple[Optional[str], str]:
+        if not command:
+            return None, "Candidate provides no verification command."
+        if len(command) > 500 or re.search(r"[;&|><`\n]|\$\(", command):
+            return None, "Command is not a safe single lightweight invocation."
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None, "Command cannot be parsed safely."
+        if not tokens:
+            return None, "Candidate provides no verification command."
+
+        executable = Path(tokens[0]).name.lower()
+        tool = executable
+        if executable in {"python", "python3"}:
+            if len(tokens) < 3 or tokens[1] != "-m":
+                return None, "Only Python module validation commands are allowed."
+            tool = tokens[2].lower()
+        if tool not in {"ruff", "mypy", "pyright", "pytest"}:
+            return None, f"'{tool}' is not in the lightweight validation allowlist."
+        mutating_flags = {"--fix", "--unsafe-fixes", "--install-types"}
+        if any(token in mutating_flags for token in tokens):
+            return None, "Potentially mutating validation flags are not allowed."
+        if tool == "ruff" and "format" in tokens and "--check" not in tokens:
+            return None, "ruff format is allowed only with --check."
+
+        if tool == "pytest":
+            has_specific_test = False
+            for token in tokens:
+                if not (token.endswith(".py") or "::" in token):
+                    continue
+                test_path = (root / token.split("::", 1)[0]).resolve()
+                try:
+                    test_path.relative_to(root)
+                except ValueError:
+                    continue
+                if test_path.is_file():
+                    has_specific_test = True
+                    break
+            if not has_specific_test:
+                return None, "A repository-wide pytest invocation is not lightweight."
+
+        prefix = "PYTHONDONTWRITEBYTECODE=1"
+        if tool == "pytest":
+            prefix += " PYTEST_ADDOPTS='-p no:cacheprovider'"
+        suffix = ""
+        if tool == "ruff" and "--no-cache" not in tokens:
+            suffix = " --no-cache"
+        elif tool == "mypy" and not any(
+            token == "--cache-dir" or token.startswith("--cache-dir=")
+            for token in tokens
+        ):
+            suffix = " --cache-dir=/dev/null"
+        return f"{prefix} {command}{suffix}", ""
+
+    @staticmethod
+    def _is_observed_target_problem(problem: Dict[str, Any]) -> bool:
+        source = problem.get("source")
+        return (
+            str(problem.get("problem_type", "")).lower() == "ci_failure"
+            or str(problem.get("evidence_status", "")).lower() == "observed_in_target_ci"
+            or (isinstance(source, dict) and bool(source.get("current_failure")))
+        )
+
+    @staticmethod
+    def _candidate_files(problem: Dict[str, Any]) -> List[str]:
+        files = problem.get("files") or problem.get("relevant_files") or []
+        if isinstance(files, str):
+            files = [files]
+        normalized = []
+        for item in files:
+            if isinstance(item, dict):
+                item = item.get("file") or item.get("path") or ""
+            value = str(item).strip()
+            if value:
+                normalized.append(value)
+        return normalized
+
+    @staticmethod
+    def _resolve_checkout_file(root: Path, claimed: str) -> Optional[Path]:
+        """Resolve a memory path without permitting access outside checkout."""
+        clean = claimed.strip().replace("\\", "/")
+        clean = re.sub(r"^[ab]/", "", clean)
+        parts = [part for part in clean.split("/") if part not in ("", ".")]
+        if not parts or ".." in parts or Path(clean).is_absolute():
+            return None
+
+        candidate = (root / Path(*parts)).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            candidate = None
+        if candidate is not None and candidate.is_file():
+            return candidate
+
+        # Suffix matching handles memory paths such as ``agno/foo.py`` versus
+        # checkout ``libs/agno/agno/foo.py``.
+        basename = parts[-1]
+        matches = []
+        for candidate in root.rglob(basename):
+            if not candidate.is_file():
+                continue
+            candidate = candidate.resolve()
+            try:
+                relative_parts = candidate.relative_to(root).parts
+            except ValueError:
+                continue
+            if any(part in {".git", ".venv", "venv", "node_modules"} for part in relative_parts):
+                continue
+            common_suffix = 0
+            for left, right in zip(reversed(parts), reversed(relative_parts)):
+                if left != right:
+                    break
+                common_suffix += 1
+            matches.append((common_suffix, len(relative_parts), candidate))
+        if not matches:
+            return None
+        matches.sort(key=lambda item: (-item[0], item[1], str(item[2])))
+        # A basename-only match is safe only when unique; otherwise the location
+        # is ambiguous and must not be promoted to the repair agent.
+        best_score = matches[0][0]
+        best = [item for item in matches if item[0] == best_score]
+        return best[0][2] if best_score > 1 or len(best) == 1 else None
+
+    @staticmethod
+    def _read_source_evidence(
+        root: Path,
+        paths: List[Path],
+        problem: Dict[str, Any],
+    ) -> List[Dict[str, str]]:
+        terms = re.findall(
+            r"[A-Za-z_][A-Za-z0-9_]{3,}",
+            " ".join(str(problem.get(key, "")) for key in ("problem", "root_cause")),
+        )
+        evidence: List[Dict[str, str]] = []
+        total = 0
+        for path in paths[:5]:
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            limit = min(12000, 30000 - total)
+            if limit <= 0:
+                break
+            if len(content) > limit:
+                positions = [content.lower().find(term.lower()) for term in terms]
+                positions = [position for position in positions if position >= 0]
+                center = positions[0] if positions else 0
+                start = max(0, center - limit // 3)
+                excerpt = content[start:start + limit]
+            else:
+                excerpt = content
+            total += len(excerpt)
+            evidence.append({
+                "path": str(path.relative_to(root)),
+                "excerpt": excerpt,
+            })
+        return evidence
+
+    def _review_candidate_source(
+        self,
+        problem: Dict[str, Any],
+        evidence: List[Dict[str, str]],
+        index: int,
+        command_check: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        candidate = {
+            key: problem.get(key)
+            for key in (
+                "problem", "root_cause", "problem_type", "failure_type",
+                "failure_signals", "files", "repair_strategy",
+            )
+        }
+        prompt = f"""Act as a conservative, read-only source validation agent.
+
+Determine whether the FAILURE-STATE source excerpts directly contain the defect or
+necessary faulty precondition described by this retrieved memory candidate.
+
+Candidate {index}:
+{json.dumps(candidate, indent=2, default=str)}
+
+Failure-state source excerpts:
+{json.dumps(evidence, indent=2, default=str)}
+
+Lightweight verification result (may be skipped or inconclusive):
+{json.dumps(command_check or {}, indent=2, default=str)}
+
+Rules:
+- "confirmed" requires concrete source evidence of the described defect/precondition.
+- File existence, similar technology, or a plausible repair alone is insufficient.
+- Use "rejected" when the source contradicts the candidate or already contains the fix.
+- Use "unverifiable" when runtime behavior, missing context, or ambiguity prevents proof.
+- Do not propose or apply a repair.
+
+Return exactly one JSON object:
+{{
+  "decision": "confirmed|rejected|unverifiable",
+  "reason": "brief evidence-based explanation",
+  "evidence": ["path: line/construct supporting the decision"]
+}}
+
+{STRICT_JSON_RULES}
+"""
+        try:
+            response = invoke_llm_with_retry(
+                llm=self.llm,
+                prompt=prompt,
+                parse_json=True,
+                max_tokens=1200,
+                verbose=False,
+            )
+        except Exception as exc:
+            return {
+                "decision": "unverifiable",
+                "reason": f"Source validation failed: {type(exc).__name__}",
+                "evidence": [],
+            }
+        if not isinstance(response, dict):
+            return {
+                "decision": "unverifiable",
+                "reason": "Source validator returned malformed output.",
+                "evidence": [],
+            }
+        decision = str(response.get("decision", "")).strip().lower()
+        if decision not in {"confirmed", "rejected", "unverifiable"}:
+            decision = "unverifiable"
+        evidence_items = response.get("evidence") or []
+        if isinstance(evidence_items, str):
+            evidence_items = [evidence_items]
+        return {
+            "decision": decision,
+            "reason": str(response.get("reason") or "No validation reason supplied."),
+            "evidence": [str(item) for item in evidence_items[:8]],
+        }
+
+    @staticmethod
+    def _with_source_decision(
+        problem: Dict[str, Any],
+        decision: str,
+        reason: str,
+        evidence: List[str],
+    ) -> Dict[str, Any]:
+        annotated = dict(problem)
+        annotated["source_validation"] = {
+            "decision": decision,
+            "reason": reason,
+            "evidence": evidence,
+        }
+        return annotated
 
     def decompose_only(
         self,
@@ -422,8 +931,18 @@ If CI log has error_types with evidence, use that evidence as failure_signals.
         verification = verification or {}
         issue_metadata = issue_metadata or {}
 
-        # Extract failed commands from validation
-        failed_cmd = self._extract_failed_commands(verification)
+        failed_jobs = (
+            ci_failure.get("failed_jobs")
+            or ci_failure.get("failed_job")
+            or []
+        )
+        # Prefer commands that actually failed. Fall back to the workflow
+        # validation sequence only for older analyzer records.
+        failed_cmd = [
+            job.get("command")
+            for job in failed_jobs
+            if isinstance(job, dict) and job.get("command")
+        ] or self._extract_failed_commands(verification)
 
         # Normalize repo name (handle both "owner/repo" and "repo" formats)
         repo_raw = issue_metadata.get("repo", "")
@@ -464,11 +983,7 @@ If CI log has error_types with evidence, use that evidence as failure_signals.
             # The CI log analyzer writes ``failed_job`` while some older
             # callers use ``failed_jobs``.  Accept both so a cached analyzer
             # result does not lose the failing command during decomposition.
-            "failed_jobs": (
-                ci_failure.get("failed_jobs")
-                or ci_failure.get("failed_job")
-                or []
-            ),
+            "failed_jobs": failed_jobs,
 
             # ============================================================
             # Validation info (for repair strategies)
