@@ -2684,14 +2684,19 @@ def process_instance(
     try:
         env, testbed_path = setup_local_environment(config, instance, instance_dir)
 
-        # The retrieval stages operate before the repository is cloned, so log
-        # evidence is the strongest signal available there.  Now that sha_fail
-        # is checked out, independently verify every memory-only recurring or
-        # dependency hypothesis against the actual failure-state source before
-        # it can enter the repair-agent prompt.
+        # ── Phase 2.5: mandatory target-state filtering ───────────────────
+        # Retrieval selects recurring/dependency hypotheses before the checkout
+        # exists. Now filter those selected hypotheses against the actual
+        # failure-state repository. Only observed/confirmed problems survive;
+        # final ordering is applied to that filtered set before agent creation.
         if memory_enabled and ci_memory and memory_plugin is not None:
-            before_source_gate = len(ci_memory.get("problems") or [])
-            ci_memory = memory_plugin.validate_candidates_against_checkout(
+            progress_manager.update_instance_status(
+                instance_id, "Filtering memory problems against failure state"
+            )
+            selected_count = len(ci_memory.get("problems") or []) + len(
+                ci_memory.get("rejected_memory_problems") or []
+            )
+            ci_memory = memory_plugin.filter_selected_memory_problems(
                 ci_memory,
                 Path(testbed_path),
                 command_runner=lambda command, timeout: env.execute(
@@ -2701,6 +2706,21 @@ def process_instance(
                 ),
             )
             actionable = ci_memory.get("problems") or []
+            filter_summary = ci_memory.get("target_state_filter") or {}
+            if filter_summary.get("stage") == "target_state_applicability_filter":
+                leaked = [
+                    problem
+                    for problem in actionable
+                    if str(
+                        (problem.get("source_validation") or {}).get("decision", "")
+                    ).lower()
+                    not in {"observed", "confirmed"}
+                ]
+                if leaked:
+                    raise RuntimeError(
+                        "Target-state filter invariant failed: an unconfirmed "
+                        "memory problem reached the actionable set"
+                    )
             separate_problems = [
                 _normalize_memory_problem_for_agent(problem, index)
                 for index, problem in enumerate(actionable, 1)
@@ -2709,18 +2729,17 @@ def process_instance(
             ci_memory.setdefault("llm_selection", {})[
                 "separate_problems"
             ] = separate_problems
-            validation_summary = ci_memory.get("source_validation") or {}
             logger.info(
-                "[CIBench] Failure-state source gate: input=%d, actionable=%d, withheld=%d",
-                before_source_gate,
+                "[CIBench] Target-state filter: selected=%d, actionable=%d, filtered_out=%d",
+                selected_count,
                 len(separate_problems),
-                int(validation_summary.get("withheld_count") or 0),
+                int(filter_summary.get("withheld_count") or 0),
             )
             extra_info["memory_summary"].update({
-                "source_validation_enabled": bool(validation_summary.get("enabled")),
-                "source_validated_actionable": len(separate_problems),
-                "source_validation_withheld": int(
-                    validation_summary.get("withheld_count") or 0
+                "target_state_filter_completed": bool(filter_summary.get("stage")),
+                "target_state_actionable": len(separate_problems),
+                "target_state_filtered_out": int(
+                    filter_summary.get("withheld_count") or 0
                 ),
             })
             _save_retrieval_diagnostic(
@@ -3057,6 +3076,7 @@ def _build_memory_traj(ci_memory: Dict[str, Any], task: str) -> Dict[str, Any]:
         # The full repair guidance document produced from relevant candidates
         "llm2_guidance": llm_sel.get("guidance_document") or {},
         # ── Failure-state source validation before repair handoff ────────
+        "target_state_filter": ci_memory.get("target_state_filter") or {},
         "source_validation": ci_memory.get("source_validation") or {},
         "actionable_problems": ci_memory.get("problems") or [],
         "source_rejected_memory_problems": (
@@ -3221,6 +3241,7 @@ def _save_retrieval_diagnostic(
                 "_full_guidance_document": guidance,
             },
             # ── Failure-state source gate ────────────────────────────────
+            "target_state_filter": memory.get("target_state_filter") or {},
             "source_validation": memory.get("source_validation") or {},
             "actionable_problems": memory.get("problems") or [],
             "source_rejected_memory_problems": (

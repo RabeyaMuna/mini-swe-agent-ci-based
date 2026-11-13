@@ -1,23 +1,64 @@
 {
-  "configuration": "Full ReCAP (Bidirectional)",
-  "sample_size": 83,
-  "instances": 26,
-  "outcomes": {
-    "correct": 14,
-    "incorrect": 69,
-    "partial": 0
+  "methodology": "BALANCED pair-based (normalized types, reasonable compat, 65% overlap, binary)",
+  "thresholds": {
+    "file_overlap_minimum": 0.65,
+    "type_matching": "normalized with compatibility groups",
+    "partial_credit": false
   },
-  "precision": {
-    "strict": 0.169,
-    "with_partial": 0.169,
-    "percentage": "16.9%"
+  "type_normalization": {
+    "type_checking": [
+      "type_check",
+      "Type Checking",
+      "Type Error"
+    ],
+    "linting": [
+      "lint",
+      "Linting",
+      "Code linting"
+    ],
+    "formatting": [
+      "format",
+      "Code Formatting",
+      "Formatting"
+    ],
+    "testing": [
+      "test",
+      "Test Failure",
+      "Testing"
+    ],
+    "dependency": [
+      "install",
+      "Dependency Issues",
+      "Package Install Error",
+      "dependency"
+    ]
   },
-  "recall": {
-    "value": 1.0,
-    "percentage": "100.0%"
+  "compatibility_groups": [
+    [
+      "Configuration Error",
+      "Dependency Issues"
+    ],
+    [
+      "Code Formatting",
+      "Documentation Formatting"
+    ],
+    [
+      "Test Failure",
+      "Assertion Error"
+    ]
+  ],
+  "confusion_matrix": {
+    "true_positives": 137,
+    "false_positives": 70,
+    "false_negatives": 61
   },
-  "f1": {
-    "value": 0.289,
-    "percentage": "28.9%"
+  "metrics": {
+    "precision": 0.6618357487922706,
+    "recall": 0.9716312056737588,
+    "f1_score": 0.7873563218390806
+  },
+  "dataset": {
+    "gt_pairs": 141,
+    "recap_pairs": 207
   }
 }

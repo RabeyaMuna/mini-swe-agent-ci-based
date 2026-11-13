@@ -332,3 +332,44 @@ def test_unsafe_or_broad_commands_are_not_executed(tmp_path):
 
     assert check["status"] == "skipped"
     assert calls == []
+
+
+def test_legacy_switch_restores_original_query_and_disables_new_gates(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RECAP_LEGACY_MEMORY_FLOW", "1")
+    plugin = MemoryPlugin(
+        memory_root=tmp_path,
+        result_dir=str(tmp_path),
+        ablation="L1+L2+L3",
+        llm=None,
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_decompose_and_save_to_cache",
+        lambda **kwargs: [{"problem": "target failure"}],
+    )
+    captured = {}
+    monkeypatch.setattr(
+        plugin.retrieval,
+        "retrieve",
+        lambda problems, top_k, query: captured.setdefault("query", query) or {},
+    )
+
+    plugin.retrieve(
+        ci_failure={"failure_signals": ["F401"]},
+        verification={},
+        issue_metadata={
+            "repo": "agno",
+            "workflow_path": ".github/workflows/test.yml",
+            "workflow_name": "test",
+        },
+    )
+
+    assert plugin.enable_source_validation is False
+    assert plugin.retrieval.enable_evidence_gate is False
+    assert captured["query"] == {
+        "repo": "agno",
+        "workflow_path": ".github/workflows/test.yml",
+        "workflow_name": "test",
+    }

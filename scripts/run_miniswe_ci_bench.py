@@ -91,7 +91,7 @@ def main() -> None:
     p.add_argument(
         "--disable-filtering",
         action="store_true",
-        help="Skip STAGE 2 applicability filtering (for component ablation)",
+        help="Skip LLM-based source validation (applicability filtering after retrieval)",
     )
     p.add_argument(
         "--disable-ordering",
@@ -193,6 +193,7 @@ def main() -> None:
     import os
     os.environ["RECAP_ENABLE_DEPENDENCY_EXPANSION"] = "0" if args.disable_dependency_expansion else "1"
     os.environ["RECAP_ENABLE_RECURRING_RECALL"] = "0" if args.disable_recurring_recall else "1"
+    # --disable-filtering disables LLM-based filtering in STAGE 2 (per-problem filtering)
     os.environ["RECAP_ENABLE_FILTERING"] = "0" if args.disable_filtering else "1"
     os.environ["RECAP_ENABLE_ORDERING"] = "0" if args.disable_ordering else "1"
     os.environ["RECAP_ENABLE_DEDUPLICATION"] = "0" if args.disable_deduplication else "1"

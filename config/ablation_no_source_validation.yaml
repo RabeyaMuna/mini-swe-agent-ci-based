@@ -1,0 +1,42 @@
+# Ablation: Disable LLM-based source validation (applicability filtering)
+# This removes the step where an LLM reviews retrieved memories to determine
+# if they are actually applicable to the current problem based on source code evidence.
+
+name: "no_source_validation"
+description: "Ablation removing LLM-based applicability filtering after retrieval"
+
+environment:
+  # Disable LLM-based source validation
+  RECAP_ENABLE_SOURCE_VALIDATION: "0"
+  
+  # Keep all other components enabled
+  RECAP_ENABLE_DEPENDENCY_EXPANSION: "1"
+  RECAP_ENABLE_RECURRING_RECALL: "1"
+  RECAP_ENABLE_FILTERING: "1"
+  RECAP_ENABLE_ORDERING: "1"
+  RECAP_ENABLE_DEDUPLICATION: "1"
+  RECAP_ENABLE_MEMORY_OPTIMIZATION: "1"
+  RECAP_ENABLE_EVIDENCE_GATE: "1"
+
+# Pipeline configuration
+pipeline:
+  model: "deepseek-v4-flash"
+  memory_levels: ["L1", "L2", "L3"]
+  output_dir: "results/ablations/no_source_validation"
+  
+notes: |
+  This ablation removes the LLM-based applicability check that happens after
+  memory retrieval. In the full system, after retrieving relevant memories,
+  an LLM reviews each one against source code evidence to determine if it's
+  actually applicable (confirmed/rejected/unverifiable).
+  
+  With this disabled, all retrieved memories are passed directly to repair,
+  which may result in:
+  - More false positives (inapplicable memories being used)
+  - Potentially more successful repairs if the LLM was being too conservative
+  - Higher token usage (no filtering before repair)
+  
+  Compare with:
+  - no_applicability_filtering: disables evidence gate (log-based filtering)
+  - no_recurring: disables recurring problem detection
+  - no_source_validation: disables LLM review of applicability (THIS ONE)

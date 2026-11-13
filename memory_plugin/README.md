@@ -42,6 +42,21 @@ This second gate also reviews hidden/dependency candidates absent from the log,
 because an earlier CI failure may have prevented them from executing.
 Set `RECAP_ENABLE_SOURCE_VALIDATION=0` only for a controlled ablation.
 
+The production handoff exposes this operation explicitly as
+`filter_selected_memory_problems(...)`. It runs after checkout and before agent
+construction. Its output `problems` contains only `observed` or `confirmed`
+items; rejected and unverifiable recurring/dependency candidates are moved to
+`source_rejected_memory_problems`. ReCAP's final problem ordering is then applied
+to this filtered set, never to the unverified candidate set.
+
+### Compatibility rollback
+
+Set `RECAP_LEGACY_MEMORY_FLOW=1` to restore the pre-gate behavior without
+reverting files. In this mode the plugin uses the original repo/workflow-only
+retrieval query and bypasses both the target-evidence gate and the failure-state
+source/command gate. This switch is intended for rollback and controlled A/B
+comparison while the new filter is validated end to end.
+
 ## Architecture
 
 ```

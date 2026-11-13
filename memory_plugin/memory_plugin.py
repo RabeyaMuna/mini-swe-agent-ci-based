@@ -65,15 +65,24 @@ class MemoryPlugin:
 
         # Read component ablation flags from environment variables
         import os
+        # Emergency compatibility switch: preserve the exact pre-gate query and
+        # bypass both new applicability filters without reverting source files.
+        self.legacy_memory_flow = (
+            os.environ.get("RECAP_LEGACY_MEMORY_FLOW", "0") == "1"
+        )
         enable_dependency_expansion = os.environ.get("RECAP_ENABLE_DEPENDENCY_EXPANSION", "1") == "1"
         enable_recurring_recall = os.environ.get("RECAP_ENABLE_RECURRING_RECALL", "1") == "1"
         enable_filtering = os.environ.get("RECAP_ENABLE_FILTERING", "1") == "1"
         enable_ordering = os.environ.get("RECAP_ENABLE_ORDERING", "1") == "1"
         enable_deduplication = os.environ.get("RECAP_ENABLE_DEDUPLICATION", "1") == "1"
         enable_memory_optimization = os.environ.get("RECAP_ENABLE_MEMORY_OPTIMIZATION", "1") == "1"
-        enable_evidence_gate = os.environ.get("RECAP_ENABLE_EVIDENCE_GATE", "1") == "1"
+        enable_evidence_gate = (
+            os.environ.get("RECAP_ENABLE_EVIDENCE_GATE", "1") == "1"
+            and not self.legacy_memory_flow
+        )
         self.enable_source_validation = (
             os.environ.get("RECAP_ENABLE_SOURCE_VALIDATION", "1") == "1"
+            and not self.legacy_memory_flow
         )
 
         # Initialize STAIR retrieval system
@@ -142,30 +151,37 @@ class MemoryPlugin:
         # 4. Memory mode: pass the complete target evidence to retrieval.
         # Passing only repo/workflow makes applicability filtering blind to the
         # current log, failed tool, and affected files.
-        query_metadata = self._build_query(
-            ci_failure=ci_failure,
-            verification=verification,
-            issue_metadata=issue_metadata,
-        )
+        if self.legacy_memory_flow:
+            query_metadata = {
+                "repo": issue_metadata.get("repo", ""),
+                "workflow_path": issue_metadata.get("workflow_path", ""),
+                "workflow_name": issue_metadata.get("workflow_name", ""),
+            }
+        else:
+            query_metadata = self._build_query(
+                ci_failure=ci_failure,
+                verification=verification,
+                issue_metadata=issue_metadata,
+            )
         return self.retrieval.retrieve(
             problems=decomposed_problems,
             top_k=self.top_k,
             query=query_metadata
         )
 
-    def validate_candidates_against_checkout(
+    def filter_selected_memory_problems(
         self,
         retrieval: Dict[str, Any],
         checkout_path: Path,
         command_runner: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Withhold memory hypotheses that are not supported by target source.
+        """Mandatory target-state filter before final ordering and repair.
 
-        This gate runs after ``sha_fail`` has been checked out and before the
-        repair agent is constructed.  Problems observed in the target CI log
-        remain actionable.  Recurring/dependency/common problems are actionable
-        only when their claimed location exists and an independent read-only
-        source review confirms that the described defect is present there.
+        This filtering stage runs after ``sha_fail`` has been checked out and
+        before final problem ordering or repair-agent construction. Problems
+        observed in the target CI log remain actionable. Selected recurring,
+        dependency, consecutive, and common memory problems are actionable only
+        when the failure-state checkout confirms that the described fault exists.
 
         An unavailable model, absent location, malformed response, or ambiguous
         evidence is fail-closed: the candidate is retained in diagnostics but
@@ -261,6 +277,24 @@ class MemoryPlugin:
                 kept.append(annotated)
                 continue
 
+            # For dependency/recurring problems with verification command but inconclusive result,
+            # be more conservative - reject if command was provided but didn't confirm
+            problem_type = str(problem.get("problem_type", "")).strip().lower()
+            is_hypothesis_problem = problem_type in ["dependency", "recurring", "consecutive", "common"]
+            verification_cmd = self._verification_command(problem)
+
+            if is_hypothesis_problem and verification_cmd and command_check["status"] == "inconclusive":
+                annotated = self._with_source_decision(
+                    problem,
+                    "rejected",
+                    f"Hypothesis problem ({problem_type}) with verification command that was inconclusive. "
+                    f"Requiring positive confirmation for non-observed problems. Command status: {command_check.get('reason', 'unknown')}",
+                    [verification_cmd],
+                )
+                annotated["source_validation"]["lightweight_check"] = command_check
+                rejected.append(annotated)
+                continue
+
             evidence = self._read_source_evidence(root, resolved, problem)
             if not evidence or not self.llm:
                 reason = (
@@ -289,17 +323,56 @@ class MemoryPlugin:
             else:
                 rejected.append(annotated)
 
+        # Final ordering is intentionally performed only after target-state
+        # filtering, so rejected memory hypotheses cannot influence repair order.
+        kept = self._order_after_target_filter(kept)
         result["problems"] = kept
         result["source_rejected_memory_problems"] = rejected
-        result["source_validation"] = {
+        filter_summary = {
             "enabled": True,
+            "stage": "target_state_applicability_filter",
             "checkout": str(root),
             "input_count": len(unique_candidates),
             "actionable_count": len(kept),
             "withheld_count": len(rejected),
+            "final_order_applied_after_filter": True,
             "policy": "Only target-CI problems and source-confirmed memory candidates are actionable.",
         }
+        result["target_state_filter"] = filter_summary
+        # Retain the older diagnostic key for readers of previous result files.
+        result["source_validation"] = filter_summary
         return result
+
+    def validate_candidates_against_checkout(
+        self,
+        retrieval: Dict[str, Any],
+        checkout_path: Path,
+        command_runner: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Backward-compatible alias for the explicit filtering stage."""
+        return self.filter_selected_memory_problems(
+            retrieval, checkout_path, command_runner
+        )
+
+    @staticmethod
+    def _order_after_target_filter(
+        problems: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Apply ReCAP's existing type priority to the confirmed set only."""
+        priority = {
+            "ci_failure": 1,
+            "dependent": 2,
+            "dependency": 2,
+            "consecutive": 3,
+            "recurring": 4,
+            "common": 4,
+        }
+        return sorted(
+            problems,
+            key=lambda problem: priority.get(
+                str(problem.get("problem_type", "")).strip().lower(), 5
+            ),
+        )
 
     @staticmethod
     def _verification_command(problem: Dict[str, Any]) -> str:
@@ -577,7 +650,50 @@ class MemoryPlugin:
                 "failure_signals", "files", "repair_strategy",
             )
         }
-        prompt = f"""Act as a conservative, read-only source validation agent.
+
+        # Stricter validation for dependency and recurring problems
+        problem_type = str(problem.get("problem_type", "")).strip().lower()
+        is_hypothesis_problem = problem_type in ["dependency", "recurring", "consecutive", "common"]
+
+        if is_hypothesis_problem:
+            # STRICTER prompt for hypothesis problems (dependency, recurring, etc.)
+            prompt = f"""Act as a STRICT, conservative source validation agent.
+
+This is a {problem_type} problem retrieved from memory - it was NOT directly observed in
+the current CI log. Therefore, it requires EXPLICIT, UNAMBIGUOUS evidence in the source
+code to be confirmed.
+
+Candidate {index} ({problem_type}):
+{json.dumps(candidate, indent=2, default=str)}
+
+Failure-state source excerpts:
+{json.dumps(evidence, indent=2, default=str)}
+
+Lightweight verification result (may be skipped or inconclusive):
+{json.dumps(command_check or {}, indent=2, default=str)}
+
+STRICT Rules for hypothesis problems:
+- "confirmed" ONLY if you can point to EXACT lines showing the defect exists
+- For import errors: the WRONG import must be visible in source
+- For type errors: the ACTUAL type mismatch must be in source
+- For missing code: the ABSENCE must be provable from source
+- "Plausible", "could exist", "similar to" → use "unverifiable", NOT "confirmed"
+- If command_check shows "problem_absent" → MUST use "rejected"
+- If you cannot see the EXACT problem in source → use "unverifiable"
+- When in doubt → use "unverifiable" (fail-closed)
+
+Return exactly one JSON object:
+{{
+  "decision": "confirmed|rejected|unverifiable",
+  "reason": "specific evidence-based explanation with line references",
+  "evidence": ["path:line_number: exact quote showing defect"]
+}}
+
+{STRICT_JSON_RULES}
+"""
+        else:
+            # Normal prompt for directly observed CI problems
+            prompt = f"""Act as a conservative, read-only source validation agent.
 
 Determine whether the FAILURE-STATE source excerpts directly contain the defect or
 necessary faulty precondition described by this retrieved memory candidate.

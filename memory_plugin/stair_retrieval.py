@@ -350,7 +350,7 @@ class STAIRRetrieval:
 
             # Validate CI problem has required content
             if not self._is_valid_problem(ci_prob):
-                print(f"[Memory]     ⚠️  SKIP: CI problem {idx} is empty or incomplete - missing required fields")
+                print(f"[Memory]  SKIP: CI problem {idx} is empty or incomplete - missing required fields")
                 print(f"[Memory]          problem: {bool(ci_prob.get('problem'))}, root_cause: {bool(ci_prob.get('root_cause'))}, files: {len(ci_prob.get('files', []))}")
                 continue
 

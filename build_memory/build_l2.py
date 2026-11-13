@@ -20,10 +20,12 @@ AUTOMATED_TOOLS = [
         "tool": "ruff",
         "purpose": "Unified Python linter and formatter (combines flake8, isort, black)",
         "install_command": "pip install ruff",
-        "fix_command": "ruff check --fix {{file_or_dir}}",
-        "format_command": "ruff format {{file_or_dir}}",
+        "fix_command": "ruff check --fix {{file_or_dir}} && ruff format {{file_or_dir}}",
+        "check_command": "ruff check --fix {{file_or_dir}}",  # linting only
+        "format_command": "ruff format {{file_or_dir}}",      # formatting only
         "file_pattern": "*.py",
         "fixes": ["linting errors", "import sorting, order, grouping", "code formatting"],
+        "note": "Run both check --fix and format to match pre-commit hooks"
     },
     {
         "tool": "black",
